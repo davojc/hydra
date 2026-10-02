@@ -74,7 +74,17 @@ Later: `hydra-app` (Tauri) depends on `hydra-core`, `hydra-providers`, `hydra-pl
 
 The split is by who edits a file: everything the user writes is under `config.toml`, `envs/` and `base/`, which can go in a dotfiles repo. Everything under `state/` and `shims/` is hydra's. The exception is that `state/<env>/claude/`, `gh/`, `gcloud/` etc. also hold logins and history written by the tools themselves, so "safe to delete" means "costs a re-login", and `hydra` never deletes `state/` on its own.
 
-An environment's name is its folder name under `envs/`. `hydra env new <name>` creates `envs/<name>/env.toml` from a template; `hydra env rm <name>` deletes `envs/<name>/` and, after confirmation, `state/<name>/`, and removes the environment's secrets from the secret store.
+**Name vs label.** An environment's name is its folder name under `envs/`; `env.toml` never contains a `name` field. The name is the identifier used everywhere: CLI arguments, bindings, `secret:<env>/…` references and secret-store keys, `HYDRA_ENV`, the prompt, and `state/<env>/`. The optional `label` in `env.toml` is display-only (Windows Terminal profile/tab names, `whoami`), defaulting to the name.
+
+Names must match `^[a-z0-9][a-z0-9-]{0,31}$` (e.g. `work`, `client-acme`). Folders under `envs/` that don't match are reported by `hydra doctor` and ignored.
+
+**Lifecycle commands:**
+- `hydra env new <name>` creates `envs/<name>/env.toml` from a template.
+- `hydra env edit <name>` opens `env.toml` in `$EDITOR` (fallback: `notepad`), validates it on close and reopens on errors.
+- `hydra env rename <old> <new>` moves `envs/<old>` and `state/<old>`, rewrites matching `[bindings]` values in `config.toml`, rewrites `secret:<old>/…` references in every `env.toml`, moves secret-store entries from `<old>/…` to `<new>/…`, and lists any `.hydra` files it can't reach (they live in repos) so the user can update them. It refuses if `<new>` exists or a hydra shell for `<old>` is running (detected via a lock file in `state/<old>/`).
+- `hydra env rm <name>` deletes `envs/<name>/` and, after confirmation, `state/<name>/`, and removes the environment's secrets from the secret store. Bindings pointing at it are reported, not silently removed.
+
+`new`, `edit`, `rename` and `rm` refresh the Windows Terminal profiles automatically (§9.1).
 
 ### 4.3 Launch flow (`hydra shell work`)
 
@@ -209,6 +219,7 @@ Guard latency budget: < 15 ms added per invocation on a warm cache.
 hydra init
 hydra import claude [--force]
 hydra env new|list|edit|rm <name>
+hydra env rename <old> <new>
 hydra shell <env> [--shell pwsh|bash] [--cwd DIR]
 hydra run <env> -- <cmd...>
 hydra auth <provider> <env>
@@ -222,7 +233,13 @@ hydra wt install
 
 ### 9.1 Windows Terminal integration
 
-`hydra wt install` writes `%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\hydra\hydra.json` with one profile per environment × shell (`"<env> · pwsh"`, `"<env> · bash"`), each with `tabColor` set to the env colour and `commandline` set to `hydra shell <env> --shell <shell>`.
+`hydra wt install` writes `%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\hydra\hydra.json`, replacing the whole file each time, so removed or renamed environments disappear.
+
+- **Environments:** every valid folder under `envs/` with an `env.toml`.
+- **Shells:** detected, then optionally narrowed. pwsh is available if `pwsh.exe` is on `PATH`; Git Bash if `bash.exe` exists at `git_bash` from `config.toml`, else at `%ProgramFiles%\Git\bin\bash.exe`. `shells = ["pwsh"]` in `config.toml` limits the list. Shells that are configured but missing are reported, not written.
+- **Per profile:** `name = "<label> · <shell>"`, `tabColor = <color>`, `commandline = "<path to hydra.exe> shell <name> --shell <shell>"`, and a stable `guid` derived from (env name, shell) so Windows Terminal keeps any user customisations across refreshes.
+
+`hydra env new|edit|rename|rm` call the same refresh automatically, so profiles never fall out of date. `hydra wt install` is the first-time setup and a manual repair command. Whether Windows Terminal picks up fragment changes live or only on restart is checked during implementation (§11), and the CLI tells the user if a restart is needed.
 
 ### 9.2 Prompt
 
@@ -230,7 +247,7 @@ The generated init files prefix the prompt with `[<env>]` in the environment col
 
 ## 10. Testing
 
-- **Unit (`hydra-core`):** config parsing and validation errors; binding resolution precedence; contribution merge and conflict detection; settings deep-merge; MCP exclude globs; CLAUDE.md concatenation; GitHub remote URL parsing; guard command classification.
+- **Unit (`hydra-core`):** config parsing and validation errors; environment name validation; `env rename` rewriting of bindings and secret references (against a temp `HYDRA_HOME` and a fake secret store); WT profile generation including shell detection and stable GUIDs; binding resolution precedence; contribution merge and conflict detection; settings deep-merge; MCP exclude globs; CLAUDE.md concatenation; GitHub remote URL parsing; guard command classification.
 - **Provider tests:** each provider materialises into a temp `HYDRA_HOME`; assert files and contributed variables. Snapshot tests (`insta`) for generated gitconfig, merged settings.json, shell init files, and the WT fragment.
 - **Integration (Windows CI, GitHub Actions `windows-latest`):** build binaries; create an env; run the shimmed `git` against a local bare repo in bound and unbound folders; assert block, warn, strict-block, `hydra allow`, and exit-code passthrough. Secret store tests use a `hydra-test/` namespace and clean up.
 - **Runtime self-check:** `hydra doctor` compares actual identities (`gh api user`, `git config user.email`, Claude account, `aws sts get-caller-identity`, `gcloud config get account`, gws auth status) with expectations.
@@ -245,3 +262,4 @@ Each is checked by a small spike before the dependent provider is built; if one 
 4. **Claude Code follows directory junctions** for `skills/`, `plugins/`, etc., and tolerates generated `settings.json`. Fallback: copy instead of link, re-synced on launch.
 5. **Plugin metadata path rewriting** on import is sufficient for plugins to load from `base/claude/plugins`. Fallback: per-env plugin install with a shared marketplace cache.
 6. **Claude Code on Windows resolves `git`/`gh` through the inherited `PATH`** so shims intercept its commands.
+7. **Windows Terminal reloads fragments live** when `hydra.json` changes. Fallback: print "restart Windows Terminal to see the change".

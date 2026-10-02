@@ -92,7 +92,7 @@ Names must match `^[a-z0-9][a-z0-9-]{0,31}$` (e.g. `work`, `client-acme`). Folde
 2. For each configured provider: `materialise`, then `contribute`.
 3. Merge contributions. Two providers setting the same variable is an error naming both.
 4. Resolve `secret:` references from the secret store.
-5. Add `HYDRA_ENV=<env>`, `HYDRA_HOME`, and prepend `~/.hydra/shims` to `PATH`.
+5. Add `HYDRA_ENV=<env>`, `HYDRA_HOME`, and prepend `~/.hydra/shims` to `PATH` if the shims are installed. Without them, identity switching still works but guards are off; `whoami` and `doctor` say so.
 6. Generate the shell init file (prompt snippet) and launch:
    - pwsh: `pwsh -NoLogo -NoExit -Command ". '<state/work/shell/init.ps1>'"` (the init file dot-sources the user's `$PROFILE` first).
    - bash: `bash --rcfile <state/work/shell/init.bash> -i` (the rcfile sources `~/.bashrc` first).
@@ -190,7 +190,7 @@ For a working directory, collect candidates: the nearest ancestor `.hydra` file 
 
 ### 7.2 Shims
 
-`hydra wt install` and `hydra init` copy `hydra.exe` to `shims/git.exe` and `shims/gh.exe`. On start, the binary inspects its own file stem: `hydra` runs the CLI; `git`/`gh` run the guard.
+`hydra install shims` (also part of plain `hydra install`, §9.1) copies `hydra.exe` to `shims/git.exe` and `shims/gh.exe`. Shims exist only for the guard. Shell aliases would miss commands run by Claude Code's non-interactive bash, and git hooks are per-repo, skippable with `--no-verify`, and don't exist for gh. A file earlier on the inherited `PATH` catches every route. On start, the binary inspects its own file stem: `hydra` runs the CLI; `git`/`gh` run the guard.
 
 Guard steps:
 
@@ -216,7 +216,7 @@ Guard latency budget: < 15 ms added per invocation on a warm cache.
 ## 9. CLI surface
 
 ```
-hydra init
+hydra init                             # creates ~/.hydra, then runs `hydra install`
 hydra import claude [--force]
 hydra env new|list|edit|rm <name>
 hydra env rename <old> <new>
@@ -228,18 +228,21 @@ hydra bind <path> <env>
 hydra allow -- <cmd...>
 hydra whoami
 hydra doctor [<env>]
-hydra wt install
+hydra install [shims|wt]               # no target = every integration hydra finds
+hydra uninstall [shims|wt]
 ```
 
-### 9.1 Windows Terminal integration
+### 9.1 Integrations (`hydra install`)
 
-`hydra wt install` writes `%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\hydra\hydra.json`, replacing the whole file each time, so removed or renamed environments disappear.
+`hydra install` is a verb with an optional target as the final argument, matching the other verb commands (`shell`, `run`, `bind`, `allow`); noun-first groups are kept for managing collections (`env`, `secret`). With no target it installs or repairs every integration it can: `shims`, then `wt` if Windows Terminal is present. It is idempotent. `hydra init` runs it at the end, so first-time setup is one command. `hydra uninstall [target]` removes what `install` created (the shims folder contents, the WT fragment) and nothing else. Later targets (`wezterm`, `iterm`, `prompt`) slot in the same way.
+
+**`wt` target.** `hydra install wt` writes `%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\hydra\hydra.json`, replacing the whole file each time, so removed or renamed environments disappear.
 
 - **Environments:** every valid folder under `envs/` with an `env.toml`.
 - **Shells:** detected, then optionally narrowed. pwsh is available if `pwsh.exe` is on `PATH`; Git Bash if `bash.exe` exists at `git_bash` from `config.toml`, else at `%ProgramFiles%\Git\bin\bash.exe`. `shells = ["pwsh"]` in `config.toml` limits the list. Shells that are configured but missing are reported, not written.
 - **Per profile:** `name = "<label> · <shell>"`, `tabColor = <color>`, `commandline = "<path to hydra.exe> shell <name> --shell <shell>"`, and a stable `guid` derived from (env name, shell) so Windows Terminal keeps any user customisations across refreshes.
 
-`hydra env new|edit|rename|rm` call the same refresh automatically, so profiles never fall out of date. `hydra wt install` is the first-time setup and a manual repair command. Whether Windows Terminal picks up fragment changes live or only on restart is checked during implementation (§11), and the CLI tells the user if a restart is needed.
+`hydra env new|edit|rename|rm` call the same refresh automatically when the `wt` integration is installed, so profiles never fall out of date. `hydra install` is first-time setup and a manual repair command. Whether Windows Terminal picks up fragment changes live or only on restart is checked during implementation (§11), and the CLI tells the user if a restart is needed.
 
 ### 9.2 Prompt
 

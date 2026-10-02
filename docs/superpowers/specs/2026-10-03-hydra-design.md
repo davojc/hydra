@@ -79,7 +79,7 @@ The split is by who edits a file: everything the user writes is under `config.to
 Names must match `^[a-z0-9][a-z0-9-]{0,31}$` (e.g. `work`, `client-acme`). Folders under `envs/` that don't match are reported by `hydra doctor` and ignored.
 
 **Lifecycle commands:**
-- `hydra env new <name>` creates `envs/<name>/env.toml` from a template.
+- `hydra env new <name> [--home <dir>]` creates `envs/<name>/env.toml` from a template; `--home` also adds a binding (§7.1.1).
 - `hydra env edit <name>` opens `env.toml` in `$EDITOR` (fallback: `notepad`), validates it on close and reopens on errors.
 - `hydra env rename <old> <new>` moves `envs/<old>` and `state/<old>`, rewrites matching `[bindings]` values in `config.toml`, rewrites `secret:<old>/…` references in every `env.toml`, moves secret-store entries from `<old>/…` to `<new>/…`, and lists any `.hydra` files it can't reach (they live in repos) so the user can update them. It refuses if `<new>` exists or a hydra shell for `<old>` is running (detected via a lock file in `state/<old>/`).
 - `hydra env rm <name>` deletes `envs/<name>/` and, after confirmation, `state/<name>/`, and removes the environment's secrets from the secret store. Bindings pointing at it are reported, not silently removed.
@@ -87,6 +87,12 @@ Names must match `^[a-z0-9][a-z0-9-]{0,31}$` (e.g. `work`, `client-acme`). Folde
 `new`, `edit`, `rename` and `rm` refresh the Windows Terminal profiles automatically (§9.1).
 
 ### 4.3 Launch flow (`hydra shell work`)
+
+**Choosing the folder and environment.** `hydra shell [<env>] [--cwd DIR]`:
+
+- **Folder:** `--cwd` if given; otherwise, if `<env>` was given and the current directory doesn't resolve to that env while the env has a `home`, its `home`; otherwise the current directory.
+- **Environment:** `<env>` if given; otherwise resolved from the folder's binding (§7.1, so any depth below a bound folder works). If the folder is unbound, fail with the folder, the hint `hydra shell <env>`, and the list of environments. There is deliberately no default environment.
+- Lookup is one-way: folder → environment. An environment never selects a folder except through `home`.
 
 1. Load and validate `config.toml` and `envs/<env>/env.toml`.
 2. For each configured provider: `materialise`, then `contribute`.
@@ -125,6 +131,7 @@ Names must match `^[a-z0-9][a-z0-9-]{0,31}$` (e.g. `work`, `client-acme`). Folde
 ```toml
 label = "acme work"
 color = "#1f9a8a"
+home  = "E:/acme"     # optional: starting folder for WT tabs and `hydra shell work`
 
 [git]
 name    = "David"
@@ -188,6 +195,17 @@ Only configured providers are active; an unconfigured provider's variables are l
 
 For a working directory, collect candidates: the nearest ancestor `.hydra` file (`env = "<name>"`) and every matching `[bindings]` glob. The most specific wins: a `.hydra` file beats a glob at the same or shallower depth; among globs, the longest literal prefix wins. No match means unbound (guards pass).
 
+`hydra shell` with no environment and the guard use this same resolution, so the environment a folder opens in is always the one its guard expects.
+
+### 7.1.1 Managing bindings
+
+- `hydra bind [<path>] <env>` adds `"<path>/**" = "<env>"` to `[bindings]` (path defaults to the current directory; normalised to an absolute path with forward slashes). It validates the environment, and if the folder already resolves to a different environment it reports which rule and that the new rule overrides it for this tree. Writing preserves comments and formatting in `config.toml` (`toml_edit`).
+- `hydra bind --file [<path>] <env>` writes `<path>/.hydra` instead. If `<path>` is inside a git repo, `.hydra` is appended to that repo's `.git/info/exclude` (local-only ignore) so the file is never committed by accident.
+- `hydra unbind [<path>]` removes the glob rule for exactly that path, or the `.hydra` file in it; if neither exists it reports which rule does cover the path.
+- `hydra bind` with no arguments shows the current folder's environment and the rule that decided it. `hydra bind --list` prints all glob rules.
+- Hand-editing `[bindings]` or creating `.hydra` files is equally supported; `hydra doctor` reports rules naming unknown environments.
+- `hydra env new <name> --home <dir>` sets `home` and adds the binding for `<dir>` in one step.
+
 ### 7.2 Shims
 
 `hydra install shims` (also part of plain `hydra install`, §9.1) copies `hydra.exe` to `shims/git.exe` and `shims/gh.exe`. Shims exist only for the guard. Shell aliases would miss commands run by Claude Code's non-interactive bash, and git hooks are per-repo, skippable with `--no-verify`, and don't exist for gh. A file earlier on the inherited `PATH` catches every route. On start, the binary inspects its own file stem: `hydra` runs the CLI; `git`/`gh` run the guard.
@@ -220,11 +238,13 @@ hydra init                             # creates ~/.hydra, then runs `hydra inst
 hydra import claude [--force]
 hydra env new|list|edit|rm <name>
 hydra env rename <old> <new>
-hydra shell <env> [--shell pwsh|bash] [--cwd DIR]
+hydra shell [<env>] [--shell pwsh|bash] [--cwd DIR]   # env from folder binding if omitted
 hydra run <env> -- <cmd...>
 hydra auth <provider> <env>
 hydra secret set|rm <env>/<key>        # value read from a hidden prompt
-hydra bind <path> <env>
+hydra bind [<path>] <env> [--file]
+hydra bind [--list]
+hydra unbind [<path>]
 hydra allow -- <cmd...>
 hydra whoami
 hydra doctor [<env>]
@@ -240,7 +260,7 @@ hydra uninstall [shims|wt]
 
 - **Environments:** every valid folder under `envs/` with an `env.toml`.
 - **Shells:** detected, then optionally narrowed. pwsh is available if `pwsh.exe` is on `PATH`; Git Bash if `bash.exe` exists at `git_bash` from `config.toml`, else at `%ProgramFiles%\Git\bin\bash.exe`. `shells = ["pwsh"]` in `config.toml` limits the list. Shells that are configured but missing are reported, not written.
-- **Per profile:** `name = "<label> · <shell>"`, `tabColor = <color>`, `commandline = "<path to hydra.exe> shell <name> --shell <shell>"`, and a stable `guid` derived from (env name, shell) so Windows Terminal keeps any user customisations across refreshes.
+- **Per profile:** `name = "<label> · <shell>"`, `tabColor = <color>`, `commandline = "<path to hydra.exe> shell <name> --shell <shell>"`, `startingDirectory = <home>` when the env sets `home` (otherwise `%USERPROFILE%`), and a stable `guid` derived from (env name, shell) so Windows Terminal keeps any user customisations across refreshes.
 
 `hydra env new|edit|rename|rm` call the same refresh automatically when the `wt` integration is installed, so profiles never fall out of date. `hydra install` is first-time setup and a manual repair command. Whether Windows Terminal picks up fragment changes live or only on restart is checked during implementation (§11), and the CLI tells the user if a restart is needed.
 

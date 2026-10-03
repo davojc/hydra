@@ -145,7 +145,10 @@ pub fn prepare(
                 Ok(Some(v)) => {
                     set.insert(var.clone(), v);
                 }
-                Ok(None) if opts.allow_missing_secrets => {}
+                Ok(None) if opts.allow_missing_secrets => {
+                    // Don't let a value inherited from the parent shell stand in for it.
+                    unset.insert(var.clone());
+                }
                 Ok(None) => {
                     let fix = providers
                         .iter()
@@ -399,6 +402,25 @@ mod tests {
         assert!(!env.set.contains_key("GH_TOKEN"));
         assert!(!env.set.contains_key("GH_CONFIG_DIR"));
         assert!(env.unset.contains("GH_CONFIG_DIR"));
+    }
+
+    #[test]
+    fn auth_mode_unsets_skipped_secret_vars() {
+        let (_d, paths, name) = setup("");
+        let providers = vec![fake(
+            "github",
+            Contribution::new().secret(
+                "GH_TOKEN",
+                SecretRef::parse_path("work/github-token").unwrap(),
+            ),
+        )];
+        let opts = PrepareOptions {
+            allow_missing_secrets: true,
+            drop_vars: vec![],
+        };
+        let env = run(&paths, &name, &providers, &MemoryStore::default(), &opts).unwrap();
+        assert!(env.unset.contains("GH_TOKEN"));
+        assert!(!env.set.contains_key("GH_TOKEN"));
     }
 
     #[test]

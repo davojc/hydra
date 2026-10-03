@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+
+[workspace.dependencies]
+hydra-core = { path = "crates/hydra-core" }
+hydra-platform = { path = "crates/hydra-platform" }
+hydra-providers = { path = "crates/hydra-providers" }
+anyhow = "1"
+assert_cmd = "2"
+clap = { version = "4", features = ["derive"] }
+ctrlc = "3"
+dirs = "6"
+keyring = { version = "3", features = ["windows-native"] }
+predicates = "3"
+rpassword = "7"
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+thiserror = "2"
+toml = "0.8"
+toml_edit = "0.22"

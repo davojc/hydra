@@ -19,6 +19,13 @@ pub struct KeyringStore {
     index_path: PathBuf,
 }
 
+/// Named when a value is rejected as too long; Credential Manager holds at most 2560 bytes of UTF-16.
+const TOO_LONG_LIMIT: &str = if cfg!(windows) {
+    "Windows Credential Manager (max ~1280 characters)"
+} else {
+    "the system credential store"
+};
+
 fn backend(e: impl std::fmt::Display) -> StoreError {
     StoreError::Backend(e.to_string())
 }
@@ -72,7 +79,12 @@ impl SecretStore for KeyringStore {
     }
 
     fn set(&self, r: &SecretRef, value: &str) -> Result<(), StoreError> {
-        self.entry(r)?.set_password(value).map_err(backend)?;
+        self.entry(r)?.set_password(value).map_err(|e| match e {
+            keyring::Error::TooLong(..) => {
+                StoreError::Backend(format!("{} is too long for {TOO_LONG_LIMIT}", r.path()))
+            }
+            e => backend(e),
+        })?;
         let mut idx = self.read_index()?;
         idx.keys
             .entry(r.env.to_string())
@@ -130,5 +142,21 @@ mod tests {
         assert!(store.delete(&r).unwrap());
         assert!(!store.delete(&r).unwrap());
         assert!(store.list(&work).unwrap().is_empty());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn values_too_long_for_credential_manager_get_a_clear_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = format!("hydra-test-long-{}", std::process::id());
+        let store = KeyringStore::new(&service, dir.path().join("secrets.toml"));
+        let r = SecretRef::parse_path("work/huge").unwrap();
+        let err = store.set(&r, &"x".repeat(2000)).unwrap_err().to_string();
+        assert!(
+            err.contains("too long for Windows Credential Manager (max ~1280 characters)"),
+            "{err}"
+        );
+        assert_eq!(store.get(&r).unwrap(), None);
+        assert!(!dir.path().join("secrets.toml").exists());
     }
 }

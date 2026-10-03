@@ -119,31 +119,6 @@ pub fn mask(value: &str) -> String {
     format!("\u{b7}\u{b7}\u{b7}\u{b7}{tail}")
 }
 
-pub fn move_env_secrets(
-    store: &dyn SecretStore,
-    from: &EnvName,
-    to: &EnvName,
-) -> Result<Vec<String>, StoreError> {
-    let keys = store.list(from)?;
-    for key in &keys {
-        let old = SecretRef {
-            env: from.clone(),
-            key: key.clone(),
-        };
-        if let Some(v) = store.get(&old)? {
-            store.set(
-                &SecretRef {
-                    env: to.clone(),
-                    key: key.clone(),
-                },
-                &v,
-            )?;
-        }
-        store.delete(&old)?;
-    }
-    Ok(keys)
-}
-
 pub fn delete_env_secrets(
     store: &dyn SecretStore,
     env: &EnvName,
@@ -228,19 +203,15 @@ mod tests {
     }
 
     #[test]
-    fn moves_and_deletes_an_environments_secrets() {
+    fn deletes_an_environments_secrets() {
         let s = MemoryStore::default();
-        let (work, iov) = (
-            EnvName::parse("work").unwrap(),
-            EnvName::parse("acme").unwrap(),
-        );
+        let work = EnvName::parse("work").unwrap();
         s.set(&r("work/a"), "1").unwrap();
         s.set(&r("work/b"), "2").unwrap();
-        assert_eq!(move_env_secrets(&s, &work, &iov).unwrap(), vec!["a", "b"]);
+        s.set(&r("home/a"), "3").unwrap();
+        assert_eq!(delete_env_secrets(&s, &work).unwrap(), vec!["a", "b"]);
         assert!(s.list(&work).unwrap().is_empty());
-        assert_eq!(s.get(&r("acme/b")).unwrap().as_deref(), Some("2"));
-        assert_eq!(delete_env_secrets(&s, &iov).unwrap(), vec!["a", "b"]);
-        assert!(s.list(&iov).unwrap().is_empty());
+        assert_eq!(s.get(&r("home/a")).unwrap().as_deref(), Some("3"));
     }
 
     #[test]

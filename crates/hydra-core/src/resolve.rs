@@ -56,13 +56,26 @@ pub struct PrepareOptions {
 }
 
 /// The environment to apply to a child process.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LaunchEnv {
     pub name: EnvName,
     pub config: EnvConfig,
     pub set: BTreeMap<String, String>,
     pub unset: BTreeSet<String>,
     pub path_prepend: Vec<PathBuf>,
+}
+
+/// Shows the names of the variables it sets, never their values (some are secrets).
+impl std::fmt::Debug for LaunchEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LaunchEnv")
+            .field("name", &self.name)
+            .field("config", &self.config)
+            .field("set", &self.set.keys().collect::<Vec<_>>())
+            .field("unset", &self.unset)
+            .field("path_prepend", &self.path_prepend)
+            .finish()
+    }
 }
 
 impl LaunchEnv {
@@ -566,5 +579,25 @@ mod tests {
         assert!(env.unset.contains("HYDRA_ENV_VARS"));
         assert!(env.unset.contains("LINEAR_API_KEY"));
         assert!(!env.set.contains_key("HYDRA_ENV_VARS"));
+    }
+
+    #[test]
+    fn debug_output_redacts_values() {
+        let (_d, paths, name) = setup("");
+        let providers = vec![fake(
+            "env",
+            Contribution::new().literal("TOKEN", "s3cret-v4lue"),
+        )];
+        let env = run(
+            &paths,
+            &name,
+            &providers,
+            &MemoryStore::default(),
+            &PrepareOptions::default(),
+        )
+        .unwrap();
+        let shown = format!("{env:?}");
+        assert!(shown.contains("TOKEN"), "{shown}");
+        assert!(!shown.contains("s3cret-v4lue"), "{shown}");
     }
 }

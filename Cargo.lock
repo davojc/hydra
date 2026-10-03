@@ -104,6 +104,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hydra-providers"
+version = "0.1.0"
+dependencies = [
+ "hydra-core",
+ "hydra-platform",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

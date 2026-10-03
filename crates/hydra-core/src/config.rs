@@ -162,10 +162,24 @@ impl EnvConfig {
         {
             return Err(format!("color {c:?} must look like \"#1f9a8a\""));
         }
+        let mut seen: Vec<&str> = Vec::new();
         for (k, v) in &self.env {
             if !valid_var_name(k) {
                 return Err(format!("[env] {k:?} isn't a valid variable name"));
             }
+            if k.eq_ignore_ascii_case("PATH")
+                || k.get(..6).is_some_and(|p| p.eq_ignore_ascii_case("HYDRA_"))
+            {
+                return Err(format!(
+                    "[env] {k:?} can't be set here: hydra manages PATH and HYDRA_* itself; remove it"
+                ));
+            }
+            if let Some(other) = seen.iter().find(|s| s.eq_ignore_ascii_case(k)) {
+                return Err(format!(
+                    "[env] {other:?} and {k:?} are the same variable on Windows; keep one"
+                ));
+            }
+            seen.push(k);
             SecretRef::parse_value(v).map_err(|e| format!("[env] {k}: {e}"))?;
         }
         if let Some(GwsConfig {
@@ -370,6 +384,28 @@ LINEAR_API_KEY = "secret:work/linear"
                 .unwrap_err()
                 .to_string()
                 .contains("binding \"E:/x/**\"")
+        );
+    }
+
+    #[test]
+    fn env_rejects_hydra_and_path_variables() {
+        for key in ["HYDRA_ENV", "hydra_env_vars", "PATH", "Path"] {
+            let (_d, paths, name) = setup(&format!("[env]\n{key} = \"x\"\n"));
+            let msg = load_env(&paths, &name).unwrap_err().to_string();
+            assert!(
+                msg.contains(&format!("[env] {key:?} can't be set here")),
+                "{key}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn env_rejects_keys_differing_only_in_case() {
+        let (_d, paths, name) = setup("[env]\nRegion = \"a\"\nREGION = \"b\"\n");
+        let msg = load_env(&paths, &name).unwrap_err().to_string();
+        assert!(
+            msg.contains("[env] \"REGION\" and \"Region\" are the same variable"),
+            "{msg}"
         );
     }
 }

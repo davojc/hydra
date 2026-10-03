@@ -50,6 +50,9 @@ pub fn shell(
         anyhow::bail!("name an environment: hydra shell <env>");
     };
     let name = app.env_name(&env)?;
+    if let Some(dir) = &cwd {
+        anyhow::ensure!(dir.is_dir(), "{} isn't a folder", dir.display());
+    }
     let global = load_global(&app.paths)?;
     let kind_name = shell
         .or(global.default_shell.clone())
@@ -75,7 +78,6 @@ pub fn shell(
     let mut cmd = shell_command(kind, &exe, &init);
     launch.apply(&mut cmd);
     if let Some(dir) = cwd {
-        anyhow::ensure!(dir.is_dir(), "{} isn't a folder", dir.display());
         cmd.current_dir(dir);
     }
     ignore_ctrl_c();
@@ -88,6 +90,8 @@ pub fn shell(
 pub fn run(app: &App, env: String, command: Vec<String>) -> anyhow::Result<i32> {
     let name = app.env_name(&env)?;
     let launch = prepare_launch(app, &name, &PrepareOptions::default())?;
+    // Held until the child exits, so env rm/rename know the environment is in use.
+    let _lock = hold_shared(&app.paths, &name)?;
     let runner = EnvRunner { launch: &launch };
     let mut cmd = runner.command(&command[0]).map_err(anyhow::Error::msg)?;
     cmd.args(&command[1..]);

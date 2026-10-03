@@ -212,3 +212,46 @@ fn nested_run_does_not_leak_the_outer_env_vars() {
         .success()
         .stdout(predicate::str::contains("[]"));
 }
+
+#[test]
+fn run_marks_the_environment_open_while_the_command_runs() {
+    let h = Home::new();
+    h.write_env("work", "");
+    h.hydra()
+        .args(run_args(
+            "work",
+            vec![
+                env!("CARGO_BIN_EXE_hydra").to_string(),
+                "env".into(),
+                "rm".into(),
+                "work".into(),
+                "--yes".into(),
+            ],
+        ))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "a hydra terminal for work is still open",
+        ));
+    assert!(
+        h.root()
+            .join("envs")
+            .join("work")
+            .join("env.toml")
+            .is_file()
+    );
+}
+
+#[test]
+fn shell_checks_cwd_before_preparing_anything() {
+    let h = Home::new();
+    h.write_env("work", "");
+    let missing = h.dir.path().join("no-such-folder");
+    h.hydra()
+        .args(["shell", "work", "--shell", "pwsh", "--cwd"])
+        .arg(&missing)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("isn't a folder"));
+    assert!(!h.root().join("state").join("work").exists());
+}

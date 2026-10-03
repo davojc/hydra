@@ -21,6 +21,31 @@ pub enum Cmd {
         #[command(subcommand)]
         command: SecretCmd,
     },
+    /// Open a shell in an environment
+    Shell {
+        /// Environment name
+        env: Option<String>,
+        /// pwsh or bash (default: default_shell in config.toml, else pwsh)
+        #[arg(long)]
+        shell: Option<String>,
+        /// Folder to open in
+        #[arg(long)]
+        cwd: Option<std::path::PathBuf>,
+    },
+    /// Run one command in an environment: hydra run <env> -- <command...>
+    Run {
+        env: String,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// Sign in to a tool inside an environment, e.g. hydra auth github work
+    Auth { provider: String, env: String },
+    /// Show which account each tool is actually using
+    Whoami {
+        /// Environment to check (default: the current hydra terminal's)
+        #[arg(long)]
+        env: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

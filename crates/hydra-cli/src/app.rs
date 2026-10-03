@@ -8,7 +8,6 @@ use hydra_platform::keyring_store::KeyringStore;
 
 pub struct App {
     pub paths: HydraPaths,
-    #[allow(dead_code)] // used by the shell/run commands added in later tasks
     pub user_home: PathBuf,
     pub store: Box<dyn SecretStore>,
 }

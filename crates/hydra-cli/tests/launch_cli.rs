@@ -255,3 +255,40 @@ fn shell_checks_cwd_before_preparing_anything() {
         .stderr(predicate::str::contains("isn't a folder"));
     assert!(!h.root().join("state").join("work").exists());
 }
+
+#[test]
+fn shell_opens_without_github_sign_in_and_says_how() {
+    let h = Home::new();
+    h.write_env(
+        "work",
+        "[github]
+",
+    );
+    h.hydra()
+        .args(["shell", "work", "--shell", "pwsh"])
+        .write_stdin(
+            "exit 0
+",
+        )
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "hydra: github: not signed in - run gh auth login",
+        ));
+}
+
+#[test]
+fn run_works_without_github_sign_in() {
+    let h = Home::new();
+    h.write_env(
+        "work",
+        "[github]
+",
+    );
+    h.hydra()
+        .env("GH_TOKEN", "leaked")
+        .args(run_args("work", show("GH_TOKEN")))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[]"));
+}

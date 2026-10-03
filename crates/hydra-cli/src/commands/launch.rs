@@ -5,6 +5,7 @@ use anyhow::Context;
 use hydra_core::config::load_global;
 use hydra_core::lock::hold_shared;
 use hydra_core::name::EnvName;
+use hydra_core::provider::Ctx;
 use hydra_core::resolve::{ENV_VARS_MARKER, LaunchEnv, PrepareOptions, prepare};
 use hydra_platform::process::EnvRunner;
 use hydra_platform::shell::{PromptStyle, ShellKind, find_shell, shell_command, write_init};
@@ -40,6 +41,24 @@ fn exit_code(status: ExitStatus) -> i32 {
     status.code().unwrap_or(1)
 }
 
+/// Tells the user which of the environment's tools aren't signed in yet.
+fn print_sign_in_hints(app: &App, name: &EnvName, launch: &LaunchEnv) {
+    let ctx = Ctx {
+        name,
+        env: &launch.config,
+        paths: &app.paths,
+        user_home: &app.user_home,
+        secrets: app.store.as_ref(),
+    };
+    for p in hydra_providers::all() {
+        if p.is_configured(&launch.config)
+            && let Some(hint) = p.sign_in_hint(&ctx)
+        {
+            eprintln!("hydra: {}: {hint}", p.id());
+        }
+    }
+}
+
 pub fn shell(
     app: &App,
     env: Option<String>,
@@ -65,6 +84,7 @@ pub fn shell(
     })?;
     let launch = prepare_launch(app, &name, &PrepareOptions::default())?;
     let _lock = hold_shared(&app.paths, &name)?;
+    print_sign_in_hints(app, &name, &launch);
     let style = PromptStyle {
         name: name.as_str(),
         rgb: launch.config.rgb().map(|c| (c.0, c.1, c.2)),

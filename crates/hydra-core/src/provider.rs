@@ -101,6 +101,11 @@ pub trait Provider {
     fn after_auth(&self, _ctx: &Ctx, _run: &dyn CommandRunner) -> Result<(), ProviderError> {
         Ok(())
     }
+    /// One line telling the user how to sign in, when this tool isn't signed in yet in this
+    /// environment. Must only look at files (no network, no subprocesses): it runs every time a shell opens.
+    fn sign_in_hint(&self, _ctx: &Ctx) -> Option<String> {
+        None
+    }
     /// Fix to suggest when one of this provider's secrets is missing.
     fn missing_secret_fix(&self, _ctx: &Ctx, _r: &SecretRef) -> Option<String> {
         None

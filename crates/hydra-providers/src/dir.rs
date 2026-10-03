@@ -14,6 +14,8 @@ pub struct DirProvider {
     pub managed: &'static [&'static str],
     pub login: &'static [&'static str],
     pub whoami: &'static [&'static str],
+    /// Path inside `subdir` that exists only after signing in, when the tool has one.
+    pub signed_in_file: Option<&'static str>,
 }
 
 impl Provider for DirProvider {
@@ -47,6 +49,12 @@ impl Provider for DirProvider {
     fn auth_command(&self, _ctx: &Ctx) -> Option<Vec<String>> {
         (!self.login.is_empty()).then(|| self.login.iter().map(|s| s.to_string()).collect())
     }
+
+    fn sign_in_hint(&self, ctx: &Ctx) -> Option<String> {
+        let file = self.signed_in_file?;
+        (!ctx.provider_dir(self.subdir).join(file).exists())
+            .then(|| format!("not signed in - run {}", self.login.join(" ")))
+    }
 }
 
 fn azure_on(e: &EnvConfig) -> bool {
@@ -67,6 +75,7 @@ pub const AZURE: DirProvider = DirProvider {
     managed: &["AZURE_CONFIG_DIR"],
     login: &["az", "login"],
     whoami: &["az", "account", "show", "--query", "user.name", "-o", "tsv"],
+    signed_in_file: None,
 };
 
 pub const GCLOUD: DirProvider = DirProvider {
@@ -81,6 +90,7 @@ pub const GCLOUD: DirProvider = DirProvider {
     ],
     login: &["gcloud", "auth", "login"],
     whoami: &["gcloud", "config", "get", "account"],
+    signed_in_file: Some("credentials.db"),
 };
 
 pub const CODEX: DirProvider = DirProvider {
@@ -91,6 +101,7 @@ pub const CODEX: DirProvider = DirProvider {
     managed: &["CODEX_HOME"],
     login: &["codex", "login"],
     whoami: &[],
+    signed_in_file: Some("auth.json"),
 };
 
 #[cfg(test)]
@@ -143,5 +154,36 @@ mod tests {
     fn login_commands() {
         let f = Fixture::new("[azure]\n");
         assert_eq!(AZURE.auth_command(&f.ctx()).unwrap(), vec!["az", "login"]);
+    }
+
+    #[test]
+    fn gcloud_hints_until_credentials_db_exists() {
+        let f = Fixture::new(
+            "[gcloud]
+",
+        );
+        assert_eq!(
+            GCLOUD.sign_in_hint(&f.ctx()).as_deref(),
+            Some("not signed in - run gcloud auth login")
+        );
+        GCLOUD.materialise(&f.ctx()).unwrap();
+        std::fs::write(
+            f.paths
+                .state_dir(&f.name)
+                .join("gcloud")
+                .join("credentials.db"),
+            "",
+        )
+        .unwrap();
+        assert_eq!(GCLOUD.sign_in_hint(&f.ctx()), None);
+    }
+
+    #[test]
+    fn azure_never_hints() {
+        let f = Fixture::new(
+            "[azure]
+",
+        );
+        assert_eq!(AZURE.sign_in_hint(&f.ctx()), None);
     }
 }

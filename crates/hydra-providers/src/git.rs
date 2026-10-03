@@ -64,6 +64,9 @@ pub fn render_gitconfig(name: &EnvName, cfg: &GitConfig, user_home: &Path) -> St
             quote(&format!("ssh -i '{key}' -o IdentitiesOnly=yes"))
         ));
     }
+    // Git Credential Manager keeps HTTPS logins for every other host (GitLab, Azure DevOps,
+    // ...) in the OS credential store; a per-environment namespace keeps them apart.
+    s.push_str(&format!("[credential]\n\tnamespace = hydra-{name}\n"));
     s.push_str(
         "[credential \"https://github.com\"]\n\thelper =\n\thelper = !gh auth git-credential\n",
     );
@@ -163,7 +166,21 @@ mod tests {
              [user]\n\tname = \"David\"\n\temail = \"work@example.com\"\n\tsigningkey = \"C:/Users/you/.ssh/id_work.pub\"\n\
              [gpg]\n\tformat = ssh\n\
              [core]\n\tsshCommand = \"ssh -i 'C:/Users/you/.ssh/id_work' -o IdentitiesOnly=yes\"\n\
+             [credential]\n\tnamespace = hydra-work\n\
              [credential \"https://github.com\"]\n\thelper =\n\thelper = !gh auth git-credential\n"
+        );
+    }
+
+    #[test]
+    fn credential_namespace_is_per_environment() {
+        let out = render_gitconfig(
+            &EnvName::parse("personal").unwrap(),
+            &cfg(""),
+            Path::new("C:/Users/you"),
+        );
+        assert!(
+            out.contains("[credential]\n\tnamespace = hydra-personal\n"),
+            "{out}"
         );
     }
 

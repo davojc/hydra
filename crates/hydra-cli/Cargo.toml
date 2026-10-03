@@ -1,0 +1,24 @@
+[package]
+name = "hydra-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "hydra"
+path = "src/main.rs"
+
+[dependencies]
+hydra-core.workspace = true
+hydra-platform.workspace = true
+hydra-providers.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+ctrlc.workspace = true
+dirs.workspace = true
+rpassword.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+tempfile.workspace = true

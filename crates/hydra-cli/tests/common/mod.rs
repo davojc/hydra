@@ -1,0 +1,41 @@
+#![allow(dead_code, clippy::new_without_default)]
+use std::path::PathBuf;
+
+/// A throwaway HYDRA_HOME plus its own Credential Manager namespace.
+pub struct Home {
+    pub dir: tempfile::TempDir,
+}
+
+impl Home {
+    pub fn new() -> Self {
+        Self {
+            dir: tempfile::tempdir().unwrap(),
+        }
+    }
+
+    pub fn root(&self) -> PathBuf {
+        self.dir.path().join(".hydra")
+    }
+
+    pub fn hydra(&self) -> assert_cmd::Command {
+        let mut c = assert_cmd::Command::new(env!("CARGO_BIN_EXE_hydra"));
+        let service = format!(
+            "hydra-test-{}",
+            self.dir.path().file_name().unwrap().to_string_lossy()
+        );
+        c.env("HYDRA_HOME", self.root())
+            .env("HYDRA_KEYRING_SERVICE", service)
+            .env_remove("HYDRA_ENV");
+        c
+    }
+
+    pub fn write_env(&self, name: &str, toml: &str) {
+        let d = self.root().join("envs").join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("env.toml"), toml).unwrap();
+    }
+
+    pub fn env_toml(&self, name: &str) -> String {
+        std::fs::read_to_string(self.root().join("envs").join(name).join("env.toml")).unwrap()
+    }
+}

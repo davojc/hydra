@@ -1,0 +1,463 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use crate::config::{ConfigError, EnvConfig, load_env};
+use crate::contribution::{VarValue, merge};
+use crate::name::EnvName;
+use crate::paths::HydraPaths;
+use crate::provider::{Ctx, Provider};
+use crate::secret::SecretStore;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    pub provider: String,
+    pub message: String,
+    pub fix: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PrepareError {
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    #[error("can't open {env}\n{}", render_failures(.failures))]
+    Failed {
+        env: EnvName,
+        failures: Vec<Failure>,
+    },
+}
+
+pub fn render_failures(failures: &[Failure]) -> String {
+    let mut out = String::new();
+    for f in failures {
+        out.push_str(&format!("  {:<8} {}\n", f.provider, f.message));
+        if let Some(fix) = &f.fix {
+            out.push_str(&format!("  {:<8} -> {}\n", "", fix));
+        }
+    }
+    out.trim_end().to_string()
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PrepareOptions {
+    /// `hydra auth`/`whoami`: skip secrets that aren't stored yet instead of failing.
+    pub allow_missing_secrets: bool,
+    /// Variables to remove even if a provider sets them (e.g. GH_TOKEN during `gh auth login`).
+    pub drop_vars: Vec<String>,
+}
+
+/// The environment to apply to a child process.
+#[derive(Debug, Clone)]
+pub struct LaunchEnv {
+    pub name: EnvName,
+    pub config: EnvConfig,
+    pub set: BTreeMap<String, String>,
+    pub unset: BTreeSet<String>,
+    pub path_prepend: Vec<PathBuf>,
+}
+
+impl LaunchEnv {
+    pub fn apply(&self, cmd: &mut Command) {
+        for k in &self.unset {
+            cmd.env_remove(k);
+        }
+        for (k, v) in &self.set {
+            cmd.env(k, v);
+        }
+        cmd.env("PATH", self.path_value(std::env::var_os("PATH")));
+    }
+
+    pub fn path_value(&self, current: Option<OsString>) -> OsString {
+        let mut parts = self.path_prepend.clone();
+        if let Some(cur) = current {
+            parts.extend(std::env::split_paths(&cur));
+        }
+        std::env::join_paths(parts).unwrap_or_default()
+    }
+}
+
+/// Materialises every configured provider and builds the environment. Fails closed:
+/// either everything succeeds or every failure is returned.
+pub fn prepare(
+    paths: &HydraPaths,
+    name: &EnvName,
+    user_home: &Path,
+    providers: &[Box<dyn Provider>],
+    secrets: &dyn SecretStore,
+    opts: &PrepareOptions,
+) -> Result<LaunchEnv, PrepareError> {
+    let config = load_env(paths, name)?;
+    let ctx = Ctx {
+        name,
+        env: &config,
+        paths,
+        user_home,
+        secrets,
+    };
+    let mut failures = Vec::new();
+    let mut parts = Vec::new();
+    let mut unset = BTreeSet::new();
+
+    for p in providers {
+        if !p.is_configured(&config) {
+            unset.extend(p.managed_vars().iter().map(|v| v.to_string()));
+            continue;
+        }
+        match p.materialise(&ctx).and_then(|()| p.contribute(&ctx)) {
+            Ok(c) => parts.push((p.id().to_string(), c)),
+            Err(e) => failures.push(Failure {
+                provider: p.id().into(),
+                message: e.message,
+                fix: e.fix,
+            }),
+        }
+    }
+
+    let merged = match merge(parts) {
+        Ok(m) => m,
+        Err(conflicts) => {
+            for c in conflicts {
+                failures.push(Failure {
+                    provider: c.second.clone(),
+                    message: c.to_string(),
+                    fix: Some(format!(
+                        "remove {} from one of them in {}",
+                        c.var,
+                        paths.env_file(name).display()
+                    )),
+                });
+            }
+            return Err(PrepareError::Failed {
+                env: name.clone(),
+                failures,
+            });
+        }
+    };
+
+    let mut set = BTreeMap::new();
+    for (var, (provider, value)) in &merged.vars {
+        match value {
+            VarValue::Literal(v) => {
+                set.insert(var.clone(), v.clone());
+            }
+            VarValue::Secret(r) => match secrets.get(r) {
+                Ok(Some(v)) => {
+                    set.insert(var.clone(), v);
+                }
+                Ok(None) if opts.allow_missing_secrets => {}
+                Ok(None) => {
+                    let fix = providers
+                        .iter()
+                        .find(|p| p.id() == provider)
+                        .and_then(|p| p.missing_secret_fix(&ctx, r))
+                        .unwrap_or_else(|| format!("hydra secret set {}", r.path()));
+                    failures.push(Failure {
+                        provider: provider.clone(),
+                        message: format!("secret {} isn't set", r.path()),
+                        fix: Some(fix),
+                    });
+                }
+                Err(e) => failures.push(Failure {
+                    provider: provider.clone(),
+                    message: e.to_string(),
+                    fix: None,
+                }),
+            },
+        }
+    }
+    if !failures.is_empty() {
+        return Err(PrepareError::Failed {
+            env: name.clone(),
+            failures,
+        });
+    }
+
+    set.insert("HYDRA_ENV".into(), name.to_string());
+    set.insert(
+        "HYDRA_HOME".into(),
+        paths.root().to_string_lossy().into_owned(),
+    );
+    if let Some(c) = &config.color {
+        set.insert("HYDRA_ENV_COLOR".into(), c.clone());
+    }
+    for v in &opts.drop_vars {
+        set.retain(|k, _| !k.eq_ignore_ascii_case(v));
+        unset.insert(v.clone());
+    }
+    unset.extend(merged.unset.iter().cloned());
+    unset.retain(|u| !set.keys().any(|k| k.eq_ignore_ascii_case(u)));
+
+    Ok(LaunchEnv {
+        name: name.clone(),
+        config,
+        set,
+        unset,
+        path_prepend: merged.path_prepend,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contribution::Contribution;
+    use crate::provider::{CommandRunner, IdentityReport, ProviderError, Status};
+    use crate::secret::{MemoryStore, SecretRef};
+
+    struct Fake {
+        id: &'static str,
+        on: bool,
+        managed: &'static [&'static str],
+        contribution: Contribution,
+        fail: Option<&'static str>,
+    }
+
+    impl Provider for Fake {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+        fn is_configured(&self, _: &EnvConfig) -> bool {
+            self.on
+        }
+        fn managed_vars(&self) -> &'static [&'static str] {
+            self.managed
+        }
+        fn contribute(&self, _: &Ctx) -> Result<Contribution, ProviderError> {
+            match self.fail {
+                Some(m) => Err(ProviderError::new(m).with_fix("fix it")),
+                None => Ok(self.contribution.clone()),
+            }
+        }
+        fn check(&self, _: &Ctx, _: &dyn CommandRunner) -> IdentityReport {
+            IdentityReport {
+                provider: self.id.into(),
+                status: Status::Info,
+                detail: String::new(),
+            }
+        }
+    }
+
+    fn fake(id: &'static str, contribution: Contribution) -> Box<dyn Provider> {
+        Box::new(Fake {
+            id,
+            on: true,
+            managed: &[],
+            contribution,
+            fail: None,
+        })
+    }
+
+    fn setup(env_toml: &str) -> (tempfile::TempDir, HydraPaths, EnvName) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = HydraPaths::new(dir.path().join(".hydra"));
+        let name = EnvName::parse("work").unwrap();
+        std::fs::create_dir_all(paths.env_dir(&name)).unwrap();
+        std::fs::write(paths.env_file(&name), env_toml).unwrap();
+        (dir, paths, name)
+    }
+
+    fn run(
+        paths: &HydraPaths,
+        name: &EnvName,
+        providers: &[Box<dyn Provider>],
+        store: &MemoryStore,
+        opts: &PrepareOptions,
+    ) -> Result<LaunchEnv, PrepareError> {
+        prepare(paths, name, Path::new("/home/me"), providers, store, opts)
+    }
+
+    #[test]
+    fn sets_configured_vars_and_hydra_markers() {
+        let (_d, paths, name) = setup("color = \"#1f9a8a\"\n");
+        let providers = vec![fake(
+            "aws",
+            Contribution::new().literal("AWS_PROFILE", "dev"),
+        )];
+        let env = run(
+            &paths,
+            &name,
+            &providers,
+            &MemoryStore::default(),
+            &PrepareOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(env.set["AWS_PROFILE"], "dev");
+        assert_eq!(env.set["HYDRA_ENV"], "work");
+        assert_eq!(env.set["HYDRA_ENV_COLOR"], "#1f9a8a");
+        assert_eq!(env.set["HYDRA_HOME"], paths.root().to_string_lossy());
+    }
+
+    #[test]
+    fn clears_vars_of_unconfigured_providers() {
+        let (_d, paths, name) = setup("");
+        let providers: Vec<Box<dyn Provider>> = vec![Box::new(Fake {
+            id: "aws",
+            on: false,
+            managed: &["AWS_PROFILE"],
+            contribution: Contribution::new(),
+            fail: None,
+        })];
+        let env = run(
+            &paths,
+            &name,
+            &providers,
+            &MemoryStore::default(),
+            &PrepareOptions::default(),
+        )
+        .unwrap();
+        assert!(env.unset.contains("AWS_PROFILE"));
+    }
+
+    #[test]
+    fn resolves_secrets() {
+        let (_d, paths, name) = setup("");
+        let store = MemoryStore::default();
+        let r = SecretRef::parse_path("work/linear").unwrap();
+        store.set(&r, "lin_123").unwrap();
+        let providers = vec![fake("env", Contribution::new().secret("LINEAR_API_KEY", r))];
+        let env = run(
+            &paths,
+            &name,
+            &providers,
+            &store,
+            &PrepareOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(env.set["LINEAR_API_KEY"], "lin_123");
+    }
+
+    #[test]
+    fn missing_secret_fails_closed_with_fix() {
+        let (_d, paths, name) = setup("");
+        let providers = vec![fake(
+            "env",
+            Contribution::new().secret("T", SecretRef::parse_path("work/token").unwrap()),
+        )];
+        let err = run(
+            &paths,
+            &name,
+            &providers,
+            &MemoryStore::default(),
+            &PrepareOptions::default(),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("can't open work"), "{msg}");
+        assert!(msg.contains("secret work/token isn't set"), "{msg}");
+        assert!(msg.contains("hydra secret set work/token"), "{msg}");
+    }
+
+    #[test]
+    fn reports_every_failing_provider() {
+        let (_d, paths, name) = setup("");
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(Fake {
+                id: "github",
+                on: true,
+                managed: &[],
+                contribution: Contribution::new(),
+                fail: Some("no token"),
+            }),
+            Box::new(Fake {
+                id: "git",
+                on: true,
+                managed: &[],
+                contribution: Contribution::new(),
+                fail: Some("no key"),
+            }),
+        ];
+        let PrepareError::Failed { failures, .. } = run(
+            &paths,
+            &name,
+            &providers,
+            &MemoryStore::default(),
+            &PrepareOptions::default(),
+        )
+        .unwrap_err() else {
+            panic!("expected Failed")
+        };
+        let ids: Vec<_> = failures.iter().map(|f| f.provider.as_str()).collect();
+        assert_eq!(ids, vec!["github", "git"]);
+        assert_eq!(failures[0].fix.as_deref(), Some("fix it"));
+    }
+
+    #[test]
+    fn auth_mode_skips_missing_secrets_and_drops_vars() {
+        let (_d, paths, name) = setup("");
+        let providers = vec![fake(
+            "github",
+            Contribution::new().literal("GH_CONFIG_DIR", "d").secret(
+                "GH_TOKEN",
+                SecretRef::parse_path("work/github-token").unwrap(),
+            ),
+        )];
+        let opts = PrepareOptions {
+            allow_missing_secrets: true,
+            drop_vars: vec!["GH_CONFIG_DIR".into()],
+        };
+        let env = run(&paths, &name, &providers, &MemoryStore::default(), &opts).unwrap();
+        assert!(!env.set.contains_key("GH_TOKEN"));
+        assert!(!env.set.contains_key("GH_CONFIG_DIR"));
+        assert!(env.unset.contains("GH_CONFIG_DIR"));
+    }
+
+    #[test]
+    fn conflicts_fail() {
+        let (_d, paths, name) = setup("");
+        let providers = vec![
+            fake("a", Contribution::new().literal("X", "1")),
+            fake("b", Contribution::new().literal("X", "2")),
+        ];
+        let msg = run(
+            &paths,
+            &name,
+            &providers,
+            &MemoryStore::default(),
+            &PrepareOptions::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(msg.contains("X is set by both a and b"), "{msg}");
+    }
+
+    #[test]
+    fn unknown_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = HydraPaths::new(dir.path());
+        let err = run(
+            &paths,
+            &EnvName::parse("nope").unwrap(),
+            &[],
+            &MemoryStore::default(),
+            &PrepareOptions::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            PrepareError::Config(ConfigError::UnknownEnv(_))
+        ));
+    }
+
+    #[test]
+    fn path_value_prepends() {
+        let (_d, paths, name) = setup("");
+        let providers = vec![fake(
+            "x",
+            Contribution::new().prepend(PathBuf::from("C:/shims")),
+        )];
+        let env = run(
+            &paths,
+            &name,
+            &providers,
+            &MemoryStore::default(),
+            &PrepareOptions::default(),
+        )
+        .unwrap();
+        let joined = env.path_value(Some(OsString::from("C:/bin")));
+        let parts: Vec<PathBuf> = std::env::split_paths(&joined).collect();
+        assert_eq!(
+            parts,
+            vec![PathBuf::from("C:/shims"), PathBuf::from("C:/bin")]
+        );
+    }
+}

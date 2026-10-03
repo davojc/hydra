@@ -20,6 +20,11 @@ pub enum EnvError {
     NotFound(EnvName),
     #[error("a hydra terminal for {0} is still open; close it first")]
     Running(EnvName),
+    #[error(
+        "saved logins from an earlier {name} still exist in {}; delete that folder to start fresh",
+        path.display()
+    )]
+    LeftoverState { name: EnvName, path: PathBuf },
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -88,6 +93,13 @@ color = "{color}"
 pub fn create(paths: &HydraPaths, name: &EnvName) -> Result<PathBuf, EnvError> {
     if paths.env_dir(name).exists() {
         return Err(EnvError::Exists(name.clone()));
+    }
+    let state = paths.state_dir(name);
+    if state.exists() {
+        return Err(EnvError::LeftoverState {
+            name: name.clone(),
+            path: state,
+        });
     }
     let count = list(paths)?.valid.len();
     std::fs::create_dir_all(paths.env_dir(name))?;
@@ -468,5 +480,21 @@ B = \"secret:work/b\"
         assert!(!paths.env_dir(&n("acme")).exists());
         assert_eq!(store.list(&n("work")).unwrap(), vec!["a"]);
         assert_eq!(store.list(&n("acme")).unwrap(), vec!["x"]);
+    }
+
+    #[test]
+    fn create_refuses_leftover_saved_logins() {
+        let (_d, paths) = home();
+        let state = paths.state_dir(&n("work"));
+        std::fs::create_dir_all(state.join("gh")).unwrap();
+        let err = create(&paths, &n("work")).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            format!(
+                "saved logins from an earlier work still exist in {}; delete that folder to start fresh",
+                state.display()
+            )
+        );
+        assert!(!paths.env_dir(&n("work")).exists());
     }
 }

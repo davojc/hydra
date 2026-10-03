@@ -19,6 +19,13 @@ fn credentials_ref(ctx: &Ctx) -> Result<Option<SecretRef>, ProviderError> {
     }
 }
 
+fn remove_if_exists(file: &std::path::Path) -> Result<(), ProviderError> {
+    match std::fs::remove_file(file) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
+    }
+}
+
 impl Provider for Gws {
     fn id(&self) -> &'static str {
         "gws"
@@ -33,18 +40,23 @@ impl Provider for Gws {
     fn materialise(&self, ctx: &Ctx) -> Result<(), ProviderError> {
         let dir = ctx.provider_dir("gws");
         std::fs::create_dir_all(&dir)?;
-        if let Some(r) = credentials_ref(ctx)? {
-            let value = ctx
-                .secrets
-                .get(&r)
-                .map_err(|e| ProviderError::new(e.to_string()))?
-                .ok_or_else(|| {
-                    ProviderError::new(format!("secret {} isn't set", r.path()))
-                        .with_fix(format!("hydra secret set {}", r.path()))
-                })?;
-            write_private(&dir.join("credentials.json"), &value)?;
+        let file = dir.join("credentials.json");
+        // The plaintext file must not outlive the config or the secret it came from.
+        let Some(r) = credentials_ref(ctx)? else {
+            return remove_if_exists(&file);
+        };
+        match ctx
+            .secrets
+            .get(&r)
+            .map_err(|e| ProviderError::new(e.to_string()))?
+        {
+            Some(v) => Ok(write_private(&file, &v)?),
+            None => {
+                remove_if_exists(&file)?;
+                Err(ProviderError::new(format!("secret {} isn't set", r.path()))
+                    .with_fix(format!("hydra secret set {}", r.path())))
+            }
         }
-        Ok(())
     }
 
     fn contribute(&self, ctx: &Ctx) -> Result<Contribution, ProviderError> {
@@ -126,5 +138,29 @@ mod tests {
         let e = Gws.materialise(&f.ctx()).unwrap_err();
         assert_eq!(e.message, "secret work/gws-creds isn't set");
         assert_eq!(e.fix.as_deref(), Some("hydra secret set work/gws-creds"));
+    }
+
+    fn stale_credentials(f: &Fixture) -> std::path::PathBuf {
+        let dir = f.paths.state_dir(&f.name).join("gws");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("credentials.json");
+        std::fs::write(&file, "{\"old\":true}").unwrap();
+        file
+    }
+
+    #[test]
+    fn dir_mode_deletes_old_credentials_file() {
+        let f = Fixture::new("[gws]\n");
+        let file = stale_credentials(&f);
+        Gws.materialise(&f.ctx()).unwrap();
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn missing_secret_deletes_old_credentials_file() {
+        let f = Fixture::new("[gws]\ncredentials = \"secret:work/gws-creds\"\n");
+        let file = stale_credentials(&f);
+        assert!(Gws.materialise(&f.ctx()).is_err());
+        assert!(!file.exists());
     }
 }

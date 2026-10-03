@@ -99,3 +99,61 @@ fn env_rm_keeps_state_without_confirmation() {
         .stdout(predicate::str::contains("kept saved logins"));
     assert!(h.root().join("state").join("work").exists());
 }
+
+#[test]
+fn env_rename_updates_bindings_refs_and_secrets() {
+    let h = Home::new();
+    h.hydra().arg("init").assert().success();
+    h.hydra().args(["env", "new", "work"]).assert().success();
+    std::fs::write(
+        h.root().join("config.toml"),
+        "[bindings]\n\"E:/acme/**\" = \"work\"\n",
+    )
+    .unwrap();
+    h.write_env("work", "[env]\nLINEAR_API_KEY = \"secret:work/linear\"\n");
+    h.hydra()
+        .args(["secret", "set", "work/linear"])
+        .write_stdin("lin_api_123\n")
+        .assert()
+        .success();
+
+    h.hydra()
+        .args(["env", "rename", "work", "acme"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("renamed work to acme")
+                .and(predicate::str::contains("moved secrets: linear")),
+        );
+    assert!(h.env_toml("acme").contains("secret:acme/linear"));
+    assert!(
+        std::fs::read_to_string(h.root().join("config.toml"))
+            .unwrap()
+            .contains("\"acme\"")
+    );
+    h.hydra()
+        .args(["secret", "rm", "acme/linear"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn env_edit_validates_after_the_editor_closes() {
+    let h = Home::new();
+    h.write_env("work", "color = \"teal\"\n");
+    h.hydra()
+        .args(["env", "edit", "work"])
+        .env_remove("VISUAL")
+        .env("EDITOR", "cmd /c rem")
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("must look like"));
+    h.write_env("work", "color = \"#1f9a8a\"\n");
+    h.hydra()
+        .args(["env", "edit", "work"])
+        .env_remove("VISUAL")
+        .env("EDITOR", "cmd /c rem")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("saved"));
+}

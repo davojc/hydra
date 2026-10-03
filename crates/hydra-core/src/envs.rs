@@ -4,7 +4,8 @@ use crate::config::{ConfigError, load_global};
 use crate::lock;
 use crate::name::EnvName;
 use crate::paths::HydraPaths;
-use crate::secret::{SecretStore, StoreError, delete_env_secrets};
+use crate::rewrite;
+use crate::secret::{SecretStore, StoreError, delete_env_secrets, move_env_secrets};
 
 /// Default tab colours, assigned in order as environments are created.
 pub const PALETTE: [&str; 6] = [
@@ -135,6 +136,74 @@ pub fn remove(
     })
 }
 
+#[derive(Debug)]
+pub struct RenameReport {
+    pub bindings: Vec<String>,
+    pub references: usize,
+    pub secrets: Vec<String>,
+}
+
+pub fn rename(
+    paths: &HydraPaths,
+    old: &EnvName,
+    new: &EnvName,
+    store: &dyn SecretStore,
+) -> Result<RenameReport, EnvError> {
+    if !paths.env_file(old).is_file() {
+        return Err(EnvError::NotFound(old.clone()));
+    }
+    if paths.env_dir(new).exists() {
+        return Err(EnvError::Exists(new.clone()));
+    }
+    if lock::is_running(paths, old)? {
+        return Err(EnvError::Running(old.clone()));
+    }
+
+    // Prepare every rewrite first, so a parse error stops the rename before anything moves.
+    let cfg_path = paths.config_file();
+    let (new_config, bindings) = match std::fs::read_to_string(&cfg_path) {
+        Ok(t) => {
+            let (text, changed) = rewrite::rename_bindings(&t, old.as_str(), new.as_str())
+                .map_err(|e| EnvError::Rewrite(format!("{}: {e}", cfg_path.display())))?;
+            (Some(text), changed)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut env_files = Vec::new();
+    for n in list(paths)?.valid {
+        let path = paths.env_file(&n);
+        let text = std::fs::read_to_string(&path)?;
+        let (out, count) = rewrite::rename_secret_refs(&text, old.as_str(), new.as_str())
+            .map_err(|e| EnvError::Rewrite(format!("{}: {e}", path.display())))?;
+        if count > 0 {
+            env_files.push((if &n == old { new.clone() } else { n }, out, count));
+        }
+    }
+
+    std::fs::rename(paths.env_dir(old), paths.env_dir(new))?;
+    let old_state = paths.state_dir(old);
+    if old_state.exists() {
+        std::fs::rename(&old_state, paths.state_dir(new))?;
+    }
+    if let Some(text) = new_config
+        && !bindings.is_empty()
+    {
+        std::fs::write(&cfg_path, text)?;
+    }
+    let mut references = 0;
+    for (n, text, count) in env_files {
+        std::fs::write(paths.env_file(&n), text)?;
+        references += count;
+    }
+    let secrets = move_env_secrets(store, old, new)?;
+    Ok(RenameReport {
+        bindings,
+        references,
+        secrets,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,5 +275,82 @@ mod tests {
         let _lock = lock::hold_shared(&paths, &n("work")).unwrap();
         let err = remove(&paths, &n("work"), &MemoryStore::default(), true).unwrap_err();
         assert!(matches!(err, EnvError::Running(_)));
+    }
+
+    #[test]
+    fn rename_moves_everything() {
+        let (_d, paths) = home();
+        let store = MemoryStore::default();
+        create(&paths, &n("work")).unwrap();
+        create(&paths, &n("other")).unwrap();
+        std::fs::write(
+            paths.env_file(&n("work")),
+            "[env]
+A = \"secret:work/a\"
+",
+        )
+        .unwrap();
+        std::fs::write(
+            paths.env_file(&n("other")),
+            "[env]
+B = \"secret:work/b\"
+",
+        )
+        .unwrap();
+        std::fs::write(
+            paths.config_file(),
+            "[bindings]
+\"E:/w/**\" = \"work\"
+",
+        )
+        .unwrap();
+        std::fs::create_dir_all(paths.state_dir(&n("work")).join("gh")).unwrap();
+        store
+            .set(&SecretRef::parse_path("work/a").unwrap(), "1")
+            .unwrap();
+
+        let r = rename(&paths, &n("work"), &n("acme"), &store).unwrap();
+        assert_eq!(r.bindings, vec!["E:/w/**"]);
+        assert_eq!(r.references, 2);
+        assert_eq!(r.secrets, vec!["a"]);
+        assert!(!paths.env_dir(&n("work")).exists());
+        assert!(paths.state_dir(&n("acme")).join("gh").is_dir());
+        assert_eq!(
+            load_env(&paths, &n("acme")).unwrap().env["A"],
+            "secret:acme/a"
+        );
+        assert_eq!(
+            load_env(&paths, &n("other")).unwrap().env["B"],
+            "secret:acme/b"
+        );
+        assert!(
+            std::fs::read_to_string(paths.config_file())
+                .unwrap()
+                .contains("= \"acme\"")
+        );
+        assert_eq!(
+            store
+                .get(&SecretRef::parse_path("acme/a").unwrap())
+                .unwrap()
+                .as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn rename_refuses_existing_target_and_open_shells() {
+        let (_d, paths) = home();
+        let store = MemoryStore::default();
+        create(&paths, &n("work")).unwrap();
+        create(&paths, &n("home")).unwrap();
+        assert!(matches!(
+            rename(&paths, &n("work"), &n("home"), &store),
+            Err(EnvError::Exists(_))
+        ));
+        let _lock = lock::hold_shared(&paths, &n("work")).unwrap();
+        assert!(matches!(
+            rename(&paths, &n("work"), &n("acme"), &store),
+            Err(EnvError::Running(_))
+        ));
     }
 }

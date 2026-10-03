@@ -36,6 +36,10 @@ pub enum EnvCmd {
         #[arg(long)]
         yes: bool,
     },
+    /// Open env.toml in your editor and check it when you close the editor
+    Edit { name: String },
+    /// Rename an environment and update its bindings, secrets and saved logins
+    Rename { old: String, new: String },
 }
 
 #[derive(Subcommand)]

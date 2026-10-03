@@ -1,3 +1,7 @@
+use std::path::Path;
+use std::process::Command;
+
+use anyhow::Context;
 use hydra_core::config::load_env;
 use hydra_core::envs;
 use hydra_core::name::EnvName;
@@ -60,5 +64,62 @@ pub fn run(app: &App, cmd: EnvCmd) -> anyhow::Result<i32> {
             }
             Ok(0)
         }
+        EnvCmd::Edit { name } => {
+            let n = app.env_name(&name)?;
+            let file = app.paths.env_file(&n);
+            loop {
+                open_editor(&file)?;
+                match load_env(&app.paths, &n) {
+                    Ok(_) => {
+                        println!("saved {}", file.display());
+                        return Ok(0);
+                    }
+                    Err(e) => {
+                        eprintln!("hydra: {e}");
+                        if !prompt::confirm("Reopen the editor to fix it?", true)? {
+                            return Ok(1);
+                        }
+                    }
+                }
+            }
+        }
+        EnvCmd::Rename { old, new } => {
+            let o = app.env_name(&old)?;
+            let n = EnvName::parse(&new)?;
+            let r = envs::rename(&app.paths, &o, &n, app.store.as_ref())?;
+            println!("renamed {o} to {n}");
+            if !r.bindings.is_empty() {
+                println!("updated bindings: {}", r.bindings.join(", "));
+            }
+            if r.references > 0 {
+                println!("updated {} secret reference(s)", r.references);
+            }
+            if !r.secrets.is_empty() {
+                println!("moved secrets: {}", r.secrets.join(", "));
+            }
+            println!("if any repo has a .hydra file with env = \"{o}\", change it to \"{n}\"");
+            Ok(0)
+        }
     }
+}
+
+/// Runs $VISUAL, $EDITOR or notepad on the file and waits for it to close.
+fn open_editor(file: &Path) -> anyhow::Result<()> {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "notepad".to_string());
+    let mut parts = editor.split_whitespace();
+    let program = parts.next().context("EDITOR is empty")?;
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let exe = hydra_platform::process::resolve_program(
+        program,
+        &path,
+        std::env::var_os("PATHEXT").as_deref(),
+    )
+    .with_context(|| format!("editor {program:?} not found; set EDITOR"))?;
+    let status = Command::new(exe).args(parts).arg(file).status()?;
+    if !status.success() {
+        anyhow::bail!("the editor exited with {status}");
+    }
+    Ok(())
 }

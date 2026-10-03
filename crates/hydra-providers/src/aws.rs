@@ -50,18 +50,38 @@ impl Provider for Aws {
                 .path("AWS_CONFIG_FILE", &dir.join("config"))
                 .path("AWS_SHARED_CREDENTIALS_FILE", &dir.join("credentials"));
         } else {
-            c = c.unset("AWS_CONFIG_FILE").unset("AWS_SHARED_CREDENTIALS_FILE");
+            c = c
+                .unset("AWS_CONFIG_FILE")
+                .unset("AWS_SHARED_CREDENTIALS_FILE");
         }
         Ok(c)
     }
 
     fn check(&self, _ctx: &Ctx, run: &dyn CommandRunner) -> IdentityReport {
-        from_command("aws", run, &["aws", "sts", "get-caller-identity", "--query", "Arn", "--output", "text"])
+        from_command(
+            "aws",
+            run,
+            &[
+                "aws",
+                "sts",
+                "get-caller-identity",
+                "--query",
+                "Arn",
+                "--output",
+                "text",
+            ],
+        )
     }
 
     fn auth_command(&self, ctx: &Ctx) -> Option<Vec<String>> {
         let profile = ctx.env.aws.as_ref()?.profile.clone();
-        Some(vec!["aws".into(), "sso".into(), "login".into(), "--profile".into(), profile])
+        Some(vec![
+            "aws".into(),
+            "sso".into(),
+            "login".into(),
+            "--profile".into(),
+            profile,
+        ])
     }
 }
 
@@ -76,7 +96,12 @@ mod tests {
         let f = Fixture::new("[aws]\nprofile = \"acme-dev\"\n");
         let c = Aws.contribute(&f.ctx()).unwrap();
         assert_eq!(c.vars["AWS_PROFILE"], VarValue::Literal("acme-dev".into()));
-        for v in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_CONFIG_FILE"] {
+        for v in [
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "AWS_CONFIG_FILE",
+        ] {
             assert!(c.unset.contains(v), "{v}");
         }
     }
@@ -88,13 +113,19 @@ mod tests {
         let c = Aws.contribute(&f.ctx()).unwrap();
         let dir = f.paths.state_dir(&f.name).join("aws");
         assert!(dir.is_dir());
-        assert_eq!(c.vars["AWS_CONFIG_FILE"], VarValue::Literal(dir.join("config").to_string_lossy().into_owned()));
+        assert_eq!(
+            c.vars["AWS_CONFIG_FILE"],
+            VarValue::Literal(dir.join("config").to_string_lossy().into_owned())
+        );
         assert!(c.vars.contains_key("AWS_SHARED_CREDENTIALS_FILE"));
     }
 
     #[test]
     fn login_uses_profile() {
         let f = Fixture::new("[aws]\nprofile = \"p\"\n");
-        assert_eq!(Aws.auth_command(&f.ctx()).unwrap(), vec!["aws", "sso", "login", "--profile", "p"]);
+        assert_eq!(
+            Aws.auth_command(&f.ctx()).unwrap(),
+            vec!["aws", "sso", "login", "--profile", "p"]
+        );
     }
 }

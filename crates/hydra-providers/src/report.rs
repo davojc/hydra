@@ -2,7 +2,11 @@ use hydra_core::provider::{CommandRunner, Ctx, IdentityReport, Status};
 use hydra_core::secret::{SecretRef, mask};
 
 pub fn report(provider: &str, status: Status, detail: impl Into<String>) -> IdentityReport {
-    IdentityReport { provider: provider.to_string(), status, detail: detail.into() }
+    IdentityReport {
+        provider: provider.to_string(),
+        status,
+        detail: detail.into(),
+    }
 }
 
 /// Runs an identity command; its first output line is the identity.
@@ -11,7 +15,9 @@ pub fn from_command(provider: &str, run: &dyn CommandRunner, cmd: &[&str]) -> Id
         return report(provider, Status::Info, "configured");
     };
     match run.output(program, args) {
-        Ok(out) if !out.is_empty() => report(provider, Status::Ok, out.lines().next().unwrap_or_default()),
+        Ok(out) if !out.is_empty() => {
+            report(provider, Status::Ok, out.lines().next().unwrap_or_default())
+        }
         Ok(_) => report(provider, Status::Missing, "not signed in"),
         Err(e) => report(provider, Status::Missing, e),
     }

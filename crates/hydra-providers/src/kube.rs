@@ -55,13 +55,19 @@ mod tests {
         Kube.materialise(&f.ctx()).unwrap();
         let expected = f.paths.state_dir(&f.name).join("kube").join("config");
         assert!(expected.parent().unwrap().is_dir());
-        assert_eq!(Kube.contribute(&f.ctx()).unwrap().vars["KUBECONFIG"], VarValue::Literal(expected.to_string_lossy().into_owned()));
+        assert_eq!(
+            Kube.contribute(&f.ctx()).unwrap().vars["KUBECONFIG"],
+            VarValue::Literal(expected.to_string_lossy().into_owned())
+        );
     }
 
     #[test]
     fn custom_kubeconfig_expands_tilde() {
         let f = Fixture::new("[kube]\nconfig = \"~/.kube/work\"\n");
         let expected = f.home.join(".kube/work");
-        assert_eq!(Kube.contribute(&f.ctx()).unwrap().vars["KUBECONFIG"], VarValue::Literal(expected.to_string_lossy().into_owned()));
+        assert_eq!(
+            Kube.contribute(&f.ctx()).unwrap().vars["KUBECONFIG"],
+            VarValue::Literal(expected.to_string_lossy().into_owned())
+        );
     }
 }

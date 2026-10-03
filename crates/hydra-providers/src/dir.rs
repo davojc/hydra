@@ -74,7 +74,11 @@ pub const GCLOUD: DirProvider = DirProvider {
     var: "CLOUDSDK_CONFIG",
     subdir: "gcloud",
     configured: gcloud_on,
-    managed: &["CLOUDSDK_CONFIG", "CLOUDSDK_CORE_ACCOUNT", "CLOUDSDK_CORE_PROJECT"],
+    managed: &[
+        "CLOUDSDK_CONFIG",
+        "CLOUDSDK_CORE_ACCOUNT",
+        "CLOUDSDK_CORE_PROJECT",
+    ],
     login: &["gcloud", "auth", "login"],
     whoami: &["gcloud", "config", "get", "account"],
 };
@@ -104,7 +108,10 @@ mod tests {
         let dir = f.paths.state_dir(&f.name).join("azure");
         assert!(dir.is_dir());
         let c = AZURE.contribute(&f.ctx()).unwrap();
-        assert_eq!(c.vars["AZURE_CONFIG_DIR"], VarValue::Literal(dir.to_string_lossy().into_owned()));
+        assert_eq!(
+            c.vars["AZURE_CONFIG_DIR"],
+            VarValue::Literal(dir.to_string_lossy().into_owned())
+        );
     }
 
     #[test]
@@ -126,7 +133,10 @@ mod tests {
         let f = Fixture::new("[gcloud]\n");
         let run = FakeRunner::default().with("gcloud config get account", Ok("work@example.com\n"));
         let r = GCLOUD.check(&f.ctx(), &run);
-        assert_eq!((r.status, r.detail.as_str()), (Status::Ok, "work@example.com"));
+        assert_eq!(
+            (r.status, r.detail.as_str()),
+            (Status::Ok, "work@example.com")
+        );
     }
 
     #[test]

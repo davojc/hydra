@@ -4,8 +4,8 @@ use hydra_core::provider::Provider;
 pub mod aws;
 pub mod dir;
 pub mod envvars;
-pub mod gws;
 pub mod gemini;
+pub mod gws;
 pub mod kube;
 pub mod report;
 #[cfg(test)]

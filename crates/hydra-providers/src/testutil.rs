@@ -25,11 +25,24 @@ impl Fixture {
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
         let env: EnvConfig = toml::from_str(env_toml).unwrap();
-        Self { _dir: dir, paths, name: EnvName::parse("work").unwrap(), env, home, store: MemoryStore::default() }
+        Self {
+            _dir: dir,
+            paths,
+            name: EnvName::parse("work").unwrap(),
+            env,
+            home,
+            store: MemoryStore::default(),
+        }
     }
 
     pub fn ctx(&self) -> Ctx<'_> {
-        Ctx { name: &self.name, env: &self.env, paths: &self.paths, user_home: &self.home, secrets: &self.store }
+        Ctx {
+            name: &self.name,
+            env: &self.env,
+            paths: &self.paths,
+            user_home: &self.home,
+            secrets: &self.store,
+        }
     }
 }
 
@@ -39,14 +52,23 @@ pub struct FakeRunner(pub HashMap<String, Result<String, String>>);
 
 impl FakeRunner {
     pub fn with(mut self, cmd: &str, out: Result<&str, &str>) -> Self {
-        self.0.insert(cmd.to_string(), out.map(str::to_string).map_err(str::to_string));
+        self.0.insert(
+            cmd.to_string(),
+            out.map(str::to_string).map_err(str::to_string),
+        );
         self
     }
 }
 
 impl CommandRunner for FakeRunner {
     fn output(&self, program: &str, args: &[&str]) -> Result<String, String> {
-        let key = std::iter::once(program).chain(args.iter().copied()).collect::<Vec<_>>().join(" ");
-        self.0.get(&key).cloned().unwrap_or_else(|| Err(format!("unexpected command: {key}")))
+        let key = std::iter::once(program)
+            .chain(args.iter().copied())
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.0
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| Err(format!("unexpected command: {key}")))
     }
 }

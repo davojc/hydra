@@ -20,9 +20,15 @@ fn credentials_ref(ctx: &Ctx) -> Result<Option<SecretRef>, ProviderError> {
 }
 
 impl Provider for Gws {
-    fn id(&self) -> &'static str { "gws" }
-    fn is_configured(&self, env: &EnvConfig) -> bool { env.gws.is_some() }
-    fn managed_vars(&self) -> &'static [&'static str] { &[CONFIG_DIR, CREDENTIALS_FILE, TOKEN] }
+    fn id(&self) -> &'static str {
+        "gws"
+    }
+    fn is_configured(&self, env: &EnvConfig) -> bool {
+        env.gws.is_some()
+    }
+    fn managed_vars(&self) -> &'static [&'static str] {
+        &[CONFIG_DIR, CREDENTIALS_FILE, TOKEN]
+    }
 
     fn materialise(&self, ctx: &Ctx) -> Result<(), ProviderError> {
         let dir = ctx.provider_dir("gws");
@@ -76,20 +82,41 @@ mod tests {
         Gws.materialise(&f.ctx()).unwrap();
         let c = Gws.contribute(&f.ctx()).unwrap();
         let dir = f.paths.state_dir(&f.name).join("gws");
-        assert_eq!(c.vars["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"], VarValue::Literal(dir.to_string_lossy().into_owned()));
+        assert_eq!(
+            c.vars["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"],
+            VarValue::Literal(dir.to_string_lossy().into_owned())
+        );
         assert!(c.unset.contains("GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"));
-        assert_eq!(Gws.auth_command(&f.ctx()).unwrap(), vec!["gws", "auth", "login"]);
+        assert_eq!(
+            Gws.auth_command(&f.ctx()).unwrap(),
+            vec!["gws", "auth", "login"]
+        );
     }
 
     #[test]
     fn credentials_mode_writes_file_from_secret() {
         let f = Fixture::new("[gws]\ncredentials = \"secret:work/gws-creds\"\n");
-        f.store.set(&SecretRef::parse_path("work/gws-creds").unwrap(), "{\"type\":\"authorized_user\"}").unwrap();
+        f.store
+            .set(
+                &SecretRef::parse_path("work/gws-creds").unwrap(),
+                "{\"type\":\"authorized_user\"}",
+            )
+            .unwrap();
         Gws.materialise(&f.ctx()).unwrap();
-        let file = f.paths.state_dir(&f.name).join("gws").join("credentials.json");
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "{\"type\":\"authorized_user\"}");
+        let file = f
+            .paths
+            .state_dir(&f.name)
+            .join("gws")
+            .join("credentials.json");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "{\"type\":\"authorized_user\"}"
+        );
         let c = Gws.contribute(&f.ctx()).unwrap();
-        assert_eq!(c.vars["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"], VarValue::Literal(file.to_string_lossy().into_owned()));
+        assert_eq!(
+            c.vars["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"],
+            VarValue::Literal(file.to_string_lossy().into_owned())
+        );
         assert_eq!(Gws.auth_command(&f.ctx()), None);
     }
 

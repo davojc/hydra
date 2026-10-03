@@ -4,6 +4,7 @@ use hydra_core::provider::Provider;
 pub mod aws;
 pub mod dir;
 pub mod envvars;
+pub mod gws;
 pub mod gemini;
 pub mod kube;
 pub mod report;
@@ -16,6 +17,7 @@ pub fn all() -> Vec<Box<dyn Provider>> {
         Box::new(aws::Aws),
         Box::new(dir::AZURE),
         Box::new(dir::GCLOUD),
+        Box::new(gws::Gws),
         Box::new(kube::Kube),
         Box::new(dir::CODEX),
         Box::new(gemini::Gemini),

@@ -1,0 +1,14 @@
+[package]
+name = "hydra-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hydra-core.workspace = true
+keyring.workspace = true
+serde.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

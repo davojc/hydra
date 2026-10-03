@@ -5,7 +5,7 @@ use anyhow::Context;
 use hydra_core::config::load_global;
 use hydra_core::lock::hold_shared;
 use hydra_core::name::EnvName;
-use hydra_core::resolve::{LaunchEnv, PrepareOptions, prepare};
+use hydra_core::resolve::{ENV_VARS_MARKER, LaunchEnv, PrepareOptions, prepare};
 use hydra_platform::process::EnvRunner;
 use hydra_platform::shell::{PromptStyle, ShellKind, find_shell, shell_command, write_init};
 
@@ -17,13 +17,17 @@ pub fn prepare_launch(
     opts: &PrepareOptions,
 ) -> anyhow::Result<LaunchEnv> {
     let providers = hydra_providers::all();
+    let opts = PrepareOptions {
+        inherited_env_vars: std::env::var(ENV_VARS_MARKER).ok(),
+        ..opts.clone()
+    };
     Ok(prepare(
         &app.paths,
         name,
         &app.user_home,
         &providers,
         app.store.as_ref(),
-        opts,
+        &opts,
     )?)
 }
 

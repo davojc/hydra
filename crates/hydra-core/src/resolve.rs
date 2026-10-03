@@ -10,6 +10,11 @@ use crate::paths::HydraPaths;
 use crate::provider::{Ctx, Provider};
 use crate::secret::SecretStore;
 
+/// Id of the provider for arbitrary `[env]` variables.
+const ENV_PROVIDER: &str = "env";
+/// Lists the `[env]` variable names a hydra launch set, `;`-separated.
+pub const ENV_VARS_MARKER: &str = "HYDRA_ENV_VARS";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Failure {
     pub provider: String,
@@ -45,6 +50,9 @@ pub struct PrepareOptions {
     pub allow_missing_secrets: bool,
     /// Variables to remove even if a provider sets them (e.g. GH_TOKEN during `gh auth login`).
     pub drop_vars: Vec<String>,
+    /// `HYDRA_ENV_VARS` from the parent process: `[env]` names set by an enclosing hydra
+    /// environment, which must not leak into this one.
+    pub inherited_env_vars: Option<String>,
 }
 
 /// The environment to apply to a child process.
@@ -181,8 +189,34 @@ pub fn prepare(
         "HYDRA_HOME".into(),
         paths.root().to_string_lossy().into_owned(),
     );
-    if let Some(c) = &config.color {
-        set.insert("HYDRA_ENV_COLOR".into(), c.clone());
+    match &config.color {
+        Some(c) => {
+            set.insert("HYDRA_ENV_COLOR".into(), c.clone());
+        }
+        None => {
+            unset.insert("HYDRA_ENV_COLOR".into());
+        }
+    }
+    // Names (never values) of the [env] variables, so a nested hydra launch can remove them.
+    let env_vars: Vec<&str> = merged
+        .vars
+        .iter()
+        .filter(|(_, (provider, _))| provider == ENV_PROVIDER)
+        .map(|(k, _)| k.as_str())
+        .collect();
+    if env_vars.is_empty() {
+        unset.insert(ENV_VARS_MARKER.into());
+    } else {
+        set.insert(ENV_VARS_MARKER.into(), env_vars.join(";"));
+    }
+    if let Some(inherited) = &opts.inherited_env_vars {
+        unset.extend(
+            inherited
+                .split(';')
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string),
+        );
     }
     for v in &opts.drop_vars {
         set.retain(|k, _| !k.eq_ignore_ascii_case(v));
@@ -397,6 +431,7 @@ mod tests {
         let opts = PrepareOptions {
             allow_missing_secrets: true,
             drop_vars: vec!["GH_CONFIG_DIR".into()],
+            ..Default::default()
         };
         let env = run(&paths, &name, &providers, &MemoryStore::default(), &opts).unwrap();
         assert!(!env.set.contains_key("GH_TOKEN"));
@@ -416,7 +451,7 @@ mod tests {
         )];
         let opts = PrepareOptions {
             allow_missing_secrets: true,
-            drop_vars: vec![],
+            ..Default::default()
         };
         let env = run(&paths, &name, &providers, &MemoryStore::default(), &opts).unwrap();
         assert!(env.unset.contains("GH_TOKEN"));
@@ -481,5 +516,55 @@ mod tests {
             parts,
             vec![PathBuf::from("C:/shims"), PathBuf::from("C:/bin")]
         );
+    }
+
+    #[test]
+    fn exports_env_var_names_for_nested_launches() {
+        let (_d, paths, name) = setup("");
+        let providers = vec![fake(
+            "env",
+            Contribution::new()
+                .literal("REGION", "eu")
+                .literal("LINEAR_API_KEY", "lin_123"),
+        )];
+        let env = run(
+            &paths,
+            &name,
+            &providers,
+            &MemoryStore::default(),
+            &PrepareOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(env.set["HYDRA_ENV_VARS"], "LINEAR_API_KEY;REGION");
+    }
+
+    #[test]
+    fn nested_launch_unsets_the_outer_environments_vars() {
+        let (_d, paths, name) = setup("");
+        let providers = vec![fake("env", Contribution::new().literal("REGION", "us"))];
+        let opts = PrepareOptions {
+            inherited_env_vars: Some("LINEAR_API_KEY;region;".into()),
+            ..Default::default()
+        };
+        let env = run(&paths, &name, &providers, &MemoryStore::default(), &opts).unwrap();
+        assert!(env.unset.contains("LINEAR_API_KEY"), "{:?}", env.unset);
+        assert!(!env.unset.iter().any(|u| u.eq_ignore_ascii_case("REGION")));
+        assert!(!env.unset.contains(""));
+        assert_eq!(env.set["REGION"], "us");
+        assert_eq!(env.set["HYDRA_ENV_VARS"], "REGION");
+    }
+
+    #[test]
+    fn without_colour_or_env_vars_the_markers_are_unset() {
+        let (_d, paths, name) = setup("");
+        let opts = PrepareOptions {
+            inherited_env_vars: Some("LINEAR_API_KEY".into()),
+            ..Default::default()
+        };
+        let env = run(&paths, &name, &[], &MemoryStore::default(), &opts).unwrap();
+        assert!(env.unset.contains("HYDRA_ENV_COLOR"));
+        assert!(env.unset.contains("HYDRA_ENV_VARS"));
+        assert!(env.unset.contains("LINEAR_API_KEY"));
+        assert!(!env.set.contains_key("HYDRA_ENV_VARS"));
     }
 }

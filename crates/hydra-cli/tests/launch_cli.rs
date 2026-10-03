@@ -181,3 +181,34 @@ fn auth_requires_configured_provider() {
         .failure()
         .stderr(predicate::str::contains("add a [github] section"));
 }
+
+fn nested(outer: &str, inner: &str, cmd: Vec<String>) -> Vec<String> {
+    let mut inner_args = vec![env!("CARGO_BIN_EXE_hydra").to_string()];
+    inner_args.extend(run_args(inner, cmd));
+    run_args(outer, inner_args)
+}
+
+#[test]
+fn nested_run_does_not_leak_the_outer_env_vars() {
+    let h = Home::new();
+    h.write_env(
+        "work",
+        "color = \"#1f9a8a\"\n[env]\nLINEAR_API_KEY = \"lin_work_value\"\n",
+    );
+    h.write_env("personal", "label = \"me\"\n");
+    h.hydra()
+        .args(run_args("work", show("LINEAR_API_KEY")))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[lin_work_value]"));
+    h.hydra()
+        .args(nested("work", "personal", show("LINEAR_API_KEY")))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[]"));
+    h.hydra()
+        .args(nested("work", "personal", show("HYDRA_ENV_COLOR")))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[]"));
+}

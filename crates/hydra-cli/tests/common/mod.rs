@@ -25,7 +25,8 @@ impl Home {
         );
         c.env("HYDRA_HOME", self.root())
             .env("HYDRA_KEYRING_SERVICE", service)
-            .env_remove("HYDRA_ENV");
+            .env_remove("HYDRA_ENV")
+            .env_remove("HYDRA_ENV_VARS");
         c
     }
 

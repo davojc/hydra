@@ -21,6 +21,7 @@ pub fn run(app: &App, provider: String, env: String) -> anyhow::Result<i32> {
     let opts = PrepareOptions {
         allow_missing_secrets: true,
         drop_vars: p.auth_unset().iter().map(|s| s.to_string()).collect(),
+        ..Default::default()
     };
     let launch = launch::prepare_launch(app, &name, &opts)?;
     let ctx = Ctx {

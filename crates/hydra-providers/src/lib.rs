@@ -6,6 +6,7 @@ pub mod dir;
 pub mod envvars;
 pub mod gemini;
 pub mod git;
+pub mod github;
 pub mod gws;
 pub mod kube;
 pub mod report;
@@ -15,6 +16,7 @@ pub(crate) mod testutil;
 /// Every provider, in the order their variables are merged.
 pub fn all() -> Vec<Box<dyn Provider>> {
     vec![
+        Box::new(github::Github),
         Box::new(git::Git),
         Box::new(aws::Aws),
         Box::new(dir::AZURE),

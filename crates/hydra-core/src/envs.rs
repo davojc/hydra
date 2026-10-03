@@ -5,7 +5,7 @@ use crate::lock;
 use crate::name::EnvName;
 use crate::paths::HydraPaths;
 use crate::rewrite;
-use crate::secret::{SecretStore, StoreError, delete_env_secrets, move_env_secrets};
+use crate::secret::{SecretRef, SecretStore, StoreError, delete_env_secrets};
 
 /// Default tab colours, assigned in order as environments are created.
 pub const PALETTE: [&str; 6] = [
@@ -158,6 +158,18 @@ pub fn rename(
     if lock::is_running(paths, old)? {
         return Err(EnvError::Running(old.clone()));
     }
+    let new_state = paths.state_dir(new);
+    if new_state.exists() {
+        return Err(EnvError::Rewrite(format!(
+            "saved logins for {new} still exist in {}; delete that folder or pick another name",
+            new_state.display()
+        )));
+    }
+    if !store.list(new)?.is_empty() {
+        return Err(EnvError::Rewrite(format!(
+            "secrets are already stored under {new}; remove them with hydra secret rm or pick another name"
+        )));
+    }
 
     // Prepare every rewrite first, so a parse error stops the rename before anything moves.
     let cfg_path = paths.config_file();
@@ -181,22 +193,97 @@ pub fn rename(
         }
     }
 
-    std::fs::rename(paths.env_dir(old), paths.env_dir(new))?;
+    // Copy secrets first; if that fails nothing has changed except the copies, which we remove.
+    let secrets = store.list(old)?;
+    let mut copied = Vec::new();
+    for key in &secrets {
+        let src = SecretRef {
+            env: old.clone(),
+            key: key.clone(),
+        };
+        let dst = SecretRef {
+            env: new.clone(),
+            key: key.clone(),
+        };
+        let result = store.get(&src).and_then(|v| match v {
+            Some(v) => store.set(&dst, &v),
+            None => Ok(()),
+        });
+        if let Err(e) = result {
+            for c in &copied {
+                let _ = store.delete(c);
+            }
+            return Err(e.into());
+        }
+        copied.push(dst);
+    }
+
+    let partial = |done: &str, failed: &str, e: &dyn std::fmt::Display, fix: String| {
+        EnvError::Rewrite(format!(
+            "{done} but couldn't {failed}: {e}; {fix} (secrets were copied to {new}; the old ones under {old} are still there)"
+        ))
+    };
+    std::fs::rename(paths.env_dir(old), paths.env_dir(new)).map_err(|e| {
+        for c in &copied {
+            let _ = store.delete(c);
+        }
+        EnvError::Io(e)
+    })?;
     let old_state = paths.state_dir(old);
     if old_state.exists() {
-        std::fs::rename(&old_state, paths.state_dir(new))?;
+        std::fs::rename(&old_state, &new_state).map_err(|e| {
+            partial(
+                &format!("renamed the env folder to {new}"),
+                "move the saved logins",
+                &e,
+                format!(
+                    "move {} to {} by hand",
+                    old_state.display(),
+                    new_state.display()
+                ),
+            )
+        })?;
     }
     if let Some(text) = new_config
         && !bindings.is_empty()
     {
-        std::fs::write(&cfg_path, text)?;
+        std::fs::write(&cfg_path, text).map_err(|e| {
+            partial(
+                &format!("renamed the env folder to {new}"),
+                "update config.toml",
+                &e,
+                format!("change bindings from \"{old}\" to \"{new}\" by hand"),
+            )
+        })?;
     }
     let mut references = 0;
     for (n, text, count) in env_files {
-        std::fs::write(paths.env_file(&n), text)?;
+        let file = paths.env_file(&n);
+        std::fs::write(&file, text).map_err(|e| {
+            partial(
+                &format!("renamed the env folder to {new}"),
+                &format!("update {}", file.display()),
+                &e,
+                format!("change secret:{old}/ references to secret:{new}/ by hand"),
+            )
+        })?;
         references += count;
     }
-    let secrets = move_env_secrets(store, old, new)?;
+    for key in &secrets {
+        store
+            .delete(&SecretRef {
+                env: old.clone(),
+                key: key.clone(),
+            })
+            .map_err(|e| {
+                partial(
+                    &format!("renamed {old} to {new}"),
+                    &format!("remove the old secret {old}/{key}"),
+                    &e,
+                    format!("remove the old secrets with hydra secret rm {old}/{key}"),
+                )
+            })?;
+    }
     Ok(RenameReport {
         bindings,
         references,
@@ -352,5 +439,34 @@ B = \"secret:work/b\"
             rename(&paths, &n("work"), &n("acme"), &store),
             Err(EnvError::Running(_))
         ));
+    }
+
+    #[test]
+    fn rename_refuses_leftover_state_or_secrets_and_moves_nothing() {
+        let (_d, paths) = home();
+        let store = MemoryStore::default();
+        create(&paths, &n("work")).unwrap();
+        std::fs::create_dir_all(paths.state_dir(&n("acme"))).unwrap();
+        let err = rename(&paths, &n("work"), &n("acme"), &store).unwrap_err();
+        assert!(err.to_string().contains("saved logins for acme"), "{err}");
+        assert!(paths.env_file(&n("work")).is_file());
+        assert!(!paths.env_dir(&n("acme")).exists());
+
+        std::fs::remove_dir_all(paths.state_dir(&n("acme"))).unwrap();
+        store
+            .set(&SecretRef::parse_path("acme/x").unwrap(), "1")
+            .unwrap();
+        store
+            .set(&SecretRef::parse_path("work/a").unwrap(), "2")
+            .unwrap();
+        let err = rename(&paths, &n("work"), &n("acme"), &store).unwrap_err();
+        assert!(
+            err.to_string().contains("already stored under acme"),
+            "{err}"
+        );
+        assert!(paths.env_file(&n("work")).is_file());
+        assert!(!paths.env_dir(&n("acme")).exists());
+        assert_eq!(store.list(&n("work")).unwrap(), vec!["a"]);
+        assert_eq!(store.list(&n("acme")).unwrap(), vec!["x"]);
     }
 }

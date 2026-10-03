@@ -108,6 +108,15 @@ fn open_editor(file: &Path) -> anyhow::Result<()> {
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "notepad".to_string());
+    // A value that is itself an existing file (e.g. a path with spaces) is the program, no arguments.
+    let whole = Path::new(editor.trim());
+    if whole.is_file() {
+        let status = Command::new(whole).arg(file).status()?;
+        if !status.success() {
+            anyhow::bail!("the editor exited with {status}");
+        }
+        return Ok(());
+    }
     let mut parts = editor.split_whitespace();
     let program = parts.next().context("EDITOR is empty")?;
     let path = std::env::var_os("PATH").unwrap_or_default();

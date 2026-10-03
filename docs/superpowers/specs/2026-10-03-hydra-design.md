@@ -1,7 +1,7 @@
 # Hydra — Design Spec
 
 **Date:** 2026-10-03
-**Status:** Approved in brainstorming, pending written-spec review
+**Status:** Approved; implementation planned in `docs/superpowers/plans/` (roadmap + Plan 1)
 **User guide (design preview):** https://claude.ai/artifact/RcSjybbshNoCCvRabb2zTf
 
 ## 1. Purpose
@@ -61,6 +61,7 @@ Later: `hydra-app` (Tauri) depends on `hydra-core`, `hydra-providers`, `hydra-pl
 ```
 ~/.hydra/                       # overridable with HYDRA_HOME (used by tests)
   config.toml                   # global: bindings, default shell, guard settings
+  secrets.toml                  # GENERATED: names of stored secrets (never values), since Credential Manager can't be listed
   envs/<env>/                   # USER-EDITED, one folder per environment
     env.toml                    # label, colour, provider sections
     claude/                     # optional Claude overrides: settings.json, CLAUDE.md, skills/ …
@@ -100,8 +101,9 @@ Names must match `^[a-z0-9][a-z0-9-]{0,31}$` (e.g. `work`, `client-acme`). Folde
 4. Resolve `secret:` references from the secret store.
 5. Add `HYDRA_ENV=<env>`, `HYDRA_HOME`, and prepend `~/.hydra/shims` to `PATH` if the shims are installed. Without them, identity switching still works but guards are off; `whoami` and `doctor` say so.
 6. Generate the shell init file (prompt snippet) and launch:
-   - pwsh: `pwsh -NoLogo -NoExit -Command ". '<state/work/shell/init.ps1>'"` (the init file dot-sources the user's `$PROFILE` first).
-   - bash: `bash --rcfile <state/work/shell/init.bash> -i` (the rcfile sources `~/.bashrc` first).
+   - pwsh: `pwsh -NoLogo -NoProfile -NoExit -Command ". '<state/work/shell/init.ps1>'"`. The init file dot-sources the user's `$PROFILE` itself (hence `-NoProfile`, so it loads once), re-prepends hydra's PATH entries, then wraps the prompt.
+   - bash: `bash --rcfile <state/work/shell/init.bash> -i` with `CHERE_INVOKING=1` (otherwise Git Bash's `/etc/profile` changes to `~`). The rcfile sources `/etc/profile`, then `~/.bash_profile` or `~/.bashrc`, then re-prepends hydra's PATH entries (because `/etc/profile` puts `/mingw64/bin` first) and sets the prompt.
+   - Programs started by `hydra run`/`auth`/`whoami` are found through `PATH` + `PATHEXT`, so `.cmd` launchers (`gcloud.cmd`, `az.cmd`, `claude.cmd`) work.
 7. Any failure in steps 1–5 aborts the launch (fail closed, §8).
 
 `hydra run <env> -- <cmd>` does steps 1–5 then spawns `<cmd>` directly and returns its exit code.
@@ -119,7 +121,7 @@ Names must match `^[a-z0-9][a-z0-9-]{0,31}$` (e.g. `work`, `client-acme`). Folde
 | `gws` | `GOOGLE_WORKSPACE_CLI_CONFIG_DIR=state/<env>/gws`. Alternative mode `credentials = "secret:<env>/gws-creds"` writes the credentials JSON to a per-env file at launch and sets `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE`. |
 | `kube` | `KUBECONFIG=state/<env>/kube/config` (or a configured path). |
 | `codex` | `CODEX_HOME=state/<env>/codex`. |
-| `gemini` | `GEMINI_API_KEY` from a secret. |
+| `gemini` | `GEMINI_API_KEY` from `api_key`, which must be a `secret:` reference. |
 | `env` | Arbitrary variables; values are literals or `secret:` references. |
 
 `whoami` groups `gcloud` and `gws` under one `google` line when both are configured.

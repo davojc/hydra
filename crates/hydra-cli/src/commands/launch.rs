@@ -11,6 +11,7 @@ use hydra_platform::process::EnvRunner;
 use hydra_platform::shell::{PromptStyle, ShellKind, find_shell, shell_command, write_init};
 
 use crate::app::App;
+use crate::style;
 
 pub fn prepare_launch(
     app: &App,
@@ -54,7 +55,7 @@ fn print_sign_in_hints(app: &App, name: &EnvName, launch: &LaunchEnv) {
         if p.is_configured(&launch.config)
             && let Some(hint) = p.sign_in_hint(&ctx)
         {
-            eprintln!("hydra: {}: {hint}", p.id());
+            anstream::eprintln!("{}", style::warn(format!("hydra: {}: {hint}", p.id())));
         }
     }
 }

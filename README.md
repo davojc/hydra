@@ -141,6 +141,8 @@ Each environment's Claude folder (`~/.hydra/state/<env>/claude`) is rebuilt from
 
 ## Commands
 
+Output is coloured in terminals; set NO_COLOR=1 to turn it off.
+
 | Command | |
 |---|---|
 | `hydra init` | Create `~/.hydra` |

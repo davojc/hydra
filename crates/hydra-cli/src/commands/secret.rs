@@ -3,6 +3,7 @@ use hydra_core::secret::SecretRef;
 use crate::app::App;
 use crate::cli::SecretCmd;
 use crate::prompt;
+use crate::style;
 
 const STORE_NAME: &str = if cfg!(windows) {
     "Windows Credential Manager"
@@ -20,16 +21,22 @@ pub fn run(app: &App, cmd: SecretCmd) -> anyhow::Result<i32> {
                 r.path()
             ))?;
             app.store.set(&r, &value)?;
-            println!("stored {} in {STORE_NAME}", r.path());
+            anstream::println!(
+                "{}",
+                style::ok(format!("stored {} in {STORE_NAME}", r.path()))
+            );
             Ok(0)
         }
         SecretCmd::Rm { path } => {
             let r = SecretRef::parse_path(&path)?;
             if app.store.delete(&r)? {
-                println!("removed {}", r.path());
+                anstream::println!("{}", style::ok(format!("removed {}", r.path())));
                 Ok(0)
             } else {
-                eprintln!("hydra: no secret named {}", r.path());
+                anstream::eprintln!(
+                    "{}",
+                    style::error(format!("hydra: no secret named {}", r.path()))
+                );
                 Ok(1)
             }
         }

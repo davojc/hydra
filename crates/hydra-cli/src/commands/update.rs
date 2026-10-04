@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 
 use crate::VERSION;
 use crate::release::{self, Release, WindowsBuild};
+use crate::style;
 
 /// The replaced exe. Windows can't delete a running exe, so the next hydra start removes it.
 pub const OLD_EXE: &str = "hydra.old.exe";
@@ -32,23 +33,26 @@ pub fn run(check: bool, force: bool) -> anyhow::Result<i32> {
     let latest = release.version()?;
     let newer = release::is_newer(&latest, &current);
     if !newer && !force {
-        println!("hydra {current} is up to date");
+        anstream::println!("{}", style::ok(format!("hydra {current} is up to date")));
         return Ok(0);
     }
     if check {
         if newer {
-            println!("hydra {current} is installed; {latest} is available");
+            anstream::println!("hydra {current} is installed; {latest} is available");
         } else {
-            println!("hydra {current} is up to date");
+            anstream::println!("{}", style::ok(format!("hydra {current} is up to date")));
         }
         return Ok(0);
     }
 
     let others = other_hydra_pids()?;
     if !others.is_empty() {
-        eprintln!("hydra is in use - not updating. Close these first:");
+        anstream::eprintln!(
+            "{}",
+            style::warn("hydra is in use - not updating. Close these first:")
+        );
         for pid in others {
-            eprintln!("  pid {pid}");
+            anstream::eprintln!("  pid {pid}");
         }
         return Ok(1);
     }
@@ -65,7 +69,7 @@ pub fn run(check: bool, force: bool) -> anyhow::Result<i32> {
         return Err(e);
     }
     replace(&target, &new, &dir.join(OLD_EXE))?;
-    println!("updated to {latest}");
+    anstream::println!("{}", style::ok(format!("updated to {latest}")));
     Ok(0)
 }
 

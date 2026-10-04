@@ -6,6 +6,7 @@ use hydra_platform::process::EnvRunner;
 
 use crate::app::App;
 use crate::commands::launch;
+use crate::style;
 
 pub fn run(app: &App, provider: String, env: String) -> anyhow::Result<i32> {
     let name = app.env_name(&env)?;
@@ -47,6 +48,6 @@ pub fn run(app: &App, provider: String, env: String) -> anyhow::Result<i32> {
     }
     p.after_auth(&ctx, &runner)
         .map_err(|e| anyhow::anyhow!("{}", e.message))?;
-    println!("signed in: {} for {name}", p.id());
+    anstream::println!("{}", style::ok(format!("signed in: {} for {name}", p.id())));
     Ok(0)
 }

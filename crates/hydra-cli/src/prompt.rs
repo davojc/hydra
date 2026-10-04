@@ -29,7 +29,7 @@ pub fn confirm(question: &str, default: bool) -> anyhow::Result<bool> {
     if !std::io::stdin().is_terminal() {
         return Ok(false);
     }
-    print!("{question} {} ", if default { "[Y/n]" } else { "[y/N]" });
+    anstream::print!("{question} {} ", if default { "[Y/n]" } else { "[y/N]" });
     std::io::stdout().flush()?;
     let mut line = String::new();
     std::io::stdin().lock().read_line(&mut line)?;

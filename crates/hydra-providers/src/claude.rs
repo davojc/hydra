@@ -339,11 +339,11 @@ impl Provider for Claude {
         )
         .map_err(ProviderError::new)?;
         if !merged.dropped.is_empty() {
-            eprintln!(
+            warn(&format!(
                 "hydra: claude: ignored {} from your shared settings.json (they would give every environment the same sign-in); set them in {} if one environment needs them",
                 merged.dropped.join(", "),
                 over_settings.display()
-            );
+            ));
         }
         let settings = merged.text;
         let env = ctx.name.as_str();
@@ -354,7 +354,7 @@ impl Provider for Claude {
         );
         for (file, content) in [("settings.json", Some(settings)), ("CLAUDE.md", md)] {
             if let Some(warning) = write_generated(&l, env, file, content.as_deref())? {
-                eprintln!("{warning}");
+                warn(&warning);
             }
         }
         let state_path = l.dir.join(".claude.json");
@@ -429,6 +429,12 @@ impl Provider for Claude {
             .is_file())
         .then(|| "not signed in - run claude auth login".to_string())
     }
+}
+
+/// Prints a warning to stderr in yellow (plain when stderr isn't a terminal).
+fn warn(text: &str) {
+    let style = anstyle::Style::new().fg_color(Some(anstyle::AnsiColor::Yellow.into()));
+    anstream::eprintln!("{style}{text}{style:#}");
 }
 
 #[cfg(test)]

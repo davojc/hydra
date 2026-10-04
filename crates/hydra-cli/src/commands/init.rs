@@ -1,6 +1,7 @@
 use anyhow::Context;
 
 use crate::app::App;
+use crate::style;
 
 const CONFIG_TEMPLATE: &str = r#"# Hydra global settings. Environments live in envs/<name>/env.toml.
 # default_shell = "pwsh"                          # or "bash"
@@ -23,10 +24,10 @@ pub fn run(app: &App) -> anyhow::Result<i32> {
     }
     let cfg = p.config_file();
     if cfg.exists() {
-        println!("already set up at {}", p.root().display());
+        anstream::println!("already set up at {}", p.root().display());
     } else {
         std::fs::write(&cfg, CONFIG_TEMPLATE)?;
-        println!("created {}", cfg.display());
+        anstream::println!("{}", style::ok(format!("created {}", cfg.display())));
     }
     Ok(0)
 }

@@ -9,35 +9,45 @@ use hydra_core::name::EnvName;
 use crate::app::App;
 use crate::cli::EnvCmd;
 use crate::prompt;
+use crate::style;
 
 pub fn run(app: &App, cmd: EnvCmd) -> anyhow::Result<i32> {
     match cmd {
         EnvCmd::New { name } => {
             let n = EnvName::parse(&name)?;
             let file = envs::create(&app.paths, &n)?;
-            println!("created {}", file.display());
-            println!("edit it with: hydra env edit {n}");
+            anstream::println!("{}", style::ok(format!("created {}", file.display())));
+            anstream::println!(
+                "{}",
+                style::dim(format!("edit it with: hydra env edit {n}"))
+            );
             Ok(0)
         }
         EnvCmd::List => {
             let l = envs::list(&app.paths)?;
             if l.valid.is_empty() {
-                println!("no environments yet; create one with: hydra env new <name>");
+                anstream::println!("no environments yet; create one with: hydra env new <name>");
             }
             for n in &l.valid {
                 match load_env(&app.paths, n) {
-                    Ok(c) => println!(
-                        "{:<16} {:<24} {}",
-                        n,
+                    Ok(c) => anstream::println!(
+                        "{} {:<24} {}",
+                        style::env_name(format!("{n:<16}"), c.rgb().map(|c| (c.0, c.1, c.2))),
                         c.label_or(n),
                         c.color.as_deref().unwrap_or("")
                     ),
-                    Err(e) => println!("{n:<16} error: {e}"),
+                    Err(e) => anstream::println!(
+                        "{} error: {e}",
+                        style::env_name(format!("{n:<16}"), None)
+                    ),
                 }
             }
             for bad in &l.invalid {
-                eprintln!(
-                    "hydra: warning: ignoring envs/{bad}: names use lowercase letters, digits and '-'"
+                anstream::eprintln!(
+                    "{}",
+                    style::warn(format!(
+                        "hydra: warning: ignoring envs/{bad}: names use lowercase letters, digits and '-'"
+                    ))
                 );
             }
             Ok(0)
@@ -52,15 +62,20 @@ pub fn run(app: &App, cmd: EnvCmd) -> anyhow::Result<i32> {
                         false,
                     )?);
             let r = envs::remove(&app.paths, &n, app.store.as_ref(), delete_state)?;
-            println!("removed environment {n}");
+            anstream::println!("{}", style::ok(format!("removed environment {n}")));
             if !r.secrets.is_empty() {
-                println!("removed secrets: {}", r.secrets.join(", "));
+                anstream::println!("removed secrets: {}", r.secrets.join(", "));
             }
             if state.exists() {
-                println!("kept saved logins in {}", state.display());
+                anstream::println!("kept saved logins in {}", state.display());
             }
             for b in &r.bindings {
-                eprintln!("hydra: warning: binding {b:?} in config.toml still points at {n}");
+                anstream::eprintln!(
+                    "{}",
+                    style::warn(format!(
+                        "hydra: warning: binding {b:?} in config.toml still points at {n}"
+                    ))
+                );
             }
             Ok(0)
         }
@@ -71,11 +86,11 @@ pub fn run(app: &App, cmd: EnvCmd) -> anyhow::Result<i32> {
                 open_editor(&file)?;
                 match load_env(&app.paths, &n) {
                     Ok(_) => {
-                        println!("saved {}", file.display());
+                        anstream::println!("{}", style::ok(format!("saved {}", file.display())));
                         return Ok(0);
                     }
                     Err(e) => {
-                        eprintln!("hydra: {e}");
+                        anstream::eprintln!("{}", style::error(format!("hydra: {e}")));
                         if !prompt::confirm("Reopen the editor to fix it?", true)? {
                             return Ok(1);
                         }
@@ -87,17 +102,19 @@ pub fn run(app: &App, cmd: EnvCmd) -> anyhow::Result<i32> {
             let o = app.env_name(&old)?;
             let n = EnvName::parse(&new)?;
             let r = envs::rename(&app.paths, &o, &n, app.store.as_ref())?;
-            println!("renamed {o} to {n}");
+            anstream::println!("{}", style::ok(format!("renamed {o} to {n}")));
             if !r.bindings.is_empty() {
-                println!("updated bindings: {}", r.bindings.join(", "));
+                anstream::println!("updated bindings: {}", r.bindings.join(", "));
             }
             if r.references > 0 {
-                println!("updated {} secret reference(s)", r.references);
+                anstream::println!("updated {} secret reference(s)", r.references);
             }
             if !r.secrets.is_empty() {
-                println!("moved secrets: {}", r.secrets.join(", "));
+                anstream::println!("moved secrets: {}", r.secrets.join(", "));
             }
-            println!("if any repo has a .hydra file with env = \"{o}\", change it to \"{n}\"");
+            anstream::println!(
+                "if any repo has a .hydra file with env = \"{o}\", change it to \"{n}\""
+            );
             Ok(0)
         }
     }

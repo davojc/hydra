@@ -3,6 +3,7 @@ mod cli;
 mod commands;
 mod prompt;
 mod release;
+mod style;
 
 use clap::Parser;
 
@@ -18,7 +19,7 @@ fn main() {
     match commands::run(cli.command) {
         Ok(code) => std::process::exit(code),
         Err(e) => {
-            eprintln!("hydra: {e:#}");
+            print_error(&e);
             std::process::exit(1);
         }
     }
@@ -30,5 +31,19 @@ fn remove_old_exe() {
         && let Some(dir) = exe.parent()
     {
         let _ = std::fs::remove_file(dir.join(commands::update::OLD_EXE));
+    }
+}
+
+/// The fatal error in red; a launch failure's `-> fix` lines are dimmed.
+fn print_error(e: &anyhow::Error) {
+    let text = format!("hydra: {e:#}");
+    for (i, line) in text.lines().enumerate() {
+        if i == 0 {
+            anstream::eprintln!("{}", style::error(line));
+        } else if line.trim_start().starts_with("->") {
+            anstream::eprintln!("{}", style::dim(line));
+        } else {
+            anstream::eprintln!("{line}");
+        }
     }
 }

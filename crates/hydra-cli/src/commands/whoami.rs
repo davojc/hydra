@@ -5,6 +5,7 @@ use hydra_platform::process::EnvRunner;
 
 use crate::app::App;
 use crate::commands::launch;
+use crate::style;
 
 pub fn run(app: &App, env: Option<String>) -> anyhow::Result<i32> {
     let env = env
@@ -25,7 +26,12 @@ pub fn run(app: &App, env: Option<String>) -> anyhow::Result<i32> {
     };
     let runner = EnvRunner { launch: &launch };
 
-    println!("{:<8} {} · {}", "env", name, launch.config.label_or(&name));
+    anstream::println!(
+        "{:<8} {} · {}",
+        "env",
+        style::env_name(&name, launch.config.rgb().map(|c| (c.0, c.1, c.2))),
+        launch.config.label_or(&name)
+    );
     let mut rows: Vec<IdentityReport> = hydra_providers::all()
         .iter()
         .filter(|p| p.is_configured(&launch.config))
@@ -36,18 +42,18 @@ pub fn run(app: &App, env: Option<String>) -> anyhow::Result<i32> {
     let mut problems = 0;
     for r in &rows {
         let mark = match r.status {
-            Status::Ok => "ok",
-            Status::Info => "",
+            Status::Ok => style::ok("ok"),
+            Status::Info => String::new(),
             Status::Mismatch => {
                 problems += 1;
-                "MISMATCH"
+                style::error("MISMATCH")
             }
             Status::Missing => {
                 problems += 1;
-                "missing"
+                style::warn("missing")
             }
         };
-        println!("{:<8} {:<48} {}", r.provider, r.detail, mark);
+        anstream::println!("{:<8} {:<48} {}", r.provider, r.detail, mark);
     }
     Ok(if problems == 0 { 0 } else { 1 })
 }

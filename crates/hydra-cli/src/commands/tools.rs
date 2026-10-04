@@ -7,6 +7,7 @@ use hydra_core::provider::Ctx;
 use hydra_core::secret::SecretRef;
 
 use crate::app::App;
+use crate::style;
 
 /// The raw `hydra add` flags, before secret names are turned into references.
 pub struct Flags {
@@ -87,7 +88,12 @@ fn check(app: &App, env: &EnvName, text: &str) -> anyhow::Result<EnvConfig> {
 
 fn note_if_running(app: &App, env: &EnvName) -> anyhow::Result<()> {
     if lock::is_running(&app.paths, env)? {
-        println!("note: {env} terminals already open won't see this until you reopen them");
+        anstream::println!(
+            "{}",
+            style::warn(format!(
+                "note: {env} terminals already open won't see this until you reopen them"
+            ))
+        );
     }
     Ok(())
 }
@@ -110,19 +116,19 @@ pub fn add(
     let cfg = check(app, &env, &new_text)?;
     let (verb, prep) = match outcome {
         AddOutcome::AlreadyPresent => {
-            println!("{tool} is already on in {env}");
+            anstream::println!("{tool} is already on in {env}");
             return Ok(0);
         }
         AddOutcome::Added => ("added", "to"),
         AddOutcome::Updated => ("updated", "in"),
     };
     write_env_file(app, &env, &new_text)?;
-    println!("{verb} {tool} {prep} {env}");
+    anstream::println!("{}", style::ok(format!("{verb} {tool} {prep} {env}")));
     let mut next = format!("next: open a new {env} terminal (hydra shell {env})");
     if has_sign_in(app, &env, &cfg, tool) {
         next.push_str(" and sign in there");
     }
-    println!("{next}");
+    anstream::println!("{}", style::dim(next));
     note_if_running(app, &env)?;
     Ok(0)
 }
@@ -152,9 +158,9 @@ fn list(app: &App, env: Option<String>) -> anyhow::Result<i32> {
     };
     for t in TOOLS {
         if on.as_ref().is_some_and(|on| on.contains(t)) {
-            println!("{t:<8} on");
+            anstream::println!("{t:<8} on");
         } else {
-            println!("{t}");
+            anstream::println!("{t}");
         }
     }
     Ok(0)
@@ -166,16 +172,19 @@ pub fn remove(app: &App, tool: String, env: Option<String>) -> anyhow::Result<i3
     let text = read_env_file(app, &env)?;
     let (new_text, removed) = envedit::remove_tool(&text, tool).map_err(anyhow::Error::msg)?;
     if !removed {
-        println!("{tool} isn't on in {env}");
+        anstream::println!("{tool} isn't on in {env}");
         return Ok(0);
     }
     check(app, &env, &new_text)?;
     write_env_file(app, &env, &new_text)?;
     let folder = if tool == "github" { "gh" } else { tool };
     let state = app.paths.state_dir(&env).join(folder);
-    println!(
-        "removed {tool} from {env}; saved logins stay in {}",
-        state.display()
+    anstream::println!(
+        "{}",
+        style::ok(format!(
+            "removed {tool} from {env}; saved logins stay in {}",
+            state.display()
+        ))
     );
     note_if_running(app, &env)?;
     Ok(0)

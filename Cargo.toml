@@ -11,6 +11,8 @@ rust-version = "1.89"
 hydra-core = { path = "crates/hydra-core" }
 hydra-platform = { path = "crates/hydra-platform" }
 hydra-providers = { path = "crates/hydra-providers" }
+anstream = "1"
+anstyle = "1"
 anyhow = "1"
 assert_cmd = "2"
 clap = { version = "4", features = ["derive"] }

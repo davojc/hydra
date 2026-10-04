@@ -100,12 +100,60 @@ fn read_hydra_file(dir: &Path) -> Option<String> {
     toml::from_str::<HydraFile>(&text).ok().map(|f| f.env)
 }
 
+/// Expand Windows 8.3 short names (`RUNNER~1`) to long ones, so a folder
+/// matches however it was spelled. Paths that don't exist come back unchanged.
+pub fn long_path(p: &Path) -> PathBuf {
+    #[cfg(windows)]
+    if p.to_string_lossy().contains('~') {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetLongPathNameW(short: *const u16, long: *mut u16, len: u32) -> u32;
+        }
+        let wide: Vec<u16> = p.as_os_str().encode_wide().chain([0]).collect();
+        let mut buf = vec![0u16; 512];
+        loop {
+            // SAFETY: `wide` is NUL-terminated and `buf` holds `buf.len()` u16s.
+            let n = unsafe { GetLongPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) }
+                as usize;
+            if n == 0 {
+                break;
+            }
+            if n < buf.len() {
+                return std::ffi::OsString::from_wide(&buf[..n]).into();
+            }
+            buf.resize(n, 0);
+        }
+    }
+    p.to_path_buf()
+}
+
+/// `pattern` with its literal leading folders expanded by [`long_path`].
+fn long_pattern(pattern: &str) -> String {
+    if !pattern.contains('~') {
+        return pattern.to_string();
+    }
+    let segs: Vec<&str> = pattern.split(['/', '\\']).collect();
+    let n = segs
+        .iter()
+        .take_while(|s| !s.contains('*') && !s.contains('?'))
+        .count();
+    let prefix = segs[..n].join("/");
+    let mut out = long_path(Path::new(&prefix)).to_string_lossy().into_owned();
+    for s in &segs[n..] {
+        out.push('/');
+        out.push_str(s);
+    }
+    out
+}
+
 /// Resolve a folder to its environment from config rules and `.hydra` files.
 pub fn resolve(dir: &Path, rules: &BTreeMap<String, String>) -> Option<Binding> {
+    let dir = &long_path(dir);
     let dir_str = normalize(&dir.to_string_lossy());
     let rule = rules
         .iter()
-        .filter(|(pattern, _)| glob_path(pattern, &dir_str))
+        .filter(|(pattern, _)| glob_path(&long_pattern(pattern), &dir_str))
         .max_by_key(|(pattern, _)| (literal_depth(pattern), pattern.len()));
     // An unreadable or invalid .hydra file is ignored and the walk continues upward.
     let file = dir
@@ -140,6 +188,43 @@ mod tests {
             .iter()
             .map(|(p, e)| (p.to_string(), e.to_string()))
             .collect()
+    }
+
+    /// The 8.3 short form of `p`, from cmd's `%~sI`; None when the volume has
+    /// short names turned off.
+    #[cfg(windows)]
+    fn short_form(p: &Path) -> Option<std::path::PathBuf> {
+        use std::os::windows::process::CommandExt;
+        let out = std::process::Command::new("cmd")
+            .raw_arg(format!(
+                "/d /c for %I in (\"{}\") do @echo %~sI",
+                p.display()
+            ))
+            .output()
+            .ok()?;
+        let short = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        short.contains('~').then(|| short.into())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn short_and_long_spellings_match_each_other() {
+        let tmp = tempfile::tempdir().unwrap();
+        let long = tmp.path().join("a rather long folder name");
+        std::fs::create_dir_all(&long).unwrap();
+        let Some(short) = short_form(&long) else {
+            return;
+        };
+        let long_rule = format!("{}/**", long.display());
+        let short_rule = format!("{}/**", short.display());
+        assert_eq!(
+            resolve(&short, &rules(&[(&long_rule, "work")])).map(|b| b.env),
+            Some("work".into())
+        );
+        assert_eq!(
+            resolve(&long, &rules(&[(&short_rule, "work")])).map(|b| b.env),
+            Some("work".into())
+        );
     }
 
     #[test]

@@ -4,12 +4,17 @@ mod init;
 pub mod launch;
 mod secret;
 mod tools;
+pub mod update;
 mod whoami;
 
 use crate::app::App;
 use crate::cli::Cmd;
 
 pub fn run(cmd: Cmd) -> anyhow::Result<i32> {
+    // Updating needs no hydra home, so it works even when ~/.hydra is missing or broken.
+    if let Cmd::Update { check, force } = cmd {
+        return update::run(check, force);
+    }
     let app = App::from_env()?;
     match cmd {
         Cmd::Init => init::run(&app),
@@ -54,5 +59,6 @@ pub fn run(cmd: Cmd) -> anyhow::Result<i32> {
         ),
         Cmd::Remove { tool, env } => tools::remove(&app, tool, env),
         Cmd::Whoami { env } => whoami::run(&app, env),
+        Cmd::Update { .. } => unreachable!("handled above"),
     }
 }

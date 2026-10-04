@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "hydra", version, about = "Terminals with their own identities")]
+#[command(name = "hydra", version = crate::VERSION, about = "Terminals with their own identities")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Cmd,
@@ -81,6 +81,15 @@ pub enum Cmd {
         /// Environment to check (default: the current hydra terminal's)
         #[arg(long)]
         env: Option<String>,
+    },
+    /// Install the latest hydra release from GitHub
+    Update {
+        /// Only say whether a newer release exists
+        #[arg(long)]
+        check: bool,
+        /// Install the latest release even if it isn't newer
+        #[arg(long)]
+        force: bool,
     },
 }
 

@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.89"
 
@@ -26,3 +26,6 @@ toml = "0.8"
 toml_edit = "0.22"
 junction = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
+semver = "1"
+sha2 = "0.10"
+ureq = "2"

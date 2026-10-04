@@ -1,6 +1,7 @@
 //! Platform-neutral core of hydra: environments, config, secrets and launch resolution.
 pub mod config;
 pub mod contribution;
+pub mod envedit;
 pub mod envs;
 pub mod lock;
 pub mod name;

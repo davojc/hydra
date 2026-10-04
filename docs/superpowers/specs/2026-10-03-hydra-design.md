@@ -252,6 +252,8 @@ Guard latency budget: < 15 ms added per invocation on a warm cache.
 hydra init                             # creates ~/.hydra, then runs `hydra install`
 hydra env new|list|edit|rm <name>
 hydra env rename <old> <new>
+hydra add [<tool>] [<env>] [--flags]       # turn a tool on: writes env.toml only, never signs in
+hydra remove <tool> [<env>]                 # turn a tool off; saved logins are kept
 hydra shell [<env>] [--shell pwsh|bash] [--cwd DIR]   # env from folder binding if omitted
 hydra run <env> -- <cmd...>
 hydra auth <provider> <env>

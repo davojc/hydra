@@ -73,6 +73,9 @@ label = "{name}"
 color = "{color}"
 # home = "E:/projects"              # where new terminals for this environment open
 
+[claude]                            # own Claude sign-in; shares your ~/.claude setup
+# mcp.exclude = ["work-only-*"]     # MCP servers to hide in this environment
+
 # [git]
 # name    = "Your Name"
 # email   = "you@example.com"

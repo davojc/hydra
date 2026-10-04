@@ -15,7 +15,10 @@ pub struct App {
 impl App {
     pub fn from_env() -> anyhow::Result<Self> {
         let paths = HydraPaths::discover()?;
-        let user_home = dirs::home_dir().context("can't find your home folder")?;
+        let user_home = match std::env::var_os("HYDRA_USER_HOME") {
+            Some(h) => PathBuf::from(h),
+            None => dirs::home_dir().context("can't find your home folder")?,
+        };
         let store = Box::new(KeyringStore::from_env(&paths));
         Ok(Self {
             paths,

@@ -11,7 +11,18 @@ use crate::style;
 
 pub fn run(app: &App, env: Option<String>) -> anyhow::Result<i32> {
     let cwd = std::env::current_dir().context("can't find the current folder")?;
-    let rules = load_global(&app.paths)?.bindings;
+    let rules = match load_global(&app.paths) {
+        Ok(g) => g.bindings,
+        Err(e) => {
+            anstream::eprintln!(
+                "{}",
+                style::warn(format!(
+                    "hydra: warning: couldn't read config.toml ({e}) - folder bindings ignored"
+                ))
+            );
+            Default::default()
+        }
+    };
     let binding = bindings::resolve(&cwd, &rules);
     let env = env
         .or_else(|| std::env::var("HYDRA_ENV").ok())

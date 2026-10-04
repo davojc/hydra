@@ -310,3 +310,15 @@ fn whoami_uses_the_folders_binding_and_says_when_unbound() {
         .success()
         .stdout(predicate::str::contains("isn't bound"));
 }
+
+#[test]
+fn whoami_with_an_explicit_env_survives_a_broken_config() {
+    let h = home();
+    std::fs::write(h.root().join("config.toml"), "this is = = not toml\n").unwrap();
+    h.hydra()
+        .args(["whoami", "--env", "work"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("couldn't read config.toml"))
+        .stderr(predicate::str::contains("folder bindings ignored"));
+}

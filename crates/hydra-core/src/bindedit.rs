@@ -44,6 +44,13 @@ pub fn rule_for_dir(dir: &Path) -> String {
     format!("{}/**", s.trim_end_matches('/'))
 }
 
+/// True when the line assigns exactly this key (not a longer key such as `home_dir`).
+fn is_key(trimmed: &str, key: &str) -> bool {
+    trimmed
+        .strip_prefix(key)
+        .is_some_and(|r| r.trim_start().starts_with('='))
+}
+
 /// Adds `home = "<dir>"` (forward slashes) to an env.toml, right after its `color` line when it
 /// has one. An existing active `home` is replaced.
 pub fn set_home(env_text: &str, dir: &Path) -> Result<String, String> {
@@ -51,9 +58,13 @@ pub fn set_home(env_text: &str, dir: &Path) -> Result<String, String> {
     let line = format!("home = {}", value(dir.as_str()));
     let mut out = Vec::new();
     let mut placed = false;
+    let mut in_table = false;
     for l in env_text.lines() {
-        if l.trim_start().starts_with("home") && l.contains('=') && !l.trim_start().starts_with('#')
-        {
+        let t = l.trim_start();
+        if t.starts_with('[') {
+            in_table = true;
+        }
+        if !in_table && is_key(t, "home") {
             if !placed {
                 out.push(line.clone());
                 placed = true;
@@ -61,7 +72,7 @@ pub fn set_home(env_text: &str, dir: &Path) -> Result<String, String> {
             continue;
         }
         out.push(l.to_string());
-        if !placed && l.trim_start().starts_with("color") && l.contains('=') {
+        if !placed && !in_table && is_key(t, "color") {
             out.push(line.clone());
             placed = true;
         }
@@ -128,6 +139,55 @@ fn exclude_in_git_below(dir: &Path, ceilings: &[PathBuf]) -> std::io::Result<boo
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn set_home_only_touches_the_top_level_home_key() {
+        let d = Path::new("E:/n");
+        let out = set_home(
+            "color = \"#111111\"
+home_dir = \"x\"
+",
+            d,
+        )
+        .unwrap();
+        assert!(out.contains("home_dir = \"x\"") && out.contains("home = \"E:/n\""));
+        let out = set_home(
+            "color = \"#111111\"
+[env]
+home = \"y\"
+",
+            d,
+        )
+        .unwrap();
+        assert!(
+            out.contains(
+                "[env]
+home = \"y\""
+            ),
+            "{out}"
+        );
+        assert!(
+            out.starts_with(
+                "color = \"#111111\"
+home = \"E:/n\"
+"
+            ),
+            "{out}"
+        );
+        let out = set_home(
+            "home = \"old\"
+color = \"#111111\"
+",
+            d,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "home = \"E:/n\"
+color = \"#111111\"
+"
+        );
+    }
+
     #[test]
     fn set_home_goes_after_color() {
         let t = "label = \"w\"\ncolor = \"#111111\"\n# home = \"E:/x\"\n[env]\n";

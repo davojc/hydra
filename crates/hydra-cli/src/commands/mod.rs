@@ -1,4 +1,5 @@
 mod auth;
+mod bind;
 mod env;
 mod init;
 pub mod launch;
@@ -59,6 +60,8 @@ pub fn run(cmd: Cmd) -> anyhow::Result<i32> {
         ),
         Cmd::Remove { tool, env } => tools::remove(&app, tool, env),
         Cmd::Whoami { env } => whoami::run(&app, env),
+        Cmd::Bind { args, file, list } => bind::bind(&app, args, file, list),
+        Cmd::Unbind { path } => bind::unbind(&app, path),
         Cmd::Update { .. } => unreachable!("handled above"),
     }
 }

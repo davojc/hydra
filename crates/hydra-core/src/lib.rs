@@ -1,4 +1,5 @@
 //! Platform-neutral core of hydra: environments, config, secrets and launch resolution.
+pub mod bindedit;
 pub mod bindings;
 pub mod config;
 pub mod contribution;

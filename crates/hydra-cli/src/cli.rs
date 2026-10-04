@@ -82,6 +82,19 @@ pub enum Cmd {
         #[arg(long)]
         env: Option<String>,
     },
+    /// Map folders to environments: hydra bind [<path>] <env>, or with no arguments show the current folder's
+    Bind {
+        /// [<path>] <env>
+        args: Vec<String>,
+        /// Write a .hydra file in the folder instead of a rule in config.toml
+        #[arg(long)]
+        file: bool,
+        /// List every rule in config.toml
+        #[arg(long)]
+        list: bool,
+    },
+    /// Remove the binding of a folder (its rule and/or its .hydra file)
+    Unbind { path: Option<String> },
     /// Install the latest hydra release from GitHub
     Update {
         /// Only say whether a newer release exists

@@ -24,3 +24,5 @@ tempfile = "3"
 thiserror = "2"
 toml = "0.8"
 toml_edit = "0.22"
+junction = "1"
+serde_json = { version = "1", features = ["preserve_order"] }

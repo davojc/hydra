@@ -12,3 +12,6 @@ toml.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+junction.workspace = true

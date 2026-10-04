@@ -104,6 +104,22 @@ pub enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Guard decisions for hydra's hooks (run by the hooks, not by hand)
+    #[command(hide = true)]
+    Guard {
+        #[command(subcommand)]
+        command: GuardCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GuardCmd {
+    /// Run by hydra's git hook wrappers: hydra guard git <hook> [args...]
+    Git {
+        hook: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]

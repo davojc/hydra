@@ -113,8 +113,24 @@ fn flag_value(args: &[String], names: &[&str]) -> Option<String> {
     None
 }
 
+/// gh api flags whose value is the next argument (so it isn't the endpoint).
+const GH_API_VALUE_FLAGS: &[&str] = &[
+    "--jq",
+    "-q",
+    "-H",
+    "--header",
+    "-p",
+    "--preview",
+    "-t",
+    "--template",
+    "--cache",
+    "--hostname",
+];
+
 /// Whether a gh api call writes. Handles `-X M`, `-XM`, `--method=M`, and field flags in
-/// separate, attached (`-ftitle=x`) and `=` forms. `graphql` is a read unless a field has a mutation.
+/// separate, attached (`-ftitle=x`) and `=` forms. An explicit method decides on its own (so
+/// `-X GET -f q=x` is a read); otherwise fields mean a write, except for `graphql`, which is a
+/// read unless a field has a mutation.
 fn gh_api_writes(args: &[String]) -> bool {
     let mut method: Option<String> = None;
     let mut fields: Vec<String> = Vec::new();
@@ -135,6 +151,7 @@ fn gh_api_writes(args: &[String]) -> bool {
                 i += 1;
             }
             "--input" => input = true,
+            _ if GH_API_VALUE_FLAGS.contains(&a) => i += 1,
             _ if a.starts_with("--method=") => method = Some(a["--method=".len()..].into()),
             _ if a.starts_with("--field=") => fields.push(a["--field=".len()..].into()),
             _ if a.starts_with("--raw-field=") => fields.push(a["--raw-field=".len()..].into()),
@@ -151,8 +168,11 @@ fn gh_api_writes(args: &[String]) -> bool {
         }
         i += 1;
     }
-    if input || method.is_some_and(|m| !m.eq_ignore_ascii_case("GET")) {
+    if input {
         return true;
+    }
+    if let Some(m) = method {
+        return !m.eq_ignore_ascii_case("GET");
     }
     if graphql {
         return fields.iter().any(|f| f.to_lowercase().contains("mutation"));
@@ -740,6 +760,43 @@ mod tests {
             classify_gh(&q("Mutation { addStar }")).unwrap().label(),
             "gh api"
         );
+    }
+
+    #[test]
+    fn gh_api_explicit_get_and_value_flags() {
+        assert_eq!(classify_gh(&v("api -X GET search/issues -f q=x")), None);
+        assert_eq!(
+            classify_gh(&v("api --method GET search/issues -F per_page=5")),
+            None
+        );
+        assert_eq!(classify_gh(&v("api -XGET search/issues -fq=x")), None);
+        assert!(classify_gh(&v("api -X POST repos/a/b/issues -f title=x")).is_some());
+        // The value of --jq / -H / ... is not the endpoint: `graphql` is still seen.
+        let gql = |flags: &[&str]| {
+            let mut a: Vec<String> = flags.iter().map(|s| s.to_string()).collect();
+            a.extend([
+                "graphql".into(),
+                "-f".into(),
+                "query={ viewer { login } }".into(),
+            ]);
+            let mut args = vec!["api".to_string()];
+            args.append(&mut a);
+            classify_gh(&args)
+        };
+        for flags in [
+            &["--jq", ".data"][..],
+            &["-q", ".data"],
+            &["-H", "Accept: x"],
+            &["--header", "Accept: x"],
+            &["-p", "corsair"],
+            &["--preview", "corsair"],
+            &["-t", "{{.}}"],
+            &["--template", "{{.}}"],
+            &["--cache", "1h"],
+        ] {
+            assert_eq!(gql(flags), None, "{flags:?}");
+        }
+        assert_eq!(classify_gh(&v("api --jq .x user")), None);
     }
 
     #[test]

@@ -912,7 +912,7 @@ fn new_environments_use_claude_by_default() {
 - [ ] **Step 3: Run to verify they fail**
 
 Run: `cargo test -p hydra-cli --test claude_cli`
-Expected: failures. `new_environments_use_claude_by_default` fails until the template changes. The others fail or touch the wrong folder until `HYDRA_USER_HOME` exists. **Before running, temporarily rename nothing and check nothing in the real `~/.claude`; the tests must only ever see the fake user folder.**
+Expected: `new_environments_use_claude_by_default` fails until the template changes. **Do the `HYDRA_USER_HOME` part of Step 4 before this first run**, so the other tests never resolve to the real `~/.claude`. Hydra only reads the base, but nothing should be left to chance.
 
 - [ ] **Step 4: Implement**
 

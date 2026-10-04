@@ -1,3 +1,5 @@
+<img src="assets/hydra.png" alt="" width="96" align="right">
+
 # hydra
 
 **Terminals with their own identities.** hydra opens PowerShell or Git Bash terminals inside named *environments*. Each environment has its own sign-ins and identity for the tools you use, including Claude Code, the GitHub CLI, git, AWS, Azure, Google Cloud and more. A `work` terminal and a `personal` terminal can then sit side by side, each signed in to a different account, and neither can quietly use the other's.

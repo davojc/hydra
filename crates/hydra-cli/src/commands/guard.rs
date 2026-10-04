@@ -29,8 +29,18 @@ fn load(current: &str, folder: &Path) -> anyhow::Result<Loaded> {
     let rules = load_global(&paths)?.bindings;
     let name = EnvName::parse(current)?;
     let github = load_env(&paths, &name)?.github;
+    let binding = bindings::resolve(folder, &rules);
+    // A binding to an environment that doesn't exist (a typo, a deleted env, `env = ""`) is
+    // malformed: skip the guard rather than block everything in the folder.
+    if let Some(b) = &binding
+        && b.env != current
+        && !EnvName::parse(&b.env).is_ok_and(|n| paths.env_file(&n).is_file())
+    {
+        let env = if b.env.is_empty() { "\"\"" } else { &b.env };
+        anyhow::bail!("{} names unknown environment {env}", b.describe());
+    }
     Ok(Loaded {
-        binding: bindings::resolve(folder, &rules),
+        binding,
         owners: github
             .as_ref()
             .map(|g| g.owners.clone())

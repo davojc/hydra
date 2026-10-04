@@ -400,6 +400,38 @@ fn broken_config_allows_with_warning() {
     assert_eq!(s.commit_count(), "1");
 }
 
+#[test]
+fn a_binding_to_an_unknown_environment_allows_with_warning() {
+    for (env, shown) in [("ghost", "ghost"), ("", "\"\"")] {
+        let s = Setup::new();
+        // At the repo root: git runs hooks there, and the file beats the `work` rule.
+        let dir = s.repo.clone();
+        std::fs::write(dir.join(".hydra"), format!("env = \"{env}\"\n")).unwrap();
+        let skipped = "hydra: warning: guard skipped (.hydra in ";
+        let warning = format!(" names unknown environment {shown})");
+        // The git hook.
+        s.h.hydra()
+            .args(["run", "personal", "--", "git", "-C"])
+            .arg(&dir)
+            .args(["commit", "--allow-empty", "-m", "x"])
+            .assert()
+            .success()
+            .stderr(predicate::str::contains(skipped))
+            .stderr(predicate::str::contains(&warning));
+        assert_eq!(s.commit_count(), "1");
+        // The gh shim.
+        run_shim(&s, "gh.exe", "personal", &["pr", "create", "--fill"])
+            .code(7)
+            .stderr(predicate::str::contains(skipped))
+            .stderr(predicate::str::contains(&warning));
+        // Claude's hook.
+        claude_hook(&s, "personal", &bash_input("git commit -m x", &dir))
+            .success()
+            .stderr(predicate::str::contains(skipped))
+            .stderr(predicate::str::contains(&warning));
+    }
+}
+
 /// PATH without any folder holding a hydra executable.
 fn path_without_hydra() -> std::ffi::OsString {
     let path = std::env::var_os("PATH").unwrap_or_default();

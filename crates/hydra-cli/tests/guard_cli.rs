@@ -108,13 +108,128 @@ fn commit_from_wrong_environment_is_blocked() {
 }
 
 #[test]
-fn allow_overrides_once() {
+fn allow_runs_once_with_override() {
     let s = Setup::new();
-    s.run_git("personal", &["commit", "--allow-empty", "-m", "x"])
-        .env("HYDRA_ALLOW", "1")
+    s.h.hydra()
+        .args(["run", "personal", "--", env!("CARGO_BIN_EXE_hydra")])
+        .args(["allow", "--", "git", "-C"])
+        .arg(&s.repo)
+        .args(["commit", "--allow-empty", "-m", "x"])
         .assert()
         .success();
     assert_eq!(s.commit_count(), "1");
+    // Only that one command: the next one is guarded again.
+    s.run_git("personal", &["commit", "--allow-empty", "-m", "y"])
+        .assert()
+        .failure();
+    assert_eq!(s.commit_count(), "1");
+}
+
+/// `<tmp>/shims/{gh,ssh}.exe` (copies of hydra) and `<tmp>/bin` with fake gh.cmd and ssh.cmd.
+fn shims(s: &Setup) -> PathBuf {
+    let shims = s.tmp().join("shims");
+    std::fs::create_dir_all(&shims).unwrap();
+    for name in ["gh.exe", "ssh.exe"] {
+        std::fs::copy(env!("CARGO_BIN_EXE_hydra"), shims.join(name)).unwrap();
+    }
+    let bin = s.tmp().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("gh.cmd"), "@echo REAL GH %*\r\n@exit /b 7\r\n").unwrap();
+    std::fs::write(bin.join("ssh.cmd"), "@echo %*\r\n").unwrap();
+    shims
+}
+
+/// A shim run from the repo bound to `work`, with PATH = shims;bin;<system PATH>.
+fn run_shim(s: &Setup, exe: &str, env: &str, args: &[&str]) -> assert_cmd::assert::Assert {
+    let shims = shims(s);
+    let mut path = vec![shims.clone(), s.tmp().join("bin")];
+    path.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    s.h.command(shims.join(exe))
+        .args(args)
+        .current_dir(&s.repo)
+        .env("HYDRA_ENV", env)
+        .env("PATH", std::env::join_paths(path).unwrap())
+        .assert()
+}
+
+#[test]
+fn gh_shim_blocks_wrong_environment() {
+    let s = Setup::new();
+    run_shim(&s, "gh.exe", "personal", &["pr", "create", "--fill"])
+        .code(1)
+        .stderr(predicate::str::contains("blocked gh pr create"))
+        .stdout(predicate::str::contains("REAL GH").not());
+}
+
+#[test]
+fn gh_shim_passes_reads_and_right_env() {
+    let s = Setup::new();
+    run_shim(&s, "gh.exe", "personal", &["pr", "list"])
+        .code(7)
+        .stdout(predicate::str::contains("REAL GH pr list"));
+    run_shim(&s, "gh.exe", "work", &["pr", "create", "--fill"])
+        .code(7)
+        .stdout(predicate::str::contains("REAL GH pr create --fill"));
+}
+
+#[test]
+fn ssh_shim_adds_the_key() {
+    let s = Setup::new();
+    let key = s.tmp().join("id_work");
+    std::fs::write(&key, "key").unwrap();
+    s.h.write_env(
+        "work",
+        &format!(
+            "[git]\nname = \"Work\"\nemail = \"work@example.com\"\nssh_key = '{}'\n",
+            key.display()
+        ),
+    );
+    let out = run_shim(&s, "ssh.exe", "work", &["-T", "git@github.com"]).success();
+    // Rust quotes `IdentitiesOnly=yes` for the batch-file stand-in; a real ssh.exe gets the
+    // same argv either way.
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).replace('"', "");
+    assert!(
+        stdout.contains(&format!(
+            "-i {} -o IdentitiesOnly=yes -T git@github.com",
+            key.display()
+        )),
+        "{stdout:?}"
+    );
+}
+
+#[test]
+fn launch_installs_shims() {
+    let s = Setup::new();
+    s.h.hydra()
+        .args(["run", "work", "--", "cmd", "/c", "exit 0"])
+        .assert()
+        .success();
+    let shims = s.h.root().join("shims");
+    assert!(shims.join("gh.exe").is_file());
+    assert!(shims.join("ssh.exe").is_file());
+    if gh_installed() {
+        let out =
+            s.h.hydra()
+                .args(["run", "work", "--", "pwsh", "-NoProfile", "-Command"])
+                .arg("(Get-Command gh -ErrorAction SilentlyContinue).Source")
+                .output()
+                .unwrap();
+        let source = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let parent = PathBuf::from(&source).parent().map(|p| p.to_path_buf());
+        assert_eq!(
+            parent.map(|p| p.to_string_lossy().to_lowercase()),
+            Some(shims.to_string_lossy().to_lowercase()),
+            "{source:?}"
+        );
+    }
+}
+
+/// Whether a real gh is on the machine's PATH.
+fn gh_installed() -> bool {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&path).any(|d| d.join("gh.exe").is_file())
 }
 
 #[test]

@@ -104,6 +104,11 @@ pub enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Run one command past the folder guard: hydra allow -- <command...>
+    Allow {
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
     /// Guard decisions for hydra's hooks (run by the hooks, not by hand)
     #[command(hide = true)]
     Guard {

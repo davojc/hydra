@@ -12,13 +12,18 @@ pub struct App {
     pub store: Box<dyn SecretStore>,
 }
 
+/// `HYDRA_USER_HOME`, else the user's home folder.
+pub fn user_home() -> anyhow::Result<PathBuf> {
+    match std::env::var_os("HYDRA_USER_HOME") {
+        Some(h) => Ok(PathBuf::from(h)),
+        None => dirs::home_dir().context("can't find your home folder"),
+    }
+}
+
 impl App {
     pub fn from_env() -> anyhow::Result<Self> {
         let paths = HydraPaths::discover()?;
-        let user_home = match std::env::var_os("HYDRA_USER_HOME") {
-            Some(h) => PathBuf::from(h),
-            None => dirs::home_dir().context("can't find your home folder")?,
-        };
+        let user_home = user_home()?;
         let store = Box::new(KeyringStore::from_env(&paths));
         Ok(Self {
             paths,

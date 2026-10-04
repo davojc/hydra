@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
 use anyhow::Context;
@@ -26,14 +26,49 @@ pub fn prepare_launch(
         inherited_env_vars: std::env::var(ENV_VARS_MARKER).ok(),
         ..opts.clone()
     };
-    Ok(prepare(
+    let mut launch = prepare(
         &app.paths,
         name,
         &app.user_home,
         &providers,
         app.store.as_ref(),
         &opts,
-    )?)
+    )?;
+    // First on PATH, so gh and ssh in the terminal go through hydra's guard.
+    launch
+        .path_prepend
+        .insert(0, refresh_shims(&app.paths.shims_dir()));
+    Ok(launch)
+}
+
+/// Makes `<dir>/gh.exe` and `ssh.exe` copies of the running hydra. A copy that can't be
+/// replaced (e.g. a shim that is running) is noted and left as it is.
+fn refresh_shims(dir: &Path) -> PathBuf {
+    if let Err(e) = install_shims(dir) {
+        anstream::eprintln!(
+            "{}",
+            style::dim(format!("hydra: note: gh/ssh shims not refreshed ({e:#})"))
+        );
+    }
+    dir.to_path_buf()
+}
+
+fn install_shims(dir: &Path) -> anyhow::Result<()> {
+    let exe = std::env::current_exe().context("can't find the hydra exe")?;
+    let len = std::fs::metadata(&exe)?.len();
+    std::fs::create_dir_all(dir).with_context(|| format!("can't create {}", dir.display()))?;
+    let mut failed = Vec::new();
+    for name in ["gh.exe", "ssh.exe"] {
+        let shim = dir.join(name);
+        if std::fs::metadata(&shim).is_ok_and(|m| m.len() == len) {
+            continue;
+        }
+        if let Err(e) = std::fs::copy(&exe, &shim) {
+            failed.push(format!("{}: {e}", shim.display()));
+        }
+    }
+    anyhow::ensure!(failed.is_empty(), "{}", failed.join("; "));
+    Ok(())
 }
 
 /// Ctrl-C belongs to the child; hydra stays alive to return its exit code.

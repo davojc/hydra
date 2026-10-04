@@ -175,8 +175,8 @@ fn origin_owner(cwd: &Path) -> Option<String> {
 }
 
 /// `hydra guard claude`: Claude Code's PreToolUse hook. Reads the hook JSON from stdin and
-/// exits 2 (reason on stderr, which Claude shows the model) when a Bash command would
-/// commit, push or write to GitHub from the wrong environment. Fails open.
+/// exits 2 (reason on stderr, which Claude shows the model) when a Bash or PowerShell command
+/// would commit, push or write to GitHub from the wrong environment. Fails open.
 pub fn claude() -> anyhow::Result<i32> {
     let mut input = String::new();
     if let Err(e) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input) {
@@ -195,7 +195,9 @@ pub fn claude() -> anyhow::Result<i32> {
         );
         return Ok(0);
     };
-    if hook["tool_name"].as_str() != Some("Bash") {
+    // PowerShell lines go through the same (shell-style) scanner: imperfect, but the common
+    // `cd x; git push` and `git -C x commit` forms read the same.
+    if !matches!(hook["tool_name"].as_str(), Some("Bash" | "PowerShell")) {
         return Ok(0);
     }
     let Some(command) = hook["tool_input"]["command"].as_str() else {

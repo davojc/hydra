@@ -736,3 +736,17 @@ fn allow_reaches_only_its_own_command() {
         .success()
         .stdout(predicate::str::contains("[%HYDRA_ALLOW%]"));
 }
+
+#[test]
+fn claude_hook_checks_powershell_commands_too() {
+    let s = Setup::new();
+    let input = |command: &str| {
+        serde_json::json!({"tool_name": "PowerShell", "tool_input": {"command": command}, "cwd": s.tmp()})
+            .to_string()
+    };
+    let repo = s.repo.to_string_lossy();
+    claude_hook(&s, "personal", &input(&format!("cd '{repo}'; git push")))
+        .code(2)
+        .stderr(predicate::str::contains("blocked git push"));
+    claude_hook(&s, "personal", &input("Get-ChildItem")).success();
+}

@@ -120,7 +120,10 @@ pub fn merge_settings(
     Ok(MergedSettings { text, dropped })
 }
 
-/// Appends a PreToolUse hook on the Bash tool running `command` to the settings JSON
+/// The tools whose commands the guard hook checks.
+pub const GUARD_MATCHER: &str = "Bash|PowerShell";
+
+/// Appends a PreToolUse hook on the Bash and PowerShell tools running `command` to the settings JSON
 /// (creating hooks/PreToolUse as needed, keeping every existing hook). Idempotent:
 /// an existing entry whose command contains " guard claude" is replaced, not duplicated.
 pub fn add_guard_hook(settings_json: &str, command: &str) -> Result<String, String> {
@@ -149,7 +152,7 @@ pub fn add_guard_hook(settings_json: &str, command: &str) -> Result<String, Stri
     };
     pre.retain(|e| !ours(e));
     pre.push(serde_json::json!({
-        "matcher": "Bash",
+        "matcher": GUARD_MATCHER,
         "hooks": [{"type": "command", "command": command}],
     }));
     let mut text = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
@@ -223,8 +226,18 @@ mod tests {
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(
             v["hooks"]["PreToolUse"],
-            json!([{"matcher": "Bash", "hooks": [{"type": "command", "command": "\"C:/h/hydra.exe\" guard claude"}]}])
+            json!([{"matcher": "Bash|PowerShell", "hooks": [{"type": "command", "command": "\"C:/h/hydra.exe\" guard claude"}]}])
         );
+    }
+
+    #[test]
+    fn guard_hook_from_an_older_hydra_is_replaced() {
+        let before = r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"\"C:/h/hydra.exe\" guard claude"}]}]}}"#;
+        let out = add_guard_hook(before, "\"C:/h/hydra.exe\" guard claude").unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let pre = v["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 1);
+        assert_eq!(pre[0]["matcher"], "Bash|PowerShell");
     }
 
     #[test]

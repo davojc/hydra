@@ -322,3 +322,29 @@ fn whoami_with_an_explicit_env_survives_a_broken_config() {
         .stderr(predicate::str::contains("couldn't read config.toml"))
         .stderr(predicate::str::contains("folder bindings ignored"));
 }
+
+#[test]
+fn binding_a_missing_folder_warns_and_still_writes_the_rule() {
+    let h = home();
+    let missing = h.dir.path().join("not-yet");
+    h.hydra()
+        .arg("bind")
+        .arg(&missing)
+        .arg("work")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(format!(
+            "hydra: warning: {} doesn't exist; binding it anyway",
+            missing.display()
+        )))
+        .stdout(predicate::str::contains("bound"));
+    assert!(config(&h).contains("not-yet/**"), "{}", config(&h));
+    // An existing folder: no warning.
+    h.hydra()
+        .arg("bind")
+        .arg(h.dir.path())
+        .arg("personal")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("doesn't exist").not());
+}

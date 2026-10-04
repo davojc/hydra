@@ -49,6 +49,16 @@ pub fn bind(app: &App, args: Vec<String>, file: bool, list: bool) -> anyhow::Res
     };
     let env = app.env_name(env)?;
     let env = env.as_str();
+    // Likely a typo, but binding a folder before it is created is legitimate.
+    if !path.exists() {
+        anstream::eprintln!(
+            "{}",
+            style::warn(format!(
+                "hydra: warning: {} doesn't exist; binding it anyway",
+                path.display()
+            ))
+        );
+    }
     let rules = config::load_global(&app.paths)?.bindings;
     if let Some(existing) = bindings::resolve(&path, &rules)
         && existing.env != env

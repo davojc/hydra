@@ -17,25 +17,25 @@ Typical uses:
 - **Stop identity mix-ups.** Commits and pushes always use the environment's author, SSH key and GitHub login.
 - **Run Claude Code on several accounts at once.** Each environment has its own Claude sign-in, usage limits and history, and all of them share your skills, plugins, settings and MCP servers.
 
-> **Status:** early (0.3). Windows 11 with PowerShell 7 and Git for Windows. See [What's not built yet](#whats-not-built-yet).
+> **Status:** early (0.4). Windows 11 with PowerShell 7 and Git for Windows. See [What's not built yet](#whats-not-built-yet).
 
 ---
 
 ## Install
 
-hydra is a Rust program. Install Rust from <https://rustup.rs>, then:
-
-```powershell
-git clone https://github.com/davojc/hydra.git
-cd hydra
-cargo build --release
-```
-
-Copy `target\release\hydra.exe` to a folder on your `PATH`. Alternatively, run `scripts\deploy.ps1`, which builds and installs to `E:\Tools` (pass `-Target <folder>` for another folder) and refuses to install while a hydra terminal is running.
+Download `hydra-x86_64-pc-windows-msvc.exe` from the [latest release](https://github.com/davojc/hydra/releases/latest). Rename it to `hydra.exe` and put it in a folder on your `PATH`. Then:
 
 ```powershell
 hydra init        # creates ~/.hydra
 ```
+
+**Updating:** `hydra update` installs the latest release after checking its SHA-256 checksum. `hydra update --check` only reports. It won't update while another hydra terminal is open.
+
+**From source:** install Rust from <https://rustup.rs>, then `git clone https://github.com/davojc/hydra.git` and `cargo build --release`. Local builds report a `-dev` version (e.g. `0.4.0-dev`), so `hydra update` replaces them with the real release. `scripts\deploy.ps1` builds and installs to `E:\Tools`, or another folder with `-Target`.
+
+**Releases:** every merge to `main` that changes more than docs publishes a release. Patch versions are bumped automatically. Minor and major versions come from `Cargo.toml`.
+
+**Guide:** <https://davojc.github.io/hydra/>
 
 ## Quick start: two GitHub and Claude accounts
 
@@ -148,6 +148,7 @@ Each environment's Claude folder (`~/.hydra/state/<env>/claude`) is rebuilt from
 | `hydra auth <tool> <env>` | Run a tool's sign-in inside an environment without opening a terminal |
 | `hydra secret set\|rm <env>/<key>` | Store or remove a secret (value read from a hidden prompt or piped stdin) |
 | `hydra whoami [--env <env>]` | Show which account each tool is actually using |
+| `hydra update [--check] [--force]` | Install the latest release from GitHub (checksum-verified) |
 
 ## Files
 

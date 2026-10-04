@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hydra: one terminal per identity</title>
+<meta name="description" content="hydra opens Windows terminals inside named environments, each with its own Claude Code, GitHub, git, cloud and AI CLI accounts.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@500;700;800&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: sticky contents rail on the left, one reading column; terminal transcripts and config as the hero material.
+   Environment colours (work teal, personal amber, client violet) recur as the page's only accents, the same way they tint tabs. */
+:root {
+  --bg: #f2f4f6;
+  --surface: #ffffff;
+  --fg: #17212b;
+  --muted: #56636f;
+  --line: #d9dee4;
+  --accent: #1f6f8b;
+  --term-bg: #18222c;
+  --term-fg: #dbe3ea;
+  --term-dim: #8796a4;
+  --env-work: #1f9a8a;
+  --env-personal: #c98a1e;
+  --env-client: #7a5cc4;
+  --bad: #c2413b;
+  --warn: #b7791f;
+  --ok: #2f8a4c;
+  --chip-fg: #ffffff;
+  --code-inline: #e6eaee;
+  --font-display: "Schibsted Grotesk", "Segoe UI", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #11181f; --surface: #18212a; --fg: #e3e9ee; --muted: #98a6b3; --line: #2a3540;
+    --accent: #6cc0dc; --term-bg: #0b1116; --term-fg: #d6dfe7; --term-dim: #7d8c99;
+    --env-work: #3cc2ae; --env-personal: #e7aa45; --env-client: #a48bec;
+    --bad: #ec6a62; --warn: #e2a64a; --ok: #5cc27c; --chip-fg: #0b1116; --code-inline: #24303b;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #11181f; --surface: #18212a; --fg: #e3e9ee; --muted: #98a6b3; --line: #2a3540;
+  --accent: #6cc0dc; --term-bg: #0b1116; --term-fg: #d6dfe7; --term-dim: #7d8c99;
+  --env-work: #3cc2ae; --env-personal: #e7aa45; --env-client: #a48bec;
+  --bad: #ec6a62; --warn: #e2a64a; --ok: #5cc27c; --chip-fg: #0b1116; --code-inline: #24303b;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 16px; line-height: 1.6; }
+.wrap { max-width: 1120px; margin: 0 auto; padding-inline: 20px; padding-block: 40px 80px; display: grid; grid-template-columns: 1fr; gap: 40px; }
+@media (min-width: 960px) { .wrap { grid-template-columns: 210px minmax(0, 1fr); gap: 56px; } }
+
+nav.toc { display: none; }
+@media (min-width: 960px) {
+  nav.toc { display: block; position: sticky; top: calc(env(safe-area-inset-top, 0px) + 24px); align-self: start; font-size: 14px; }
+}
+.toc .brand { font-family: var(--font-display); font-weight: 800; font-size: 20px; letter-spacing: -0.01em; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+.heads { display: inline-flex; gap: 3px; }
+.heads i { width: 8px; height: 8px; border-radius: 50%; display: block; }
+.heads i:nth-child(1) { background: var(--env-work); }
+.heads i:nth-child(2) { background: var(--env-personal); }
+.heads i:nth-child(3) { background: var(--env-client); }
+.toc ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.toc a { color: var(--muted); text-decoration: none; display: block; padding: 4px 10px; border-left: 2px solid var(--line); }
+.toc a:hover, .toc a:focus-visible { color: var(--fg); border-left-color: var(--accent); outline: none; }
+.toc .grp { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 18px 0 6px; }
+
+main { min-width: 0; }
+header.hero { display: grid; gap: 16px; margin-bottom: 40px; }
+.status { justify-self: start; font-size: 13px; font-weight: 500; color: var(--warn); border: 1px solid currentColor; border-radius: 999px; padding: 3px 12px; }
+h1 { font-family: var(--font-display); font-weight: 800; font-size: clamp(36px, 6vw, 56px); line-height: 1.02; letter-spacing: -0.025em; margin: 0; text-wrap: balance; }
+.lede { font-size: 19px; color: var(--muted); max-width: 62ch; margin: 0; }
+.lede strong { color: var(--fg); font-weight: 600; }
+
+h2 { font-family: var(--font-display); font-weight: 700; font-size: 28px; letter-spacing: -0.015em; line-height: 1.2; margin: 0 0 12px; text-wrap: balance; }
+h3 { font-family: var(--font-display); font-weight: 700; font-size: 18px; margin: 28px 0 8px; }
+section { padding-block: 36px; border-top: 1px solid var(--line); scroll-margin-top: 16px; }
+section > p, section > ul, section > ol { max-width: 66ch; }
+p { margin: 0 0 14px; }
+ul, ol { margin: 0 0 14px; padding-left: 22px; }
+li { margin-bottom: 6px; }
+a { color: var(--accent); }
+code { font-family: var(--font-mono); font-size: 0.88em; background: var(--code-inline); padding: 1px 6px; border-radius: 4px; }
+.step-no { font-family: var(--font-mono); font-size: 13px; color: var(--muted); display: block; margin-bottom: 4px; }
+
+/* Environment chips mirror Windows Terminal tab colours */
+.envs { display: flex; flex-wrap: wrap; gap: 10px; }
+.chip { display: inline-flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 13px; font-weight: 500; color: var(--chip-fg); padding: 5px 12px 5px 10px; border-radius: 6px 6px 0 0; }
+.chip::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: 0.7; }
+.chip.work { background: var(--env-work); }
+.chip.personal { background: var(--env-personal); }
+.chip.client { background: var(--env-client); }
+.envline { display: flex; flex-wrap: wrap; gap: 24px; font-size: 14px; color: var(--muted); }
+.envline > div { display: grid; gap: 6px; min-width: 0; }
+
+/* Terminal blocks */
+.term { background: var(--term-bg); color: var(--term-fg); border-radius: 8px; margin: 16px 0 20px; overflow: hidden; }
+.term-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 8px 0 0; background: color-mix(in srgb, var(--term-bg) 82%, #ffffff); }
+.term-bar .tab { font-family: var(--font-mono); font-size: 12px; padding: 6px 12px; color: #0b1116; font-weight: 500; }
+.term-bar .tab.work { background: var(--env-work); }
+.term-bar .tab.personal { background: var(--env-personal); }
+.term-bar .tab.client { background: var(--env-client); }
+.term-bar .tab.plain { background: transparent; color: var(--term-dim); }
+.copy { font-family: var(--font-body); font-size: 12px; color: var(--term-dim); background: transparent; border: 1px solid color-mix(in srgb, var(--term-dim) 50%, transparent); border-radius: 4px; padding: 2px 10px; cursor: pointer; }
+.copy:hover, .copy:focus-visible { color: var(--term-fg); border-color: var(--term-fg); outline: none; }
+.term pre { margin: 0; padding: 14px 16px 16px; overflow-x: auto; font-family: var(--font-mono); font-size: 13.5px; line-height: 1.65; }
+.term .p { color: var(--term-dim); }
+.term .pw { color: var(--env-work); font-weight: 500; }
+.term .pp { color: var(--env-personal); font-weight: 500; }
+.term .pc { color: var(--env-client); font-weight: 500; }
+.term .c { color: var(--term-dim); font-style: italic; }
+.term .bad { color: var(--bad); font-weight: 500; }
+.term .warn { color: var(--warn); font-weight: 500; }
+.term .ok { color: var(--ok); }
+.term .k { color: #8cc4e8; }
+.term .s { color: #c7d98a; }
+
+.note { border-left: 3px solid var(--accent); background: var(--surface); padding: 12px 16px; border-radius: 0 6px 6px 0; margin: 16px 0; max-width: 66ch; font-size: 15px; }
+.note strong { font-weight: 600; }
+
+/* Tables */
+.tbl { overflow-x: auto; margin: 16px 0 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 14.5px; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-family: var(--font-display); font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); background: color-mix(in srgb, var(--surface) 90%, var(--line)); }
+tr:last-child td { border-bottom: 0; }
+td code { white-space: nowrap; }
+
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin: 16px 0; }
+.col { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; min-width: 0; }
+.col h4 { font-family: var(--font-display); font-size: 14px; text-transform: uppercase; letter-spacing: 0.07em; margin: 0 0 8px; }
+.col h4.l { color: var(--accent); }
+.col h4.m { color: var(--env-personal); }
+.col h4.v { color: var(--env-client); }
+.col ul { margin: 0; padding-left: 18px; font-size: 14.5px; }
+.col p { font-size: 14px; color: var(--muted); margin: 0 0 8px; }
+
+footer { margin-top: 40px; font-size: 13px; color: var(--muted); }
+
+@media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; }
+.links { margin: 0; font-size: 15px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="toc" aria-label="Contents">
+    <div class="brand"><span class="heads" aria-hidden="true"><i></i><i></i><i></i></span>hydra</div>
+    <div class="grp">Getting started</div>
+    <ol>
+      <li><a href="#what">What hydra does</a></li>
+      <li><a href="#install">Install and update</a></li>
+      <li><a href="#walkthrough">Walkthrough: two accounts</a></li>
+    </ol>
+    <div class="grp">Using hydra</div>
+    <ol>
+      <li><a href="#how">How it works</a></li>
+      <li><a href="#tools">Tools</a></li>
+      <li><a href="#claude">Claude Code</a></li>
+      <li><a href="#secrets">Variables and secrets</a></li>
+    </ol>
+    <div class="grp">Reference</div>
+    <ol>
+      <li><a href="#commands">Commands</a></li>
+      <li><a href="#files">Files</a></li>
+      <li><a href="#trouble">Troubleshooting</a></li>
+      <li><a href="#planned">Planned</a></li>
+    </ol>
+  </nav>
+
+  <main>
+    <header class="hero">
+      <span class="status">Early release · Windows 11</span>
+      <h1>One terminal per identity.</h1>
+      <p class="lede">hydra opens terminals inside named <strong>environments</strong>. Each one has its own Claude Code account, GitHub login, git author and SSH key, cloud logins and secrets. A terminal stays in its environment, and none of them can quietly use another's account.</p>
+      <div class="envs" aria-label="Example environments">
+        <span class="chip work">work</span>
+        <span class="chip personal">personal</span>
+        <span class="chip client">client</span>
+      </div>
+      <p class="links"><a href="https://github.com/davojc/hydra">Source on GitHub</a> · <a href="https://github.com/davojc/hydra/releases/latest">Latest release</a></p>
+    </header>
+
+    <section id="what">
+      <h2>What hydra does</h2>
+      <p>Most command-line tools read their login and settings from a folder you can move with an environment variable. Claude Code uses <code>CLAUDE_CONFIG_DIR</code>, the GitHub CLI uses <code>GH_CONFIG_DIR</code>, git uses <code>GIT_CONFIG_GLOBAL</code>. hydra keeps a separate set of those folders for each environment and starts your shell with them already set.</p>
+      <div class="term">
+        <div class="term-bar"><span class="tab work">work · pwsh</span></div>
+<pre><span class="pw">[work]</span> <span class="p">PS&gt;</span> gh api user --jq .login
+work-user
+<span class="pw">[work]</span> <span class="p">PS&gt;</span> git config user.email
+work@example.com</pre>
+      </div>
+      <div class="term">
+        <div class="term-bar"><span class="tab personal">personal · bash</span></div>
+<pre><span class="pp">[personal]</span> <span class="p">$</span> gh api user --jq .login
+my-username</pre>
+      </div>
+      <ul>
+        <li><strong>Stop identity mix-ups.</strong> Commits and pushes always use the environment's author, SSH key and GitHub login.</li>
+        <li><strong>Run Claude Code on several accounts at once.</strong> Each environment has its own Claude sign-in, usage limits and history. Your skills, plugins, settings and MCP servers stay shared.</li>
+      </ul>
+    </section>
+
+    <section id="install">
+      <h2>Install and update</h2>
+      <p>Download <code>hydra-x86_64-pc-windows-msvc.exe</code> from the <a href="https://github.com/davojc/hydra/releases/latest">latest release</a>. Rename it to <code>hydra.exe</code> and put it in a folder on your <code>PATH</code>. Then create hydra's home folder:</p>
+      <div class="term">
+        <div class="term-bar"><span class="tab plain">PowerShell</span><button class="copy" type="button" data-copy="hydra init">Copy</button></div>
+<pre><span class="p">PS&gt;</span> hydra init
+<span class="ok">created</span> C:\Users\you\.hydra\config.toml</pre>
+      </div>
+      <p>From then on, <code>hydra update</code> fetches the latest release and checks its SHA-256 checksum before replacing itself. <code>hydra update --check</code> only reports. It won't update while another hydra terminal is open.</p>
+      <div class="term">
+        <div class="term-bar"><span class="tab plain">PowerShell</span><button class="copy" type="button" data-copy="hydra update">Copy</button></div>
+<pre><span class="p">PS&gt;</span> hydra update
+hydra 0.4.0 is installed; 0.4.1 is available
+<span class="ok">updated to 0.4.1</span></pre>
+      </div>
+      <p>To build from source instead, install Rust from <a href="https://rustup.rs">rustup.rs</a>, then <code>git clone https://github.com/davojc/hydra.git</code> and <code>cargo build --release</code>.</p>
+    </section>
+
+    <section id="walkthrough">
+      <h2>Walkthrough: two accounts, GitHub and Claude</h2>
+      <p>This sets up a <span class="chip work">work</span> and a <span class="chip personal">personal</span> environment, each with its own GitHub account, Claude account, git author and SSH key.</p>
+
+      <h3><span class="step-no">Step 1</span>One SSH key per GitHub account</h3>
+      <p>GitHub won't accept the same key on two accounts. Add each <code>.pub</code> file to the matching account under <strong>Settings → SSH and GPG keys</strong>.</p>
+      <div class="term">
+        <div class="term-bar"><span class="tab plain">PowerShell</span><button class="copy" type="button" data-copy-from="w1">Copy</button></div>
+<pre id="w1">ssh-keygen -t ed25519 -f $HOME\.ssh\id_ed25519_work     -C "work@example.com"
+ssh-keygen -t ed25519 -f $HOME\.ssh\id_ed25519_personal -C "me@example.com"</pre>
+      </div>
+
+      <h3><span class="step-no">Step 2</span>Create the environments</h3>
+      <p>Each gets its own colour, and Claude is on by default.</p>
+      <div class="term">
+        <div class="term-bar"><span class="tab plain">PowerShell</span><button class="copy" type="button" data-copy-from="w2">Copy</button></div>
+<pre id="w2">hydra env new work
+hydra env new personal</pre>
+      </div>
+
+      <h3><span class="step-no">Step 3</span>Turn on the tools each one uses</h3>
+      <p><code>hydra add</code> only writes configuration. It never runs a tool or signs you in.</p>
+      <div class="term">
+        <div class="term-bar"><span class="tab plain">PowerShell</span><button class="copy" type="button" data-copy-from="w3">Copy</button></div>
+<pre id="w3">hydra add git work --name "Your Name" --email work@example.com --ssh-key ~/.ssh/id_ed25519_work
+hydra add github work --owner acme
+hydra add git personal --name "Your Name" --email me@example.com --ssh-key ~/.ssh/id_ed25519_personal
+hydra add github personal</pre>
+      </div>
+
+      <h3><span class="step-no">Step 4</span>Sign in inside each environment</h3>
+      <p>Use each tool's own sign-in command. The terminal opens even before you've signed in, and hydra lists what's missing.</p>
+      <div class="note"><strong>Check which account the browser is signed in to.</strong> Browser sign-ins authorise whichever account the browser is currently using. Use a private window for the second account.</div>
+      <div class="term">
+        <div class="term-bar"><span class="tab work">work · pwsh</span><button class="copy" type="button" data-copy="hydra shell work">Copy</button></div>
+<pre><span class="p">PS&gt;</span> hydra shell work
+<span class="warn">hydra: claude: not signed in - run claude auth login</span>
+<span class="warn">hydra: github: not signed in - run gh auth login</span>
+<span class="pw">[work]</span> <span class="p">PS&gt;</span> gh auth login
+<span class="pw">[work]</span> <span class="p">PS&gt;</span> claude auth login
+<span class="pw">[work]</span> <span class="p">PS&gt;</span> exit</pre>
+      </div>
+      <p>Repeat in <code>hydra shell personal</code> with your personal accounts.</p>
+
+      <h3><span class="step-no">Step 5</span>Check</h3>
+      <div class="term">
+        <div class="term-bar"><span class="tab plain">PowerShell</span><button class="copy" type="button" data-copy="hydra whoami --env work">Copy</button></div>
+<pre><span class="p">PS&gt;</span> hydra whoami --env work
+env      work · work
+claude   work@example.com (Acme)                          <span class="ok">ok</span>
+github   work-user                                        <span class="ok">ok</span>
+git      work@example.com                                 <span class="ok">ok</span></pre>
+      </div>
+      <p>Each terminal stays in its environment until you close it, and you can have both open at once. Run <code>claude</code> in each: <code>/status</code> shows that environment's account.</p>
+    </section>
+
+    <section id="how">
+      <h2>How it works</h2>
+      <p>hydra starts each terminal with environment variables that point every tool at that environment's own folder under <code>~/.hydra/state/&lt;env&gt;/</code>.</p>
+      <ul>
+        <li><strong>Nothing leaks between environments.</strong> Identity variables inherited from the terminal you started in are removed, for example <code>GH_TOKEN</code>, <code>AWS_PROFILE</code> or <code>ANTHROPIC_API_KEY</code>. That includes those of tools the environment doesn't use, even when one hydra terminal is started from inside another.</li>
+        <li><strong>Launch fails closed.</strong> If something could make a tool fall back to another identity, hydra refuses to open the terminal and tells you how to fix it. Examples are a configured SSH key that doesn't exist, or a secret you referenced but never stored. A tool that simply isn't signed in yet doesn't block anything.</li>
+        <li><strong>Secrets live in Windows Credential Manager.</strong> Config files only reference them. Values never go to disk or into hydra's output, with one exception: a gws credentials file, which is written readable by your Windows account only.</li>
+      </ul>
+    </section>
+
+    <section id="tools">
+      <h2>Tools</h2>
+      <p>Turn a tool on with <code>hydra add &lt;tool&gt; [env]</code>. Inside a hydra terminal you can leave out the environment. <code>hydra add</code> with no tool lists tools and which are on; <code>hydra remove &lt;tool&gt; [env]</code> turns one off and keeps its saved logins.</p>
+      <div class="tbl">
+        <table>
+          <thead><tr><th>Tool</th><th>What each environment gets</th><th>Flags</th></tr></thead>
+          <tbody>
+            <tr><td><code>claude</code></td><td>Its own Claude Code sign-in, sharing your <code>~/.claude</code> setup</td><td><code>--mcp-exclude</code></td></tr>
+            <tr><td><code>github</code> (<code>gh</code>)</td><td>Its own <code>gh auth login</code>; git's HTTPS pushes to github.com use it</td><td><code>--owner</code>, <code>--strict</code></td></tr>
+            <tr><td><code>git</code></td><td>Author, email, SSH key, optional signing key, its own Git Credential Manager space for other HTTPS hosts. Your <code>~/.gitconfig</code> still loads underneath.</td><td><code>--name</code>, <code>--email</code>, <code>--ssh-key</code>, <code>--signing-key</code></td></tr>
+            <tr><td><code>aws</code></td><td>An AWS profile, optionally with private config and credentials files</td><td><code>--profile</code> (required), <code>--isolate</code></td></tr>
+            <tr><td><code>azure</code></td><td>Its own <code>az login</code></td><td></td></tr>
+            <tr><td><code>gcloud</code></td><td>Its own <code>gcloud auth login</code> and configurations</td><td></td></tr>
+            <tr><td><code>gws</code></td><td>Its own Google Workspace CLI login, or stored credentials</td><td><code>--credentials-secret</code></td></tr>
+            <tr><td><code>kube</code></td><td>Its own kubeconfig</td><td><code>--kubeconfig</code></td></tr>
+            <tr><td><code>codex</code></td><td>Its own Codex CLI login</td><td></td></tr>
+            <tr><td><code>gemini</code></td><td><code>GEMINI_API_KEY</code> from a stored secret</td><td><code>--api-key-secret</code> (required)</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="claude">
+      <h2>Claude Code: separate accounts, shared setup</h2>
+      <p>Each environment's Claude folder (<code>~/.hydra/state/&lt;env&gt;/claude</code>) is rebuilt from your existing <code>~/.claude</code> every time a terminal opens. hydra only ever <strong>reads</strong> <code>~/.claude</code> and <code>~/.claude.json</code>.</p>
+      <div class="cols">
+        <div class="col">
+          <h4 class="l">Linked from ~/.claude</h4>
+          <p>One copy; every environment sees it.</p>
+          <ul><li><code>skills/</code>, <code>commands/</code>, <code>agents/</code></li><li><code>hooks/</code>, <code>output-styles/</code></li><li><code>plugins/</code>: install once, available everywhere</li></ul>
+        </div>
+        <div class="col">
+          <h4 class="m">Rebuilt each launch</h4>
+          <p>Shared base plus this environment's changes.</p>
+          <ul><li><code>settings.json</code> + <code>envs/&lt;env&gt;/claude/settings.json</code></li><li><code>CLAUDE.md</code> + the environment's own section</li><li>MCP servers from <code>~/.claude.json</code>, minus <code>--mcp-exclude</code></li></ul>
+        </div>
+        <div class="col">
+          <h4 class="v">Private</h4>
+          <p>Never shared between environments.</p>
+          <ul><li>the Claude sign-in</li><li>history, projects, sessions</li><li>the rest of <code>.claude.json</code></li></ul>
+        </div>
+      </div>
+      <div class="note"><strong>Changes made inside Claude don't stick.</strong> If Claude edits the rebuilt <code>settings.json</code> or <code>CLAUDE.md</code>, for example with <code>/model</code>, hydra saves your version as <code>.bak</code> on the next launch, tells you, and rebuilds the file. Put lasting changes in <code>~/.claude</code> or <code>~/.hydra/envs/&lt;env&gt;/claude/</code>.</div>
+      <p>Sign-in settings are never shared. If <code>~/.claude/settings.json</code> has an <code>apiKeyHelper</code> or an API key under <code>env</code>, hydra leaves it out of every environment and warns you. Running <code>claude</code> outside hydra keeps using <code>~/.claude</code> as before.</p>
+    </section>
+
+    <section id="secrets">
+      <h2>Variables and secrets</h2>
+      <p>Any other variable goes under <code>[env]</code> in the environment's <code>env.toml</code> (<code>hydra env edit work</code>). Values can be plain or come from a secret stored in Windows Credential Manager.</p>
+      <div class="term">
+        <div class="term-bar"><span class="tab plain">~/.hydra/envs/work/env.toml</span></div>
+<pre><span class="k">[env]</span>
+REGION = <span class="s">"eu-west"</span>
+LINEAR_API_KEY = <span class="s">"secret:work/linear"</span></pre>
+      </div>
+      <div class="term">
+        <div class="term-bar"><span class="tab plain">PowerShell</span><button class="copy" type="button" data-copy="hydra secret set work/linear">Copy</button></div>
+<pre><span class="p">PS&gt;</span> hydra secret set work/linear
+value: ••••••••••••••••
+<span class="ok">stored</span> work/linear in Windows Credential Manager</pre>
+      </div>
+      <p>For multi-line values such as JSON, pipe them in: <code>Get-Content -Raw creds.json | hydra secret set work/gws-creds</code>.</p>
+    </section>
+
+    <section id="commands">
+      <h2>Commands</h2>
+      <div class="tbl">
+        <table>
+          <thead><tr><th>Command</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td><code>hydra init</code></td><td>Creates <code>~/.hydra</code></td></tr>
+            <tr><td><code>hydra env new|list|edit|rm|rename</code></td><td>Manages environments. <code>rename</code> updates secrets and saved logins too.</td></tr>
+            <tr><td><code>hydra add [&lt;tool&gt;] [&lt;env&gt;]</code></td><td>Turns a tool on by writing its settings. Never signs in.</td></tr>
+            <tr><td><code>hydra remove &lt;tool&gt; [&lt;env&gt;]</code></td><td>Turns a tool off. Saved logins are kept.</td></tr>
+            <tr><td><code>hydra shell [&lt;env&gt;]</code></td><td>Opens a terminal in an environment. Options: <code>--shell pwsh|bash</code>, <code>--cwd DIR</code>.</td></tr>
+            <tr><td><code>hydra run &lt;env&gt; -- &lt;command&gt;</code></td><td>Runs one command in an environment</td></tr>
+            <tr><td><code>hydra auth &lt;tool&gt; &lt;env&gt;</code></td><td>Runs a tool's sign-in inside an environment without opening a terminal</td></tr>
+            <tr><td><code>hydra secret set|rm &lt;env&gt;/&lt;key&gt;</code></td><td>Stores or removes a secret</td></tr>
+            <tr><td><code>hydra whoami [--env &lt;env&gt;]</code></td><td>Shows which account each tool is actually using</td></tr>
+            <tr><td><code>hydra update [--check]</code></td><td>Installs the latest release from GitHub after checking its checksum</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="files">
+      <h2>Files</h2>
+      <div class="term">
+        <div class="term-bar"><span class="tab plain">~/.hydra</span></div>
+<pre>config.toml          <span class="c">global settings</span>
+envs/&lt;env&gt;/          <span class="c">yours: env.toml, plus optional claude/ overrides</span>
+state/&lt;env&gt;/         <span class="c">hydra's: each tool's folder, sign-ins, generated config</span>
+secrets.toml         <span class="c">names (never values) of stored secrets</span></pre>
+      </div>
+      <p><code>HYDRA_HOME</code> moves <code>~/.hydra</code>. Deleting <code>state/&lt;env&gt;</code> resets an environment, but you'll need to sign in again.</p>
+    </section>
+
+    <section id="trouble">
+      <h2>Troubleshooting</h2>
+      <div class="tbl">
+        <table>
+          <thead><tr><th>Message</th><th>What to do</th></tr></thead>
+          <tbody>
+            <tr><td><code>hydra: &lt;tool&gt;: not signed in</code></td><td>Sign in with that tool's own command inside the environment's terminal.</td></tr>
+            <tr><td><code>secret work/x isn't set</code></td><td><code>hydra secret set work/x</code></td></tr>
+            <tr><td><code>…id_ed25519_work not found</code></td><td>Fix the key path: <code>hydra add git work --ssh-key &lt;path&gt;</code></td></tr>
+            <tr><td><code>CLAUDE_CONFIG_DIR</code> error when opening</td><td>Remove <code>CLAUDE_CONFIG_DIR</code> from <code>[env]</code>; <code>[claude]</code> sets it. Then sign in again.</td></tr>
+            <tr><td><code>… is a real folder, not a link</code></td><td>Move anything you want to keep into <code>~/.claude</code>, delete that folder, and reopen the terminal.</td></tr>
+            <tr><td>A Claude setting you changed disappeared</td><td>Your version is in <code>settings.json.bak</code>. Put lasting changes in <code>~/.claude/settings.json</code> or <code>envs/&lt;env&gt;/claude/settings.json</code>.</td></tr>
+            <tr><td><code>hydra is in use - not updating</code></td><td>Close the listed hydra terminals, then run <code>hydra update</code> again.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="planned">
+      <h2>Planned</h2>
+      <p>These are designed but not built yet:</p>
+      <ul>
+        <li><strong>Folder bindings and guards.</strong> Blocks <code>git push</code> and <code>gh pr create</code> from a folder that belongs to another environment, including when Claude Code runs them.</li>
+        <li><strong><code>hydra shell</code> without a name.</strong> Picks the environment from the current folder.</li>
+        <li><strong>Plain <code>ssh</code> and <code>scp</code></strong> using the environment's key outside git.</li>
+        <li><strong>Windows Terminal profiles.</strong> One coloured tab per environment.</li>
+        <li><strong><code>hydra doctor</code></strong> and macOS / Linux support.</li>
+      </ul>
+    </section>
+
+    <footer>hydra · <a href="https://github.com/davojc/hydra">github.com/davojc/hydra</a></footer>
+  </main>
+</div>
+
+<script>
+document.querySelectorAll('.copy').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    var text = btn.dataset.copy;
+    if (!text && btn.dataset.copyFrom) {
+      var el = document.getElementById(btn.dataset.copyFrom);
+      text = el ? el.textContent : '';
+    }
+    var done = function () { btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy'; }, 1500); };
+    try {
+      navigator.clipboard.writeText(text).then(done, function () { selectFallback(btn); });
+    } catch (e) { selectFallback(btn); }
+  });
+});
+function selectFallback(btn) {
+  var pre = btn.closest('.term').querySelector('pre');
+  var range = document.createRange();
+  range.selectNodeContents(pre);
+  var sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+  btn.textContent = 'Press Ctrl+C';
+}
+</script>
+</body>
+</html>

@@ -3,6 +3,7 @@ mod env;
 mod init;
 pub mod launch;
 mod secret;
+mod tools;
 mod whoami;
 
 use crate::app::App;
@@ -17,6 +18,41 @@ pub fn run(cmd: Cmd) -> anyhow::Result<i32> {
         Cmd::Shell { env, shell, cwd } => launch::shell(&app, env, shell, cwd),
         Cmd::Run { env, command } => launch::run(&app, env, command),
         Cmd::Auth { provider, env } => auth::run(&app, provider, env),
+        Cmd::Add {
+            tool,
+            env,
+            mcp_exclude,
+            owners,
+            strict,
+            name,
+            email,
+            ssh_key,
+            signing_key,
+            profile,
+            isolate,
+            credentials_secret,
+            kube_config,
+            api_key_secret,
+        } => tools::add(
+            &app,
+            tool,
+            env,
+            tools::Flags {
+                mcp_exclude,
+                owners,
+                strict,
+                name,
+                email,
+                ssh_key,
+                signing_key,
+                profile,
+                isolate,
+                credentials_secret,
+                kube_config,
+                api_key_secret,
+            },
+        ),
+        Cmd::Remove { tool, env } => tools::remove(&app, tool, env),
         Cmd::Whoami { env } => whoami::run(&app, env),
     }
 }

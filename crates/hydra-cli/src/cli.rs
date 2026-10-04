@@ -8,6 +8,7 @@ pub struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)] // parsed once at startup; boxing would only add noise
 pub enum Cmd {
     /// Create ~/.hydra
     Init,
@@ -40,6 +41,41 @@ pub enum Cmd {
     },
     /// Sign in to a tool inside an environment, e.g. hydra auth github work
     Auth { provider: String, env: String },
+    /// Turn a tool on for an environment (writes env.toml only; sign in afterwards inside the environment)
+    Add {
+        /// claude, github (gh), git, aws, azure, gcloud, gws, kube, codex, gemini. Omit to list tools.
+        tool: Option<String>,
+        /// Environment (default: the current hydra terminal's)
+        env: Option<String>,
+        #[arg(long = "mcp-exclude")]
+        mcp_exclude: Vec<String>,
+        #[arg(long = "owner")]
+        owners: Vec<String>,
+        #[arg(long)]
+        strict: bool,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        email: Option<String>,
+        #[arg(long = "ssh-key")]
+        ssh_key: Option<String>,
+        #[arg(long = "signing-key")]
+        signing_key: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        isolate: bool,
+        /// gws: secret name holding credentials JSON, e.g. iov/gws-creds
+        #[arg(long = "credentials-secret")]
+        credentials_secret: Option<String>,
+        #[arg(long = "kubeconfig")]
+        kube_config: Option<String>,
+        /// gemini: secret name holding the API key, e.g. iov/gemini
+        #[arg(long = "api-key-secret")]
+        api_key_secret: Option<String>,
+    },
+    /// Turn a tool off for an environment (saved logins are kept)
+    Remove { tool: String, env: Option<String> },
     /// Show which account each tool is actually using
     Whoami {
         /// Environment to check (default: the current hydra terminal's)

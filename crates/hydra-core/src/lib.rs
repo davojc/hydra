@@ -5,6 +5,7 @@ pub mod config;
 pub mod contribution;
 pub mod envedit;
 pub mod envs;
+pub mod guard;
 pub mod lock;
 pub mod name;
 pub mod paths;

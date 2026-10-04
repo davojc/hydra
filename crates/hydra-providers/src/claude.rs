@@ -119,6 +119,67 @@ fn write_if_changed(path: &Path, content: &str) -> Result<(), ProviderError> {
     })
 }
 
+fn remove_if_present(path: &Path) -> Result<(), ProviderError> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(ProviderError::new(format!(
+            "can't remove {}: {e}",
+            path.display()
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// Writes (or, for `None`, removes) a file hydra generates in the config folder, keeping a
+/// copy in `.hydra/last/`. If the file was changed since hydra last wrote it (by Claude or
+/// by hand), the changed version is first saved as `<file>.bak`; the returned warning says so.
+fn write_generated(
+    l: &Layout,
+    env: &str,
+    file: &str,
+    content: Option<&str>,
+) -> Result<Option<String>, ProviderError> {
+    let path = l.dir.join(file);
+    let last = l.dir.join(".hydra").join("last").join(file);
+    let current = read_opt(&path)?;
+    let mut warning = None;
+    if let Some(cur) = &current
+        && Some(cur.as_str()) != content
+        && let Some(prev) = read_opt(&last)?
+        && *cur != prev
+    {
+        let mut bak = path.as_os_str().to_owned();
+        bak.push(".bak");
+        let bak = PathBuf::from(bak);
+        std::fs::copy(&path, &bak).map_err(|e| {
+            ProviderError::new(format!(
+                "can't save {} as {}: {e}",
+                path.display(),
+                bak.display()
+            ))
+        })?;
+        warning = Some(format!(
+            "hydra: claude: {file} was changed inside {env}; saved your version as {} - put lasting changes in {} or {}",
+            bak.display(),
+            l.base.join(file).display(),
+            l.over.join(file).display()
+        ));
+    }
+    match content {
+        Some(c) => {
+            write_if_changed(&path, c)?;
+            std::fs::create_dir_all(last.parent().expect("has a parent"))?;
+            write_if_changed(&last, c)?;
+        }
+        None => {
+            if current.is_some() {
+                remove_if_present(&path)?;
+            }
+            remove_if_present(&last)?;
+        }
+    }
+    Ok(warning)
+}
+
 /// Makes `<dir>/<name>` a link to the environment's or the base's `<name>` folder (or
 /// removes a stale link when neither exists). Leaves a correct link alone.
 fn link_shared(l: &Layout, name: &str, override_dir: &Path) -> Result<(), ProviderError> {
@@ -244,18 +305,15 @@ impl Provider for Claude {
             &exclude,
         )
         .map_err(ProviderError::new)?;
-        write_if_changed(&l.dir.join("settings.json"), &settings)?;
-        let md_path = l.dir.join("CLAUDE.md");
-        match render_claude_md(
-            ctx.name.as_str(),
+        let env = ctx.name.as_str();
+        let md = render_claude_md(
+            env,
             read_opt(&l.base.join("CLAUDE.md"))?.as_deref(),
             read_opt(&l.over.join("CLAUDE.md"))?.as_deref(),
-        ) {
-            Some(md) => write_if_changed(&md_path, &md)?,
-            None => {
-                if md_path.is_file() {
-                    std::fs::remove_file(&md_path)?;
-                }
+        );
+        for (file, content) in [("settings.json", Some(settings)), ("CLAUDE.md", md)] {
+            if let Some(warning) = write_generated(&l, env, file, content.as_deref())? {
+                eprintln!("{warning}");
             }
         }
         let state_path = l.dir.join(".claude.json");
@@ -558,6 +616,101 @@ mod tests {
                 "{linked}: wrote through the link"
             );
         }
+    }
+
+    #[test]
+    fn changes_made_inside_the_environment_are_backed_up_before_regenerating() {
+        let f = Fixture::new("[claude]\n");
+        with_base(&f);
+        Claude.materialise(&f.ctx()).unwrap();
+        let dir = cfg_dir(&f);
+        for file in ["settings.json", "CLAUDE.md"] {
+            assert!(
+                !dir.join(format!("{file}.bak")).exists(),
+                "no backup on the first run"
+            );
+        }
+        let generated = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+        Claude.materialise(&f.ctx()).unwrap();
+        assert!(
+            !dir.join("settings.json.bak").exists(),
+            "no backup when nothing changed"
+        );
+
+        std::fs::write(dir.join("settings.json"), r#"{"model":"haiku"}"#).unwrap();
+        std::fs::write(dir.join("CLAUDE.md"), "# edited by Claude").unwrap();
+        Claude.materialise(&f.ctx()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("settings.json.bak")).unwrap(),
+            r#"{"model":"haiku"}"#
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("settings.json")).unwrap(),
+            generated,
+            "regenerated"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("CLAUDE.md.bak")).unwrap(),
+            "# edited by Claude"
+        );
+        assert!(
+            std::fs::read_to_string(dir.join("CLAUDE.md"))
+                .unwrap()
+                .contains("# Base rules")
+        );
+    }
+
+    #[test]
+    fn no_backup_when_the_edit_matches_what_hydra_writes_next() {
+        let f = Fixture::new("[claude]\n");
+        with_base(&f);
+        Claude.materialise(&f.ctx()).unwrap();
+        let dir = cfg_dir(&f);
+        std::fs::write(
+            f.home.join(".claude").join("settings.json"),
+            r#"{"model":"haiku"}"#,
+        )
+        .unwrap();
+        let next = merge_settings(Some(r#"{"model":"haiku"}"#), None, &[]).unwrap();
+        std::fs::write(dir.join("settings.json"), &next).unwrap();
+        Claude.materialise(&f.ctx()).unwrap();
+        assert!(!dir.join("settings.json.bak").exists());
+    }
+
+    #[test]
+    fn backup_warning_names_both_places_for_lasting_changes() {
+        let f = Fixture::new("[claude]\n");
+        let l = layout(&f.ctx()).unwrap();
+        std::fs::create_dir_all(&l.dir).unwrap();
+        assert_eq!(
+            write_generated(&l, "work", "settings.json", Some("{}\n")).unwrap(),
+            None
+        );
+        std::fs::write(l.dir.join("settings.json"), "{\"x\":1}").unwrap();
+        let warning = write_generated(&l, "work", "settings.json", Some("{}\n"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            warning,
+            format!(
+                "hydra: claude: settings.json was changed inside work; saved your version as {} - put lasting changes in {} or {}",
+                l.dir.join("settings.json.bak").display(),
+                l.base.join("settings.json").display(),
+                l.over.join("settings.json").display()
+            )
+        );
+    }
+
+    #[test]
+    fn claude_md_goes_away_when_the_base_one_is_deleted() {
+        let f = Fixture::new("[claude]\n");
+        with_base(&f);
+        Claude.materialise(&f.ctx()).unwrap();
+        assert!(cfg_dir(&f).join("CLAUDE.md").is_file());
+        std::fs::remove_file(f.home.join(".claude").join("CLAUDE.md")).unwrap();
+        Claude.materialise(&f.ctx()).unwrap();
+        assert!(!cfg_dir(&f).join("CLAUDE.md").exists());
+        assert!(!cfg_dir(&f).join("CLAUDE.md.bak").exists());
     }
 
     #[test]

@@ -6,7 +6,7 @@ use hydra_core::paths::expand_tilde;
 use hydra_core::provider::{CommandRunner, Ctx, IdentityReport, Provider, ProviderError, Status};
 use hydra_platform::links::{is_link, link_dir, points_at, unlink};
 
-use crate::claude_files::{merge_settings, render_claude_md, sync_mcp};
+use crate::claude_files::{add_guard_hook, merge_settings, render_claude_md, sync_mcp};
 use crate::report::report;
 
 pub struct Claude;
@@ -345,7 +345,7 @@ impl Provider for Claude {
                 over_settings.display()
             ));
         }
-        let settings = merged.text;
+        let settings = with_guard_hook(merged.text);
         let env = ctx.name.as_str();
         let md = render_claude_md(
             env,
@@ -428,6 +428,27 @@ impl Provider for Claude {
             .join(".credentials.json")
             .is_file())
         .then(|| "not signed in - run claude auth login".to_string())
+    }
+}
+
+/// Adds hydra's PreToolUse guard hook to the generated settings. Skipped with a warning when
+/// hydra's own path is unknown or the settings can't take it.
+fn with_guard_hook(text: String) -> String {
+    let exe = match std::env::current_exe() {
+        Ok(e) => e.to_string_lossy().replace('\\', "/"),
+        Err(e) => {
+            warn(&format!(
+                "hydra: claude: guard hook not added (can't find hydra's own path: {e})"
+            ));
+            return text;
+        }
+    };
+    match add_guard_hook(&text, &format!("\"{exe}\" guard claude")) {
+        Ok(with_hook) => with_hook,
+        Err(e) => {
+            warn(&format!("hydra: claude: guard hook not added ({e})"));
+            text
+        }
     }
 }
 
@@ -680,6 +701,18 @@ mod tests {
     }
 
     #[test]
+    fn materialised_settings_carry_the_guard_hook() {
+        let f = Fixture::new("[claude]\n");
+        Claude.materialise(&f.ctx()).unwrap();
+        let text = std::fs::read_to_string(cfg_dir(&f).join("settings.json")).unwrap();
+        assert!(text.contains("guard claude"), "{text}");
+        assert!(text.contains("PreToolUse"), "{text}");
+        // Stable across launches: the second materialise changes nothing and makes no .bak.
+        Claude.materialise(&f.ctx()).unwrap();
+        assert!(!cfg_dir(&f).join("settings.json.bak").exists());
+    }
+
+    #[test]
     fn shared_sign_in_settings_never_reach_the_environment() {
         let f = Fixture::new("[claude]\n");
         let base = f.home.join(".claude");
@@ -775,9 +808,11 @@ mod tests {
             r#"{"model":"haiku"}"#,
         )
         .unwrap();
-        let next = merge_settings(Some((Path::new("x"), r#"{"model":"haiku"}"#)), None, &[])
-            .unwrap()
-            .text;
+        let next = with_guard_hook(
+            merge_settings(Some((Path::new("x"), r#"{"model":"haiku"}"#)), None, &[])
+                .unwrap()
+                .text,
+        );
         std::fs::write(dir.join("settings.json"), &next).unwrap();
         Claude.materialise(&f.ctx()).unwrap();
         assert!(!dir.join("settings.json.bak").exists());
@@ -858,7 +893,7 @@ mod tests {
         assert!(dir.is_dir());
         assert_eq!(
             std::fs::read_to_string(dir.join("settings.json")).unwrap(),
-            "{}\n"
+            with_guard_hook("{}\n".to_string())
         );
         assert!(!dir.join("CLAUDE.md").exists());
     }

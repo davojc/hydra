@@ -1,10 +1,13 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
 use anyhow::Context;
-use hydra_core::config::load_global;
+use hydra_core::bindings;
+use hydra_core::config::{load_env, load_global};
+use hydra_core::envs;
 use hydra_core::lock::hold_shared;
 use hydra_core::name::EnvName;
+use hydra_core::paths::expand_tilde;
 use hydra_core::provider::Ctx;
 use hydra_core::resolve::{ENV_VARS_MARKER, LaunchEnv, PrepareOptions, prepare};
 use hydra_platform::process::EnvRunner;
@@ -23,14 +26,74 @@ pub fn prepare_launch(
         inherited_env_vars: std::env::var(ENV_VARS_MARKER).ok(),
         ..opts.clone()
     };
-    Ok(prepare(
+    let mut launch = prepare(
         &app.paths,
         name,
         &app.user_home,
         &providers,
         app.store.as_ref(),
         &opts,
-    )?)
+    )?;
+    // First on PATH, so gh and ssh in the terminal go through hydra's guard.
+    launch
+        .path_prepend
+        .insert(0, refresh_shims(&app.paths.shims_dir()));
+    Ok(launch)
+}
+
+/// Makes `<dir>/gh.exe` and `ssh.exe` copies of the running hydra. A copy that can't be
+/// replaced (e.g. a shim that is running) is noted and left as it is.
+fn refresh_shims(dir: &Path) -> PathBuf {
+    if let Err(e) = install_shims(dir) {
+        anstream::eprintln!(
+            "{}",
+            style::dim(format!("hydra: note: gh/ssh shims not refreshed ({e:#})"))
+        );
+    }
+    dir.to_path_buf()
+}
+
+fn install_shims(dir: &Path) -> anyhow::Result<()> {
+    let exe = std::env::current_exe().context("can't find the hydra exe")?;
+    let meta = std::fs::metadata(&exe)?;
+    std::fs::create_dir_all(dir).with_context(|| format!("can't create {}", dir.display()))?;
+    let mut failed = Vec::new();
+    for name in ["gh.exe", "ssh.exe"] {
+        let shim = dir.join(name);
+        if is_current(&shim, &meta) {
+            continue;
+        }
+        if let Err(e) = replace_shim(&exe, &shim) {
+            failed.push(format!("{}: {e}", shim.display()));
+        }
+    }
+    anyhow::ensure!(failed.is_empty(), "{}", failed.join("; "));
+    Ok(())
+}
+
+/// A shim is current when it has the exe's size and isn't older than it (same-size builds,
+/// e.g. 0.5.0 and 0.5.1, differ only in the time).
+fn is_current(shim: &Path, exe: &std::fs::Metadata) -> bool {
+    let Ok(m) = std::fs::metadata(shim) else {
+        return false;
+    };
+    let older = match (m.modified(), exe.modified()) {
+        (Ok(s), Ok(e)) => s < e,
+        _ => true,
+    };
+    m.len() == exe.len() && !older
+}
+
+/// Copies beside the shim, then renames over it, so a shim is never half-written.
+fn replace_shim(exe: &Path, shim: &Path) -> std::io::Result<()> {
+    let mut tmp = shim.as_os_str().to_owned();
+    tmp.push(".hydra-tmp");
+    let tmp = PathBuf::from(tmp);
+    let result = std::fs::copy(exe, &tmp).and_then(|_| std::fs::rename(&tmp, shim));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Ctrl-C belongs to the child; hydra stays alive to return its exit code.
@@ -60,20 +123,80 @@ fn print_sign_in_hints(app: &App, name: &EnvName, launch: &LaunchEnv) {
     }
 }
 
+/// The environment's `home`, when a named shell is opened from a folder that isn't bound to it.
+fn home_folder(
+    app: &App,
+    name: &EnvName,
+    here: &std::path::Path,
+    rules: &std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<Option<PathBuf>> {
+    if bindings::resolve(here, rules).is_some_and(|b| b.env == name.as_str()) {
+        return Ok(None);
+    }
+    let Some(home) = load_env(&app.paths, name)?.home else {
+        return Ok(None);
+    };
+    let dir = expand_tilde(&home, &app.user_home);
+    if !dir.is_dir() {
+        anstream::eprintln!(
+            "{}",
+            style::warn(format!(
+                "hydra: warning: home {} isn't a folder; staying in the current folder",
+                dir.display()
+            ))
+        );
+        return Ok(None);
+    }
+    Ok(Some(dir))
+}
+
 pub fn shell(
     app: &App,
     env: Option<String>,
     shell: Option<String>,
     cwd: Option<PathBuf>,
 ) -> anyhow::Result<i32> {
-    let Some(env) = env else {
-        anyhow::bail!("name an environment: hydra shell <env>");
-    };
-    let name = app.env_name(&env)?;
+    let global = load_global(&app.paths)?;
+    let here = std::env::current_dir().context("can't find the current folder")?;
     if let Some(dir) = &cwd {
         anyhow::ensure!(dir.is_dir(), "{} isn't a folder", dir.display());
     }
-    let global = load_global(&app.paths)?;
+    let probe = match &cwd {
+        Some(dir) => std::path::absolute(dir).unwrap_or_else(|_| dir.clone()),
+        None => here.clone(),
+    };
+    let name = match env.as_deref() {
+        Some(e) => app.env_name(e)?,
+        None => {
+            let Some(b) = bindings::resolve(&probe, &global.bindings) else {
+                let l = envs::list(&app.paths)?;
+                let names: Vec<&str> = l.valid.iter().map(|n| n.as_str()).collect();
+                anyhow::bail!(
+                    "{} isn't bound to an environment - run hydra shell <env>
+{}",
+                    probe.display(),
+                    style::dim(format!("  environments: {}", names.join(", ")))
+                );
+            };
+            let name = app.env_name(&b.env).with_context(|| {
+                format!(
+                    "{} names environment {}, which doesn't exist",
+                    b.describe(),
+                    b.env
+                )
+            })?;
+            anstream::eprintln!(
+                "{}",
+                style::dim(format!("opening {name} ({})", b.describe()))
+            );
+            name
+        }
+    };
+    let folder = match cwd {
+        Some(dir) => Some(dir),
+        None if env.is_some() => home_folder(app, &name, &here, &global.bindings)?,
+        None => None,
+    };
     let kind_name = shell
         .or(global.default_shell.clone())
         .unwrap_or_else(|| "pwsh".to_string());
@@ -98,7 +221,7 @@ pub fn shell(
     )?;
     let mut cmd = shell_command(kind, &exe, &init);
     launch.apply(&mut cmd);
-    if let Some(dir) = cwd {
+    if let Some(dir) = folder {
         cmd.current_dir(dir);
     }
     ignore_ctrl_c();

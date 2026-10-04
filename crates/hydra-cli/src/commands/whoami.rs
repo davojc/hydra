@@ -1,4 +1,6 @@
 use anyhow::Context;
+use hydra_core::bindings;
+use hydra_core::config::load_global;
 use hydra_core::provider::{Ctx, IdentityReport, Status};
 use hydra_core::resolve::PrepareOptions;
 use hydra_platform::process::EnvRunner;
@@ -8,9 +10,24 @@ use crate::commands::launch;
 use crate::style;
 
 pub fn run(app: &App, env: Option<String>) -> anyhow::Result<i32> {
+    let cwd = std::env::current_dir().context("can't find the current folder")?;
+    let rules = match load_global(&app.paths) {
+        Ok(g) => g.bindings,
+        Err(e) => {
+            anstream::eprintln!(
+                "{}",
+                style::warn(format!(
+                    "hydra: warning: couldn't read config.toml ({e}) - folder bindings ignored"
+                ))
+            );
+            Default::default()
+        }
+    };
+    let binding = bindings::resolve(&cwd, &rules);
     let env = env
         .or_else(|| std::env::var("HYDRA_ENV").ok())
-        .context("not in a hydra terminal; use hydra whoami --env <name>")?;
+        .or_else(|| binding.as_ref().map(|b| b.env.clone()))
+        .context("not in a hydra terminal or a bound folder; use hydra whoami --env <name>")?;
     let name = app.env_name(&env)?;
     let opts = PrepareOptions {
         allow_missing_secrets: true,
@@ -55,7 +72,44 @@ pub fn run(app: &App, env: Option<String>) -> anyhow::Result<i32> {
         };
         anstream::println!("{:<8} {:<48} {}", r.provider, r.detail, mark);
     }
+    if own_hooks_path(&cwd) {
+        anstream::eprintln!(
+            "{}",
+            style::warn(
+                "note: this repo sets its own core.hooksPath, so hydra's git guard is off here"
+            )
+        );
+    }
+    match &binding {
+        Some(b) => {
+            let mark = if b.env == name.as_str() {
+                style::ok("ok")
+            } else {
+                problems += 1;
+                style::error("MISMATCH")
+            };
+            anstream::println!(
+                "{:<8} {} -> {} ({}) {}",
+                "folder",
+                cwd.display(),
+                b.env,
+                b.describe(),
+                mark
+            );
+        }
+        None => anstream::println!("{:<8} {} isn't bound", "folder", cwd.display()),
+    }
     Ok(if problems == 0 { 0 } else { 1 })
+}
+
+/// True when the repo at `cwd` sets its own `core.hooksPath` (e.g. Husky).
+fn own_hooks_path(cwd: &std::path::Path) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["config", "--local", "--get", "core.hooksPath"])
+        .output()
+        .is_ok_and(|o| o.status.success())
 }
 
 /// gcloud and gws usually share one Google identity: show them as one line when they agree.

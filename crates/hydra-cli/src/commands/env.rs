@@ -2,21 +2,43 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::Context;
+use hydra_core::bindedit;
 use hydra_core::config::load_env;
 use hydra_core::envs;
 use hydra_core::name::EnvName;
 
 use crate::app::App;
 use crate::cli::EnvCmd;
+use crate::commands::bind;
 use crate::prompt;
 use crate::style;
 
 pub fn run(app: &App, cmd: EnvCmd) -> anyhow::Result<i32> {
     match cmd {
-        EnvCmd::New { name } => {
+        EnvCmd::New { name, home } => {
             let n = EnvName::parse(&name)?;
+            // Resolve the folder first so a bad path fails before anything is created.
+            let home = home
+                .map(|h| {
+                    std::path::absolute(&h)
+                        .with_context(|| format!("can't resolve {}", h.display()))
+                })
+                .transpose()?;
             let file = envs::create(&app.paths, &n)?;
             anstream::println!("{}", style::ok(format!("created {}", file.display())));
+            if let Some(dir) = home {
+                let text = std::fs::read_to_string(&file)?;
+                let text = bindedit::set_home(&text, &dir).map_err(anyhow::Error::msg)?;
+                std::fs::write(&file, text)?;
+                let shown = dir.to_string_lossy().replace('\\', "/");
+                anstream::println!("{}", style::ok(format!("home = \"{shown}\"")));
+                bind::bind(
+                    app,
+                    vec![dir.to_string_lossy().into_owned(), n.to_string()],
+                    false,
+                    false,
+                )?;
+            }
             anstream::println!(
                 "{}",
                 style::dim(format!("edit it with: hydra env edit {n}"))

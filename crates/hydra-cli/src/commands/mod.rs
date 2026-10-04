@@ -1,5 +1,7 @@
 mod auth;
+mod bind;
 mod env;
+pub mod guard;
 mod init;
 pub mod launch;
 mod secret;
@@ -8,12 +10,22 @@ pub mod update;
 mod whoami;
 
 use crate::app::App;
-use crate::cli::Cmd;
+use crate::cli::{Cmd, GuardCmd};
 
 pub fn run(cmd: Cmd) -> anyhow::Result<i32> {
     // Updating needs no hydra home, so it works even when ~/.hydra is missing or broken.
     if let Cmd::Update { check, force } = cmd {
         return update::run(check, force);
+    }
+    // The guard loads what it needs itself and fails open, so it runs before the App.
+    if let Cmd::Guard { command } = cmd {
+        return match command {
+            GuardCmd::Git { hook, args } => guard::git(&hook, &args),
+            GuardCmd::Claude => guard::claude(),
+        };
+    }
+    if let Cmd::Allow { command } = cmd {
+        return guard::allow(&command);
     }
     let app = App::from_env()?;
     match cmd {
@@ -59,6 +71,8 @@ pub fn run(cmd: Cmd) -> anyhow::Result<i32> {
         ),
         Cmd::Remove { tool, env } => tools::remove(&app, tool, env),
         Cmd::Whoami { env } => whoami::run(&app, env),
-        Cmd::Update { .. } => unreachable!("handled above"),
+        Cmd::Bind { args, file, list } => bind::bind(&app, args, file, list),
+        Cmd::Unbind { path } => bind::unbind(&app, path),
+        Cmd::Update { .. } | Cmd::Guard { .. } | Cmd::Allow { .. } => unreachable!("handled above"),
     }
 }

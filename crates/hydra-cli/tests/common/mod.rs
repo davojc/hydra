@@ -18,7 +18,12 @@ impl Home {
     }
 
     pub fn hydra(&self) -> assert_cmd::Command {
-        let mut c = assert_cmd::Command::new(env!("CARGO_BIN_EXE_hydra"));
+        self.command(env!("CARGO_BIN_EXE_hydra"))
+    }
+
+    /// `program` (e.g. a copy of hydra named gh.exe) with the same hermetic environment.
+    pub fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> assert_cmd::Command {
+        let mut c = assert_cmd::Command::new(program);
         let service = format!(
             "hydra-test-{}",
             self.dir.path().file_name().unwrap().to_string_lossy()
@@ -28,6 +33,18 @@ impl Home {
         c.env("HYDRA_HOME", self.root())
             .env("HYDRA_KEYRING_SERVICE", service)
             .env("HYDRA_USER_HOME", self.dir.path().join("user"))
+            // git searches (e.g. for `.git/info/exclude`) stop at the test folder, so no test
+            // can touch a repo that happens to contain the machine's temp folder.
+            .env("GIT_CEILING_DIRECTORIES", self.dir.path())
+            // The developer's own global git config (often set by GIT_CONFIG_GLOBAL) must
+            // never leak in: the fake user's file stands in for it.
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                self.dir.path().join("user").join(".gitconfig"),
+            )
+            .env_remove("HYDRA_USER_GIT_CONFIG")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("HYDRA_ALLOW")
             .env_remove("HYDRA_ENV")
             .env_remove("HYDRA_ENV_VARS");
         for var in [

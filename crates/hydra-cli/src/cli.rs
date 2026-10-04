@@ -82,6 +82,19 @@ pub enum Cmd {
         #[arg(long)]
         env: Option<String>,
     },
+    /// Map folders to environments: hydra bind [<path>] <env>, or with no arguments show the current folder's
+    Bind {
+        /// [<path>] <env>
+        args: Vec<String>,
+        /// Write a .hydra file in the folder instead of a rule in config.toml
+        #[arg(long)]
+        file: bool,
+        /// List every rule in config.toml
+        #[arg(long)]
+        list: bool,
+    },
+    /// Remove the binding of a folder (its rule and/or its .hydra file)
+    Unbind { path: Option<String> },
     /// Install the latest hydra release from GitHub
     Update {
         /// Only say whether a newer release exists
@@ -91,12 +104,40 @@ pub enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Run one command past the folder guard: hydra allow -- <command...>
+    Allow {
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// Guard decisions for hydra's hooks (run by the hooks, not by hand)
+    #[command(hide = true)]
+    Guard {
+        #[command(subcommand)]
+        command: GuardCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GuardCmd {
+    /// Run by hydra's git hook wrappers: hydra guard git <hook> [args...]
+    Git {
+        hook: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Claude Code's PreToolUse hook: reads the hook JSON on stdin, exits 2 to block
+    Claude,
 }
 
 #[derive(Subcommand)]
 pub enum EnvCmd {
     /// Create an environment
-    New { name: String },
+    New {
+        name: String,
+        /// Where terminals for this environment open; also binds that folder to it
+        #[arg(long)]
+        home: Option<std::path::PathBuf>,
+    },
     /// List environments
     List,
     /// Delete an environment, its secrets and (after asking) its saved logins

@@ -1,5 +1,6 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use hydra_core::bindings::normalize;
 use hydra_core::config::{EnvConfig, GitConfig};
 use hydra_core::contribution::Contribution;
 use hydra_core::name::EnvName;
@@ -8,10 +9,36 @@ use hydra_core::provider::{CommandRunner, Ctx, IdentityReport, Provider, Provide
 
 use crate::report::report;
 
-pub struct Git;
+/// Looks up an inherited environment variable; empty values count as unset.
+type EnvLookup = Box<dyn Fn(&str) -> Option<String>>;
+
+pub struct Git {
+    inherited: EnvLookup,
+}
+
+impl Default for Git {
+    /// Reads inherited variables (`GIT_CONFIG_GLOBAL`, ...) from this process.
+    fn default() -> Self {
+        Self::with_env(|k| std::env::var(k).ok())
+    }
+}
+
+impl Git {
+    /// Reads inherited variables through `lookup` instead of the process environment.
+    pub fn with_env(lookup: impl Fn(&str) -> Option<String> + 'static) -> Self {
+        Self {
+            inherited: Box::new(move |k| lookup(k).filter(|v| !v.is_empty())),
+        }
+    }
+}
+
+/// Carries the user's own global git config file through nested hydra launches, where the
+/// inherited `GIT_CONFIG_GLOBAL` is hydra's generated file.
+const USER_GIT_CONFIG: &str = "HYDRA_USER_GIT_CONFIG";
 
 const MANAGED: &[&str] = &[
     "GIT_CONFIG_GLOBAL",
+    USER_GIT_CONFIG,
     "GIT_AUTHOR_NAME",
     "GIT_AUTHOR_EMAIL",
     "GIT_COMMITTER_NAME",
@@ -29,16 +56,182 @@ fn quote(v: &str) -> String {
     format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// The per-environment global gitconfig. It includes the user's own ~/.gitconfig first,
-/// so everything below overrides it.
-pub fn render_gitconfig(name: &EnvName, cfg: &GitConfig, user_home: &Path) -> String {
+/// The user's effective global git config, which the generated gitconfig includes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserGitConfig {
+    /// In include order (later files win).
+    pub files: Vec<PathBuf>,
+    /// The file named by an inherited `GIT_CONFIG_GLOBAL`, passed on as `HYDRA_USER_GIT_CONFIG`.
+    pub carried: Option<PathBuf>,
+}
+
+fn inside(path: &Path, root: &Path) -> bool {
+    let p = normalize(&path.to_string_lossy());
+    let r = normalize(&root.to_string_lossy());
+    p == r || p.starts_with(&format!("{r}/"))
+}
+
+/// Which file(s) git would read as the user's global config if hydra weren't involved.
+/// - an inherited `GIT_CONFIG_GLOBAL`, unless it is one of hydra's generated files (inside
+///   `state_root`, i.e. a nested launch): then the inherited `HYDRA_USER_GIT_CONFIG`;
+/// - otherwise the XDG file and `~/.gitconfig`, each if it exists (`~/.gitconfig` when neither does).
+pub fn user_git_config(
+    user_home: &Path,
+    state_root: &Path,
+    inherited: &dyn Fn(&str) -> Option<String>,
+) -> UserGitConfig {
+    let carried = match inherited("GIT_CONFIG_GLOBAL").map(PathBuf::from) {
+        Some(p) if !inside(&std::path::absolute(&p).unwrap_or(p.clone()), state_root) => Some(p),
+        Some(_) => inherited(USER_GIT_CONFIG).map(PathBuf::from),
+        None => None,
+    };
+    if let Some(p) = carried {
+        return UserGitConfig {
+            files: vec![p.clone()],
+            carried: Some(p),
+        };
+    }
+    let xdg = match inherited("XDG_CONFIG_HOME") {
+        Some(d) => PathBuf::from(d).join("git").join("config"),
+        None => user_home.join(".config").join("git").join("config"),
+    };
+    let home = user_home.join(".gitconfig");
+    let mut files: Vec<PathBuf> = [xdg, home.clone()]
+        .into_iter()
+        .filter(|f| f.is_file())
+        .collect();
+    if files.is_empty() {
+        files.push(home);
+    }
+    UserGitConfig {
+        files,
+        carried: None,
+    }
+}
+
+/// Every hook git runs; each gets a wrapper so the repo's own hook (or the user's global one)
+/// still runs when `core.hooksPath` points at hydra's folder. The receive-side hooks are here
+/// because a push to a local path runs `git receive-pack` with this environment's config.
+pub const HOOKS: &[&str] = &[
+    "applypatch-msg",
+    "pre-applypatch",
+    "post-applypatch",
+    "pre-commit",
+    "pre-merge-commit",
+    "prepare-commit-msg",
+    "commit-msg",
+    "post-commit",
+    "pre-rebase",
+    "post-checkout",
+    "post-merge",
+    "pre-push",
+    "post-rewrite",
+    "pre-auto-gc",
+    "push-to-checkout",
+    "sendemail-validate",
+    "pre-receive",
+    "update",
+    "post-receive",
+    "post-update",
+    "proc-receive",
+];
+
+/// The hooks that ask `hydra guard git` before chaining.
+const GUARDED: &[&str] = &["pre-commit", "pre-push"];
+
+/// A POSIX shell single-quoted string.
+fn sh_quote(v: &str) -> String {
+    format!("'{}'", v.replace('\'', r"'\''"))
+}
+
+/// The wrapper git runs for `hook`: the guard (for commit and push), then the hook it replaces.
+/// `chain_dir` is the user's global hooks folder, or empty for the repo's own hooks folder.
+pub fn render_hook(name: &EnvName, hook: &str, hydra_exe: &str, chain_dir: &str) -> String {
+    let mut s = format!(
+        "#!/bin/sh\n# generated by hydra - git hook wrapper for environment \"{name}\"\nhook={hook}\n"
+    );
+    s.push_str(&format!("hydra_exe={}\n", sh_quote(hydra_exe)));
+    s.push_str("[ -x \"$hydra_exe\" ] || hydra_exe=$(command -v hydra 2>/dev/null)\n");
+    if GUARDED.contains(&hook) {
+        // Only the guard's block code (1) stops git: a crash, a usage error or an older hydra
+        // without `guard` fails open.
+        s.push_str(
+            "if [ -n \"$hydra_exe\" ]; then \"$hydra_exe\" guard git \"$hook\" \"$@\" </dev/null; [ $? -ne 1 ] || exit 1; fi\n",
+        );
+    }
+    s.push_str(&format!("chain_dir={}\n", sh_quote(chain_dir)));
+    // Not `--git-path hooks`: with core.hooksPath set that names this folder, and the
+    // wrapper would exec itself forever.
+    s.push_str("[ -n \"$chain_dir\" ] || chain_dir=\"$(git rev-parse --git-common-dir)/hooks\"\n");
+    s.push_str(
+        "if [ -x \"$chain_dir/$hook\" ]; then exec \"$chain_dir/$hook\" \"$@\"; fi\nexit 0\n",
+    );
+    s
+}
+
+/// The user's own global `core.hooksPath`, with `/` separators: the first of `files` (highest
+/// precedence first) that sets it, directly or through an `[include]`. Empty when none does or git can't be run.
+fn user_hooks_path(files: &[PathBuf]) -> String {
+    for f in files.iter().rev().filter(|f| f.is_file()) {
+        let out = std::process::Command::new("git")
+            .arg("config")
+            .arg("--file")
+            .arg(f)
+            .args(["--includes", "--type=path", "--get", "core.hooksPath"])
+            .stdin(std::process::Stdio::null())
+            .output();
+        if let Ok(o) = out
+            && o.status.success()
+        {
+            let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if !v.is_empty() {
+                return v.replace('\\', "/");
+            }
+        }
+    }
+    String::new()
+}
+
+/// Writes `content` unless the file already holds it, through a temporary file and a rename so
+/// a running git never sees a half-written file.
+fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
+    if std::fs::read(path).is_ok_and(|old| old == content.as_bytes()) {
+        return Ok(());
+    }
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = path.with_file_name(format!(".{name}.hydra-tmp"));
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+/// The per-environment global gitconfig. It includes the user's own global config first
+/// (`includes`), so everything below overrides it. `core.hooksPath` points at hydra's hook wrappers.
+/// `git` is the environment's `[git]` section; `github` says whether it has `[github]`.
+pub fn render_gitconfig(
+    name: &EnvName,
+    git: Option<&GitConfig>,
+    github: bool,
+    user_home: &Path,
+    includes: &[PathBuf],
+    hooks_dir: &Path,
+) -> String {
+    let default = GitConfig::default();
+    let cfg = git.unwrap_or(&default);
     let mut s = format!(
         "# generated by hydra for environment \"{name}\" - edit ~/.hydra/envs/{name}/env.toml instead\n"
     );
+    let own: Vec<String> = includes.iter().map(|f| fwd(f)).collect();
     s.push_str(&format!(
-        "[include]\n\tpath = {}\n",
-        quote(&fwd(&user_home.join(".gitconfig")))
+        "# `git config --global` in a hydra terminal writes to this file, which hydra rewrites on the\n\
+         # next launch: put lasting settings in your own global config ({}), included below.\n",
+        own.join(", ")
     ));
+    s.push_str("[include]\n");
+    for f in includes {
+        s.push_str(&format!("\tpath = {}\n", quote(&fwd(f))));
+    }
     if cfg.name.is_some() || cfg.email.is_some() || cfg.signing_key.is_some() {
         s.push_str("[user]\n");
         if let Some(n) = &cfg.name {
@@ -57,37 +250,51 @@ pub fn render_gitconfig(name: &EnvName, cfg: &GitConfig, user_home: &Path) -> St
     if cfg.signing_key.is_some() {
         s.push_str("[gpg]\n\tformat = ssh\n");
     }
+    s.push_str("[core]\n");
     if let Some(k) = &cfg.ssh_key {
         let key = fwd(&expand_tilde(k, user_home)).replace('\'', "'\\''");
         s.push_str(&format!(
-            "[core]\n\tsshCommand = {}\n",
+            "\tsshCommand = {}\n",
             quote(&format!("ssh -i '{key}' -o IdentitiesOnly=yes"))
         ));
     }
+    s.push_str(&format!("\thooksPath = {}\n", quote(&fwd(hooks_dir))));
     // Git Credential Manager keeps HTTPS logins for every other host (GitLab, Azure DevOps,
-    // ...) in the OS credential store; a per-environment namespace keeps them apart.
-    s.push_str(&format!("[credential]\n\tnamespace = hydra-{name}\n"));
-    s.push_str(
-        "[credential \"https://github.com\"]\n\thelper =\n\thelper = !gh auth git-credential\n",
-    );
+    // ...) in the OS credential store; a per-environment namespace keeps them apart. Without
+    // `[git]` the environment keeps the user's own credentials.
+    if git.is_some() {
+        s.push_str(&format!("[credential]\n\tnamespace = hydra-{name}\n"));
+    }
+    // github.com logins come from the environment's own gh sign-in.
+    if git.is_some() || github {
+        s.push_str(
+            "[credential \"https://github.com\"]\n\thelper =\n\thelper = !gh auth git-credential\n",
+        );
+    }
     s
+}
+
+impl Git {
+    fn user_config(&self, ctx: &Ctx) -> UserGitConfig {
+        user_git_config(ctx.user_home, &ctx.paths.state_root(), &*self.inherited)
+    }
 }
 
 impl Provider for Git {
     fn id(&self) -> &'static str {
         "git"
     }
-    fn is_configured(&self, env: &EnvConfig) -> bool {
-        env.git.is_some()
+    /// Always on: every environment gets its own gitconfig (the user's global config plus the
+    /// guard hooks); a `[git]` section only adds identity overrides.
+    fn is_configured(&self, _env: &EnvConfig) -> bool {
+        true
     }
     fn managed_vars(&self) -> &'static [&'static str] {
         MANAGED
     }
 
     fn materialise(&self, ctx: &Ctx) -> Result<(), ProviderError> {
-        let Some(cfg) = &ctx.env.git else {
-            return Err(ProviderError::new("[git] section missing"));
-        };
+        let cfg = ctx.env.git.clone().unwrap_or_default();
         for (field, value) in [("ssh_key", &cfg.ssh_key), ("signing_key", &cfg.signing_key)] {
             if let Some(v) = value {
                 let p = expand_tilde(v, ctx.user_home);
@@ -102,10 +309,27 @@ impl Provider for Git {
             }
         }
         let dir = ctx.provider_dir("git");
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(
-            dir.join("gitconfig"),
-            render_gitconfig(ctx.name, cfg, ctx.user_home),
+        let hooks = dir.join("hooks");
+        std::fs::create_dir_all(&hooks)?;
+        let user = self.user_config(ctx);
+        let hydra_exe = std::env::current_exe().map(|p| fwd(&p)).unwrap_or_default();
+        let chain_dir = user_hooks_path(&user.files);
+        for hook in HOOKS {
+            write_atomic(
+                &hooks.join(hook),
+                &render_hook(ctx.name, hook, &hydra_exe, &chain_dir),
+            )?;
+        }
+        write_atomic(
+            &dir.join("gitconfig"),
+            &render_gitconfig(
+                ctx.name,
+                ctx.env.git.as_ref(),
+                ctx.env.github.is_some(),
+                ctx.user_home,
+                &user.files,
+                &hooks,
+            ),
         )?;
         Ok(())
     }
@@ -115,26 +339,34 @@ impl Provider for Git {
             "GIT_CONFIG_GLOBAL",
             &ctx.provider_dir("git").join("gitconfig"),
         );
-        for v in MANAGED.iter().filter(|v| **v != "GIT_CONFIG_GLOBAL") {
+        let carried = self.user_config(ctx).carried;
+        if let Some(f) = &carried {
+            c = c.path(USER_GIT_CONFIG, f);
+        }
+        for v in MANAGED.iter().filter(|v| {
+            **v != "GIT_CONFIG_GLOBAL" && !(**v == USER_GIT_CONFIG && carried.is_some())
+        }) {
             c = c.unset(v);
         }
         Ok(c)
     }
 
     fn check(&self, ctx: &Ctx, run: &dyn CommandRunner) -> IdentityReport {
-        let expected = ctx.env.git.as_ref().and_then(|g| g.email.clone());
-        match (
-            run.output("git", &["config", "--global", "user.email"]),
-            expected,
-        ) {
-            (Ok(actual), Some(exp)) if actual == exp => report("git", Status::Ok, actual),
-            (Ok(actual), Some(exp)) => report(
+        let Some(exp) = ctx.env.git.as_ref().and_then(|g| g.email.clone()) else {
+            // No identity override: show whatever git actually uses (includes followed).
+            return match run.output("git", &["config", "--get", "user.email"]) {
+                Ok(actual) => report("git", Status::Info, actual),
+                Err(_) => report("git", Status::Info, "no user.email set"),
+            };
+        };
+        match run.output("git", &["config", "--global", "user.email"]) {
+            Ok(actual) if actual == exp => report("git", Status::Ok, actual),
+            Ok(actual) => report(
                 "git",
                 Status::Mismatch,
                 format!("uses {actual}, expected {exp}"),
             ),
-            (Ok(actual), None) => report("git", Status::Info, actual),
-            (Err(e), _) => report("git", Status::Missing, e),
+            Err(e) => report("git", Status::Missing, e),
         }
     }
 }
@@ -144,9 +376,35 @@ mod tests {
     use super::*;
     use crate::testutil::{FakeRunner, Fixture};
     use hydra_core::contribution::VarValue;
+    use std::collections::HashMap;
 
     fn cfg(toml_src: &str) -> GitConfig {
         toml::from_str(toml_src).unwrap()
+    }
+
+    /// A provider that sees no inherited variables (never the developer's real ones).
+    fn git() -> Git {
+        Git::with_env(|_| None)
+    }
+
+    fn git_with(vars: &[(&str, String)]) -> Git {
+        let map: HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+        Git::with_env(move |k| map.get(k).cloned())
+    }
+
+    fn lookup(vars: &[(&str, String)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+        move |k| map.get(k).cloned()
+    }
+
+    fn s(p: &Path) -> String {
+        p.to_string_lossy().into_owned()
     }
 
     #[test]
@@ -156,16 +414,21 @@ mod tests {
         );
         let out = render_gitconfig(
             &EnvName::parse("work").unwrap(),
-            &c,
+            Some(&c),
+            false,
             Path::new("C:/Users/you"),
+            &[PathBuf::from("C:\\Users\\you\\.gitconfig")],
+            Path::new("C:\\hydra\\state\\work\\git\\hooks"),
         );
         assert_eq!(
             out,
             "# generated by hydra for environment \"work\" - edit ~/.hydra/envs/work/env.toml instead\n\
+             # `git config --global` in a hydra terminal writes to this file, which hydra rewrites on the\n\
+             # next launch: put lasting settings in your own global config (C:/Users/you/.gitconfig), included below.\n\
              [include]\n\tpath = \"C:/Users/you/.gitconfig\"\n\
              [user]\n\tname = \"David\"\n\temail = \"work@example.com\"\n\tsigningkey = \"C:/Users/you/.ssh/id_work.pub\"\n\
              [gpg]\n\tformat = ssh\n\
-             [core]\n\tsshCommand = \"ssh -i 'C:/Users/you/.ssh/id_work' -o IdentitiesOnly=yes\"\n\
+             [core]\n\tsshCommand = \"ssh -i 'C:/Users/you/.ssh/id_work' -o IdentitiesOnly=yes\"\n\thooksPath = \"C:/hydra/state/work/git/hooks\"\n\
              [credential]\n\tnamespace = hydra-work\n\
              [credential \"https://github.com\"]\n\thelper =\n\thelper = !gh auth git-credential\n"
         );
@@ -175,11 +438,33 @@ mod tests {
     fn credential_namespace_is_per_environment() {
         let out = render_gitconfig(
             &EnvName::parse("personal").unwrap(),
-            &cfg(""),
+            Some(&cfg("")),
+            false,
             Path::new("C:/Users/you"),
+            &[],
+            Path::new("C:/h"),
         );
         assert!(
             out.contains("[credential]\n\tnamespace = hydra-personal\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn github_section_alone_brings_the_gh_credential_helper() {
+        let out = render_gitconfig(
+            &EnvName::parse("personal").unwrap(),
+            None,
+            true,
+            Path::new("C:/Users/you"),
+            &[],
+            Path::new("C:/h"),
+        );
+        assert!(!out.contains("namespace"), "{out}");
+        assert!(
+            out.contains(
+                "[credential \"https://github.com\"]\n\thelper =\n\thelper = !gh auth git-credential\n"
+            ),
             "{out}"
         );
     }
@@ -189,8 +474,11 @@ mod tests {
         let c = cfg("ssh_key = \"~/.ssh/id work\"\nname = \"Jane \\\"JD\\\" Doe\"\n");
         let out = render_gitconfig(
             &EnvName::parse("work").unwrap(),
-            &c,
+            Some(&c),
+            false,
             Path::new("C:\\Users\\Jane Doe"),
+            &[PathBuf::from("C:\\Users\\Jane Doe\\.gitconfig")],
+            Path::new("C:/h"),
         );
         assert!(
             out.contains("\tpath = \"C:/Users/Jane Doe/.gitconfig\"\n"),
@@ -206,9 +494,108 @@ mod tests {
     }
 
     #[test]
+    fn user_config_defaults_to_home_gitconfig_even_when_missing() {
+        let f = Fixture::new("");
+        let u = user_git_config(&f.home, &f.paths.state_root(), &lookup(&[]));
+        assert_eq!(u.files, vec![f.home.join(".gitconfig")]);
+        assert_eq!(u.carried, None);
+    }
+
+    #[test]
+    fn user_config_includes_existing_xdg_and_home_files() {
+        let f = Fixture::new("");
+        let xdg = f.home.join(".config").join("git");
+        std::fs::create_dir_all(&xdg).unwrap();
+        std::fs::write(xdg.join("config"), "").unwrap();
+        let u = user_git_config(&f.home, &f.paths.state_root(), &lookup(&[]));
+        assert_eq!(u.files, vec![xdg.join("config")]);
+        std::fs::write(f.home.join(".gitconfig"), "").unwrap();
+        let u = user_git_config(&f.home, &f.paths.state_root(), &lookup(&[]));
+        assert_eq!(u.files, vec![xdg.join("config"), f.home.join(".gitconfig")]);
+
+        let other = f.home.join("xdg");
+        std::fs::create_dir_all(other.join("git")).unwrap();
+        std::fs::write(other.join("git").join("config"), "").unwrap();
+        let u = user_git_config(
+            &f.home,
+            &f.paths.state_root(),
+            &lookup(&[("XDG_CONFIG_HOME", s(&other))]),
+        );
+        assert_eq!(
+            u.files,
+            vec![other.join("git").join("config"), f.home.join(".gitconfig")]
+        );
+    }
+
+    #[test]
+    fn user_config_follows_an_inherited_git_config_global() {
+        let f = Fixture::new("");
+        let mine = f.home.join("elsewhere").join(".gitconfig");
+        let u = user_git_config(
+            &f.home,
+            &f.paths.state_root(),
+            &lookup(&[("GIT_CONFIG_GLOBAL", s(&mine))]),
+        );
+        assert_eq!(u.files, vec![mine.clone()]);
+        assert_eq!(u.carried, Some(mine));
+    }
+
+    #[test]
+    fn nested_launch_uses_the_carried_user_config() {
+        let f = Fixture::new("");
+        let generated = f
+            .paths
+            .state_root()
+            .join("other")
+            .join("git")
+            .join("gitconfig");
+        let mine = f.home.join("mine.gitconfig");
+        let u = user_git_config(
+            &f.home,
+            &f.paths.state_root(),
+            &lookup(&[
+                ("GIT_CONFIG_GLOBAL", s(&generated)),
+                (USER_GIT_CONFIG, s(&mine)),
+            ]),
+        );
+        assert_eq!(u.files, vec![mine.clone()]);
+        assert_eq!(u.carried, Some(mine));
+        // Nested, but nothing carried: back to the defaults, never hydra's own file.
+        let u = user_git_config(
+            &f.home,
+            &f.paths.state_root(),
+            &lookup(&[("GIT_CONFIG_GLOBAL", s(&generated))]),
+        );
+        assert_eq!(u.files, vec![f.home.join(".gitconfig")]);
+        assert_eq!(u.carried, None);
+    }
+
+    #[test]
+    fn contribute_carries_the_inherited_user_config() {
+        let f = Fixture::new("[git]\nemail = \"a@b.c\"\n");
+        let mine = f.home.join("mine.gitconfig");
+        let g = git_with(&[("GIT_CONFIG_GLOBAL", s(&mine))]);
+        g.materialise(&f.ctx()).unwrap();
+        let gitconfig =
+            std::fs::read_to_string(f.paths.state_dir(&f.name).join("git").join("gitconfig"))
+                .unwrap();
+        assert!(
+            gitconfig.contains(&format!("[include]\n\tpath = {}\n", quote(&fwd(&mine)))),
+            "{gitconfig}"
+        );
+        let c = g.contribute(&f.ctx()).unwrap();
+        assert_eq!(c.vars[USER_GIT_CONFIG], VarValue::Literal(s(&mine)));
+        assert!(!c.unset.contains(USER_GIT_CONFIG));
+
+        let c = git().contribute(&f.ctx()).unwrap();
+        assert!(!c.vars.contains_key(USER_GIT_CONFIG));
+        assert!(c.unset.contains(USER_GIT_CONFIG));
+    }
+
+    #[test]
     fn materialise_requires_the_ssh_key() {
         let f = Fixture::new("[git]\nssh_key = \"~/.ssh/missing\"\n");
-        let e = Git.materialise(&f.ctx()).unwrap_err();
+        let e = git().materialise(&f.ctx()).unwrap_err();
         assert!(e.message.ends_with("missing not found"), "{}", e.message);
         assert!(
             e.fix
@@ -220,14 +607,14 @@ mod tests {
     #[test]
     fn materialise_writes_gitconfig_and_contributes_it() {
         let f = Fixture::new("[git]\nemail = \"a@b.c\"\n");
-        Git.materialise(&f.ctx()).unwrap();
+        git().materialise(&f.ctx()).unwrap();
         let file = f.paths.state_dir(&f.name).join("git").join("gitconfig");
         assert!(
             std::fs::read_to_string(&file)
                 .unwrap()
                 .contains("email = \"a@b.c\"")
         );
-        let c = Git.contribute(&f.ctx()).unwrap();
+        let c = git().contribute(&f.ctx()).unwrap();
         assert_eq!(
             c.vars["GIT_CONFIG_GLOBAL"],
             VarValue::Literal(file.to_string_lossy().into_owned())
@@ -235,13 +622,240 @@ mod tests {
         assert!(c.unset.contains("GIT_AUTHOR_EMAIL") && c.unset.contains("GIT_SSH_COMMAND"));
     }
 
+    const ALL_HOOKS: &[&str] = &[
+        "applypatch-msg",
+        "pre-applypatch",
+        "post-applypatch",
+        "pre-commit",
+        "pre-merge-commit",
+        "prepare-commit-msg",
+        "commit-msg",
+        "post-commit",
+        "pre-rebase",
+        "post-checkout",
+        "post-merge",
+        "pre-push",
+        "post-rewrite",
+        "pre-auto-gc",
+        "push-to-checkout",
+        "sendemail-validate",
+        "pre-receive",
+        "update",
+        "post-receive",
+        "post-update",
+        "proc-receive",
+    ];
+
+    fn hooks_dir(f: &Fixture) -> std::path::PathBuf {
+        f.paths.state_dir(&f.name).join("git").join("hooks")
+    }
+
+    #[test]
+    fn materialise_points_core_hooks_path_at_the_wrappers() {
+        let f = Fixture::new("[git]\nemail = \"a@b.c\"\n");
+        git().materialise(&f.ctx()).unwrap();
+        let gitconfig =
+            std::fs::read_to_string(f.paths.state_dir(&f.name).join("git").join("gitconfig"))
+                .unwrap();
+        let dir = hooks_dir(&f).to_string_lossy().replace('\\', "/");
+        assert!(
+            gitconfig.contains(&format!("[core]\n\thooksPath = \"{dir}\"\n")),
+            "{gitconfig}"
+        );
+        for hook in ALL_HOOKS {
+            assert!(hooks_dir(&f).join(hook).is_file(), "{hook} missing");
+        }
+        for hook in [
+            "pre-receive",
+            "update",
+            "post-receive",
+            "post-update",
+            "proc-receive",
+        ] {
+            let w = std::fs::read_to_string(hooks_dir(&f).join(hook)).unwrap();
+            assert!(!w.contains("guard"), "{w}");
+        }
+    }
+
+    #[test]
+    fn unchanged_wrappers_are_not_rewritten() {
+        let f = Fixture::new("[git]\nemail = \"a@b.c\"\n");
+        git().materialise(&f.ctx()).unwrap();
+        let file = hooks_dir(&f).join("pre-commit");
+        let before = std::fs::metadata(&file).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        git().materialise(&f.ctx()).unwrap();
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().modified().unwrap(),
+            before
+        );
+        std::fs::write(&file, "stale").unwrap();
+        git().materialise(&f.ctx()).unwrap();
+        assert!(
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .starts_with("#!/bin/sh")
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(hooks_dir(&f))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".hydra-tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
+    }
+
+    #[test]
+    fn hooks_path_joins_ssh_command_in_one_core_section() {
+        let f = Fixture::new("[git]\nssh_key = \"~/.ssh/id\"\n");
+        std::fs::create_dir_all(f.home.join(".ssh")).unwrap();
+        std::fs::write(f.home.join(".ssh").join("id"), "k").unwrap();
+        git().materialise(&f.ctx()).unwrap();
+        let gitconfig =
+            std::fs::read_to_string(f.paths.state_dir(&f.name).join("git").join("gitconfig"))
+                .unwrap();
+        assert_eq!(gitconfig.matches("[core]").count(), 1, "{gitconfig}");
+        assert!(
+            gitconfig.contains("IdentitiesOnly=yes\"\n\thooksPath = "),
+            "{gitconfig}"
+        );
+    }
+
+    #[test]
+    fn guarded_wrappers_call_hydra_and_chain() {
+        let f = Fixture::new("[git]\nemail = \"a@b.c\"\n");
+        git().materialise(&f.ctx()).unwrap();
+        let push = std::fs::read_to_string(hooks_dir(&f).join("pre-push")).unwrap();
+        assert!(
+            push.starts_with("#!/bin/sh\n# generated by hydra"),
+            "{push}"
+        );
+        assert!(!push.contains('\r'), "{push:?}");
+        assert!(push.contains("hook=pre-push\n"), "{push}");
+        assert!(
+            push.contains("guard git \"$hook\" \"$@\" </dev/null; [ $? -ne 1 ] || exit 1; fi\n"),
+            "{push}"
+        );
+        assert!(push.contains("chain_dir=''\n"), "{push}");
+        assert!(
+            push.contains("chain_dir=\"$(git rev-parse --git-common-dir)/hooks\"\n"),
+            "{push}"
+        );
+        assert!(
+            push.contains("if [ -x \"$chain_dir/$hook\" ]; then exec \"$chain_dir/$hook\" \"$@\"; fi\nexit 0\n"),
+            "{push}"
+        );
+        let commit = std::fs::read_to_string(hooks_dir(&f).join("pre-commit")).unwrap();
+        assert!(commit.contains("guard git \"$hook\""), "{commit}");
+        let msg = std::fs::read_to_string(hooks_dir(&f).join("commit-msg")).unwrap();
+        assert!(!msg.contains("guard"), "{msg}");
+        assert!(msg.contains("hook=commit-msg\n"), "{msg}");
+    }
+
+    #[test]
+    fn wrappers_chain_to_the_users_global_hooks_path() {
+        let f = Fixture::new("[git]\nemail = \"a@b.c\"\n");
+        std::fs::write(
+            f.home.join(".gitconfig"),
+            "[core]\n\thooksPath = \"C:/my hooks/it's\"\n",
+        )
+        .unwrap();
+        git().materialise(&f.ctx()).unwrap();
+        let commit = std::fs::read_to_string(hooks_dir(&f).join("pre-commit")).unwrap();
+        assert!(
+            commit.contains("chain_dir='C:/my hooks/it'\\''s'\n"),
+            "{commit}"
+        );
+    }
+
+    #[test]
+    fn global_hooks_path_set_in_an_included_file_is_found() {
+        let f = Fixture::new("[git]\nemail = \"a@b.c\"\n");
+        let extra = f.home.join("extra.gitconfig");
+        std::fs::write(&extra, "[core]\n\thooksPath = C:/included-hooks\n").unwrap();
+        std::fs::write(
+            f.home.join(".gitconfig"),
+            format!("[include]\n\tpath = {}\n", quote(&fwd(&extra))),
+        )
+        .unwrap();
+        git().materialise(&f.ctx()).unwrap();
+        let commit = std::fs::read_to_string(hooks_dir(&f).join("pre-commit")).unwrap();
+        assert!(
+            commit.contains("chain_dir='C:/included-hooks'\n"),
+            "{commit}"
+        );
+    }
+
+    #[test]
+    fn global_hooks_path_comes_from_the_inherited_user_config() {
+        let f = Fixture::new("[git]\nemail = \"a@b.c\"\n");
+        // ~/.gitconfig says one thing, the inherited GIT_CONFIG_GLOBAL another: that one wins.
+        std::fs::write(
+            f.home.join(".gitconfig"),
+            "[core]\n\thooksPath = C:/home-hooks\n",
+        )
+        .unwrap();
+        let mine = f.home.join("mine.gitconfig");
+        std::fs::write(&mine, "[core]\n\thooksPath = C:/mine-hooks\n").unwrap();
+        git_with(&[("GIT_CONFIG_GLOBAL", s(&mine))])
+            .materialise(&f.ctx())
+            .unwrap();
+        let commit = std::fs::read_to_string(hooks_dir(&f).join("pre-commit")).unwrap();
+        assert!(commit.contains("chain_dir='C:/mine-hooks'\n"), "{commit}");
+    }
+
+    #[test]
+    fn every_environment_gets_a_gitconfig_even_without_a_git_section() {
+        let f = Fixture::new("");
+        assert!(git().is_configured(&f.env));
+        git().materialise(&f.ctx()).unwrap();
+        let file = f.paths.state_dir(&f.name).join("git").join("gitconfig");
+        let gitconfig = std::fs::read_to_string(&file).unwrap();
+        assert!(!gitconfig.contains("[user]"), "{gitconfig}");
+        assert!(!gitconfig.contains("[gpg]"), "{gitconfig}");
+        assert!(!gitconfig.contains("sshCommand"), "{gitconfig}");
+        // The user's own credentials stay in charge.
+        assert!(!gitconfig.contains("namespace = "), "{gitconfig}");
+        assert!(!gitconfig.contains("gh auth git-credential"), "{gitconfig}");
+        assert!(gitconfig.contains("\thooksPath = "), "{gitconfig}");
+        // The header names the user's real global config.
+        assert!(
+            gitconfig.contains(&format!(
+                "# `git config --global` in a hydra terminal writes to this file, which hydra rewrites on the\n\
+                 # next launch: put lasting settings in your own global config ({}), included below.\n",
+                fwd(&f.home.join(".gitconfig"))
+            )),
+            "{gitconfig}"
+        );
+        assert!(
+            gitconfig.contains(&format!(
+                "[include]\n\tpath = {}\n",
+                quote(&fwd(&f.home.join(".gitconfig")))
+            )),
+            "{gitconfig}"
+        );
+        assert!(hooks_dir(&f).join("pre-commit").is_file());
+        let c = git().contribute(&f.ctx()).unwrap();
+        assert_eq!(c.vars["GIT_CONFIG_GLOBAL"], VarValue::Literal(s(&file)));
+        assert!(c.unset.contains("GIT_AUTHOR_EMAIL"));
+    }
+
+    #[test]
+    fn check_without_an_email_override_reports_the_effective_email() {
+        let f = Fixture::new("");
+        let run = FakeRunner::default().with("git config --get user.email", Ok("me@home"));
+        let r = git().check(&f.ctx(), &run);
+        assert_eq!((r.status, r.detail.as_str()), (Status::Info, "me@home"));
+        let none = FakeRunner::default();
+        assert_eq!(git().check(&f.ctx(), &none).status, Status::Info);
+    }
+
     #[test]
     fn check_compares_email() {
         let f = Fixture::new("[git]\nemail = \"a@b.c\"\n");
         let ok = FakeRunner::default().with("git config --global user.email", Ok("a@b.c"));
-        assert_eq!(Git.check(&f.ctx(), &ok).status, Status::Ok);
+        assert_eq!(git().check(&f.ctx(), &ok).status, Status::Ok);
         let wrong = FakeRunner::default().with("git config --global user.email", Ok("x@y.z"));
-        let r = Git.check(&f.ctx(), &wrong);
+        let r = git().check(&f.ctx(), &wrong);
         assert_eq!(
             (r.status, r.detail.as_str()),
             (Status::Mismatch, "uses x@y.z, expected a@b.c")

@@ -20,7 +20,7 @@ pub fn all() -> Vec<Box<dyn Provider>> {
     vec![
         Box::new(claude::Claude),
         Box::new(github::Github),
-        Box::new(git::Git),
+        Box::new(git::Git::default()),
         Box::new(aws::Aws),
         Box::new(dir::AZURE),
         Box::new(dir::GCLOUD),

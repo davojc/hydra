@@ -335,6 +335,33 @@ fn is_wrapper(t: &str) -> bool {
 
 const MAX_DEPTH: usize = 4;
 
+/// A program token's lowercased file name without `.exe`: "C:/x/Git.exe" -> "git".
+fn program_base(prog: &str) -> String {
+    let lower = prog
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(prog)
+        .to_lowercase();
+    lower.strip_suffix(".exe").unwrap_or(&lower).to_string()
+}
+
+/// Whether a shell path stands on its own: `/x`, `\x`, `~`, `~/x`, `C:/x`, `C:\x`.
+fn is_rooted(p: &str) -> bool {
+    let b = p.as_bytes();
+    p.starts_with(['/', '\\'])
+        || p == "~"
+        || p.starts_with("~/")
+        || (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':')
+}
+
+/// `dir` as seen from `base` (the folder earlier `cd`s moved to, if any).
+fn join_dir(base: Option<&str>, dir: &str) -> String {
+    match base {
+        Some(b) if !is_rooted(dir) => format!("{}/{dir}", b.trim_end_matches(['/', '\\'])),
+        _ => dir.to_string(),
+    }
+}
+
 fn scan_line(line: &str, cd: &mut Option<String>, depth: usize, checks: &mut Vec<Check>) {
     let (parts, nested) = split_commands(line);
     for part in parts {
@@ -348,26 +375,38 @@ fn scan_line(line: &str, cd: &mut Option<String>, depth: usize, checks: &mut Vec
         if let Some(last) = tokens.last_mut() {
             *last = last.trim_end_matches('}').to_string();
         }
+        // `hydra allow -- <cmd>` is checked as `<cmd>`: the override needs a human, so the
+        // model can't use it to step past the guard.
+        while tokens.len() >= 2 && program_base(&tokens[0]) == "hydra" && tokens[1] == "allow" {
+            let skip = if tokens.get(2).is_some_and(|t| t == "--") {
+                3
+            } else {
+                2
+            };
+            tokens = tokens
+                .split_off(skip)
+                .into_iter()
+                .skip_while(|t| is_wrapper(t.as_str()))
+                .collect();
+        }
         let Some(prog) = tokens.first() else { continue };
-        let lower = prog
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or(prog)
-            .to_lowercase();
-        let base = lower.strip_suffix(".exe").unwrap_or(&lower);
+        let base = program_base(prog);
+        let base = base.as_str();
         let rest = &tokens[1..];
         match base {
             "cd" => {
                 if let Some(d) = rest.iter().find(|a| !a.eq_ignore_ascii_case("/d")) {
-                    *cd = Some(d.clone());
+                    *cd = Some(join_dir(cd.as_deref(), d));
                 }
             }
             "git" => {
                 if let Some(mut c) = classify_git(rest) {
-                    if let Check::Git { dir, .. } = &mut c
-                        && dir.is_none()
-                    {
-                        *dir = cd.clone();
+                    if let Check::Git { dir, .. } = &mut c {
+                        // `-C` is relative to wherever earlier `cd`s left the shell.
+                        *dir = match dir.take() {
+                            Some(d) => Some(join_dir(cd.as_deref(), &d)),
+                            None => cd.clone(),
+                        };
                     }
                     checks.push(c);
                 }
@@ -440,6 +479,12 @@ pub struct Facts<'a> {
     pub target_owner: Option<&'a str>,
 }
 
+/// The last line of a wrong-environment block, before the command.
+pub const ALLOW_HINT: &str = "  -> or run it once anyway: hydra allow -- ";
+/// What Claude is told instead of [`ALLOW_HINT`]: only the user may override.
+pub const CLAUDE_ALLOW_HINT: &str =
+    "  -> or ask the user to run it once in their terminal: hydra allow -- ";
+
 pub fn decide(check: &Check, f: &Facts) -> Verdict {
     let Some(current) = f.current_env else {
         return Verdict::Allow;
@@ -452,7 +497,7 @@ pub fn decide(check: &Check, f: &Facts) -> Verdict {
         && b.env != current
     {
         return Verdict::Block(format!(
-            "hydra: blocked {cmd} - this folder belongs to {bound} ({source}), this terminal is {current}\n  -> open a {bound} terminal here: hydra shell {bound}\n  -> or run it once anyway: hydra allow -- {cmd}",
+            "hydra: blocked {cmd} - this folder belongs to {bound} ({source}), this terminal is {current}\n  -> open a {bound} terminal here: hydra shell {bound}\n{ALLOW_HINT}{cmd}",
             bound = b.env,
             source = b.describe(),
         ));
@@ -541,7 +586,7 @@ mod tests {
             c[0],
             Check::Git {
                 action: GitAction::Push,
-                dir: Some("my dir".into()),
+                dir: Some("../repo/my dir".into()),
                 remote: None
             }
         );
@@ -721,5 +766,59 @@ mod tests {
         assert_eq!(labels("sh -c \"gh pr merge 1\""), ["gh pr merge"]);
         assert_eq!(labels("bash -lc 'git commit -m x'"), ["git commit"]);
         assert!(labels("echo '$(git push)' `echo hi`").is_empty());
+    }
+
+    fn git_dirs(line: &str) -> Vec<Option<String>> {
+        checks_in_command_line(line)
+            .into_iter()
+            .map(|c| match c {
+                Check::Git { dir, .. } => dir,
+                Check::Gh { .. } => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn git_dir_follows_earlier_cds() {
+        assert_eq!(
+            git_dirs("cd sub && git -C .. commit"),
+            [Some("sub/..".into())]
+        );
+        assert_eq!(git_dirs("cd a; cd b && git push"), [Some("a/b".into())]);
+        assert_eq!(
+            git_dirs("cd a && cd /c/r && git push"),
+            [Some("/c/r".into())]
+        );
+        assert_eq!(git_dirs("cd a && git -C ~/r push"), [Some("~/r".into())]);
+        assert_eq!(git_dirs("cd a && git -C D:/r push"), [Some("D:/r".into())]);
+        assert_eq!(git_dirs("git -C r push"), [Some("r".into())]);
+        assert_eq!(git_dirs("git push"), [None]);
+    }
+
+    #[test]
+    fn hydra_allow_is_scanned_as_its_command() {
+        assert_eq!(labels("hydra allow -- git push"), ["git push"]);
+        assert_eq!(
+            labels("cd x && hydra.exe allow -- gh pr create"),
+            ["gh pr create"]
+        );
+        assert_eq!(
+            labels("C:/tools/Hydra.EXE allow -- FOO=1 git commit -m x"),
+            ["git commit"]
+        );
+        assert_eq!(
+            labels("hydra allow -- hydra allow -- git push"),
+            ["git push"]
+        );
+        assert_eq!(
+            checks_in_command_line("cd ../r && hydra allow -- git -C sub push"),
+            vec![Check::Git {
+                action: GitAction::Push,
+                dir: Some("../r/sub".into()),
+                remote: None
+            }]
+        );
+        assert!(labels("hydra allow -- git status").is_empty());
+        assert!(labels("hydra whoami").is_empty());
     }
 }

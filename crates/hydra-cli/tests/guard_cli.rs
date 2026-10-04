@@ -642,3 +642,69 @@ fn claude_hook_allows_other_commands() {
     let other = serde_json::json!({"tool_name": "Edit", "tool_input": {"command": "git commit"}, "cwd": s.repo}).to_string();
     claude_hook(&s, "personal", &other).success();
 }
+
+#[test]
+fn claude_is_told_to_ask_the_user_and_cannot_allow_itself() {
+    let s = Setup::new();
+    claude_hook(
+        &s,
+        "personal",
+        &bash_input("hydra allow -- git commit -m x", &s.repo),
+    )
+    .code(2)
+    .stderr(predicate::str::contains("blocked git commit"))
+    .stderr(predicate::str::contains(
+        "\n  -> or ask the user to run it once in their terminal: hydra allow -- git commit",
+    ))
+    .stderr(predicate::str::contains("run it once anyway").not());
+    claude_hook(
+        &s,
+        "personal",
+        &bash_input("hydra.exe allow -- gh pr create --fill", &s.repo),
+    )
+    .code(2)
+    .stderr(predicate::str::contains("blocked gh pr create"));
+    // The git hook keeps the usual wording.
+    s.run_git("personal", &["commit", "--allow-empty", "-m", "x"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "-> or run it once anyway: hydra allow -- git commit",
+        ));
+}
+
+/// `C:\a\b` as Git Bash writes it: `/c/a/b`.
+fn msys(p: &Path) -> String {
+    let s = p.to_string_lossy().replace('\\', "/");
+    let (drive, rest) = s.split_once(':').unwrap();
+    format!("/{}{rest}", drive.to_lowercase())
+}
+
+#[test]
+fn claude_hook_follows_shell_paths_and_cds() {
+    let s = Setup::new();
+    let side = s.tmp().join("side");
+    std::fs::create_dir_all(&side).unwrap();
+    std::fs::create_dir_all(s.repo.join("sub")).unwrap();
+    let repo = msys(&s.repo);
+    for (command, cwd) in [
+        (format!("cd {repo} && git commit --no-verify -m x"), &side),
+        (format!("git -C {repo} push"), &side),
+        // `..` is relative to `sub`, not to the starting folder (whose parent is unbound).
+        ("cd sub && git -C .. commit -m x".to_string(), &s.repo),
+    ] {
+        claude_hook(&s, "personal", &bash_input(&command, cwd))
+            .code(2)
+            .stderr(predicate::str::contains("blocked git"));
+    }
+    s.h.hydra()
+        .args(["guard", "claude"])
+        .env("HYDRA_ENV", "personal")
+        .env("HYDRA_USER_HOME", s.tmp())
+        .write_stdin(bash_input("cd ~/repo && git commit -m x", &side))
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("blocked git commit"));
+    // Still allowed where nothing is bound.
+    claude_hook(&s, "personal", &bash_input("git -C .. commit -m x", &side)).success();
+}

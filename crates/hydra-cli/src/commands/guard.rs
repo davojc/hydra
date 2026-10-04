@@ -8,7 +8,8 @@ use anyhow::Context;
 use hydra_core::bindings::{self, Binding};
 use hydra_core::config::{load_env, load_global};
 use hydra_core::guard::{
-    Check, Facts, GitAction, Verdict, checks_in_command_line, classify_gh, decide, github_owner,
+    ALLOW_HINT, CLAUDE_ALLOW_HINT, Check, Facts, GitAction, Verdict, checks_in_command_line,
+    classify_gh, decide, github_owner,
 };
 use hydra_core::name::EnvName;
 use hydra_core::paths::{HydraPaths, expand_tilde};
@@ -204,9 +205,14 @@ pub fn claude() -> anyhow::Result<i32> {
         None => std::env::current_dir().unwrap_or_default(),
     };
     let cwd = std::path::absolute(&cwd).unwrap_or(cwd);
+    let home = crate::app::user_home().ok();
     for check in checks_in_command_line(command) {
         let folder = match &check {
-            Check::Git { dir: Some(d), .. } => cwd.join(d),
+            Check::Git { dir: Some(d), .. } => {
+                let joined = cwd.join(shell_path(d, home.as_deref()));
+                // Also folds `..` away, so the binding walk starts at the real folder.
+                std::path::absolute(&joined).unwrap_or(joined)
+            }
             _ => cwd.clone(),
         };
         let owner = || match &check {
@@ -220,12 +226,33 @@ pub fn claude() -> anyhow::Result<i32> {
             Verdict::Allow => {}
             Verdict::Warn(m) => anstream::eprintln!("{}", style::warn(m)),
             Verdict::Block(m) => {
-                anstream::eprintln!("{m}");
+                // Only the user may override: the model is told to ask, not to run it.
+                anstream::eprintln!("{}", m.replace(ALLOW_HINT, CLAUDE_ALLOW_HINT));
                 return Ok(2);
             }
         }
     }
     Ok(0)
+}
+
+/// A folder as Claude's bash writes it, in Windows form: `/c/x` -> `C:/x`, `~` and `~/x` under
+/// `home`. Anything else is returned as it is (relative paths stay relative).
+fn shell_path(d: &str, home: Option<&Path>) -> PathBuf {
+    if let Some(home) = home {
+        if d == "~" {
+            return home.to_path_buf();
+        }
+        if let Some(rest) = d.strip_prefix("~/") {
+            return home.join(rest);
+        }
+    }
+    let b = d.as_bytes();
+    if b.len() >= 2 && b[0] == b'/' && b[1].is_ascii_alphabetic() && (b.len() == 2 || b[2] == b'/')
+    {
+        let drive = (b[1] as char).to_ascii_uppercase();
+        return PathBuf::from(format!("{drive}:/{}", d.get(3..).unwrap_or("")));
+    }
+    PathBuf::from(d)
 }
 
 /// ssh.exe in a hydra terminal: adds the environment's git ssh_key, then runs the real ssh.
@@ -299,4 +326,25 @@ fn real_program(name: &str) -> anyhow::Result<PathBuf> {
     let path = std::env::join_paths(dirs).context("PATH holds a folder that can't be searched")?;
     resolve_program(name, &path, std::env::var_os("PATHEXT").as_deref())
         .ok_or_else(|| anyhow::anyhow!("{name} isn't installed or isn't on PATH"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_paths_become_windows_paths() {
+        let home = Path::new("C:/Users/me");
+        assert_eq!(
+            shell_path("/c/work/r", Some(home)),
+            PathBuf::from("C:/work/r")
+        );
+        assert_eq!(shell_path("/e", Some(home)), PathBuf::from("E:/"));
+        assert_eq!(shell_path("~", Some(home)), home.to_path_buf());
+        assert_eq!(shell_path("~/r", Some(home)), home.join("r"));
+        assert_eq!(shell_path("../r", Some(home)), PathBuf::from("../r"));
+        assert_eq!(shell_path("/cd/r", Some(home)), PathBuf::from("/cd/r"));
+        assert_eq!(shell_path("D:/r", None), PathBuf::from("D:/r"));
+        assert_eq!(shell_path("~/r", None), PathBuf::from("~/r"));
+    }
 }

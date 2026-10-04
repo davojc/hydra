@@ -344,3 +344,39 @@ fn the_users_own_global_config_is_included_and_carried() {
         .success();
     assert!(s.repo.join("global-ran").is_file());
 }
+
+#[test]
+fn an_environment_without_a_git_section_still_gets_its_gitconfig_and_guard() {
+    let s = Setup::new();
+    s.h.write_env("plain", "label = \"plain\"\n");
+    // The (fake) user's global config: Home::hydra points GIT_CONFIG_GLOBAL at it.
+    std::fs::write(
+        s.tmp().join("user").join(".gitconfig"),
+        "[user]\n\tname = Me\n\temail = me@example.com\n[alias]\n\thy = status\n",
+    )
+    .unwrap();
+
+    // GIT_CONFIG_GLOBAL is plain's generated file: --global reads only that file.
+    let hooks = s.state_git("plain").join("hooks");
+    s.run_git("plain", &["config", "--global", "--get", "core.hooksPath"])
+        .assert()
+        .success()
+        .stdout(format!("{}\n", hooks.to_string_lossy().replace('\\', "/")));
+    // ... and it includes the user's global config.
+    s.run_git("plain", &["config", "--get", "alias.hy"])
+        .assert()
+        .success()
+        .stdout("status\n");
+    s.run_git("plain", &["config", "--get", "user.email"])
+        .assert()
+        .success()
+        .stdout("me@example.com\n");
+
+    s.run_git("plain", &["commit", "--allow-empty", "-m", "x"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "blocked git commit - this folder belongs to work",
+        ));
+    assert_eq!(s.commit_count(), "0");
+}

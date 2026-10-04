@@ -268,17 +268,17 @@ impl Provider for Git {
     fn id(&self) -> &'static str {
         "git"
     }
-    fn is_configured(&self, env: &EnvConfig) -> bool {
-        env.git.is_some()
+    /// Always on: every environment gets its own gitconfig (the user's global config plus the
+    /// guard hooks); a `[git]` section only adds identity overrides.
+    fn is_configured(&self, _env: &EnvConfig) -> bool {
+        true
     }
     fn managed_vars(&self) -> &'static [&'static str] {
         MANAGED
     }
 
     fn materialise(&self, ctx: &Ctx) -> Result<(), ProviderError> {
-        let Some(cfg) = &ctx.env.git else {
-            return Err(ProviderError::new("[git] section missing"));
-        };
+        let cfg = ctx.env.git.clone().unwrap_or_default();
         for (field, value) in [("ssh_key", &cfg.ssh_key), ("signing_key", &cfg.signing_key)] {
             if let Some(v) = value {
                 let p = expand_tilde(v, ctx.user_home);
@@ -306,7 +306,7 @@ impl Provider for Git {
         }
         write_atomic(
             &dir.join("gitconfig"),
-            &render_gitconfig(ctx.name, cfg, ctx.user_home, &user.files, &hooks),
+            &render_gitconfig(ctx.name, &cfg, ctx.user_home, &user.files, &hooks),
         )?;
         Ok(())
     }
@@ -329,19 +329,21 @@ impl Provider for Git {
     }
 
     fn check(&self, ctx: &Ctx, run: &dyn CommandRunner) -> IdentityReport {
-        let expected = ctx.env.git.as_ref().and_then(|g| g.email.clone());
-        match (
-            run.output("git", &["config", "--global", "user.email"]),
-            expected,
-        ) {
-            (Ok(actual), Some(exp)) if actual == exp => report("git", Status::Ok, actual),
-            (Ok(actual), Some(exp)) => report(
+        let Some(exp) = ctx.env.git.as_ref().and_then(|g| g.email.clone()) else {
+            // No identity override: show whatever git actually uses (includes followed).
+            return match run.output("git", &["config", "--get", "user.email"]) {
+                Ok(actual) => report("git", Status::Info, actual),
+                Err(_) => report("git", Status::Info, "no user.email set"),
+            };
+        };
+        match run.output("git", &["config", "--global", "user.email"]) {
+            Ok(actual) if actual == exp => report("git", Status::Ok, actual),
+            Ok(actual) => report(
                 "git",
                 Status::Mismatch,
                 format!("uses {actual}, expected {exp}"),
             ),
-            (Ok(actual), None) => report("git", Status::Info, actual),
-            (Err(e), _) => report("git", Status::Missing, e),
+            Err(e) => report("git", Status::Missing, e),
         }
     }
 }
@@ -734,6 +736,40 @@ mod tests {
             .unwrap();
         let commit = std::fs::read_to_string(hooks_dir(&f).join("pre-commit")).unwrap();
         assert!(commit.contains("chain_dir='C:/mine-hooks'\n"), "{commit}");
+    }
+
+    #[test]
+    fn every_environment_gets_a_gitconfig_even_without_a_git_section() {
+        let f = Fixture::new("");
+        assert!(git().is_configured(&f.env));
+        git().materialise(&f.ctx()).unwrap();
+        let file = f.paths.state_dir(&f.name).join("git").join("gitconfig");
+        let gitconfig = std::fs::read_to_string(&file).unwrap();
+        assert!(!gitconfig.contains("[user]"), "{gitconfig}");
+        assert!(!gitconfig.contains("[gpg]"), "{gitconfig}");
+        assert!(!gitconfig.contains("sshCommand"), "{gitconfig}");
+        assert!(gitconfig.contains("\thooksPath = "), "{gitconfig}");
+        assert!(
+            gitconfig.contains(&format!(
+                "[include]\n\tpath = {}\n",
+                quote(&fwd(&f.home.join(".gitconfig")))
+            )),
+            "{gitconfig}"
+        );
+        assert!(hooks_dir(&f).join("pre-commit").is_file());
+        let c = git().contribute(&f.ctx()).unwrap();
+        assert_eq!(c.vars["GIT_CONFIG_GLOBAL"], VarValue::Literal(s(&file)));
+        assert!(c.unset.contains("GIT_AUTHOR_EMAIL"));
+    }
+
+    #[test]
+    fn check_without_an_email_override_reports_the_effective_email() {
+        let f = Fixture::new("");
+        let run = FakeRunner::default().with("git config --get user.email", Ok("me@home"));
+        let r = git().check(&f.ctx(), &run);
+        assert_eq!((r.status, r.detail.as_str()), (Status::Info, "me@home"));
+        let none = FakeRunner::default();
+        assert_eq!(git().check(&f.ctx(), &none).status, Status::Info);
     }
 
     #[test]

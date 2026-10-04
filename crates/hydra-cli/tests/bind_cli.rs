@@ -274,8 +274,16 @@ fn shell_with_a_name_from_elsewhere_starts_in_home() {
     let out = String::from_utf8_lossy(&out)
         .to_lowercase()
         .replace('\\', "/");
-    let want = web.to_string_lossy().to_lowercase().replace('\\', "/");
-    assert!(out.contains(&format!("[{want}]")), "{out}");
+    // Compare only the temp folder's name and below: CI runners report the
+    // temp path in 8.3 short form (RUNNER~1) while pwsh shows the long form.
+    let tmp = h
+        .dir
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_lowercase();
+    assert!(out.contains(&format!("/{tmp}/web]")), "{out}");
 }
 
 #[test]

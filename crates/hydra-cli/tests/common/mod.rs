@@ -23,10 +23,24 @@ impl Home {
             "hydra-test-{}",
             self.dir.path().file_name().unwrap().to_string_lossy()
         );
+        // Hermetic by default: a fake user folder (so the real ~/.claude and ~/.claude.json
+        // are never read or written) and no inherited Claude sign-in variables.
         c.env("HYDRA_HOME", self.root())
             .env("HYDRA_KEYRING_SERVICE", service)
+            .env("HYDRA_USER_HOME", self.dir.path().join("user"))
             .env_remove("HYDRA_ENV")
             .env_remove("HYDRA_ENV_VARS");
+        for var in [
+            "CLAUDE_CONFIG_DIR",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+        ] {
+            c.env_remove(var);
+        }
         c
     }
 

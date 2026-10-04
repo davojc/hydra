@@ -119,6 +119,57 @@ fn env_rm_keeps_the_claude_base_intact() {
     );
 }
 
+/// Path, length and content of every file under `dir` (sorted), plus `extra`.
+fn fingerprint(dir: &std::path::Path, extra: &std::path::Path) -> Vec<(String, usize, Vec<u8>)> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<(String, usize, Vec<u8>)>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else {
+                let bytes = std::fs::read(&p).unwrap();
+                out.push((p.display().to_string(), bytes.len(), bytes));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, &mut out);
+    let bytes = std::fs::read(extra).unwrap();
+    out.push((extra.display().to_string(), bytes.len(), bytes));
+    out.sort();
+    out
+}
+
+#[test]
+fn run_rename_and_rm_never_change_the_base() {
+    let h = Home::new();
+    let user = fake_user(&h);
+    let base = user.join(".claude");
+    std::fs::create_dir_all(base.join("plugins")).unwrap();
+    std::fs::write(base.join("plugins").join("installed_plugins.json"), "{}").unwrap();
+    std::fs::write(
+        base.join("settings.json"),
+        r#"{"model":"opus","apiKeyHelper":"key.sh"}"#,
+    )
+    .unwrap();
+    std::fs::write(base.join(".credentials.json"), "BASE-SECRET").unwrap();
+    let before = fingerprint(&base, &user.join(".claude.json"));
+    h.write_env("work", "[claude]\n");
+    hydra_as(&h, &user)
+        .args(["run", "work", "--", "cmd", "/c", "exit", "0"])
+        .assert()
+        .success();
+    hydra_as(&h, &user)
+        .args(["env", "rename", "work", "iov"])
+        .assert()
+        .success();
+    hydra_as(&h, &user)
+        .args(["env", "rm", "iov", "--yes"])
+        .assert()
+        .success();
+    assert_eq!(fingerprint(&base, &user.join(".claude.json")), before);
+}
+
 #[test]
 fn new_environments_use_claude_by_default() {
     let h = Home::new();

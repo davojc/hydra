@@ -195,3 +195,118 @@ fn bind_file_outside_a_repo_stops_at_the_ceiling_and_writes_no_exclude_file() {
     }
     assert!(!h.dir.path().join(".git").exists());
 }
+
+fn bound_folder(h: &Home, sub: &str, env: &str) -> std::path::PathBuf {
+    let d = h.dir.path().join(sub);
+    std::fs::create_dir_all(&d).unwrap();
+    h.hydra().arg("bind").arg(&d).arg(env).assert().success();
+    d
+}
+
+#[test]
+fn shell_without_a_name_uses_the_folders_binding() {
+    let h = home();
+    let d = bound_folder(&h, "w", "work");
+    h.hydra()
+        .current_dir(&d)
+        .args(["shell", "--shell", "pwsh"])
+        .write_stdin("exit 0\n")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("opening work (rule"));
+}
+
+#[test]
+fn shell_without_a_name_in_an_unbound_folder_fails() {
+    let h = home();
+    let d = h.dir.path().join("plain");
+    std::fs::create_dir_all(&d).unwrap();
+    h.hydra()
+        .current_dir(&d)
+        .args(["shell", "--shell", "pwsh"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("isn't bound to an environment"))
+        .stderr(predicate::str::contains("environments: personal, work"));
+}
+
+#[test]
+fn env_new_home_writes_home_and_binds_it() {
+    let h = home();
+    let web = h.dir.path().join("web");
+    h.hydra()
+        .args(["env", "new", "web", "--home"])
+        .arg(&web)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("home"))
+        .stdout(predicate::str::contains("-> web"));
+    assert!(
+        h.env_toml("web").contains("\nhome = \""),
+        "{}",
+        h.env_toml("web")
+    );
+    assert!(config(&h).contains("web"), "{}", config(&h));
+}
+
+#[test]
+fn shell_with_a_name_from_elsewhere_starts_in_home() {
+    let h = home();
+    let web = h.dir.path().join("web");
+    std::fs::create_dir_all(&web).unwrap();
+    h.hydra()
+        .args(["env", "new", "web", "--home"])
+        .arg(&web)
+        .assert()
+        .success();
+    let elsewhere = h.dir.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let out = h
+        .hydra()
+        .current_dir(&elsewhere)
+        .args(["shell", "web", "--shell", "pwsh"])
+        .write_stdin("Write-Output \"[$PWD]\"; exit 0\n")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let out = String::from_utf8_lossy(&out)
+        .to_lowercase()
+        .replace('\\', "/");
+    let want = web.to_string_lossy().to_lowercase().replace('\\', "/");
+    assert!(out.contains(&format!("[{want}]")), "{out}");
+}
+
+#[test]
+fn whoami_reports_a_folder_mismatch() {
+    let h = home();
+    let d = bound_folder(&h, "p", "personal");
+    h.hydra()
+        .current_dir(&d)
+        .args(["whoami", "--env", "work"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("folder"))
+        .stdout(predicate::str::contains("MISMATCH"));
+}
+
+#[test]
+fn whoami_uses_the_folders_binding_and_says_when_unbound() {
+    let h = home();
+    let d = bound_folder(&h, "w", "work");
+    h.hydra()
+        .current_dir(&d)
+        .arg("whoami")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("-> work (rule"));
+    let plain = h.dir.path().join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    h.hydra()
+        .current_dir(&plain)
+        .args(["whoami", "--env", "work"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("isn't bound"));
+}

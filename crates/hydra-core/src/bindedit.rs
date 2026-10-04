@@ -44,6 +44,36 @@ pub fn rule_for_dir(dir: &Path) -> String {
     format!("{}/**", s.trim_end_matches('/'))
 }
 
+/// Adds `home = "<dir>"` (forward slashes) to an env.toml, right after its `color` line when it
+/// has one. An existing active `home` is replaced.
+pub fn set_home(env_text: &str, dir: &Path) -> Result<String, String> {
+    let dir = dir.to_string_lossy().replace('\\', "/");
+    let line = format!("home = {}", value(dir.as_str()));
+    let mut out = Vec::new();
+    let mut placed = false;
+    for l in env_text.lines() {
+        if l.trim_start().starts_with("home") && l.contains('=') && !l.trim_start().starts_with('#')
+        {
+            if !placed {
+                out.push(line.clone());
+                placed = true;
+            }
+            continue;
+        }
+        out.push(l.to_string());
+        if !placed && l.trim_start().starts_with("color") && l.contains('=') {
+            out.push(line.clone());
+            placed = true;
+        }
+    }
+    if !placed {
+        out.insert(0, line);
+    }
+    let text = format!("{}\n", out.join("\n"));
+    parse(&text)?;
+    Ok(text)
+}
+
 /// Writes `<dir>/.hydra` naming the environment.
 pub fn write_hydra_file(dir: &Path, env: &str) -> std::io::Result<PathBuf> {
     let path = dir.join(".hydra");
@@ -98,6 +128,19 @@ fn exclude_in_git_below(dir: &Path, ceilings: &[PathBuf]) -> std::io::Result<boo
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn set_home_goes_after_color() {
+        let t = "label = \"w\"\ncolor = \"#111111\"\n# home = \"E:/x\"\n[env]\n";
+        let out = set_home(t, Path::new(r"E:\acme\web")).unwrap();
+        assert_eq!(
+            out,
+            "label = \"w\"\ncolor = \"#111111\"\nhome = \"E:/acme/web\"\n# home = \"E:/x\"\n[env]\n"
+        );
+        let again = set_home(&out, Path::new("E:/b")).unwrap();
+        assert_eq!(again.matches("\nhome =").count(), 1);
+        assert!(again.contains("home = \"E:/b\""));
+    }
+
     use super::*;
 
     #[test]

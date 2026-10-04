@@ -109,7 +109,12 @@ pub enum Cmd {
 #[derive(Subcommand)]
 pub enum EnvCmd {
     /// Create an environment
-    New { name: String },
+    New {
+        name: String,
+        /// Where terminals for this environment open; also binds that folder to it
+        #[arg(long)]
+        home: Option<std::path::PathBuf>,
+    },
     /// List environments
     List,
     /// Delete an environment, its secrets and (after asking) its saved logins

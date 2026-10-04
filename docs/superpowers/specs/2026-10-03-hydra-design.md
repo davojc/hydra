@@ -222,22 +222,40 @@ For a working directory, collect candidates: the nearest ancestor `.hydra` file 
 - Hand-editing `[bindings]` or creating `.hydra` files is equally supported; `hydra doctor` reports rules naming unknown environments.
 - `hydra env new <name> --home <dir>` sets `home` and adds the binding for `<dir>` in one step.
 
-### 7.2 Shims
+### 7.2 Guards (revised 2026-10-04)
 
-`hydra install shims` (also part of plain `hydra install`, §9.1) copies `hydra.exe` to `shims/git.exe` and `shims/gh.exe`. Shims exist only for the guard. Shell aliases would miss commands run by Claude Code's non-interactive bash, and git hooks are per-repo, skippable with `--no-verify`, and don't exist for gh. A file earlier on the inherited `PATH` catches every route. On start, the binary inspects its own file stem: `hydra` runs the CLI; `git`/`gh` run the guard.
+Checked on this machine: Claude Code's bash puts Git for Windows' `/mingw64/bin` and `/usr/bin` ahead of the inherited PATH, so `git` always resolves to `/mingw64/bin/git`. A PATH shim for git would never see commands Claude runs. `gh` (installed under Program Files) and Windows OpenSSH `ssh` are found through the Windows PATH, so shims work for them. The guard is therefore three layers:
 
-Guard steps:
+1. **git: hooks, not a shim.** The git provider sets `core.hooksPath = state/<env>/git/hooks` in the generated gitconfig. That folder holds a small `sh` wrapper for every client-side hook git runs. Exceptions: `reference-transaction`, `post-index-change` and `fsmonitor-watchman` are left out because git runs them very often or they are rarely used.
+   - The `pre-commit` and `pre-push` wrappers first run `hydra guard git <hook> "$@"`. `pre-push` receives the remote name and URL.
+   - Every wrapper then runs the hook the repo would otherwise have run, with the same arguments and stdin. That is the user's own global `core.hooksPath` if `~/.gitconfig` sets one, else `$(git rev-parse --git-path hooks)/<hook>`.
+   - The wrappers call hydra by absolute path (the exe that materialised them), fall back to `hydra` on PATH, and allow the command if neither exists.
+   - Limits: `--no-verify` skips them. A repo with its own local `core.hooksPath` (e.g. Husky) overrides hydra's, so the guard is off there; `hydra whoami` says so for that folder.
+2. **gh: a shim.** `~/.hydra/shims/gh.exe` is a copy of `hydra.exe`, refreshed at launch whenever it differs from the running exe, and first on PATH in hydra terminals. Started as `gh`, hydra checks the command, then runs the real `gh` (found on PATH with the shims folder removed) and returns its exit code.
+3. **Claude Code: a `PreToolUse` hook.** The claude provider adds a hook on the `Bash` tool to each environment's generated `settings.json`, running `"<hydra.exe>" guard claude`. It is appended to any `PreToolUse` hooks the user already has.
+   - It reads the hook JSON from stdin, finds `git push`/`git commit`/`gh` write commands in the command line (respecting `git -C <dir>`), and checks them against the folder's binding.
+   - A block exits 2 with the reason on stderr, which Claude Code shows to the model.
+   - It doesn't depend on PATH and catches `--no-verify`.
 
-1. Find the real binary: search `PATH` with the shims directory removed. Cache the result in `shims/.resolved` keyed by PATH hash.
-2. If `HYDRA_ENV` is unset or `HYDRA_ALLOW=1`, pass through.
-3. Classify the command. Guarded: `git push`, `git commit`; `gh pr create|merge|edit|close|comment`, `gh repo create|delete|edit|fork`, `gh release create|delete|edit`, `gh issue create|edit|close|comment`, `gh api` with `-X`/`--method` other than GET. Everything else passes through.
-4. Wrong environment: if the cwd binds to an environment other than `HYDRA_ENV` → **block** (exit 1, message naming both environments and the fixes).
-5. Wrong owner (git push / gh repo commands only): if the env has `github.owners`, resolve the target remote's owner (`git remote get-url <remote>`, parse GitHub HTTPS/SSH URLs). Owner not in list → **warn** to stderr and continue, or **block** when `strict = true`.
-6. Run the real binary with the same args, inheriting stdio; forward Ctrl-C (console control handler that ignores the signal in the shim so the child receives it); exit with the child's code.
+**Shared decision** (`hydra_core::guard`). Commands checked:
+- `git commit`, `git push`
+- `gh pr create|merge|edit|close|comment|review`
+- `gh repo create|delete|edit|fork|rename`
+- `gh release create|delete|edit|upload`
+- `gh issue create|edit|close|comment|delete`
+- `gh api` with `-X`/`--method` other than GET, or with `-f`/`-F`/`--field`/`--raw-field`/`--input`
 
-Override: `hydra allow -- <cmd...>` runs the command with `HYDRA_ALLOW=1` set for that child only. In Git Bash, `HYDRA_ALLOW=1 git push` also works.
+Everything else passes. Outcomes:
+- `HYDRA_ENV` unset or `HYDRA_ALLOW=1` → allow.
+- The folder binds to an environment other than `HYDRA_ENV` → **block**: `hydra: blocked <cmd> - this folder belongs to <env> (<rule>), this terminal is <env>`, plus the fixes `hydra shell <env>` / `hydra allow -- <cmd>`.
+- For `git push` and gh repo/pr/release/issue commands: if the environment has `github.owners` and the target owner isn't listed → warn, or block with `strict = true`. The owner comes from the push URL, `--repo/-R`, or the folder's `origin` remote.
+- Internal errors (unreadable config) → allow, with a warning.
 
-Guard latency budget: < 15 ms added per invocation on a warm cache.
+**Override:** `hydra allow -- <cmd...>` runs one command with `HYDRA_ALLOW=1`.
+
+**ssh:** `~/.hydra/shims/ssh.exe` (same mechanism) adds `-i <ssh_key> -o IdentitiesOnly=yes` when the environment has a git `ssh_key`. It is effective where Windows OpenSSH is used (PowerShell, and hydra's Git Bash shells, which re-prepend the shims); Git Bash's own `/usr/bin/ssh` in Claude Code's bash is not covered.
+
+Shims are managed automatically at launch; there is no `hydra install shims` command.
 
 ## 8. Error handling
 
@@ -262,10 +280,11 @@ hydra bind [<path>] <env> [--file]
 hydra bind [--list]
 hydra unbind [<path>]
 hydra allow -- <cmd...>
+hydra guard <git|claude> ...                # internal: called by git hooks and the Claude hook
 hydra whoami
 hydra doctor [<env>]
-hydra install [shims|wt]               # no target = every integration hydra finds
-hydra uninstall [shims|wt]
+hydra install [wt]                     # Windows Terminal profiles (Plan 4)
+hydra uninstall [wt]
 ```
 
 ### 9.1 Integrations (`hydra install`)
@@ -300,5 +319,5 @@ Each is checked by a small spike before the dependent provider is built; if one 
 3. **gws keyring entry** (encryption key for stored credentials) is either per-config-dir or harmless when shared. Fallback: gws credentials-file mode (§5).
 4. ✅ **Claude Code follows directory junctions** for `plugins/`, `skills/`, `commands/` — verified 2026-10-04 (`claude plugin list` through junctions).
 5. ✅ **No plugin path rewriting needed** — the base is linked, not copied (§6).
-6. **Claude Code on Windows resolves `git`/`gh` through the inherited `PATH`** so shims intercept its commands.
+6. ❌ **Claude Code on Windows resolves `git` through the inherited `PATH`** — false (verified 2026-10-04): its bash puts `/mingw64/bin` first. Guards use git hooks plus a Claude `PreToolUse` hook instead (§7.2); `gh` and Windows `ssh` shims do work.
 7. **Windows Terminal reloads fragments live** when `hydra.json` changes. Fallback: print "restart Windows Terminal to see the change".

@@ -333,7 +333,7 @@ mod tests {
     #[test]
     fn gemini_api_key_validates() {
         let v = ToolValues {
-            api_key: Some("secret:iov/gemini".into()),
+            api_key: Some("secret:work/gemini".into()),
             ..vals()
         };
         let (out, _) = add_tool(&tpl(), "gemini", &v).unwrap();

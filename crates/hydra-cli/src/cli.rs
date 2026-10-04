@@ -65,12 +65,12 @@ pub enum Cmd {
         profile: Option<String>,
         #[arg(long)]
         isolate: bool,
-        /// gws: secret name holding credentials JSON, e.g. iov/gws-creds
+        /// gws: secret name holding credentials JSON, e.g. work/gws-creds
         #[arg(long = "credentials-secret")]
         credentials_secret: Option<String>,
         #[arg(long = "kubeconfig")]
         kube_config: Option<String>,
-        /// gemini: secret name holding the API key, e.g. iov/gemini
+        /// gemini: secret name holding the API key, e.g. work/gemini
         #[arg(long = "api-key-secret")]
         api_key_secret: Option<String>,
     },

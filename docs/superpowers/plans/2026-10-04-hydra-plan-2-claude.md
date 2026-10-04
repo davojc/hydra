@@ -40,7 +40,7 @@
 2. **`env rm --yes` and `env rename` with junctions inside the state folder.** The base's contents must survive both. Tests: Task 1 `remove_dir_all_does_not_follow_junctions`, Task 4 `env_rm_keeps_the_claude_base_intact`.
 3. **The environment's `.claude.json` is not valid JSON**, for example because Claude was mid-write. Hydra must not overwrite it, and the launch fails with a "try again" message. Test: Task 2 `sync_refuses_unparseable_state_file`.
 4. **No `~/.claude` at all** (Claude never used on this machine). The environment still opens, with an empty, working config folder. Test: Task 3 `works_without_a_base`.
-5. **The user's real `.claude.json` keys** (`oauthAccount`, `projects`, …) survive a sync byte-for-byte apart from `mcpServers`. Test: Task 2 `sync_touches_only_mcp_servers`.
+5. **The user's real `.claude.json` keys** (`oauthAccount`, `projects`, …) keep their values and order through a sync; only `mcpServers` changes (the file is re-formatted). Test: Task 2 `sync_touches_only_mcp_servers`.
 
 ---
 

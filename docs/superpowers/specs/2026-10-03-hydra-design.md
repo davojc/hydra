@@ -195,7 +195,13 @@ At each launch the claude provider builds `state/<env>/claude/` (= `CLAUDE_CONFI
 - **Synced key:** user-scoped MCP servers live in the base's global state file (`~/.claude.json` for the default base, else `<base>/.claude.json`) under `mcpServers`. Each launch copies that key, minus `mcp.exclude` matches, into `state/<env>/claude/.claude.json`, leaving every other key in that file untouched (atomic write; only when it changed). If the file doesn't exist yet it is created as `{"mcpServers": {...}}`.
 - **Private (never touched by hydra):** `.credentials.json` (the sign-in), the rest of `.claude.json` (account, per-project state), history, `projects/`, `sessions/`, `file-history/`, todos, plans, caches, and anything else Claude writes.
 
-Signing in happens inside the environment: run `claude`, then `/login`. A sign-in hint is shown when `.credentials.json` is missing.
+Signing in happens inside the environment: run `claude auth login` (or `claude` then `/login`). A sign-in hint is shown when `.credentials.json` is missing, unless the environment supplies an API key through `[env]`.
+
+**Sign-in settings never come from the shared base.** `apiKeyHelper` and `env` entries for `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK` and `CLAUDE_CODE_USE_VERTEX` are dropped from the base `settings.json` (with a warning); an environment's own `settings.json` may set them.
+
+**Changes Claude makes inside an environment** to the generated `settings.json` or `CLAUDE.md` are not kept: on the next launch hydra saves the changed file as `<file>.bak`, says so, and regenerates it. Lasting changes go in the base or in `envs/<env>/claude/`.
+
+**Upgrading:** environments created before Claude support have no `[claude]` section, so they keep using `~/.claude` directly. Add `[claude]` to give them their own sign-in, and remove any hand-set `CLAUDE_CONFIG_DIR` from `[env]` (hydra refuses both together).
 
 Verified on Claude Code 2.1.289 (2026-10-04): a fresh `CLAUDE_CONFIG_DIR` starts logged out and keeps `.claude.json` inside it; plugins resolve through junctions.
 

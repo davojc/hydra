@@ -170,14 +170,14 @@ pub fn render_hook(name: &EnvName, hook: &str, hydra_exe: &str, chain_dir: &str)
 }
 
 /// The user's own global `core.hooksPath`, with `/` separators: the first of `files` (highest
-/// precedence first) that sets it. Empty when none does or git can't be run.
+/// precedence first) that sets it, directly or through an `[include]`. Empty when none does or git can't be run.
 fn user_hooks_path(files: &[PathBuf]) -> String {
     for f in files.iter().rev().filter(|f| f.is_file()) {
         let out = std::process::Command::new("git")
             .arg("config")
             .arg("--file")
             .arg(f)
-            .args(["--type=path", "--get", "core.hooksPath"])
+            .args(["--includes", "--type=path", "--get", "core.hooksPath"])
             .stdin(std::process::Stdio::null())
             .output();
         if let Ok(o) = out
@@ -763,6 +763,24 @@ mod tests {
         let commit = std::fs::read_to_string(hooks_dir(&f).join("pre-commit")).unwrap();
         assert!(
             commit.contains("chain_dir='C:/my hooks/it'\\''s'\n"),
+            "{commit}"
+        );
+    }
+
+    #[test]
+    fn global_hooks_path_set_in_an_included_file_is_found() {
+        let f = Fixture::new("[git]\nemail = \"a@b.c\"\n");
+        let extra = f.home.join("extra.gitconfig");
+        std::fs::write(&extra, "[core]\n\thooksPath = C:/included-hooks\n").unwrap();
+        std::fs::write(
+            f.home.join(".gitconfig"),
+            format!("[include]\n\tpath = {}\n", quote(&fwd(&extra))),
+        )
+        .unwrap();
+        git().materialise(&f.ctx()).unwrap();
+        let commit = std::fs::read_to_string(hooks_dir(&f).join("pre-commit")).unwrap();
+        assert!(
+            commit.contains("chain_dir='C:/included-hooks'\n"),
             "{commit}"
         );
     }

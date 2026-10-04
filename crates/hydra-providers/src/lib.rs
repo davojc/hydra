@@ -2,6 +2,7 @@
 use hydra_core::provider::Provider;
 
 pub mod aws;
+pub mod claude_files;
 pub mod dir;
 pub mod envvars;
 pub mod gemini;

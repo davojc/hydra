@@ -183,6 +183,14 @@ impl EnvConfig {
             seen.push(k);
             SecretRef::parse_value(v).map_err(|e| format!("[env] {k}: {e}"))?;
         }
+        if self.claude.is_some()
+            && self
+                .env
+                .keys()
+                .any(|k| k.eq_ignore_ascii_case("CLAUDE_CONFIG_DIR"))
+        {
+            return Err("[claude] now sets CLAUDE_CONFIG_DIR itself - remove CLAUDE_CONFIG_DIR from [env]. Sign in again inside the environment (claude auth login); the old folder's sign-in isn't moved".to_string());
+        }
         if let Some(GwsConfig {
             credentials: Some(c),
         }) = &self.gws
@@ -228,6 +236,16 @@ pub fn load_global(paths: &HydraPaths) -> Result<GlobalConfig, ConfigError> {
             path: path.clone(),
             message: format!("binding {pattern:?}: {e}"),
         })?;
+    }
+    if let Some(b) = &cfg.claude_base
+        && !(b.starts_with('~') || Path::new(b).is_absolute())
+    {
+        return Err(ConfigError::Invalid {
+            path,
+            message: format!(
+                "claude_base {b:?} must be an absolute path or start with ~ (like \"~/.claude\")"
+            ),
+        });
     }
     Ok(cfg)
 }
@@ -397,6 +415,38 @@ LINEAR_API_KEY = "secret:work/linear"
                 msg.contains(&format!("[env] {key:?} can't be set here")),
                 "{key}: {msg}"
             );
+        }
+    }
+
+    #[test]
+    fn claude_config_dir_in_env_is_rejected_with_claude_section() {
+        for key in ["CLAUDE_CONFIG_DIR", "claude_config_dir"] {
+            let (_d, paths, name) = setup(&format!("[claude]\n[env]\n{key} = \"C:/x\"\n"));
+            let msg = load_env(&paths, &name).unwrap_err().to_string();
+            assert!(
+                msg.contains("[claude] now sets CLAUDE_CONFIG_DIR itself - remove CLAUDE_CONFIG_DIR from [env]. Sign in again inside the environment (claude auth login); the old folder's sign-in isn't moved"),
+                "{key}: {msg}"
+            );
+        }
+        let (_d, paths, name) = setup("[env]\nCLAUDE_CONFIG_DIR = \"C:/x\"\n");
+        assert!(load_env(&paths, &name).is_ok(), "fine without [claude]");
+    }
+
+    #[test]
+    fn claude_base_must_be_absolute_or_start_with_tilde() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = HydraPaths::new(dir.path());
+        std::fs::write(paths.config_file(), "claude_base = \"dotfiles/claude\"\n").unwrap();
+        let msg = load_global(&paths).unwrap_err().to_string();
+        assert!(msg.contains("claude_base"), "{msg}");
+        let abs = dir
+            .path()
+            .join("dotfiles")
+            .to_string_lossy()
+            .replace('\\', "/");
+        for ok in ["~/dotfiles/claude", "~", abs.as_str()] {
+            std::fs::write(paths.config_file(), format!("claude_base = \"{ok}\"\n")).unwrap();
+            assert!(load_global(&paths).is_ok(), "{ok}");
         }
     }
 

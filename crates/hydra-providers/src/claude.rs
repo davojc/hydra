@@ -44,6 +44,8 @@ struct Layout {
     base_global: PathBuf,
     over: PathBuf,
     dir: PathBuf,
+    /// True when the base comes from `claude_base` in config.toml (it must then exist).
+    configured_base: bool,
 }
 
 fn layout(ctx: &Ctx) -> Result<Layout, ProviderError> {
@@ -62,6 +64,7 @@ fn layout(ctx: &Ctx) -> Result<Layout, ProviderError> {
     Ok(Layout {
         base,
         base_global,
+        configured_base: global.claude_base.is_some(),
         over: ctx.paths.env_dir(ctx.name).join("claude"),
         dir: ctx.provider_dir("claude"),
     })
@@ -261,6 +264,20 @@ fn link_shared(l: &Layout, name: &str, override_dir: &Path) -> Result<(), Provid
     })
 }
 
+/// The `[env]` variable (as written there) that signs Claude in with a key or token instead
+/// of the environment's own sign-in, if any.
+fn api_key_var(env: &EnvConfig) -> Option<&str> {
+    const KEY_VARS: &[&str] = &[
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    ];
+    env.env
+        .keys()
+        .find(|k| KEY_VARS.iter().any(|v| k.eq_ignore_ascii_case(v)))
+        .map(String::as_str)
+}
+
 /// Refuses to write when the state folder itself has been replaced by a link: hydra would
 /// otherwise write (and later delete) files wherever that link points.
 fn refuse_linked(path: &Path) -> Result<(), ProviderError> {
@@ -290,6 +307,13 @@ impl Provider for Claude {
 
     fn materialise(&self, ctx: &Ctx) -> Result<(), ProviderError> {
         let l = layout(ctx)?;
+        if l.configured_base && !l.base.is_dir() {
+            return Err(ProviderError::new(format!(
+                "claude_base {} doesn't exist",
+                l.base.display()
+            ))
+            .with_fix("fix claude_base in config.toml"));
+        }
         refuse_linked(&ctx.state_dir())?;
         refuse_linked(&l.dir)?;
         std::fs::create_dir_all(&l.dir)?;
@@ -360,6 +384,9 @@ impl Provider for Claude {
     }
 
     fn check(&self, ctx: &Ctx, _run: &dyn CommandRunner) -> IdentityReport {
+        if let Some(var) = api_key_var(ctx.env) {
+            return report("claude", Status::Info, format!("uses {var} from [env]"));
+        }
         let dir = ctx.provider_dir("claude");
         if !dir.join(".credentials.json").is_file() {
             return report("claude", Status::Missing, "not signed in");
@@ -393,6 +420,9 @@ impl Provider for Claude {
     }
 
     fn sign_in_hint(&self, ctx: &Ctx) -> Option<String> {
+        if api_key_var(ctx.env).is_some() {
+            return None;
+        }
         (!ctx
             .provider_dir("claude")
             .join(".credentials.json")
@@ -847,6 +877,46 @@ mod tests {
                 .unwrap()
                 .contains("\"alt\"")
         );
+    }
+
+    #[test]
+    fn a_configured_claude_base_that_does_not_exist_is_an_error() {
+        let f = Fixture::new("[claude]\n");
+        let missing = f.home.join("no-such-folder");
+        std::fs::create_dir_all(f.paths.root()).unwrap();
+        std::fs::write(
+            f.paths.config_file(),
+            format!(
+                "claude_base = \"{}\"\n",
+                missing.to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        let e = Claude.materialise(&f.ctx()).unwrap_err();
+        assert!(
+            e.message.starts_with("claude_base ") && e.message.ends_with(" doesn't exist"),
+            "{}",
+            e.message
+        );
+        assert_eq!(e.fix.as_deref(), Some("fix claude_base in config.toml"));
+    }
+
+    #[test]
+    fn api_key_environments_need_no_sign_in() {
+        for key in [
+            "ANTHROPIC_API_KEY",
+            "anthropic_auth_token",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+        ] {
+            let f = Fixture::new(&format!("[claude]\n[env]\n{key} = \"secret:work/k\"\n"));
+            Claude.materialise(&f.ctx()).unwrap();
+            assert_eq!(Claude.sign_in_hint(&f.ctx()), None, "{key}");
+            let r = Claude.check(&f.ctx(), &FakeRunner::default());
+            assert_eq!(
+                (r.status, r.detail),
+                (Status::Info, format!("uses {key} from [env]"))
+            );
+        }
     }
 
     #[test]

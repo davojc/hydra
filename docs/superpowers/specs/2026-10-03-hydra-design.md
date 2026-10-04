@@ -116,7 +116,7 @@ Names must match `^[a-z0-9][a-z0-9-]{0,31}$` (e.g. `work`, `client-acme`). Folde
 |---|---|
 | `claude` | `CLAUDE_CONFIG_DIR=state/<env>/claude`, layered from the user's `~/.claude` (§6). Inherited `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`/`CLAUDE_CODE_OAUTH_TOKEN` are cleared. |
 | `github` | `GH_CONFIG_DIR=state/<env>/gh`. Inherited `GH_TOKEN`/`GITHUB_TOKEN`/enterprise tokens are cleared, because they would override the environment's own login. The user signs in with plain `gh auth login` inside the environment (or `hydra auth github <env>`, alias `gh`, which runs the same command). gh keeps the token in Windows Credential Manager, keyed by account; hydra never uses `--insecure-storage`. `owners` / `strict` feed the guard. |
-| `git` | Generates `state/<env>/git/gitconfig`, sets `GIT_CONFIG_GLOBAL` to it. File contents: `[include] path = ~/.gitconfig`, then `user.name`, `user.email`, optional `user.signingkey` + `gpg.format = ssh`, `core.sshCommand = ssh -i <key> -o IdentitiesOnly=yes`, `credential.https://github.com.helper = !gh auth git-credential` (with an empty helper line first to reset inherited helpers), and `credential.namespace = hydra-<env>` so Git Credential Manager keeps HTTPS logins for other hosts (GitLab, Azure DevOps, GitHub Enterprise) separate per environment. |
+| `git` | **Always on:** every environment gets `state/<env>/git/gitconfig`, with `GIT_CONFIG_GLOBAL` set to it, even without a `[git]` section. File contents: a header (naming the user's real global file, since `git config --global` edits here are lost), `[include]` of the user's effective global config (the inherited `GIT_CONFIG_GLOBAL` unless it points into hydra's state, else `~/.config/git/config` and `~/.gitconfig`), `core.hooksPath` for the guard (§7.2), then, only with `[git]`, `user.name`, `user.email`, `user.email`, optional `user.signingkey` + `gpg.format = ssh`, `core.sshCommand = ssh -i <key> -o IdentitiesOnly=yes`. The `credential.https://github.com.helper = !gh auth git-credential` line (with an empty helper line first to reset inherited helpers) appears with `[git]` or `[github]`. `credential.namespace = hydra-<env>` appears only with `[git]`, so Git Credential Manager keeps HTTPS logins for other hosts (GitLab, Azure DevOps, GitHub Enterprise) separate per environment. |
 | `aws` | `AWS_PROFILE`; optional `isolate = true` adds per-env `AWS_CONFIG_FILE` and `AWS_SHARED_CREDENTIALS_FILE`. |
 | `azure` | `AZURE_CONFIG_DIR=state/<env>/azure`. |
 | `gcloud` | `CLOUDSDK_CONFIG=state/<env>/gcloud`. |
@@ -226,15 +226,16 @@ For a working directory, collect candidates: the nearest ancestor `.hydra` file 
 
 Checked on this machine: Claude Code's bash puts Git for Windows' `/mingw64/bin` and `/usr/bin` ahead of the inherited PATH, so `git` always resolves to `/mingw64/bin/git`. A PATH shim for git would never see commands Claude runs. `gh` (installed under Program Files) and Windows OpenSSH `ssh` are found through the Windows PATH, so shims work for them. The guard is therefore three layers:
 
-1. **git: hooks, not a shim.** The git provider sets `core.hooksPath = state/<env>/git/hooks` in the generated gitconfig. That folder holds a small `sh` wrapper for every client-side hook git runs. Exceptions: `reference-transaction`, `post-index-change` and `fsmonitor-watchman` are left out because git runs them very often or they are rarely used.
+1. **git: hooks, not a shim.** The git provider (always on, §5) sets `core.hooksPath = state/<env>/git/hooks` in the generated gitconfig. That folder holds a small `sh` wrapper for every client-side and receive-side hook git runs (`pre-receive`, `update`, `post-receive` and the rest are wrapped too, so they chain). Exceptions: `reference-transaction`, `post-index-change` and `fsmonitor-watchman` are left out because git runs them very often or they are rarely used.
    - The `pre-commit` and `pre-push` wrappers first run `hydra guard git <hook> "$@"`. `pre-push` receives the remote name and URL.
-   - Every wrapper then runs the hook the repo would otherwise have run, with the same arguments and stdin. That is the user's own global `core.hooksPath` if `~/.gitconfig` sets one, else `$(git rev-parse --git-path hooks)/<hook>`.
+   - Every wrapper then runs the hook the repo would otherwise have run, with the same arguments and stdin. That is the user's own global `core.hooksPath`, read from the effective global config (including files it `[include]`s), else `$(git rev-parse --git-common-dir)/hooks/<hook>`. (`--git-path hooks` is not used: once `core.hooksPath` names hydra's folder it returns that folder and the wrapper would run itself forever. `--git-common-dir` is also right inside linked worktrees.) A wrapper blocks only when the guard exits 1; any other failure allows.
    - The wrappers call hydra by absolute path (the exe that materialised them), fall back to `hydra` on PATH, and allow the command if neither exists.
    - Limits: `--no-verify` skips them. A repo with its own local `core.hooksPath` (e.g. Husky) overrides hydra's, so the guard is off there; `hydra whoami` says so for that folder.
 2. **gh: a shim.** `~/.hydra/shims/gh.exe` is a copy of `hydra.exe`, refreshed at launch whenever it differs from the running exe, and first on PATH in hydra terminals. Started as `gh`, hydra checks the command, then runs the real `gh` (found on PATH with the shims folder removed) and returns its exit code.
-3. **Claude Code: a `PreToolUse` hook.** The claude provider adds a hook on the `Bash` tool to each environment's generated `settings.json`, running `"<hydra.exe>" guard claude`. It is appended to any `PreToolUse` hooks the user already has.
+3. **Claude Code: a `PreToolUse` hook.** The claude provider adds a hook with matcher `Bash|PowerShell` to each environment's generated `settings.json`, running `"<hydra.exe>" guard claude`. It is appended to any `PreToolUse` hooks the user already has, and an older `Bash`-only entry from a previous hydra is replaced.
    - It reads the hook JSON from stdin, finds `git push`/`git commit`/`gh` write commands in the command line (respecting `git -C <dir>`), and checks them against the folder's binding.
-   - A block exits 2 with the reason on stderr, which Claude Code shows to the model.
+   - It follows earlier `cd`s and `git -C` (including `/c/...` and `~` paths) when choosing the folder, and unwraps `hydra allow -- <cmd>` so Claude can't use it to override.
+   - A block exits 2 with the reason on stderr, which Claude Code shows to the model. Instead of "run it once anyway", Claude is told to ask the user to run `hydra allow -- <cmd>` in their own terminal. Claude cannot self-allow.
    - It doesn't depend on PATH and catches `--no-verify`.
 
 **Shared decision** (`hydra_core::guard`). Commands checked:
@@ -249,9 +250,10 @@ Everything else passes. Outcomes:
 - `HYDRA_ENV` unset or `HYDRA_ALLOW=1` → allow.
 - The folder binds to an environment other than `HYDRA_ENV` → **block**: `hydra: blocked <cmd> - this folder belongs to <env> (<rule>), this terminal is <env>`, plus the fixes `hydra shell <env>` / `hydra allow -- <cmd>`.
 - For `git push` and gh repo/pr/release/issue commands: if the environment has `github.owners` and the target owner isn't listed → warn, or block with `strict = true`. The owner comes from the push URL, `--repo/-R`, or the folder's `origin` remote.
+- The binding names an environment that doesn't exist (or is empty) → allow, with `hydra: warning: guard skipped (<source> names unknown environment <x>)`.
 - Internal errors (unreadable config) → allow, with a warning.
 
-**Override:** `hydra allow -- <cmd...>` runs one command with `HYDRA_ALLOW=1`.
+**Override:** `hydra allow -- <cmd...>` runs one command with `HYDRA_ALLOW=1`. A launch unsets `HYDRA_ALLOW`, so it never reaches a terminal.
 
 **ssh:** `~/.hydra/shims/ssh.exe` (same mechanism) adds `-i <ssh_key> -o IdentitiesOnly=yes` when the environment has a git `ssh_key`. It is effective where Windows OpenSSH is used (PowerShell, and hydra's Git Bash shells, which re-prepend the shims); Git Bash's own `/usr/bin/ssh` in Claude Code's bash is not covered.
 

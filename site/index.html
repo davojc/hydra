@@ -165,6 +165,7 @@ body { margin: 0; }
       <li><a href="#how">How it works</a></li>
       <li><a href="#tools">Tools</a></li>
       <li><a href="#claude">Claude Code</a></li>
+      <li><a href="#guards">Folders and guards</a></li>
       <li><a href="#secrets">Variables and secrets</a></li>
     </ol>
     <div class="grp">Reference</div>
@@ -222,8 +223,8 @@ my-username</pre>
       <div class="term">
         <div class="term-bar"><span class="tab plain">PowerShell</span><button class="copy" type="button" data-copy="hydra update">Copy</button></div>
 <pre><span class="p">PS&gt;</span> hydra update
-hydra 0.4.0 is installed; 0.4.1 is available
-<span class="ok">updated to 0.4.1</span></pre>
+hydra 0.5.0 is installed; 0.5.1 is available
+<span class="ok">updated to 0.5.1</span></pre>
       </div>
       <p>To build from source instead, install Rust from <a href="https://rustup.rs">rustup.rs</a>, then <code>git clone https://github.com/davojc/hydra.git</code> and <code>cargo build --release</code>.</p>
     </section>
@@ -305,7 +306,7 @@ git      work@example.com                                 <span class="ok">ok</s
           <tbody>
             <tr><td><code>claude</code></td><td>Its own Claude Code sign-in, sharing your <code>~/.claude</code> setup</td><td><code>--mcp-exclude</code></td></tr>
             <tr><td><code>github</code> (<code>gh</code>)</td><td>Its own <code>gh auth login</code>; git's HTTPS pushes to github.com use it</td><td><code>--owner</code>, <code>--strict</code></td></tr>
-            <tr><td><code>git</code></td><td>Author, email, SSH key, optional signing key, its own Git Credential Manager space for other HTTPS hosts. Your <code>~/.gitconfig</code> still loads underneath.</td><td><code>--name</code>, <code>--email</code>, <code>--ssh-key</code>, <code>--signing-key</code></td></tr>
+            <tr><td><code>git</code></td><td>Always on, even without <code>hydra add git</code>: your global git config loads underneath, plus the folder guard. Adding it gives the author, email, SSH key, optional signing key and its own Git Credential Manager space for other HTTPS hosts.</td><td><code>--name</code>, <code>--email</code>, <code>--ssh-key</code>, <code>--signing-key</code></td></tr>
             <tr><td><code>aws</code></td><td>An AWS profile, optionally with private config and credentials files</td><td><code>--profile</code> (required), <code>--isolate</code></td></tr>
             <tr><td><code>azure</code></td><td>Its own <code>az login</code></td><td></td></tr>
             <tr><td><code>gcloud</code></td><td>Its own <code>gcloud auth login</code> and configurations</td><td></td></tr>
@@ -340,6 +341,73 @@ git      work@example.com                                 <span class="ok">ok</s
       </div>
       <div class="note"><strong>Changes made inside Claude don't stick.</strong> If Claude edits the rebuilt <code>settings.json</code> or <code>CLAUDE.md</code>, for example with <code>/model</code>, hydra saves your version as <code>.bak</code> on the next launch, tells you, and rebuilds the file. Put lasting changes in <code>~/.claude</code> or <code>~/.hydra/envs/&lt;env&gt;/claude/</code>.</div>
       <p>Sign-in settings are never shared. If <code>~/.claude/settings.json</code> has an <code>apiKeyHelper</code> or an API key under <code>env</code>, hydra leaves it out of every environment and warns you. Running <code>claude</code> outside hydra keeps using <code>~/.claude</code> as before.</p>
+      <p>Each environment's <code>settings.json</code> also gets a <code>PreToolUse</code> hook that blocks <code>git commit</code>, <code>git push</code> and <code>gh</code> write commands in folders bound to another environment. See <a href="#guards">Folders and guards</a>.</p>
+    </section>
+
+    <section id="guards">
+      <h2>Folders and guards</h2>
+      <p>A folder can belong to an environment. hydra then opens the right terminal there, and blocks <code>git commit</code>, <code>git push</code> and <code>gh</code> write commands (<code>gh pr create</code>, <code>gh repo delete</code>, <code>gh api -X POST</code> and the like) when they run from a terminal for a different environment. It covers commands you type and commands Claude Code runs.</p>
+
+      <h3>Bind a folder</h3>
+      <div class="term">
+        <div class="term-bar"><span class="tab plain">PowerShell</span><button class="copy" type="button" data-copy-from="g1">Copy</button></div>
+<pre id="g1">hydra bind E:\work work           # a rule in config.toml: everything under E:\work
+hydra bind --file work            # or a .hydra file in the current folder
+hydra bind                        # show which environment this folder resolves to
+hydra bind --list                 # list the rules in config.toml
+hydra unbind E:\work              # remove the rule and/or .hydra file</pre>
+      </div>
+      <p><code>--file</code> writes <code>.hydra</code> and adds it to the repo's <code>.git/info/exclude</code>, so it is never committed. You can also write rules by hand:</p>
+      <div class="term">
+        <div class="term-bar"><span class="tab plain">~/.hydra/config.toml</span></div>
+<pre><span class="k">[bindings]</span>
+<span class="s">"E:/work/**"</span> = <span class="s">"work"</span>
+<span class="s">"E:/personal/**"</span> = <span class="s">"personal"</span></pre>
+      </div>
+      <p>The most specific binding wins. A <code>.hydra</code> file beats a rule at the same or shallower depth, and among rules the longest literal prefix wins. A folder that matches nothing is unbound, and nothing is blocked there.</p>
+      <p><code>hydra shell</code> with no name opens the environment bound to the current folder. <code>hydra shell work</code> opens in the environment's <code>home</code> folder (set in <code>env.toml</code>) when you start it from somewhere not bound to it. <code>hydra env new work --home E:\work</code> sets <code>home</code> and binds the folder in one step. <code>hydra whoami</code> shows a <code>folder</code> line.</p>
+
+      <h3>What a block looks like</h3>
+      <div class="term">
+        <div class="term-bar"><span class="tab personal">personal · pwsh</span></div>
+<pre><span class="pp">[personal]</span> <span class="p">PS&gt;</span> git push
+<span class="bad">hydra: blocked git push - this folder belongs to work (rule E:/work/**), this terminal is personal</span>
+  -&gt; open a work terminal here: hydra shell work
+  -&gt; or run it once anyway: hydra allow -- git push</pre>
+      </div>
+      <p><code>hydra allow -- &lt;command&gt;</code> runs that one command past the guard. When Claude Code is blocked, it is told to ask you to run <code>hydra allow</code> in your own terminal. It can't run <code>hydra allow</code> itself.</p>
+
+      <h3>How it's enforced</h3>
+      <div class="cols">
+        <div class="col">
+          <h4 class="l">git hooks</h4>
+          <p>Each environment's gitconfig sets <code>core.hooksPath</code> to hydra's wrappers.</p>
+          <ul><li><code>pre-commit</code> and <code>pre-push</code> ask hydra first</li><li>Then the repo's own hook, or your global one, runs as usual</li></ul>
+        </div>
+        <div class="col">
+          <h4 class="m">gh and ssh shims</h4>
+          <p>Copies of hydra in <code>~/.hydra/shims</code>, first on <code>PATH</code>.</p>
+          <ul><li><code>gh</code> is checked, then run</li><li><code>ssh</code> adds the environment's key</li></ul>
+        </div>
+        <div class="col">
+          <h4 class="v">Claude Code hook</h4>
+          <p>A <code>PreToolUse</code> hook on the <code>Bash</code> and <code>PowerShell</code> tools.</p>
+          <ul><li>Follows <code>cd</code> and <code>git -C</code></li><li>Catches <code>--no-verify</code></li></ul>
+        </div>
+      </div>
+      <p>If a binding names an environment that doesn't exist, hydra prints <code>guard skipped</code> and allows the command.</p>
+      <p><strong>Git is always on.</strong> Every environment gets hydra's gitconfig, even without <code>hydra add git</code>. It includes your real global config (<code>GIT_CONFIG_GLOBAL</code> if you set it, else <code>~/.config/git/config</code> and <code>~/.gitconfig</code>) plus the guard. The Credential Manager namespace is written only with <code>[git]</code>, and the <code>gh</code> credential helper only with <code>[git]</code> or <code>[github]</code>.</p>
+
+      <h3>Limits</h3>
+      <p>The guard stops mistakes. It isn't a security boundary.</p>
+      <ul>
+        <li><code>--no-verify</code> skips git hooks outside Claude Code. The Claude hook catches it.</li>
+        <li>A repo that sets its own <code>core.hooksPath</code> (Husky, for example) replaces hydra's hooks, so the git guard is off there. <code>hydra whoami</code> says so. The <code>gh</code> shim and Claude hook still apply.</li>
+        <li>In a hydra terminal, <code>pre-commit install</code> refuses and <code>git lfs install</code> complains, because <code>core.hooksPath</code> is set. Run them from a normal terminal.</li>
+        <li><code>git config --global</code> inside hydra edits the generated file, which hydra rewrites on the next launch. Edit your real global file instead. The generated file's header names it.</li>
+        <li>The git hook looks up the binding at the repo root.</li>
+        <li>Git Bash's own <code>ssh</code> inside Claude Code isn't shimmed. PowerShell and hydra's own Git Bash terminals are.</li>
+      </ul>
     </section>
 
     <section id="secrets">
@@ -367,14 +435,17 @@ value: ••••••••••••••••
           <thead><tr><th>Command</th><th>What it does</th></tr></thead>
           <tbody>
             <tr><td><code>hydra init</code></td><td>Creates <code>~/.hydra</code></td></tr>
-            <tr><td><code>hydra env new|list|edit|rm|rename</code></td><td>Manages environments. <code>rename</code> updates secrets and saved logins too.</td></tr>
+            <tr><td><code>hydra env new|list|edit|rm|rename</code></td><td>Manages environments. <code>env new &lt;name&gt; --home DIR</code> sets where its terminals open and binds that folder. <code>rename</code> updates bindings, secrets and saved logins too.</td></tr>
             <tr><td><code>hydra add [&lt;tool&gt;] [&lt;env&gt;]</code></td><td>Turns a tool on by writing its settings. Never signs in.</td></tr>
             <tr><td><code>hydra remove &lt;tool&gt; [&lt;env&gt;]</code></td><td>Turns a tool off. Saved logins are kept.</td></tr>
-            <tr><td><code>hydra shell [&lt;env&gt;]</code></td><td>Opens a terminal in an environment. Options: <code>--shell pwsh|bash</code>, <code>--cwd DIR</code>.</td></tr>
+            <tr><td><code>hydra shell [&lt;env&gt;]</code></td><td>Opens a terminal in an environment. With no name, the environment comes from the current folder's binding. Options: <code>--shell pwsh|bash</code>, <code>--cwd DIR</code>.</td></tr>
             <tr><td><code>hydra run &lt;env&gt; -- &lt;command&gt;</code></td><td>Runs one command in an environment</td></tr>
             <tr><td><code>hydra auth &lt;tool&gt; &lt;env&gt;</code></td><td>Runs a tool's sign-in inside an environment without opening a terminal</td></tr>
             <tr><td><code>hydra secret set|rm &lt;env&gt;/&lt;key&gt;</code></td><td>Stores or removes a secret</td></tr>
-            <tr><td><code>hydra whoami [--env &lt;env&gt;]</code></td><td>Shows which account each tool is actually using</td></tr>
+            <tr><td><code>hydra bind [&lt;path&gt;] &lt;env&gt;</code></td><td>Binds a folder to an environment. <code>--file</code> writes a <code>.hydra</code> file instead of a rule. With no arguments it shows the current folder's binding; <code>--list</code> lists every rule.</td></tr>
+            <tr><td><code>hydra unbind [&lt;path&gt;]</code></td><td>Removes a folder's rule and/or <code>.hydra</code> file</td></tr>
+            <tr><td><code>hydra allow -- &lt;command&gt;</code></td><td>Runs one command past the folder guard</td></tr>
+            <tr><td><code>hydra whoami [--env &lt;env&gt;]</code></td><td>Shows which account each tool is actually using, and the current folder's binding</td></tr>
             <tr><td><code>hydra update [--check]</code></td><td>Installs the latest release from GitHub after checking its checksum</td></tr>
           </tbody>
         </table>
@@ -385,9 +456,11 @@ value: ••••••••••••••••
       <h2>Files</h2>
       <div class="term">
         <div class="term-bar"><span class="tab plain">~/.hydra</span></div>
-<pre>config.toml          <span class="c">global settings</span>
+<pre>config.toml          <span class="c">global settings and [bindings]</span>
 envs/&lt;env&gt;/          <span class="c">yours: env.toml, plus optional claude/ overrides</span>
 state/&lt;env&gt;/         <span class="c">hydra's: each tool's folder, sign-ins, generated config</span>
+state/&lt;env&gt;/git/hooks/  <span class="c">hydra's git hook wrappers (the guard)</span>
+shims/               <span class="c">gh.exe and ssh.exe copies of hydra, first on PATH</span>
 secrets.toml         <span class="c">names (never values) of stored secrets</span></pre>
       </div>
       <p><code>HYDRA_HOME</code> moves <code>~/.hydra</code>. Deleting <code>state/&lt;env&gt;</code> resets an environment, but you'll need to sign in again.</p>
@@ -404,6 +477,10 @@ secrets.toml         <span class="c">names (never values) of stored secrets</spa
             <tr><td><code>…id_ed25519_work not found</code></td><td>Fix the key path: <code>hydra add git work --ssh-key &lt;path&gt;</code></td></tr>
             <tr><td><code>CLAUDE_CONFIG_DIR</code> error when opening</td><td>Remove <code>CLAUDE_CONFIG_DIR</code> from <code>[env]</code>; <code>[claude]</code> sets it. Then sign in again.</td></tr>
             <tr><td><code>… is a real folder, not a link</code></td><td>Move anything you want to keep into <code>~/.claude</code>, delete that folder, and reopen the terminal.</td></tr>
+            <tr><td><code>hydra: blocked git push - this folder belongs to work …</code></td><td>The folder is bound to another environment. Open the right terminal (<code>hydra shell work</code>) or run it once with <code>hydra allow -- git push</code>. <code>hydra bind</code> shows which rule applies.</td></tr>
+            <tr><td><code>hydra: warning: guard skipped</code></td><td>A binding names an environment that doesn't exist, so nothing was checked. Fix the name in <code>config.toml</code> or the <code>.hydra</code> file, or create the environment.</td></tr>
+            <tr><td><code>whoami</code> says the repo sets its own <code>core.hooksPath</code></td><td>Husky or similar replaces hydra's git hooks in that repo, so the git guard is off there. The <code>gh</code> shim and Claude hook still guard it.</td></tr>
+            <tr><td><code>gh/ssh shims not refreshed</code></td><td>hydra couldn't copy itself into <code>~/.hydra/shims</code>, usually because a <code>gh</code> or <code>ssh</code> from there is running. Close it and open a new terminal.</td></tr>
             <tr><td>A Claude setting you changed disappeared</td><td>Your version is in <code>settings.json.bak</code>. Put lasting changes in <code>~/.claude/settings.json</code> or <code>envs/&lt;env&gt;/claude/settings.json</code>.</td></tr>
             <tr><td><code>hydra is in use - not updating</code></td><td>Close the listed hydra terminals, then run <code>hydra update</code> again.</td></tr>
           </tbody>
@@ -415,9 +492,7 @@ secrets.toml         <span class="c">names (never values) of stored secrets</spa
       <h2>Planned</h2>
       <p>These are designed but not built yet:</p>
       <ul>
-        <li><strong>Folder bindings and guards.</strong> Blocks <code>git push</code> and <code>gh pr create</code> from a folder that belongs to another environment, including when Claude Code runs them.</li>
-        <li><strong><code>hydra shell</code> without a name.</strong> Picks the environment from the current folder.</li>
-        <li><strong>Plain <code>ssh</code> and <code>scp</code></strong> using the environment's key outside git.</li>
+        <li><strong><code>scp</code> and <code>sftp</code></strong> using the environment's key outside git. <code>ssh</code> is already handled by the shim.</li>
         <li><strong>Windows Terminal profiles.</strong> One coloured tab per environment.</li>
         <li><strong><code>hydra doctor</code></strong> and macOS / Linux support.</li>
       </ul>

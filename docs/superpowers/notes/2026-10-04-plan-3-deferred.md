@@ -32,5 +32,5 @@ Collected from the review ledger and the final fix report when Plan 3 finished (
 - Task 4: heredoc lines can false-positive (including inside `$()`, an extra warn on the safe side); `ssh://host:22` owner parse fails open; `HEAD@{1}` remote heuristic; wrappers with flags (`sudo -u bob`, `env -i`) aren't unwrapped, a remaining bypass; an unquoted `(` in args truncates the command's args.
 - Task 5: `--type=path` expands `~` from `HOME`; `inside()` knows only the current `HYDRA_HOME`; `rename` can fail if a hook runs at that moment (a launch error); `bind_cli` git init inherits the dev `GIT_CONFIG_GLOBAL` (read-only, harmless).
 - Task 6: non-UTF-8 args are passed lossily through the shims.
-- Task 7: the guard-hook dedupe drops a whole entry if the user grouped hooks with ours; the owner for `git push <named-remote>` uses `origin`; the hook command's quoting breaks if Claude hooks run via PowerShell (fail-open); missing e2e tests (relative cwd).
+- Task 7: the guard-hook dedupe drops a whole entry if the user grouped hooks with ours; the owner for `git push <named-remote>` uses `origin`; the hook command's quoting breaks if Claude hooks run via PowerShell (fail-open).
 - Final: PowerShell tool support is best-effort (see above); docs say the guard is not a security boundary.

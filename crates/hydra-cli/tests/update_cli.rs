@@ -98,11 +98,11 @@ fn update(h: &Home, api: &str, exe: &PathBuf) -> assert_cmd::Command {
 fn newer_release_replaces_the_exe() {
     let h = Home::new();
     let exe = installed(&h);
-    let gh = FakeGitHub::release("v0.4.0", None);
+    let gh = FakeGitHub::release("v99.0.0", None);
     update(&h, &gh.base, &exe)
         .assert()
         .success()
-        .stdout(predicate::str::contains("updated to 0.4.0"));
+        .stdout(predicate::str::contains("updated to 99.0.0"));
     assert_eq!(std::fs::read(&exe).unwrap(), NEW_BYTES);
     let dir = exe.parent().unwrap();
     assert!(!dir.join("hydra.new.exe").exists());
@@ -113,7 +113,7 @@ fn checksum_mismatch_changes_nothing() {
     let h = Home::new();
     let exe = installed(&h);
     let wrong = format!("{}  {EXE_ASSET}\n", "0".repeat(64));
-    let gh = FakeGitHub::release("v0.4.0", Some(&wrong));
+    let gh = FakeGitHub::release("v99.0.0", Some(&wrong));
     update(&h, &gh.base, &exe)
         .assert()
         .failure()
@@ -128,12 +128,14 @@ fn checksum_mismatch_changes_nothing() {
 fn check_only_reports_the_available_version() {
     let h = Home::new();
     let exe = installed(&h);
-    let gh = FakeGitHub::release("v0.4.0", None);
+    let gh = FakeGitHub::release("v99.0.0", None);
     update(&h, &gh.base, &exe)
         .arg("--check")
         .assert()
         .success()
-        .stdout(predicate::str::contains("is installed; 0.4.0 is available"));
+        .stdout(predicate::str::contains(
+            "is installed; 99.0.0 is available",
+        ));
     assert_eq!(std::fs::read_to_string(&exe).unwrap(), "old");
 }
 

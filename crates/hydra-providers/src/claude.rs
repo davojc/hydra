@@ -4,7 +4,7 @@ use hydra_core::config::{EnvConfig, load_global};
 use hydra_core::contribution::Contribution;
 use hydra_core::paths::expand_tilde;
 use hydra_core::provider::{CommandRunner, Ctx, IdentityReport, Provider, ProviderError, Status};
-use hydra_platform::links::{is_link, link_dir, unlink};
+use hydra_platform::links::{is_link, link_dir, points_at, unlink};
 
 use crate::claude_files::{merge_settings, render_claude_md, sync_mcp};
 use crate::report::report;
@@ -77,41 +77,138 @@ fn read_opt(path: &Path) -> Result<Option<String>, ProviderError> {
     }
 }
 
-/// Writes only when the content changed, via a temp file + rename so Claude never sees half a file.
-fn write_if_changed(path: &Path, content: &str) -> Result<(), ProviderError> {
-    if read_opt(path)?.as_deref() == Some(content) {
-        return Ok(());
+/// How often a step that can race with another launch of the same environment is tried.
+const ATTEMPTS: u32 = 8;
+
+/// Runs `step` until it succeeds, pausing briefly between tries, so two launches of one
+/// environment at the same moment both end up with the same, complete result.
+fn with_retries<T>(mut step: impl FnMut() -> Result<T, ProviderError>) -> Result<T, ProviderError> {
+    let mut tries = 1;
+    loop {
+        match step() {
+            Ok(v) => return Ok(v),
+            Err(e) if tries >= ATTEMPTS => return Err(e),
+            Err(_) => {
+                std::thread::sleep(std::time::Duration::from_millis(5 * u64::from(tries)));
+                tries += 1;
+            }
+        }
     }
-    let tmp = path.with_extension("hydra-tmp");
-    std::fs::write(&tmp, content)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
 }
 
-fn link_shared(l: &Layout, name: &str, env_file: &Path) -> Result<(), ProviderError> {
-    let target = [l.over.join(name), l.base.join(name)]
+/// Writes only when the content changed, via a temp file + rename so Claude never sees half a file.
+fn write_if_changed(path: &Path, content: &str) -> Result<(), ProviderError> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    with_retries(|| {
+        if read_opt(path)?.as_deref() == Some(content) {
+            return Ok(());
+        }
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(format!(".hydra-tmp-{}-{seq}", std::process::id()));
+        let tmp = PathBuf::from(tmp);
+        let written = std::fs::write(&tmp, content).and_then(|()| std::fs::rename(&tmp, path));
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(ProviderError::new(format!(
+                "can't write {}: {e}",
+                path.display()
+            )));
+        }
+        Ok(())
+    })
+}
+
+/// Makes `<dir>/<name>` a link to the environment's or the base's `<name>` folder (or
+/// removes a stale link when neither exists). Leaves a correct link alone.
+fn link_shared(l: &Layout, name: &str, override_dir: &Path) -> Result<(), ProviderError> {
+    let target = [override_dir.to_path_buf(), l.base.join(name)]
         .into_iter()
         .find(|p| p.is_dir());
     let link = l.dir.join(name);
-    if is_link(&link) {
-        unlink(&link)?;
-    } else if link.is_dir() {
-        let empty = std::fs::read_dir(&link)?.next().is_none();
-        if !empty {
+    with_retries(|| {
+        let done = match &target {
+            Some(t) => points_at(&link, t),
+            None => std::fs::symlink_metadata(&link).is_err(),
+        };
+        if done {
+            return Ok(());
+        }
+        if is_link(&link) {
+            // Another launch may remove it first; only a link that's still there is an error.
+            if let Err(e) = unlink(&link)
+                && is_link(&link)
+            {
+                return Err(e.into());
+            }
+        } else if link.is_dir() {
+            if std::fs::read_dir(&link)?.next().is_some() {
+                let shared = l.base.join(name);
+                return Err(ProviderError::new(format!(
+                    "{} is a real folder, not a link to your shared {}",
+                    link.display(),
+                    shared.display()
+                ))
+                .with_fix(format!(
+                    "move anything you want to keep into {} (or {}), then delete {}",
+                    shared.display(),
+                    override_dir.display(),
+                    link.display()
+                )));
+            }
+            if let Err(e) = std::fs::remove_dir(&link)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(e.into());
+            }
+        } else if target.is_some() && std::fs::symlink_metadata(&link).is_ok() {
             return Err(ProviderError::new(format!(
-                "{} is a real folder, not a link to your shared ~/.claude/{name}",
+                "{} is in the way of the link to your shared {name} folder",
                 link.display()
             ))
             .with_fix(format!(
-                "move anything you want to keep into ~/.claude/{name} (or {}), then delete {}",
-                env_file.display(),
+                "delete {}; hydra recreates it as a link",
                 link.display()
             )));
         }
-        std::fs::remove_dir(&link)?;
-    }
-    if let Some(t) = target {
-        link_dir(&t, &link)?;
+        if let Some(t) = &target
+            && let Err(e) = link_dir(t, &link)
+            && !points_at(&link, t)
+        {
+            // AlreadyExists is fine when another launch made the same link meanwhile.
+            return Err(ProviderError::new(format!(
+                "can't link {} to {}: {e}",
+                link.display(),
+                t.display()
+            )));
+        }
+        let ok = match &target {
+            Some(t) => points_at(&link, t),
+            None => true,
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(ProviderError::new(format!(
+                "{} changed while hydra was linking it",
+                link.display()
+            )))
+        }
+    })
+}
+
+/// Refuses to write when the state folder itself has been replaced by a link: hydra would
+/// otherwise write (and later delete) files wherever that link points.
+fn refuse_linked(path: &Path) -> Result<(), ProviderError> {
+    if is_link(path) {
+        return Err(ProviderError::new(format!(
+            "{} is a link; hydra won't write its files through it",
+            path.display()
+        ))
+        .with_fix(format!(
+            "remove the link {} (only the link, e.g. rmdir); hydra recreates it as a folder",
+            path.display()
+        )));
     }
     Ok(())
 }
@@ -129,6 +226,8 @@ impl Provider for Claude {
 
     fn materialise(&self, ctx: &Ctx) -> Result<(), ProviderError> {
         let l = layout(ctx)?;
+        refuse_linked(&ctx.state_dir())?;
+        refuse_linked(&l.dir)?;
         std::fs::create_dir_all(&l.dir)?;
         let exclude = ctx
             .env
@@ -136,9 +235,8 @@ impl Provider for Claude {
             .as_ref()
             .map(|c| c.mcp.exclude.clone())
             .unwrap_or_default();
-        let over_dir = l.over.clone();
         for name in SHARED_DIRS {
-            link_shared(&l, name, &over_dir.join(name))?;
+            link_shared(&l, name, &l.over.join(name))?;
         }
         let settings = merge_settings(
             read_opt(&l.base.join("settings.json"))?.as_deref(),
@@ -349,6 +447,120 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_launches_of_one_environment_all_succeed() {
+        for round in 0..20 {
+            let f = Fixture::new("[claude]\n");
+            with_base(&f);
+            std::fs::create_dir_all(f.home.join(".claude").join("commands")).unwrap();
+            std::thread::scope(|s| {
+                let handles: Vec<_> = (0..4)
+                    .map(|_| s.spawn(|| Claude.materialise(&f.ctx())))
+                    .collect();
+                for h in handles {
+                    h.join()
+                        .unwrap()
+                        .unwrap_or_else(|e| panic!("round {round}: {e}"));
+                }
+            });
+            let dir = cfg_dir(&f);
+            assert!(is_link(&dir.join("skills")) && is_link(&dir.join("commands")));
+            assert_eq!(
+                std::fs::read_to_string(dir.join("skills").join("my-skill").join("SKILL.md"))
+                    .unwrap(),
+                "skill"
+            );
+            let leftovers: Vec<_> = std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().contains("hydra-tmp"))
+                .collect();
+            assert!(leftovers.is_empty(), "round {round}: {leftovers:?}");
+        }
+    }
+
+    #[test]
+    fn links_that_already_point_right_are_left_alone() {
+        let f = Fixture::new("[claude]\n");
+        with_base(&f);
+        Claude.materialise(&f.ctx()).unwrap();
+        let link = cfg_dir(&f).join("skills");
+        let created = std::fs::symlink_metadata(&link).unwrap().created().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        Claude.materialise(&f.ctx()).unwrap();
+        assert_eq!(
+            std::fs::symlink_metadata(&link).unwrap().created().unwrap(),
+            created,
+            "the link was recreated"
+        );
+    }
+
+    #[test]
+    fn a_link_to_the_wrong_place_is_repointed() {
+        let f = Fixture::new("[claude]\n");
+        with_base(&f);
+        let dir = cfg_dir(&f);
+        let elsewhere = f.home.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("keep.txt"), "keep").unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        link_dir(&elsewhere, &dir.join("skills")).unwrap();
+        Claude.materialise(&f.ctx()).unwrap();
+        assert!(dir.join("skills").join("my-skill").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(elsewhere.join("keep.txt")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn a_plain_file_where_a_link_goes_is_an_error() {
+        let f = Fixture::new("[claude]\n");
+        with_base(&f);
+        let dir = cfg_dir(&f);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("skills"), "mine").unwrap();
+        let e = Claude.materialise(&f.ctx()).unwrap_err();
+        let path = dir.join("skills").display().to_string();
+        assert!(e.message.contains(&path), "{}", e.message);
+        assert_eq!(
+            e.fix.as_deref(),
+            Some(format!("delete {path}; hydra recreates it as a link").as_str())
+        );
+        assert_eq!(std::fs::read_to_string(dir.join("skills")).unwrap(), "mine");
+    }
+
+    #[test]
+    fn refuses_to_write_through_a_linked_state_folder() {
+        for linked in ["env", "claude"] {
+            let f = Fixture::new("[claude]\n");
+            with_base(&f);
+            let elsewhere = f.home.join("elsewhere");
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            let state = f.paths.state_dir(&f.name);
+            let link = if linked == "env" {
+                std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+                state.clone()
+            } else {
+                std::fs::create_dir_all(&state).unwrap();
+                state.join("claude")
+            };
+            link_dir(&elsewhere, &link).unwrap();
+            let e = Claude.materialise(&f.ctx()).unwrap_err();
+            assert!(
+                e.message.contains(&link.display().to_string()) && e.message.contains("link"),
+                "{}",
+                e.message
+            );
+            assert!(e.fix.is_some());
+            assert_eq!(
+                std::fs::read_dir(&elsewhere).unwrap().count(),
+                0,
+                "{linked}: wrote through the link"
+            );
+        }
+    }
+
+    #[test]
     fn real_folder_in_place_of_link_is_never_deleted() {
         let f = Fixture::new("[claude]\n");
         with_base(&f);
@@ -362,7 +574,17 @@ mod tests {
             "{}",
             e.message
         );
-        assert!(e.fix.is_some());
+        let base_plugins = f.home.join(".claude").join("plugins");
+        assert!(
+            e.message.contains(&base_plugins.display().to_string()),
+            "{}",
+            e.message
+        );
+        let fix = e.fix.unwrap();
+        assert!(
+            fix.contains(&base_plugins.display().to_string()) && !fix.contains("~/.claude"),
+            "{fix}"
+        );
         assert_eq!(
             std::fs::read_to_string(dir.join("plugins").join("mine.json")).unwrap(),
             "x"

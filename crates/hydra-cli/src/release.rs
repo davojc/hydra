@@ -82,17 +82,61 @@ pub fn parse_checksum(text: &str) -> Option<String> {
         .then(|| token.to_ascii_lowercase())
 }
 
-/// PIDs in `tasklist /FO CSV /NH` output, e.g. `"hydra.exe","1234","Console","1","9,000 K"`.
-/// The "No tasks are running" line has no PID and is skipped.
-pub fn parse_tasklist_pids(text: &str) -> Vec<u32> {
-    text.lines()
-        .filter_map(|line| line.split("\",\"").nth(1)?.parse().ok())
-        .collect()
+/// Image names `hydra update` treats as a running hydra: the exe, and an old one still
+/// running from a previous update (the same names scripts/deploy.ps1 checks).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub const HYDRA_IMAGES: [&str; 2] = ["hydra.exe", "hydra.old.exe"];
+
+/// PIDs of hydra processes in `tasklist /FO CSV /NH` output, whose lines look like
+/// `"hydra.exe","1234","Console","1","9,000 K"`. Anything hydra can't read is an error,
+/// so the caller refuses to update rather than guess.
+#[cfg_attr(not(windows), allow(dead_code))] // used on Windows; tested everywhere
+pub fn hydra_pids_from_tasklist(text: &str) -> Result<Vec<u32>, String> {
+    let mut pids = Vec::new();
+    let mut lines = 0;
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        lines += 1;
+        if line.starts_with("INFO:") {
+            continue; // "No tasks are running which match the specified criteria."
+        }
+        let fields: Vec<&str> = line.split("\",\"").collect();
+        let (Some(name), Some(pid)) = (fields[0].strip_prefix('"'), fields.get(1)) else {
+            return Err(format!("unexpected tasklist line: {line}"));
+        };
+        let pid: u32 = pid
+            .parse()
+            .map_err(|_| format!("unexpected tasklist line: {line}"))?;
+        if HYDRA_IMAGES.iter().any(|i| i.eq_ignore_ascii_case(name)) {
+            pids.push(pid);
+        }
+    }
+    if lines == 0 {
+        return Err("tasklist printed nothing".into());
+    }
+    Ok(pids)
 }
 
-/// PIDs in `pgrep` output: one per line.
-pub fn parse_pgrep_pids(text: &str) -> Vec<u32> {
-    text.lines().filter_map(|l| l.trim().parse().ok()).collect()
+/// PIDs from `pgrep -x 'hydra|hydra\.old'`: exit 0 lists them one per line, exit 1 means
+/// none are running, anything else (or output hydra can't read) is an error.
+#[cfg_attr(windows, allow(dead_code))] // used off Windows; tested everywhere
+pub fn hydra_pids_from_pgrep(code: Option<i32>, stdout: &str) -> Result<Vec<u32>, String> {
+    match code {
+        Some(1) => Ok(Vec::new()),
+        Some(0) => {
+            let pids = stdout
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(|l| l.parse().map_err(|_| format!("unexpected pgrep line: {l}")))
+                .collect::<Result<Vec<u32>, String>>()?;
+            if pids.is_empty() {
+                return Err("pgrep found processes but printed none".into());
+            }
+            Ok(pids)
+        }
+        Some(c) => Err(format!("pgrep exited with {c}")),
+        None => Err("pgrep was stopped by a signal".into()),
+    }
 }
 
 #[cfg(test)]
@@ -174,16 +218,48 @@ mod tests {
     }
 
     #[test]
-    fn tasklist_and_pgrep_pids() {
-        let tasklist = "\r\n\"hydra.exe\",\"1234\",\"Console\",\"1\",\"9,000 K\"\r\n\"hydra.exe\",\"88\",\"Console\",\"1\",\"8,000 K\"\r\n";
-        assert_eq!(parse_tasklist_pids(tasklist), vec![1234, 88]);
+    fn tasklist_lists_hydra_and_hydra_old() {
+        let out = "\r\n\"System\",\"4\",\"Services\",\"0\",\"144 K\"\r\n\
+                   \"hydra.exe\",\"1234\",\"Console\",\"1\",\"9,000 K\"\r\n\
+                   \"pwsh.exe\",\"77\",\"Console\",\"1\",\"80,000 K\"\r\n\
+                   \"HYDRA.OLD.EXE\",\"88\",\"Console\",\"1\",\"8,000 K\"\r\n\
+                   \"hydra-tool.exe\",\"99\",\"Console\",\"1\",\"8,000 K\"\r\n";
+        assert_eq!(hydra_pids_from_tasklist(out), Ok(vec![1234, 88]));
         assert_eq!(
-            parse_tasklist_pids(
+            hydra_pids_from_tasklist("\"System\",\"4\",\"Services\",\"0\",\"144 K\"\r\n"),
+            Ok(vec![])
+        );
+        assert_eq!(
+            hydra_pids_from_tasklist(
                 "INFO: No tasks are running which match the specified criteria.\r\n"
             ),
-            Vec::<u32>::new()
+            Ok(vec![])
         );
-        assert_eq!(parse_pgrep_pids("12\n345\n"), vec![12, 345]);
-        assert_eq!(parse_pgrep_pids(""), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn tasklist_output_hydra_cant_read_is_an_error() {
+        assert!(hydra_pids_from_tasklist("").is_err());
+        assert!(hydra_pids_from_tasklist("ERROR: Invalid argument/option.\r\n").is_err());
+        assert!(hydra_pids_from_tasklist("Image Name   PID\r\n").is_err());
+        assert!(
+            hydra_pids_from_tasklist("\"hydra.exe\",\"abc\",\"Console\",\"1\",\"9 K\"\r\n")
+                .is_err()
+        );
+        assert!(hydra_pids_from_tasklist("\"hydra.exe\"\r\n").is_err());
+    }
+
+    #[test]
+    fn pgrep_exit_codes() {
+        assert_eq!(
+            hydra_pids_from_pgrep(Some(0), "12\n345\n"),
+            Ok(vec![12, 345])
+        );
+        assert_eq!(hydra_pids_from_pgrep(Some(1), ""), Ok(vec![]));
+        assert!(hydra_pids_from_pgrep(Some(2), "").is_err());
+        assert!(hydra_pids_from_pgrep(Some(3), "").is_err());
+        assert!(hydra_pids_from_pgrep(None, "").is_err());
+        assert!(hydra_pids_from_pgrep(Some(0), "12\nnope\n").is_err());
+        assert!(hydra_pids_from_pgrep(Some(0), "").is_err());
     }
 }

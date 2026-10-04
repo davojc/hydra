@@ -131,9 +131,9 @@ fn replace(target: &Path, new: &Path, old: &Path) -> anyhow::Result<()> {
         let restored = fs::rename(old, target);
         let _ = fs::remove_file(new);
         let what = if restored.is_ok() {
-            "the old hydra is back in place"
+            "the old version is back in place"
         } else {
-            "the old hydra is hydra.old.exe"
+            "the old version is hydra.old.exe"
         };
         return Err(e).with_context(|| {
             format!(
@@ -147,24 +147,66 @@ fn replace(target: &Path, new: &Path, old: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// PIDs of other running hydra processes. `HYDRA_UPDATE_SKIP_PROCESS_CHECK=1` skips the check (tests).
+/// PIDs of other running hydra processes (hydra.exe and hydra.old.exe). Fails closed: if
+/// the processes can't be listed, the update is refused.
+/// `HYDRA_UPDATE_SKIP_PROCESS_CHECK=1` skips the check (tests).
 fn other_hydra_pids() -> anyhow::Result<Vec<u32>> {
     if std::env::var("HYDRA_UPDATE_SKIP_PROCESS_CHECK").as_deref() == Ok("1") {
         return Ok(Vec::new());
     }
-    let pids = if cfg!(windows) {
-        let out = std::process::Command::new("tasklist")
-            .args(["/FI", "IMAGENAME eq hydra.exe", "/FO", "CSV", "/NH"])
-            .output()
-            .context("can't list running processes (tasklist)")?;
-        release::parse_tasklist_pids(&String::from_utf8_lossy(&out.stdout))
-    } else {
-        let out = std::process::Command::new("pgrep")
-            .args(["-x", "hydra"])
-            .output()
-            .context("can't list running processes (pgrep)")?;
-        release::parse_pgrep_pids(&String::from_utf8_lossy(&out.stdout))
-    };
+    let pids = running_hydra_pids().map_err(|reason| {
+        anyhow::anyhow!("can't check whether hydra is running ({reason}) - not updating")
+    })?;
     let me = std::process::id();
     Ok(pids.into_iter().filter(|&p| p != me).collect())
+}
+
+#[cfg(windows)]
+fn running_hydra_pids() -> Result<Vec<u32>, String> {
+    let out = std::process::Command::new("tasklist")
+        .args(["/FO", "CSV", "/NH"])
+        .output()
+        .map_err(|e| format!("tasklist didn't run: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("tasklist failed with {}", out.status));
+    }
+    release::hydra_pids_from_tasklist(&String::from_utf8_lossy(&out.stdout))
+}
+
+#[cfg(not(windows))]
+fn running_hydra_pids() -> Result<Vec<u32>, String> {
+    let out = std::process::Command::new("pgrep")
+        .args(["-x", r"hydra|hydra\.old"])
+        .output()
+        .map_err(|e| format!("pgrep didn't run: {e}"))?;
+    release::hydra_pids_from_pgrep(out.status.code(), &String::from_utf8_lossy(&out.stdout))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_install_puts_the_old_version_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("hydra.exe");
+        std::fs::write(&target, "old").unwrap();
+        let missing_new = dir.path().join("hydra.new.exe");
+        let old = dir.path().join(OLD_EXE);
+
+        let err = replace(&target, &missing_new, &old).unwrap_err();
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "old");
+        assert!(!old.exists());
+        assert!(
+            format!("{err:#}").contains("the old version is back in place"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn this_machines_process_list_can_be_read() {
+        // The real tasklist / pgrep output must parse, or every update would be refused.
+        running_hydra_pids().unwrap();
+    }
 }

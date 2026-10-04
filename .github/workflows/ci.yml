@@ -11,3 +11,65 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+
+  release:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Decide the version
+        id: decide
+        shell: bash
+        run: |
+          next="$(bash scripts/next-version.sh)"
+          if [ "$next" = "skip" ]; then
+            echo "only docs changed since the last release - not releasing"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "releasing $next"
+            echo "version=$next" >> "$GITHUB_OUTPUT"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build
+        if: steps.decide.outputs.release == 'true'
+        shell: bash
+        env:
+          HYDRA_VERSION: ${{ steps.decide.outputs.version }}
+        run: cargo build --release -p hydra-cli
+      - name: Package
+        if: steps.decide.outputs.release == 'true'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/hydra.exe dist/hydra-x86_64-pc-windows-msvc.exe
+          cd dist
+          sha256sum hydra-x86_64-pc-windows-msvc.exe | awk '{print tolower($1) "  hydra-x86_64-pc-windows-msvc.exe"}' > hydra-x86_64-pc-windows-msvc.exe.sha256
+          cat hydra-x86_64-pc-windows-msvc.exe.sha256
+      - name: Check the version
+        if: steps.decide.outputs.release == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.decide.outputs.version }}
+        run: |
+          got="$(dist/hydra-x86_64-pc-windows-msvc.exe --version | tr -d '\r')"
+          echo "$got"
+          if [ "$got" != "hydra $VERSION" ]; then
+            echo "expected 'hydra $VERSION', got '$got'" >&2
+            exit 1
+          fi
+      - name: Publish the release
+        if: steps.decide.outputs.release == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.decide.outputs.version }}
+        run: gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" --title "hydra $VERSION" --generate-notes

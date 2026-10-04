@@ -28,6 +28,7 @@ pub struct GlobalConfig {
     pub default_shell: Option<String>,
     pub shells: Option<Vec<String>>,
     pub git_bash: Option<PathBuf>,
+    pub claude_base: Option<String>,
     #[serde(default)]
     pub bindings: BTreeMap<String, String>,
 }

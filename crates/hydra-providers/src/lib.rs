@@ -2,6 +2,7 @@
 use hydra_core::provider::Provider;
 
 pub mod aws;
+pub mod claude;
 pub mod claude_files;
 pub mod dir;
 pub mod envvars;
@@ -17,6 +18,7 @@ pub(crate) mod testutil;
 /// Every provider, in the order their variables are merged.
 pub fn all() -> Vec<Box<dyn Provider>> {
     vec![
+        Box::new(claude::Claude),
         Box::new(github::Github),
         Box::new(git::Git),
         Box::new(aws::Aws),

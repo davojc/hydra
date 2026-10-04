@@ -125,6 +125,8 @@ pub enum GuardCmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Claude Code's PreToolUse hook: reads the hook JSON on stdin, exits 2 to block
+    Claude,
 }
 
 #[derive(Subcommand)]

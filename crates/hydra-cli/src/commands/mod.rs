@@ -21,6 +21,7 @@ pub fn run(cmd: Cmd) -> anyhow::Result<i32> {
     if let Cmd::Guard { command } = cmd {
         return match command {
             GuardCmd::Git { hook, args } => guard::git(&hook, &args),
+            GuardCmd::Claude => guard::claude(),
         };
     }
     if let Cmd::Allow { command } = cmd {

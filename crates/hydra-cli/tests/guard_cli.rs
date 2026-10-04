@@ -579,3 +579,34 @@ fn an_environment_without_a_git_section_still_gets_its_gitconfig_and_guard() {
         ));
     assert_eq!(s.commit_count(), "0");
 }
+
+fn claude_hook(s: &Setup, env: &str, input: &str) -> assert_cmd::assert::Assert {
+    let mut c = s.h.hydra();
+    c.args(["guard", "claude"]).env("HYDRA_ENV", env);
+    c.write_stdin(input.to_string()).assert()
+}
+
+fn bash_input(command: &str, cwd: &Path) -> String {
+    serde_json::json!({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": cwd})
+        .to_string()
+}
+
+#[test]
+fn claude_hook_blocks_wrong_environment() {
+    let s = Setup::new();
+    claude_hook(&s, "personal", &bash_input("git commit -m x", &s.repo))
+        .code(2)
+        .stderr(predicate::str::contains("blocked git commit"));
+    claude_hook(&s, "work", &bash_input("git commit -m x", &s.repo)).success();
+    claude_hook(&s, "personal", "not json")
+        .success()
+        .stderr(predicate::str::contains("guard skipped"));
+}
+
+#[test]
+fn claude_hook_allows_other_commands() {
+    let s = Setup::new();
+    claude_hook(&s, "personal", &bash_input("ls -la", &s.repo)).success();
+    let other = serde_json::json!({"tool_name": "Edit", "tool_input": {"command": "git commit"}, "cwd": s.repo}).to_string();
+    claude_hook(&s, "personal", &other).success();
+}

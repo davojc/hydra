@@ -120,6 +120,43 @@ pub fn merge_settings(
     Ok(MergedSettings { text, dropped })
 }
 
+/// Appends a PreToolUse hook on the Bash tool running `command` to the settings JSON
+/// (creating hooks/PreToolUse as needed, keeping every existing hook). Idempotent:
+/// an existing entry whose command contains " guard claude" is replaced, not duplicated.
+pub fn add_guard_hook(settings_json: &str, command: &str) -> Result<String, String> {
+    let mut root: Value = serde_json::from_str(settings_json).map_err(|e| e.to_string())?;
+    let obj = root
+        .as_object_mut()
+        .ok_or("settings.json isn't a JSON object")?;
+    let hooks = obj
+        .entry("hooks")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or("settings.json: \"hooks\" isn't an object")?;
+    let pre = hooks
+        .entry("PreToolUse")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or("settings.json: hooks.PreToolUse isn't a list")?;
+    let ours = |entry: &Value| {
+        entry["hooks"].as_array().is_some_and(|hs| {
+            hs.iter().any(|h| {
+                h["command"]
+                    .as_str()
+                    .is_some_and(|c| c.contains(" guard claude"))
+            })
+        })
+    };
+    pre.retain(|e| !ours(e));
+    pre.push(serde_json::json!({
+        "matcher": "Bash",
+        "hooks": [{"type": "command", "command": command}],
+    }));
+    let mut text = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    text.push('\n');
+    Ok(text)
+}
+
 /// Base CLAUDE.md followed by the environment's own section. `None` when neither exists.
 pub fn render_claude_md(env: &str, base: Option<&str>, over: Option<&str>) -> Option<String> {
     if base.is_none() && over.is_none() {
@@ -179,6 +216,38 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::path::PathBuf;
+
+    #[test]
+    fn guard_hook_is_added_to_empty_settings() {
+        let out = add_guard_hook("{}", "\"C:/h/hydra.exe\" guard claude").unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v["hooks"]["PreToolUse"],
+            json!([{"matcher": "Bash", "hooks": [{"type": "command", "command": "\"C:/h/hydra.exe\" guard claude"}]}])
+        );
+    }
+
+    #[test]
+    fn guard_hook_keeps_existing_hooks() {
+        let before = r#"{"model":"opus","hooks":{"PreToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"mine.sh"}]}],"Stop":[]}}"#;
+        let out = add_guard_hook(before, "h guard claude").unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let pre = v["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 2);
+        assert_eq!(pre[0]["hooks"][0]["command"], "mine.sh");
+        assert_eq!(v["model"], "opus");
+        assert_eq!(v["hooks"]["Stop"], json!([]));
+    }
+
+    #[test]
+    fn guard_hook_twice_is_not_duplicated_and_is_replaced() {
+        let once = add_guard_hook("{}", "old guard claude").unwrap();
+        let twice = add_guard_hook(&once, "new guard claude").unwrap();
+        let v: Value = serde_json::from_str(&twice).unwrap();
+        let pre = v["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 1);
+        assert_eq!(pre[0]["hooks"][0]["command"], "new guard claude");
+    }
 
     fn base_path() -> PathBuf {
         PathBuf::from("C:/u/.claude/settings.json")

@@ -7,7 +7,9 @@ use std::process::{Command, Stdio};
 use anyhow::Context;
 use hydra_core::bindings::{self, Binding};
 use hydra_core::config::{load_env, load_global};
-use hydra_core::guard::{Check, Facts, GitAction, Verdict, classify_gh, decide, github_owner};
+use hydra_core::guard::{
+    Check, Facts, GitAction, Verdict, checks_in_command_line, classify_gh, decide, github_owner,
+};
 use hydra_core::name::EnvName;
 use hydra_core::paths::{HydraPaths, expand_tilde};
 use hydra_platform::process::resolve_program;
@@ -22,14 +24,13 @@ struct Loaded {
     strict: bool,
 }
 
-fn load(current: &str) -> anyhow::Result<Loaded> {
+fn load(current: &str, folder: &Path) -> anyhow::Result<Loaded> {
     let paths = HydraPaths::discover()?;
-    let cwd = std::env::current_dir()?;
     let rules = load_global(&paths)?.bindings;
     let name = EnvName::parse(current)?;
     let github = load_env(&paths, &name)?.github;
     Ok(Loaded {
-        binding: bindings::resolve(&cwd, &rules),
+        binding: bindings::resolve(folder, &rules),
         owners: github
             .as_ref()
             .map(|g| g.owners.clone())
@@ -84,20 +85,31 @@ pub fn git(hook: &str, args: &[String]) -> anyhow::Result<i32> {
 /// The fail-open decision for `check` in the current folder; prints it and returns 0 or 1.
 /// `target_owner` is only asked for when the environment lists github owners.
 fn guarded(check: &Check, target_owner: impl FnOnce() -> Option<String>) -> i32 {
+    let folder = std::env::current_dir().unwrap_or_default();
+    report(verdict_in(&folder, check, target_owner), 1)
+}
+
+/// The fail-open verdict for `check` run in `folder`. Warnings about a skipped guard are
+/// printed here; the verdict itself is left to the caller.
+fn verdict_in(
+    folder: &Path,
+    check: &Check,
+    target_owner: impl FnOnce() -> Option<String>,
+) -> Verdict {
     let current = std::env::var("HYDRA_ENV").ok().filter(|s| !s.is_empty());
     let allow = std::env::var("HYDRA_ALLOW").is_ok_and(|v| v == "1");
     // Outside a hydra terminal, or allowed once: nothing to check.
     let Some(current) = current.filter(|_| !allow) else {
-        return 0;
+        return Verdict::Allow;
     };
-    let loaded = match load(&current) {
+    let loaded = match load(&current, folder) {
         Ok(l) => l,
         Err(e) => {
             anstream::eprintln!(
                 "{}",
                 style::warn(format!("hydra: warning: guard skipped ({e:#})"))
             );
-            return 0;
+            return Verdict::Allow;
         }
     };
     let target_owner = if loaded.owners.is_empty() {
@@ -113,7 +125,7 @@ fn guarded(check: &Check, target_owner: impl FnOnce() -> Option<String>) -> i32 
         strict: loaded.strict,
         target_owner: target_owner.as_deref(),
     };
-    report(decide(check, &facts), 1)
+    decide(check, &facts)
 }
 
 /// gh.exe in a hydra terminal: guards gh's write commands, then runs the real gh.
@@ -125,7 +137,7 @@ pub fn gh_shim(args: &[String]) -> anyhow::Result<i32> {
         };
         let code = guarded(&check, || match repo {
             Some(r) => r.split('/').next().map(str::to_string),
-            None => origin_owner(),
+            None => std::env::current_dir().ok().and_then(|d| origin_owner(&d)),
         });
         if code != 0 {
             return Ok(code);
@@ -135,8 +147,7 @@ pub fn gh_shim(args: &[String]) -> anyhow::Result<i32> {
 }
 
 /// The owner of the current folder's `origin` remote, if it is on GitHub.
-fn origin_owner() -> Option<String> {
-    let cwd = std::env::current_dir().ok()?;
+fn origin_owner(cwd: &Path) -> Option<String> {
     let out = Command::new("git")
         .arg("-C")
         .arg(cwd)
@@ -149,6 +160,62 @@ fn origin_owner() -> Option<String> {
         return None;
     }
     github_owner(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `hydra guard claude`: Claude Code's PreToolUse hook. Reads the hook JSON from stdin and
+/// exits 2 (reason on stderr, which Claude shows the model) when a Bash command would
+/// commit, push or write to GitHub from the wrong environment. Fails open.
+pub fn claude() -> anyhow::Result<i32> {
+    let mut input = String::new();
+    if let Err(e) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input) {
+        anstream::eprintln!(
+            "{}",
+            style::warn(format!(
+                "hydra: warning: guard skipped (can't read stdin: {e})"
+            ))
+        );
+        return Ok(0);
+    }
+    let Ok(hook) = serde_json::from_str::<serde_json::Value>(&input) else {
+        anstream::eprintln!(
+            "{}",
+            style::warn("hydra: warning: guard skipped (hook input isn't JSON)")
+        );
+        return Ok(0);
+    };
+    if hook["tool_name"].as_str() != Some("Bash") {
+        return Ok(0);
+    }
+    let Some(command) = hook["tool_input"]["command"].as_str() else {
+        return Ok(0);
+    };
+    let cwd = match hook["cwd"].as_str() {
+        Some(c) => PathBuf::from(c),
+        None => std::env::current_dir().unwrap_or_default(),
+    };
+    let cwd = std::path::absolute(&cwd).unwrap_or(cwd);
+    for check in checks_in_command_line(command) {
+        let folder = match &check {
+            Check::Git { dir: Some(d), .. } => cwd.join(d),
+            _ => cwd.clone(),
+        };
+        let owner = || match &check {
+            Check::Gh { repo: Some(r), .. } => r.split('/').next().map(str::to_string),
+            Check::Git {
+                remote: Some(r), ..
+            } => github_owner(r).or_else(|| origin_owner(&folder)),
+            _ => origin_owner(&folder),
+        };
+        match verdict_in(&folder, &check, owner) {
+            Verdict::Allow => {}
+            Verdict::Warn(m) => anstream::eprintln!("{}", style::warn(m)),
+            Verdict::Block(m) => {
+                anstream::eprintln!("{m}");
+                return Ok(2);
+            }
+        }
+    }
+    Ok(0)
 }
 
 /// ssh.exe in a hydra terminal: adds the environment's git ssh_key, then runs the real ssh.

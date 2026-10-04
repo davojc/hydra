@@ -31,9 +31,17 @@ struct HydraFile {
     env: String,
 }
 
-/// A backslash becomes `/`, trailing `/` is trimmed, and on Windows the result is lowercased.
+/// A backslash becomes `/`, a verbatim `\\?\` (or `\\?\UNC\`) prefix is dropped, trailing `/` is
+/// trimmed, and on Windows the result is lowercased.
 pub fn normalize(p: &str) -> String {
     let s = p.replace('\\', "/");
+    let s = match s.strip_prefix("//?/") {
+        Some(rest) => match rest.get(..4) {
+            Some(unc) if unc.eq_ignore_ascii_case("UNC/") => format!("//{}", &rest[4..]),
+            _ => rest.to_string(),
+        },
+        None => s,
+    };
     let s = s.trim_end_matches('/');
     if cfg!(windows) {
         s.to_lowercase()
@@ -132,6 +140,17 @@ mod tests {
             .iter()
             .map(|(p, e)| (p.to_string(), e.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn normalize_drops_verbatim_prefixes() {
+        assert_eq!(normalize(r"\\?\C:\Work\Repo\"), normalize("C:/Work/Repo"));
+        assert_eq!(
+            normalize(r"\\?\UNC\server\share\x"),
+            normalize("//server/share/x")
+        );
+        assert_eq!(normalize(r"\\server\share"), normalize("//server/share"));
+        assert!(glob_path("c:/work/**", r"\\?\C:\work\a"));
     }
 
     #[test]

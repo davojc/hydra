@@ -31,6 +31,15 @@ impl Home {
             // git searches (e.g. for `.git/info/exclude`) stop at the test folder, so no test
             // can touch a repo that happens to contain the machine's temp folder.
             .env("GIT_CEILING_DIRECTORIES", self.dir.path())
+            // The developer's own global git config (often set by GIT_CONFIG_GLOBAL) must
+            // never leak in: the fake user's file stands in for it.
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                self.dir.path().join("user").join(".gitconfig"),
+            )
+            .env_remove("HYDRA_USER_GIT_CONFIG")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("HYDRA_ALLOW")
             .env_remove("HYDRA_ENV")
             .env_remove("HYDRA_ENV_VARS");
         for var in [

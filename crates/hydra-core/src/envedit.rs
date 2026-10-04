@@ -252,10 +252,9 @@ mod tests {
         let (twice, o) = add_tool(&once, "claude", &vals()).unwrap();
         assert_eq!(o, AddOutcome::AlreadyPresent);
         assert_eq!(once, twice);
-        // The template already has [claude]: nothing to change either.
-        let (same, o) = add_tool(&tpl(), "claude", &vals()).unwrap();
-        assert_eq!(o, AddOutcome::AlreadyPresent);
-        assert_eq!(same, tpl());
+        // The template starts with no tools: adding claude to it is a real addition.
+        let (_, o) = add_tool(&tpl(), "claude", &vals()).unwrap();
+        assert_eq!(o, AddOutcome::Added);
     }
 
     #[test]
@@ -276,7 +275,8 @@ mod tests {
             mcp_exclude: vec!["z".into()],
             ..vals()
         };
-        let (out, o) = add_tool(&tpl(), "claude", &v).unwrap();
+        let (with_claude, _) = add_tool(&tpl(), "claude", &vals()).unwrap();
+        let (out, o) = add_tool(&with_claude, "claude", &v).unwrap();
         assert_eq!(o, AddOutcome::Updated);
         let cfg: EnvConfig = toml::from_str(&out).unwrap();
         assert_eq!(cfg.claude.unwrap().mcp.exclude, vec!["z"]);

@@ -73,19 +73,10 @@ label = "{name}"
 color = "{color}"
 # home = "E:/projects"              # where new terminals for this environment open
 
-[claude]                            # own Claude sign-in; shares your ~/.claude setup
-# mcp.exclude = ["work-only-*"]     # MCP servers to hide in this environment
-
-# [git]
-# name    = "Your Name"
-# email   = "you@example.com"
-# ssh_key = "~/.ssh/id_ed25519"
-
-# [github]                          # then run: hydra auth github {name}
-# owners = ["your-org"]
-
-# [aws]
-# profile = "my-profile"
+# Turn tools on with: hydra add <tool> {name}
+#   e.g. hydra add claude {name}
+#        hydra add git {name} --name "Your Name" --email you@example.com --ssh-key ~/.ssh/id_ed25519
+# See every tool with: hydra add
 
 # [env]
 # MY_API_KEY = "secret:{name}/my-api-key"   # store it with: hydra secret set {name}/my-api-key

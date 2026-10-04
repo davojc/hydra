@@ -171,8 +171,15 @@ fn run_rename_and_rm_never_change_the_base() {
 }
 
 #[test]
-fn new_environments_use_claude_by_default() {
+fn new_environments_start_without_tools() {
     let h = Home::new();
     h.hydra().args(["env", "new", "work"]).assert().success();
-    assert!(h.env_toml("work").contains("\n[claude]"));
+    let toml = h.env_toml("work");
+    assert!(!toml.contains("\n[claude]"), "{toml}");
+    assert!(toml.contains("hydra add <tool> work"), "{toml}");
+    h.hydra()
+        .args(["add", "claude", "work"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("added claude to work"));
 }

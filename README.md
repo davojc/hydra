@@ -48,7 +48,7 @@ ssh-keygen -t ed25519 -f $HOME\.ssh\id_ed25519_work     -C "work@example.com"
 ssh-keygen -t ed25519 -f $HOME\.ssh\id_ed25519_personal -C "me@example.com"
 ```
 
-**2. Create the environments.** Each gets its own colour, and Claude is on by default.
+**2. Create the environments.** Each gets its own colour. New environments start with no tools on.
 
 ```powershell
 hydra env new work
@@ -58,10 +58,12 @@ hydra env new personal
 **3. Turn on the tools each one uses.** `hydra add` only writes configuration; it never runs a tool or signs in.
 
 ```powershell
+hydra add claude work
 hydra add git work --name "Your Name" --email work@example.com --ssh-key ~/.ssh/id_ed25519_work
 hydra add github work --owner acme
 hydra add git personal --name "Your Name" --email me@example.com --ssh-key ~/.ssh/id_ed25519_personal
 hydra add github personal
+hydra add claude personal
 ```
 
 **4. Sign in inside each environment,** with each tool's own command. Terminals open even before you've signed in, and hydra lists what's missing:

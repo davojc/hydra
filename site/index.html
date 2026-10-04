@@ -241,7 +241,7 @@ ssh-keygen -t ed25519 -f $HOME\.ssh\id_ed25519_personal -C "me@example.com"</pre
       </div>
 
       <h3><span class="step-no">Step 2</span>Create the environments</h3>
-      <p>Each gets its own colour, and Claude is on by default.</p>
+      <p>Each gets its own colour. New environments start with no tools on.</p>
       <div class="term">
         <div class="term-bar"><span class="tab plain">PowerShell</span><button class="copy" type="button" data-copy-from="w2">Copy</button></div>
 <pre id="w2">hydra env new work
@@ -252,10 +252,12 @@ hydra env new personal</pre>
       <p><code>hydra add</code> only writes configuration. It never runs a tool or signs you in.</p>
       <div class="term">
         <div class="term-bar"><span class="tab plain">PowerShell</span><button class="copy" type="button" data-copy-from="w3">Copy</button></div>
-<pre id="w3">hydra add git work --name "Your Name" --email work@example.com --ssh-key ~/.ssh/id_ed25519_work
+<pre id="w3">hydra add claude work
+hydra add git work --name "Your Name" --email work@example.com --ssh-key ~/.ssh/id_ed25519_work
 hydra add github work --owner acme
 hydra add git personal --name "Your Name" --email me@example.com --ssh-key ~/.ssh/id_ed25519_personal
-hydra add github personal</pre>
+hydra add github personal
+hydra add claude personal</pre>
       </div>
 
       <h3><span class="step-no">Step 4</span>Sign in inside each environment</h3>

@@ -113,22 +113,59 @@ fn flag_value(args: &[String], names: &[&str]) -> Option<String> {
     None
 }
 
+/// Whether a gh api call writes. Handles `-X M`, `-XM`, `--method=M`, and field flags in
+/// separate, attached (`-ftitle=x`) and `=` forms. `graphql` is a read unless a field has a mutation.
+fn gh_api_writes(args: &[String]) -> bool {
+    let mut method: Option<String> = None;
+    let mut fields: Vec<String> = Vec::new();
+    let mut input = false;
+    let mut graphql = false;
+    let mut positional = 0;
+    let mut i = 1;
+    while i < args.len() {
+        let a = args[i].as_str();
+        let next = args.get(i + 1).cloned().unwrap_or_default();
+        match a {
+            "-X" | "--method" => {
+                method = Some(next);
+                i += 1;
+            }
+            "-f" | "-F" | "--field" | "--raw-field" => {
+                fields.push(next);
+                i += 1;
+            }
+            "--input" => input = true,
+            _ if a.starts_with("--method=") => method = Some(a["--method=".len()..].into()),
+            _ if a.starts_with("--field=") => fields.push(a["--field=".len()..].into()),
+            _ if a.starts_with("--raw-field=") => fields.push(a["--raw-field=".len()..].into()),
+            _ if a.starts_with("--input=") => input = true,
+            _ if a.starts_with("-X") => method = Some(a[2..].trim_start_matches('=').into()),
+            _ if a.starts_with("-f") || a.starts_with("-F") => fields.push(a[2..].into()),
+            _ if a.starts_with('-') => {}
+            _ => {
+                positional += 1;
+                if positional == 1 && a == "graphql" {
+                    graphql = true;
+                }
+            }
+        }
+        i += 1;
+    }
+    if input || method.is_some_and(|m| !m.eq_ignore_ascii_case("GET")) {
+        return true;
+    }
+    if graphql {
+        return fields.iter().any(|f| f.to_lowercase().contains("mutation"));
+    }
+    !fields.is_empty()
+}
+
 /// gh argv (without "gh"): Some for the write commands.
 pub fn classify_gh(args: &[String]) -> Option<Check> {
     let group = args.first()?.as_str();
     let repo = flag_value(args, &["-R", "--repo"]);
     if group == "api" {
-        let method = flag_value(args, &["-X", "--method"]);
-        let writes = method.is_some_and(|m| !m.eq_ignore_ascii_case("GET"))
-            || args.iter().any(|a| {
-                matches!(
-                    a.as_str(),
-                    "-f" | "-F" | "--field" | "--raw-field" | "--input"
-                ) || a.starts_with("--field=")
-                    || a.starts_with("--raw-field=")
-                    || a.starts_with("--input=")
-            });
-        return writes.then(|| Check::Gh {
+        return gh_api_writes(args).then(|| Check::Gh {
             label: "gh api".into(),
             repo,
             checks_owner: false,
@@ -156,10 +193,45 @@ fn end_token(tokens: &mut Vec<String>, cur: &mut String, has: &mut bool) {
     }
 }
 
-/// Splits a shell line into commands (on `&&`, `||`, `;`, `|`, `&`, newline outside quotes),
-/// each tokenised shell-style.
-fn split_commands(line: &str) -> Vec<Vec<String>> {
+type Chars<'a> = std::iter::Peekable<std::str::Chars<'a>>;
+
+/// After `$(`: the text up to the matching `)`.
+fn take_paren(chars: &mut Chars) -> String {
+    let mut depth = 1;
+    let mut s = String::new();
+    for c in chars.by_ref() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        s.push(c);
+    }
+    s
+}
+
+/// After an opening backtick: the text up to the closing one.
+fn take_backtick(chars: &mut Chars) -> String {
+    let mut s = String::new();
+    for c in chars.by_ref() {
+        if c == '`' {
+            break;
+        }
+        s.push(c);
+    }
+    s
+}
+
+/// Splits a shell line into commands (on `&&`, `||`, `;`, `|`, `&`, `(`, `)`, newline outside
+/// quotes), each tokenised shell-style. Contents of `$( )` and backticks come back as `nested`.
+fn split_commands(line: &str) -> (Vec<Vec<String>>, Vec<String>) {
     let mut parts: Vec<Vec<String>> = Vec::new();
+    let mut nested: Vec<String> = Vec::new();
     let mut tokens: Vec<String> = Vec::new();
     let mut cur = String::new();
     let mut has_tok = false;
@@ -188,12 +260,26 @@ fn split_commands(line: &str) -> Vec<Vec<String>> {
                             }
                             _ => cur.push('\\'),
                         },
+                        '$' if chars.peek() == Some(&'(') => {
+                            chars.next();
+                            nested.push(take_paren(&mut chars));
+                        }
+                        '`' => nested.push(take_backtick(&mut chars)),
                         _ => cur.push(q),
                     }
                 }
             }
+            '$' if chars.peek() == Some(&'(') => {
+                chars.next();
+                has_tok = true;
+                nested.push(take_paren(&mut chars));
+            }
+            '`' => {
+                has_tok = true;
+                nested.push(take_backtick(&mut chars));
+            }
             ' ' | '\t' | '\r' => end_token(&mut tokens, &mut cur, &mut has_tok),
-            '&' | '|' | ';' | '\n' => {
+            '&' | '|' | ';' | '\n' | '(' | ')' => {
                 if (c == '&' || c == '|') && chars.peek() == Some(&c) {
                     chars.next();
                 }
@@ -212,7 +298,7 @@ fn split_commands(line: &str) -> Vec<Vec<String>> {
     if !tokens.is_empty() {
         parts.push(tokens);
     }
-    parts
+    (parts, nested)
 }
 
 fn is_env_assignment(t: &str) -> bool {
@@ -226,15 +312,42 @@ fn is_env_assignment(t: &str) -> bool {
     }
 }
 
-/// Shell command line (Claude's Bash tool input) -> every guarded check in it.
-pub fn checks_in_command_line(line: &str) -> Vec<Check> {
-    let mut checks = Vec::new();
-    let mut cd: Option<String> = None;
-    for part in split_commands(line) {
-        let tokens: Vec<&String> = part
-            .iter()
-            .skip_while(|t| is_env_assignment(t.as_str()))
+/// Tokens that precede the real program: shell keywords, wrappers and `VAR=value` / `env`.
+fn is_wrapper(t: &str) -> bool {
+    matches!(
+        t,
+        "{" | "!"
+            | "then"
+            | "do"
+            | "else"
+            | "elif"
+            | "if"
+            | "while"
+            | "until"
+            | "time"
+            | "command"
+            | "exec"
+            | "nohup"
+            | "sudo"
+            | "env"
+    ) || is_env_assignment(t)
+}
+
+const MAX_DEPTH: usize = 4;
+
+fn scan_line(line: &str, cd: &mut Option<String>, depth: usize, checks: &mut Vec<Check>) {
+    let (parts, nested) = split_commands(line);
+    for part in parts {
+        let mut tokens: Vec<String> = part
+            .into_iter()
+            .skip_while(|t| is_wrapper(t.as_str()))
             .collect();
+        if let Some(first) = tokens.first_mut() {
+            *first = first.trim_start_matches('{').to_string();
+        }
+        if let Some(last) = tokens.last_mut() {
+            *last = last.trim_end_matches('}').to_string();
+        }
         let Some(prog) = tokens.first() else { continue };
         let lower = prog
             .rsplit(['/', '\\'])
@@ -242,15 +355,15 @@ pub fn checks_in_command_line(line: &str) -> Vec<Check> {
             .unwrap_or(prog)
             .to_lowercase();
         let base = lower.strip_suffix(".exe").unwrap_or(&lower);
-        let rest: Vec<String> = tokens[1..].iter().map(|t| (*t).clone()).collect();
+        let rest = &tokens[1..];
         match base {
             "cd" => {
                 if let Some(d) = rest.iter().find(|a| !a.eq_ignore_ascii_case("/d")) {
-                    cd = Some(d.clone());
+                    *cd = Some(d.clone());
                 }
             }
             "git" => {
-                if let Some(mut c) = classify_git(&rest) {
+                if let Some(mut c) = classify_git(rest) {
                     if let Check::Git { dir, .. } = &mut c
                         && dir.is_none()
                     {
@@ -259,10 +372,33 @@ pub fn checks_in_command_line(line: &str) -> Vec<Check> {
                     checks.push(c);
                 }
             }
-            "gh" => checks.extend(classify_gh(&rest)),
+            "gh" => checks.extend(classify_gh(rest)),
+            "bash" | "sh" | "zsh" | "dash" if depth < MAX_DEPTH => {
+                let pos = rest.iter().position(|a| {
+                    a.len() >= 2
+                        && a.starts_with('-')
+                        && !a.starts_with("--")
+                        && a.ends_with('c')
+                        && a[1..].chars().all(|c| c.is_ascii_alphabetic())
+                });
+                if let Some(script) = pos.and_then(|p| rest.get(p + 1)) {
+                    scan_line(script, cd, depth + 1, checks);
+                }
+            }
             _ => {}
         }
     }
+    if depth < MAX_DEPTH {
+        for n in nested {
+            scan_line(&n, cd, depth + 1, checks);
+        }
+    }
+}
+
+/// Shell command line (Claude's Bash tool input) -> every guarded check in it.
+pub fn checks_in_command_line(line: &str) -> Vec<Check> {
+    let mut checks = Vec::new();
+    scan_line(line, &mut None, 0, &mut checks);
     checks
 }
 
@@ -514,5 +650,76 @@ mod tests {
         let mut f = facts(Some("personal"), Some(&b), &[], false, None);
         f.allow = true;
         assert_eq!(decide(&push(), &f), Verdict::Allow);
+    }
+
+    fn labels(line: &str) -> Vec<String> {
+        checks_in_command_line(line)
+            .iter()
+            .map(Check::label)
+            .collect()
+    }
+
+    #[test]
+    fn gh_attached_flags_and_graphql() {
+        assert_eq!(
+            classify_gh(&v("api -XPOST repos/a/b")).unwrap().label(),
+            "gh api"
+        );
+        assert_eq!(classify_gh(&v("api -XGET repos/a/b")), None);
+        assert_eq!(
+            classify_gh(&v("api repos/a/b/issues -ftitle=x"))
+                .unwrap()
+                .label(),
+            "gh api"
+        );
+        assert_eq!(
+            classify_gh(&v("api repos/a/b -Fa=b")).unwrap().label(),
+            "gh api"
+        );
+        assert_eq!(
+            classify_gh(&v("api --method=PUT repos/a/b"))
+                .unwrap()
+                .label(),
+            "gh api"
+        );
+        let q = |s: &str| {
+            vec![
+                "api".to_string(),
+                "graphql".into(),
+                "-f".into(),
+                format!("query={s}"),
+            ]
+        };
+        assert!(classify_gh(&q("{ viewer { login } }")).is_none());
+        assert_eq!(
+            classify_gh(&q("Mutation { addStar }")).unwrap().label(),
+            "gh api"
+        );
+    }
+
+    #[test]
+    fn wrappers_and_nesting() {
+        assert_eq!(labels("(cd x && git push)"), ["git push"]);
+        assert_eq!(
+            checks_in_command_line("(cd x && git push)"),
+            vec![Check::Git {
+                action: GitAction::Push,
+                dir: Some("x".into()),
+                remote: None
+            }]
+        );
+        assert_eq!(labels("if true; then git push; fi"), ["git push"]);
+        assert_eq!(labels("sudo git push"), ["git push"]);
+        assert_eq!(labels("env A=1 B=2 git push"), ["git push"]);
+        assert_eq!(labels("command git commit -m x"), ["git commit"]);
+        assert_eq!(labels("{ git push; }"), ["git push"]);
+        assert_eq!(labels("! git push"), ["git push"]);
+        assert_eq!(labels("echo $(git push)"), ["git push"]);
+        assert_eq!(labels("echo `gh pr create`"), ["gh pr create"]);
+        assert_eq!(labels(r#"echo "$(git push)""#), ["git push"]);
+        assert_eq!(labels("bash -c 'cd x && git push'"), ["git push"]);
+        assert_eq!(labels("sh -c \"gh pr merge 1\""), ["gh pr merge"]);
+        assert_eq!(labels("bash -lc 'git commit -m x'"), ["git commit"]);
+        assert!(labels("echo '$(git push)' `echo hi`").is_empty());
     }
 }

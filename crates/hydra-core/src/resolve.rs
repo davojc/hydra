@@ -14,6 +14,8 @@ use crate::secret::SecretStore;
 const ENV_PROVIDER: &str = "env";
 /// Lists the `[env]` variable names a hydra launch set, `;`-separated.
 pub const ENV_VARS_MARKER: &str = "HYDRA_ENV_VARS";
+/// `hydra allow`'s one-command guard override.
+pub const ALLOW_VAR: &str = "HYDRA_ALLOW";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Failure {
@@ -237,6 +239,9 @@ pub fn prepare(
     }
     unset.extend(merged.unset.iter().cloned());
     unset.retain(|u| !set.keys().any(|k| k.eq_ignore_ascii_case(u)));
+    // `hydra allow -- pwsh` must not switch the guard off for a whole session: the one-off
+    // override never reaches what a launch starts. (`hydra allow` sets it on its own child.)
+    unset.insert(ALLOW_VAR.into());
 
     Ok(LaunchEnv {
         name: name.clone(),
@@ -314,6 +319,20 @@ mod tests {
         opts: &PrepareOptions,
     ) -> Result<LaunchEnv, PrepareError> {
         prepare(paths, name, Path::new("/home/me"), providers, store, opts)
+    }
+
+    #[test]
+    fn launch_unsets_the_one_off_guard_override() {
+        let (_d, paths, name) = setup("");
+        let env = run(
+            &paths,
+            &name,
+            &[],
+            &MemoryStore::default(),
+            &PrepareOptions::default(),
+        )
+        .unwrap();
+        assert!(env.unset.contains(ALLOW_VAR), "{:?}", env.unset);
     }
 
     #[test]

@@ -13,6 +13,7 @@ use hydra_core::guard::{
 };
 use hydra_core::name::EnvName;
 use hydra_core::paths::{HydraPaths, expand_tilde};
+use hydra_core::resolve::ALLOW_VAR;
 use hydra_platform::process::resolve_program;
 
 use super::launch::ignore_ctrl_c;
@@ -108,7 +109,7 @@ fn verdict_in(
     target_owner: impl FnOnce() -> Option<String>,
 ) -> Verdict {
     let current = std::env::var("HYDRA_ENV").ok().filter(|s| !s.is_empty());
-    let allow = std::env::var("HYDRA_ALLOW").is_ok_and(|v| v == "1");
+    let allow = std::env::var(ALLOW_VAR).is_ok_and(|v| v == "1");
     // Outside a hydra terminal, or allowed once: nothing to check.
     let Some(current) = current.filter(|_| !allow) else {
         return Verdict::Allow;
@@ -294,7 +295,7 @@ pub fn allow(command: &[String]) -> anyhow::Result<i32> {
     let exe = resolve_program(&command[0], &path, std::env::var_os("PATHEXT").as_deref())
         .ok_or_else(|| anyhow::anyhow!("{} isn't installed or isn't on PATH", command[0]))?;
     let mut cmd = Command::new(exe);
-    cmd.env("HYDRA_ALLOW", "1");
+    cmd.env(ALLOW_VAR, "1");
     run_inherited(cmd, &command[1..])
 }
 

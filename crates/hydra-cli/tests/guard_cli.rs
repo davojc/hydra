@@ -708,3 +708,31 @@ fn claude_hook_follows_shell_paths_and_cds() {
     // Still allowed where nothing is bound.
     claude_hook(&s, "personal", &bash_input("git -C .. commit -m x", &side)).success();
 }
+
+#[test]
+fn allow_reaches_only_its_own_command() {
+    let s = Setup::new();
+    let echo = ["cmd", "/c", "echo [%HYDRA_ALLOW%]"];
+    // `hydra allow -- <cmd>` hands the override to its child ...
+    s.h.hydra()
+        .args([
+            "run",
+            "personal",
+            "--",
+            env!("CARGO_BIN_EXE_hydra"),
+            "allow",
+            "--",
+        ])
+        .args(echo)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[1]"));
+    // ... but a launch from inside it (e.g. `hydra allow -- pwsh`, then hydra run) drops it.
+    s.h.hydra()
+        .env("HYDRA_ALLOW", "1")
+        .args(["run", "personal", "--"])
+        .args(echo)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[%HYDRA_ALLOW%]"));
+}

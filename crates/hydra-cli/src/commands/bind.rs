@@ -86,10 +86,19 @@ fn bind_file(dir: &Path, env: &str) -> anyhow::Result<i32> {
     let written = bindedit::write_hydra_file(dir, env)
         .with_context(|| format!("can't write .hydra in {}", dir.display()))?;
     let mut line = format!("wrote {} (env = \"{env}\")", written.display());
-    if bindedit::exclude_in_git(dir).unwrap_or(false) {
+    let excluded = bindedit::exclude_in_git(dir);
+    if matches!(excluded, Ok(true)) {
         line.push_str(", added to .git/info/exclude");
     }
     anstream::println!("{}", style::ok(line));
+    if let Err(e) = excluded {
+        anstream::println!(
+            "{}",
+            style::warn(format!(
+                "hydra: warning: couldn't add .hydra to .git/info/exclude ({e})"
+            ))
+        );
+    }
     Ok(0)
 }
 

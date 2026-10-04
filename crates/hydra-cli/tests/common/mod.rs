@@ -28,6 +28,9 @@ impl Home {
         c.env("HYDRA_HOME", self.root())
             .env("HYDRA_KEYRING_SERVICE", service)
             .env("HYDRA_USER_HOME", self.dir.path().join("user"))
+            // git searches (e.g. for `.git/info/exclude`) stop at the test folder, so no test
+            // can touch a repo that happens to contain the machine's temp folder.
+            .env("GIT_CEILING_DIRECTORIES", self.dir.path())
             .env_remove("HYDRA_ENV")
             .env_remove("HYDRA_ENV_VARS");
         for var in [

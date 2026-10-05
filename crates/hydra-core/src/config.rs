@@ -19,6 +19,8 @@ pub enum ConfigError {
     Invalid { path: PathBuf, message: String },
     #[error("environment {0} doesn't exist (create it with `hydra env new {0}`)")]
     UnknownEnv(EnvName),
+    #[error("{0}")]
+    Borrow(String),
 }
 
 /// `~/.hydra/config.toml`.
@@ -52,6 +54,9 @@ pub struct EnvConfig {
     pub gemini: Option<GeminiConfig>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Tools borrowed from another environment (tool id -> owner). Filled by `parse_env`.
+    #[serde(skip)]
+    pub borrowed: BTreeMap<String, EnvName>,
 }
 
 /// A provider section with no settings, e.g. `[gcloud]`.
@@ -250,18 +255,33 @@ pub fn load_global(paths: &HydraPaths) -> Result<GlobalConfig, ConfigError> {
     Ok(cfg)
 }
 
-pub fn load_env(paths: &HydraPaths, name: &EnvName) -> Result<EnvConfig, ConfigError> {
+/// Parses env.toml text for `name`: borrowed sections are filled in from their owners,
+/// then the result is validated.
+pub fn parse_env(paths: &HydraPaths, name: &EnvName, text: &str) -> Result<EnvConfig, ConfigError> {
     let path = paths.env_file(name);
-    let Some(text) = read_toml(&path)? else {
+    let invalid = |message: String| ConfigError::Invalid {
+        path: path.clone(),
+        message,
+    };
+    let mut table: toml::Table = toml::from_str(text).map_err(|e| invalid(e.to_string()))?;
+    let borrowed = crate::borrow::resolve(paths, name, &mut table).map_err(ConfigError::Borrow)?;
+    // Without borrowing, parse the text itself so errors keep their line numbers.
+    let parsed: Result<EnvConfig, toml::de::Error> = if borrowed.is_empty() {
+        toml::from_str(text)
+    } else {
+        table.try_into()
+    };
+    let mut cfg = parsed.map_err(|e| invalid(e.to_string()))?;
+    cfg.borrowed = borrowed;
+    cfg.validate().map_err(invalid)?;
+    Ok(cfg)
+}
+
+pub fn load_env(paths: &HydraPaths, name: &EnvName) -> Result<EnvConfig, ConfigError> {
+    let Some(text) = read_toml(&paths.env_file(name))? else {
         return Err(ConfigError::UnknownEnv(name.clone()));
     };
-    let cfg: EnvConfig = toml::from_str(&text).map_err(|e| ConfigError::Invalid {
-        path: path.clone(),
-        message: e.to_string(),
-    })?;
-    cfg.validate()
-        .map_err(|message| ConfigError::Invalid { path, message })?;
-    Ok(cfg)
+    parse_env(paths, name, &text)
 }
 
 #[cfg(test)]
@@ -458,5 +478,123 @@ LINEAR_API_KEY = "secret:work/linear"
             msg.contains("[env] \"REGION\" and \"Region\" are the same variable"),
             "{msg}"
         );
+    }
+
+    fn add_env(paths: &HydraPaths, name: &str, toml: &str) {
+        let n = EnvName::parse(name).unwrap();
+        std::fs::create_dir_all(paths.env_dir(&n)).unwrap();
+        std::fs::write(paths.env_file(&n), toml).unwrap();
+    }
+
+    fn borrow_err(work: &str, personal: Option<&str>) -> String {
+        let (_d, paths, name) = setup(work);
+        if let Some(p) = personal {
+            add_env(&paths, "personal", p);
+        }
+        load_env(&paths, &name).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn borrowed_section_takes_the_owners_settings() {
+        let (_d, paths, name) =
+            setup("[claude]\nfrom = \"personal\"\n\n[github]\nfrom = \"personal\"\n");
+        add_env(
+            &paths,
+            "personal",
+            "[claude]\nmcp.exclude = [\"x\"]\n\n[github]\nowners = [\"me\"]\n",
+        );
+        let c = load_env(&paths, &name).unwrap();
+        assert_eq!(c.claude.unwrap().mcp.exclude, vec!["x"]);
+        assert_eq!(c.github.unwrap().owners, vec!["me"]);
+        assert_eq!(c.borrowed["claude"].as_str(), "personal");
+        assert_eq!(c.borrowed["github"].as_str(), "personal");
+        assert!(!c.borrowed.contains_key("git"));
+    }
+
+    #[test]
+    fn inline_borrow_and_bom_crlf_owner_work() {
+        let (_d, paths, name) = setup("claude = { from = \"personal\" }\r\n");
+        add_env(&paths, "personal", "\u{feff}[claude]\r\n");
+        let c = load_env(&paths, &name).unwrap();
+        assert!(c.claude.is_some());
+        assert_eq!(c.borrowed["claude"].as_str(), "personal");
+    }
+
+    #[test]
+    fn owner_without_the_section_is_an_error() {
+        let e = borrow_err("[claude]\nfrom = \"personal\"\n", Some("label = \"p\"\n"));
+        assert_eq!(
+            e,
+            "work borrows [claude] from personal, but personal has no [claude]\n  -> add it there: hydra add claude personal"
+        );
+    }
+
+    #[test]
+    fn chains_are_an_error() {
+        let e = borrow_err(
+            "[claude]\nfrom = \"personal\"\n",
+            Some("[claude]\nfrom = \"client\"\n"),
+        );
+        assert_eq!(
+            e,
+            "work borrows [claude] from personal, which borrows it from client\n  -> borrow from the owner: from = \"client\""
+        );
+    }
+
+    #[test]
+    fn unknown_owner_is_an_error() {
+        let e = borrow_err("[codex]\nfrom = \"ghost\"\n", None);
+        assert_eq!(
+            e,
+            "work borrows [codex] from ghost, but there's no environment ghost\n  -> fix from in [codex] in work's env.toml"
+        );
+    }
+
+    #[test]
+    fn self_borrow_is_an_error() {
+        let e = borrow_err("[codex]\nfrom = \"work\"\n", None);
+        assert_eq!(
+            e,
+            "work can't borrow [codex] from itself\n  -> remove from = \"work\""
+        );
+    }
+
+    #[test]
+    fn borrowed_section_with_other_keys_is_an_error() {
+        let e = borrow_err(
+            "[github]\nfrom = \"personal\"\nstrict = true\n",
+            Some("[github]\n"),
+        );
+        assert_eq!(
+            e,
+            "[github] borrows from personal, so it can't also set strict\n  -> remove strict; personal's [github] settings are used"
+        );
+    }
+
+    #[test]
+    fn git_cannot_be_borrowed() {
+        let e = borrow_err(
+            "[git]\nfrom = \"personal\"\n",
+            Some("[git]\nname = \"x\"\n"),
+        );
+        assert_eq!(
+            e,
+            "[git] can't be borrowed: commit author and SSH key stay per environment\n  -> set [git] in work itself"
+        );
+    }
+
+    #[test]
+    fn from_must_be_a_name() {
+        let e = borrow_err("[codex]\nfrom = 3\n", None);
+        assert!(
+            e.contains("[codex] from must be an environment name"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn parse_errors_keep_their_line_numbers() {
+        let e = borrow_err("[claude]\nnope = 1\n", None);
+        assert!(e.contains("line 2"), "{e}");
     }
 }

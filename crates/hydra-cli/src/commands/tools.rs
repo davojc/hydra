@@ -76,14 +76,9 @@ fn write_env_file(app: &App, env: &EnvName, text: &str) -> anyhow::Result<()> {
     std::fs::write(&file, text).with_context(|| format!("can't write {}", file.display()))
 }
 
-/// Parses and validates the edited text; nothing is written if either fails.
+/// Parses and validates the edited text (borrowed sections included); nothing is written if it fails.
 fn check(app: &App, env: &EnvName, text: &str) -> anyhow::Result<EnvConfig> {
-    let path = app.paths.env_file(env);
-    let cfg: EnvConfig =
-        toml::from_str(text).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
-    cfg.validate()
-        .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
-    Ok(cfg)
+    Ok(hydra_core::config::parse_env(&app.paths, env, text)?)
 }
 
 fn note_if_running(app: &App, env: &EnvName) -> anyhow::Result<()> {

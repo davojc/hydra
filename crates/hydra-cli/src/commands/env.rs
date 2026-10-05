@@ -128,6 +128,9 @@ pub fn run(app: &App, cmd: EnvCmd) -> anyhow::Result<i32> {
             if !r.bindings.is_empty() {
                 anstream::println!("updated bindings: {}", r.bindings.join(", "));
             }
+            if !r.borrowers.is_empty() {
+                anstream::println!("updated borrowers: {}", r.borrowers.join(", "));
+            }
             if r.references > 0 {
                 anstream::println!("updated {} secret reference(s)", r.references);
             }

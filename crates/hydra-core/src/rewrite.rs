@@ -79,9 +79,48 @@ fn walk_value(v: &mut Value, from: &str, to: &str, count: &mut usize) {
     }
 }
 
+/// Rewrites `from = "<old>"` in every tool section (table or inline table). Returns the count.
+pub fn rename_borrow_owner(text: &str, old: &str, new: &str) -> Result<(String, usize), TomlError> {
+    let mut doc: DocumentMut = text.parse()?;
+    let mut count = 0;
+    for tool in crate::envedit::TOOLS {
+        let Some(t) = doc.get_mut(tool).and_then(Item::as_table_like_mut) else {
+            continue;
+        };
+        if let Some(Value::String(s)) = t.get_mut("from").and_then(Item::as_value_mut)
+            && s.value() == old
+        {
+            replace_string(s, new.to_string());
+            count += 1;
+        }
+    }
+    Ok((doc.to_string(), count))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rename_borrow_owner_rewrites_only_matching_from() {
+        let text = "# keep
+codex = { from = \"personal\" }
+[claude]
+from = \"personal\" # mine
+
+[github]
+from = \"other\"
+
+[env]
+from = \"personal\"
+";
+        let (out, n) = rename_borrow_owner(text, "personal", "home").unwrap();
+        assert_eq!(n, 2);
+        assert!(out.contains("[claude]\nfrom = \"home\" # mine\n"), "{out}");
+        assert!(out.contains("codex = { from = \"home\" }"), "{out}");
+        assert!(out.contains("from = \"other\""), "{out}");
+        assert!(out.contains("[env]\nfrom = \"personal\""), "{out}");
+    }
 
     #[test]
     fn renames_only_matching_bindings_and_keeps_comments() {

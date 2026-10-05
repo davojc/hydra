@@ -193,3 +193,40 @@ fn remove_refuses_an_owner_that_lends_and_frees_a_borrower() {
         .assert()
         .success();
 }
+
+#[test]
+fn env_rm_refuses_an_owner_with_borrowers() {
+    let h = Home::new();
+    h.write_env("personal", "[claude]\n[github]\n");
+    h.write_env(
+        "work",
+        "[claude]\nfrom = \"personal\"\n[github]\nfrom = \"personal\"\n",
+    );
+    h.hydra()
+        .args(["env", "rm", "personal", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "work borrows claude, github from personal",
+        ));
+    assert!(
+        h.root()
+            .join("envs")
+            .join("personal")
+            .join("env.toml")
+            .is_file()
+    );
+}
+
+#[test]
+fn env_rename_updates_borrowers() {
+    let h = Home::new();
+    h.write_env("personal", "[claude]\n");
+    h.write_env("work", "[claude]\nfrom = \"personal\"\n");
+    h.hydra()
+        .args(["env", "rename", "personal", "home"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("updated borrowers: work"));
+    assert_eq!(h.env_toml("work"), "[claude]\nfrom = \"home\"\n");
+}

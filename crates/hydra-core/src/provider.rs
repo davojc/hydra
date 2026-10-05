@@ -19,8 +19,14 @@ impl Ctx<'_> {
     pub fn state_dir(&self) -> PathBuf {
         self.paths.state_dir(self.name)
     }
+    /// The environment whose saved logins `tool` uses: its owner when borrowed, else this one.
+    pub fn tool_owner(&self, tool: &str) -> &EnvName {
+        self.env.borrowed.get(tool).unwrap_or(self.name)
+    }
+    /// The tool's state folder; a borrowed tool's lives in its owner's state.
     pub fn provider_dir(&self, sub: &str) -> PathBuf {
-        self.state_dir().join(sub)
+        let tool = if sub == "gh" { "github" } else { sub };
+        self.paths.state_dir(self.tool_owner(tool)).join(sub)
     }
 }
 
@@ -109,5 +115,38 @@ pub trait Provider {
     /// Fix to suggest when one of this provider's secrets is missing.
     fn missing_secret_fix(&self, _ctx: &Ctx, _r: &SecretRef) -> Option<String> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::secret::MemoryStore;
+
+    #[test]
+    fn borrowed_tools_use_the_owners_state_folder() {
+        let paths = HydraPaths::new("C:/h");
+        let work = EnvName::parse("work").unwrap();
+        let mut env = EnvConfig::default();
+        env.borrowed
+            .insert("github".into(), EnvName::parse("personal").unwrap());
+        env.borrowed
+            .insert("claude".into(), EnvName::parse("personal").unwrap());
+        let store = MemoryStore::default();
+        let ctx = Ctx {
+            name: &work,
+            env: &env,
+            paths: &paths,
+            user_home: Path::new("C:/u"),
+            secrets: &store,
+        };
+        let state = |e: &str| paths.state_dir(&EnvName::parse(e).unwrap());
+        assert_eq!(ctx.provider_dir("gh"), state("personal").join("gh"));
+        assert_eq!(ctx.provider_dir("claude"), state("personal").join("claude"));
+        assert_eq!(ctx.provider_dir("git"), state("work").join("git"));
+        assert_eq!(ctx.provider_dir("codex"), state("work").join("codex"));
+        assert_eq!(ctx.tool_owner("claude").as_str(), "personal");
+        assert_eq!(ctx.tool_owner("aws").as_str(), "work");
+        assert_eq!(ctx.state_dir(), state("work"));
     }
 }

@@ -65,7 +65,7 @@ fn layout(ctx: &Ctx) -> Result<Layout, ProviderError> {
         base,
         base_global,
         configured_base: global.claude_base.is_some(),
-        over: ctx.paths.env_dir(ctx.name).join("claude"),
+        over: ctx.paths.env_dir(ctx.tool_owner("claude")).join("claude"),
         dir: ctx.provider_dir("claude"),
     })
 }
@@ -314,7 +314,7 @@ impl Provider for Claude {
             ))
             .with_fix("fix claude_base in config.toml"));
         }
-        refuse_linked(&ctx.state_dir())?;
+        refuse_linked(&ctx.paths.state_dir(ctx.tool_owner("claude")))?;
         refuse_linked(&l.dir)?;
         std::fs::create_dir_all(&l.dir)?;
         let exclude = ctx
@@ -346,7 +346,7 @@ impl Provider for Claude {
             ));
         }
         let settings = with_guard_hook(merged.text);
-        let env = ctx.name.as_str();
+        let env = ctx.tool_owner("claude").as_str();
         let md = render_claude_md(
             env,
             read_opt(&l.base.join("CLAUDE.md"))?.as_deref(),
@@ -510,6 +510,25 @@ mod tests {
         }
         assert!(Claude.is_configured(&f.env));
         assert!(!Claude.is_configured(&Fixture::new("").env));
+    }
+
+    #[test]
+    fn borrowed_claude_prepares_the_owners_folder_as_the_owner() {
+        let mut f = Fixture::new(
+            "[claude]
+",
+        );
+        with_base(&f);
+        let personal = hydra_core::name::EnvName::parse("personal").unwrap();
+        f.env.borrowed.insert("claude".into(), personal.clone());
+        Claude.materialise(&f.ctx()).unwrap();
+        let dir = f.paths.state_dir(&personal).join("claude");
+        assert!(dir.join("settings.json").is_file());
+        assert!(!f.paths.state_dir(&f.name).join("claude").exists());
+        // Generated files name the owner, so owner and borrower launches write the same thing.
+        if let Ok(md) = std::fs::read_to_string(dir.join("CLAUDE.md")) {
+            assert!(!md.contains("work"), "{md}");
+        }
     }
 
     #[test]

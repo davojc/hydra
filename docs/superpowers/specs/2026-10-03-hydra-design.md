@@ -35,7 +35,7 @@ It is a personal tool with two goals:
 - **Environment** — a named profile (`work`, `personal`, `client-acme`) with a label, a colour, provider configs, and optional folder bindings.
 - **Provider** — one compiled-in module per identity type. Implements:
   - `materialise(env, ctx)` — creates/refreshes its files under `~/.hydra/state/<env>/`.
-  - `contribute(env, ctx) -> Contribution` — environment variables, PATH prepends, and secret references for the child process.
+  - `contribute(env, ctx) -> Contribution` — environment variables, variables to unset, and secret references for the child process. hydra never prepends folders to PATH.
   - `check(env, ctx) -> IdentityReport` — the identity actually active (for `whoami`/`doctor`).
   - optional `auth(env, ctx)` — runs the tool's login flow inside the environment.
 - **Secret store** — trait with a Windows Credential Manager implementation (`keyring` crate). Config holds only references: `secret:<env>/<key>`. Values never touch disk or logs.
@@ -101,8 +101,8 @@ Names must match `^[a-z0-9][a-z0-9-]{0,31}$` (e.g. `work`, `client-acme`). Folde
 4. Resolve `secret:` references from the secret store.
 5. Add `HYDRA_ENV=<env>` and `HYDRA_HOME`. An older hydra's `~/.hydra/shims` folder is deleted (best effort; a file in use is noted, never fatal) and dropped from the child's `PATH` (case-insensitive, either separator), since a terminal opened by an older hydra may still have it first.
 6. Generate the shell init file (prompt snippet) and launch:
-   - pwsh: `pwsh -NoLogo -NoProfile -NoExit -Command ". '<state/work/shell/init.ps1>'"`. The init file dot-sources the user's `$PROFILE` itself (hence `-NoProfile`, so it loads once), re-prepends hydra's PATH entries, then wraps the prompt.
-   - bash: `bash --rcfile <state/work/shell/init.bash> -i` with `CHERE_INVOKING=1` (otherwise Git Bash's `/etc/profile` changes to `~`). The rcfile sources `/etc/profile`, then `~/.bash_profile` or `~/.bashrc`, then re-prepends hydra's PATH entries (because `/etc/profile` puts `/mingw64/bin` first) and sets the prompt.
+   - pwsh: `pwsh -NoLogo -NoProfile -NoExit -Command ". '<state/work/shell/init.ps1>'"`. The init file dot-sources the user's `$PROFILE` itself (hence `-NoProfile`, so it loads once), then wraps the prompt.
+   - bash: `bash --rcfile <state/work/shell/init.bash> -i` with `CHERE_INVOKING=1` (otherwise Git Bash's `/etc/profile` changes to `~`). The rcfile sources `/etc/profile`, then `~/.bash_profile` or `~/.bashrc`, then sets the prompt.
    - Programs started by `hydra run`/`auth`/`whoami` are found through `PATH` + `PATHEXT`, so `.cmd` launchers (`gcloud.cmd`, `az.cmd`, `claude.cmd`) work.
 7. Any failure in steps 1–5 aborts the launch (fail closed, §8).
 8. For `hydra shell` only: for each configured provider that isn't signed in yet, print one line such as `hydra: github: not signed in - run gh auth login`. The check looks only at files (e.g. `state/<env>/gh/hosts.yml`) and never blocks the launch.

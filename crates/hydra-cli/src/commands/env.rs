@@ -74,33 +74,7 @@ pub fn run(app: &App, cmd: EnvCmd) -> anyhow::Result<i32> {
             }
             Ok(0)
         }
-        EnvCmd::Rm { name, yes } => {
-            let n = app.env_name(&name)?;
-            let state = app.paths.state_dir(&n);
-            let delete_state = state.exists()
-                && (yes
-                    || prompt::confirm(
-                        &format!("Also delete saved logins in {}?", state.display()),
-                        false,
-                    )?);
-            let r = envs::remove(&app.paths, &n, app.store.as_ref(), delete_state)?;
-            anstream::println!("{}", style::ok(format!("removed environment {n}")));
-            if !r.secrets.is_empty() {
-                anstream::println!("removed secrets: {}", r.secrets.join(", "));
-            }
-            if state.exists() {
-                anstream::println!("kept saved logins in {}", state.display());
-            }
-            for b in &r.bindings {
-                anstream::eprintln!(
-                    "{}",
-                    style::warn(format!(
-                        "hydra: warning: binding {b:?} in config.toml still points at {n}"
-                    ))
-                );
-            }
-            Ok(0)
-        }
+        EnvCmd::Rm { name, yes } => rm(app, &name, yes, &mut |q| prompt::confirm(q, false)),
         EnvCmd::Edit { name } => {
             let n = app.env_name(&name)?;
             let file = app.paths.env_file(&n);
@@ -145,6 +119,38 @@ pub fn run(app: &App, cmd: EnvCmd) -> anyhow::Result<i32> {
     }
 }
 
+/// `hydra env rm`. `ask` is the yes/no prompt (asked only when the env can be removed).
+fn rm(
+    app: &App,
+    name: &str,
+    yes: bool,
+    ask: &mut dyn FnMut(&str) -> anyhow::Result<bool>,
+) -> anyhow::Result<i32> {
+    let n = app.env_name(name)?;
+    // Refuse (running, or lending a tool) before asking anything.
+    envs::check_removable(&app.paths, &n)?;
+    let state = app.paths.state_dir(&n);
+    let delete_state = state.exists()
+        && (yes || ask(&format!("Also delete saved logins in {}?", state.display()))?);
+    let r = envs::remove(&app.paths, &n, app.store.as_ref(), delete_state)?;
+    anstream::println!("{}", style::ok(format!("removed environment {n}")));
+    if !r.secrets.is_empty() {
+        anstream::println!("removed secrets: {}", r.secrets.join(", "));
+    }
+    if state.exists() {
+        anstream::println!("kept saved logins in {}", state.display());
+    }
+    for b in &r.bindings {
+        anstream::eprintln!(
+            "{}",
+            style::warn(format!(
+                "hydra: warning: binding {b:?} in config.toml still points at {n}"
+            ))
+        );
+    }
+    Ok(0)
+}
+
 /// Runs $VISUAL, $EDITOR or notepad on the file and waits for it to close.
 fn open_editor(file: &Path) -> anyhow::Result<()> {
     let editor = std::env::var("VISUAL")
@@ -173,4 +179,72 @@ fn open_editor(file: &Path) -> anyhow::Result<()> {
         anyhow::bail!("the editor exited with {status}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hydra_core::paths::HydraPaths;
+    use hydra_core::secret::MemoryStore;
+
+    fn app_with(envs: &[(&str, &str)]) -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = HydraPaths::new(dir.path());
+        for (name, toml) in envs {
+            let n = EnvName::parse(name).unwrap();
+            std::fs::create_dir_all(paths.env_dir(&n)).unwrap();
+            std::fs::write(paths.env_file(&n), toml).unwrap();
+            std::fs::create_dir_all(paths.state_dir(&n)).unwrap();
+        }
+        let app = App {
+            paths,
+            user_home: dir.path().join("user"),
+            store: Box::new(MemoryStore::default()),
+        };
+        (dir, app)
+    }
+
+    #[test]
+    fn rm_refuses_before_asking() {
+        let (_d, app) = app_with(&[
+            ("personal", "[claude]\n"),
+            ("work", "[claude]\nfrom = \"personal\"\n"),
+        ]);
+        let mut asked = Vec::new();
+        let e = rm(&app, "personal", false, &mut |q| {
+            asked.push(q.to_string());
+            Ok(true)
+        })
+        .unwrap_err();
+        assert!(
+            e.to_string().contains("work borrows claude from personal"),
+            "{e}"
+        );
+        assert!(asked.is_empty(), "asked {asked:?}");
+        let personal = EnvName::parse("personal").unwrap();
+        assert!(app.paths.env_file(&personal).is_file());
+
+        // Running: also refused without a question.
+        let work = EnvName::parse("work").unwrap();
+        let _lock = hydra_core::lock::hold_shared(&app.paths, &work).unwrap();
+        let e = rm(&app, "work", false, &mut |q| {
+            asked.push(q.to_string());
+            Ok(true)
+        })
+        .unwrap_err();
+        assert!(asked.is_empty(), "asked {asked:?} ({e})");
+        drop(_lock);
+
+        // Removable: now it asks.
+        rm(&app, "work", false, &mut |q| {
+            asked.push(q.to_string());
+            Ok(false)
+        })
+        .unwrap();
+        assert_eq!(asked.len(), 1);
+        assert!(
+            asked[0].starts_with("Also delete saved logins in "),
+            "{asked:?}"
+        );
+    }
 }

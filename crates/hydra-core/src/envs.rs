@@ -129,12 +129,9 @@ fn refuse_open_borrowers(paths: &HydraPaths, owner: &EnvName) -> Result<(), EnvE
     Ok(())
 }
 
-pub fn remove(
-    paths: &HydraPaths,
-    name: &EnvName,
-    store: &dyn SecretStore,
-    delete_state: bool,
-) -> Result<RemoveReport, EnvError> {
+/// Why `remove` would refuse `name` (missing, running, or lending a tool), checked before
+/// anything is asked or deleted.
+pub fn check_removable(paths: &HydraPaths, name: &EnvName) -> Result<(), EnvError> {
     if !paths.env_file(name).is_file() {
         return Err(EnvError::NotFound(name.clone()));
     }
@@ -155,6 +152,16 @@ pub fn remove(
             first.0
         )));
     }
+    Ok(())
+}
+
+pub fn remove(
+    paths: &HydraPaths,
+    name: &EnvName,
+    store: &dyn SecretStore,
+    delete_state: bool,
+) -> Result<RemoveReport, EnvError> {
+    check_removable(paths, name)?;
     let bindings = load_global(paths)?
         .bindings
         .into_iter()

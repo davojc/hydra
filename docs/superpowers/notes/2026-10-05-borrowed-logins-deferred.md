@@ -5,7 +5,7 @@ Plan: `docs/superpowers/plans/2026-10-05-hydra-borrowed-logins.md`. Released as 
 ## Rulings
 
 - `[github]` `owners`/`strict` are guard policy and stay per environment. They are allowed next to `from`, and are not inherited from the owner.
-- The guard and the ssh shim read only the environment's own env.toml, so a broken owner can't weaken them.
+- The guard and the ssh shim read only the environment's own env.toml, so a broken owner can't weaken them. (2026-10-05: the gh/ssh shims were removed after Windows Defender's ML detection flagged hydra builds; hydra no longer copies itself under another program's name. The ssh key reaches git through `core.sshCommand`.)
 - `hydra whoami` reports a broken borrow on that tool's line and carries on.
 - A Claude sign-in made with an `[env]` API key isn't borrowed; only the folder is. This is documented.
 - The generated CLAUDE.md names the owner, so the shared file stays identical for owner and borrower.

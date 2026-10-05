@@ -2,6 +2,7 @@
 
 **Date:** 2026-10-03
 **Status:** Approved; implementation planned in `docs/superpowers/plans/` (roadmap + Plan 1)
+**Revised 2026-10-05:** the gh/ssh shims are removed (§7.2). Windows Defender's ML detection flagged hydra builds, most likely because hydra copied itself as `gh.exe`/`ssh.exe` and put that folder first on PATH. hydra no longer copies itself under another program's name.
 **User guide (design preview):** https://claude.ai/artifact/RcSjybbshNoCCvRabb2zTf
 
 ## 1. Purpose
@@ -39,7 +40,7 @@ It is a personal tool with two goals:
   - optional `auth(env, ctx)` — runs the tool's login flow inside the environment.
 - **Secret store** — trait with a Windows Credential Manager implementation (`keyring` crate). Config holds only references: `secret:<env>/<key>`. Values never touch disk or logs.
 - **Binding** — maps a folder to an environment, via config glob rules or a `.hydra` file in the folder.
-- **Guard** — shims for `git` and `gh` that check write operations against bindings and allowed owners.
+- **Guard** — git hooks and a Claude Code `PreToolUse` hook that check write operations against bindings and allowed owners.
 - **Borrowed login** — an environment can borrow a tool from another (`[tool] from = "<owner>"`) and use the owner's tool folder; see `2026-10-05-hydra-borrowed-logins-design.md`.
 
 ## 4. Architecture
@@ -52,7 +53,7 @@ hydra/
     hydra-core/       # config, env model, provider trait, resolution, bindings, merge — no I/O to OS-specific APIs
     hydra-providers/  # claude, github, git, aws, azure, gcloud, gws, kube, codex, gemini, env
     hydra-platform/   # SecretStore + ShellLauncher traits; windows impl now
-    hydra-cli/        # `hydra` binary; also the shim entry point (argv[0] dispatch)
+    hydra-cli/        # `hydra` binary
 ```
 
 Later: `hydra-app` (Tauri) depends on `hydra-core`, `hydra-providers`, `hydra-platform`.
@@ -70,10 +71,9 @@ Later: `hydra-app` (Tauri) depends on `hydra-core`, `hydra-providers`, `hydra-pl
     claude/                     # CLAUDE_CONFIG_DIR (private Claude state lives here too)
     gh/  git/gitconfig  aws/  azure/  gcloud/  gws/  kube/  codex/
     shell/                      # generated pwsh profile + bash rcfile
-  shims/                        # git.exe, gh.exe (copies of hydra.exe)
 ```
 
-The split is by who edits a file: everything the user writes is under `config.toml`, `envs/` and `base/`, which can go in a dotfiles repo. Everything under `state/` and `shims/` is hydra's. The exception is that `state/<env>/claude/`, `gh/`, `gcloud/` etc. also hold logins and history written by the tools themselves, so "safe to delete" means "costs a re-login", and `hydra` never deletes `state/` on its own.
+The split is by who edits a file: everything the user writes is under `config.toml`, `envs/` and `base/`, which can go in a dotfiles repo. Everything under `state/` is hydra's. The exception is that `state/<env>/claude/`, `gh/`, `gcloud/` etc. also hold logins and history written by the tools themselves, so "safe to delete" means "costs a re-login", and `hydra` never deletes `state/` on its own.
 
 **Name vs label.** An environment's name is its folder name under `envs/`; `env.toml` never contains a `name` field. The name is the identifier used everywhere: CLI arguments, bindings, `secret:<env>/…` references and secret-store keys, `HYDRA_ENV`, the prompt, and `state/<env>/`. The optional `label` in `env.toml` is display-only (Windows Terminal profile/tab names, `whoami`), defaulting to the name.
 
@@ -99,7 +99,7 @@ Names must match `^[a-z0-9][a-z0-9-]{0,31}$` (e.g. `work`, `client-acme`). Folde
 2. For each configured provider: `materialise`, then `contribute`.
 3. Merge contributions. Two providers setting the same variable is an error naming both.
 4. Resolve `secret:` references from the secret store.
-5. Add `HYDRA_ENV=<env>`, `HYDRA_HOME`, and prepend `~/.hydra/shims` to `PATH` if the shims are installed. Without them, identity switching still works but guards are off; `whoami` and `doctor` say so.
+5. Add `HYDRA_ENV=<env>` and `HYDRA_HOME`. An older hydra's `~/.hydra/shims` folder is deleted (best effort; a file in use is noted, never fatal) and dropped from the child's `PATH` (case-insensitive, either separator), since a terminal opened by an older hydra may still have it first.
 6. Generate the shell init file (prompt snippet) and launch:
    - pwsh: `pwsh -NoLogo -NoProfile -NoExit -Command ". '<state/work/shell/init.ps1>'"`. The init file dot-sources the user's `$PROFILE` itself (hence `-NoProfile`, so it loads once), re-prepends hydra's PATH entries, then wraps the prompt.
    - bash: `bash --rcfile <state/work/shell/init.bash> -i` with `CHERE_INVOKING=1` (otherwise Git Bash's `/etc/profile` changes to `~`). The rcfile sources `/etc/profile`, then `~/.bash_profile` or `~/.bashrc`, then re-prepends hydra's PATH entries (because `/etc/profile` puts `/mingw64/bin` first) and sets the prompt.
@@ -223,17 +223,16 @@ For a working directory, collect candidates: the nearest ancestor `.hydra` file 
 - Hand-editing `[bindings]` or creating `.hydra` files is equally supported; `hydra doctor` reports rules naming unknown environments.
 - `hydra env new <name> --home <dir>` sets `home` and adds the binding for `<dir>` in one step.
 
-### 7.2 Guards (revised 2026-10-04)
+### 7.2 Guards (revised 2026-10-05)
 
-Checked on this machine: Claude Code's bash puts Git for Windows' `/mingw64/bin` and `/usr/bin` ahead of the inherited PATH, so `git` always resolves to `/mingw64/bin/git`. A PATH shim for git would never see commands Claude runs. `gh` (installed under Program Files) and Windows OpenSSH `ssh` are found through the Windows PATH, so shims work for them. The guard is therefore three layers:
+Checked on this machine: Claude Code's bash puts Git for Windows' `/mingw64/bin` and `/usr/bin` ahead of the inherited PATH, so `git` always resolves to `/mingw64/bin/git`. A PATH shim for git would never see commands Claude runs. The guard is therefore two layers:
 
 1. **git: hooks, not a shim.** The git provider (always on, §5) sets `core.hooksPath = state/<env>/git/hooks` in the generated gitconfig. That folder holds a small `sh` wrapper for every client-side and receive-side hook git runs (`pre-receive`, `update`, `post-receive` and the rest are wrapped too, so they chain). Exceptions: `reference-transaction`, `post-index-change` and `fsmonitor-watchman` are left out because git runs them very often or they are rarely used.
    - The `pre-commit` and `pre-push` wrappers first run `hydra guard git <hook> "$@"`. `pre-push` receives the remote name and URL.
    - Every wrapper then runs the hook the repo would otherwise have run, with the same arguments and stdin. That is the user's own global `core.hooksPath`, read from the effective global config (including files it `[include]`s), else `$(git rev-parse --git-common-dir)/hooks/<hook>`. (`--git-path hooks` is not used: once `core.hooksPath` names hydra's folder it returns that folder and the wrapper would run itself forever. `--git-common-dir` is also right inside linked worktrees.) A wrapper blocks only when the guard exits 1; any other failure allows.
    - The wrappers call hydra by absolute path (the exe that materialised them), fall back to `hydra` on PATH, and allow the command if neither exists.
    - Limits: `--no-verify` skips them. A repo with its own local `core.hooksPath` (e.g. Husky) overrides hydra's, so the guard is off there; `hydra whoami` says so for that folder.
-2. **gh: a shim.** `~/.hydra/shims/gh.exe` is a copy of `hydra.exe`, refreshed at launch whenever it differs from the running exe, and first on PATH in hydra terminals. Started as `gh`, hydra checks the command, then runs the real `gh` (found on PATH with the shims folder removed) and returns its exit code.
-3. **Claude Code: a `PreToolUse` hook.** The claude provider adds a hook with matcher `Bash|PowerShell` to each environment's generated `settings.json`, running `"<hydra.exe>" guard claude`. It is appended to any `PreToolUse` hooks the user already has, and an older `Bash`-only entry from a previous hydra is replaced.
+2. **Claude Code: a `PreToolUse` hook.** The claude provider adds a hook with matcher `Bash|PowerShell` to each environment's generated `settings.json`, running `"<hydra.exe>" guard claude`. It is appended to any `PreToolUse` hooks the user already has, and an older `Bash`-only entry from a previous hydra is replaced.
    - It reads the hook JSON from stdin, finds `git push`/`git commit`/`gh` write commands in the command line (respecting `git -C <dir>`), and checks them against the folder's binding.
    - It follows earlier `cd`s and `git -C` (including `/c/...` and `~` paths) when choosing the folder, and unwraps `hydra allow -- <cmd>` so Claude can't use it to override.
    - A block exits 2 with the reason on stderr, which Claude Code shows to the model. Instead of "run it once anyway", Claude is told to ask the user to run `hydra allow -- <cmd>` in their own terminal. Claude cannot self-allow.
@@ -256,9 +255,13 @@ Everything else passes. Outcomes:
 
 **Override:** `hydra allow -- <cmd...>` runs one command with `HYDRA_ALLOW=1`. A launch unsets `HYDRA_ALLOW`, so it never reaches a terminal.
 
-**ssh:** `~/.hydra/shims/ssh.exe` (same mechanism) adds `-i <ssh_key> -o IdentitiesOnly=yes` when the environment has a git `ssh_key`. It is effective where Windows OpenSSH is used (PowerShell, and hydra's Git Bash shells, which re-prepend the shims); Git Bash's own `/usr/bin/ssh` in Claude Code's bash is not covered.
+**ssh:** the environment's git `ssh_key` reaches git through `core.sshCommand = ssh -i <ssh_key> -o IdentitiesOnly=yes` in the generated gitconfig (§5).
 
-Shims are managed automatically at launch; there is no `hydra install shims` command.
+**Not guarded:**
+- `gh` write commands typed by hand in a folder bound to another environment. `gh` still uses the terminal's own environment's login, so it can't act as another account.
+- Plain `ssh`/`scp` typed by hand, which uses ssh's normal key selection.
+
+**Shims removed (2026-10-05).** Earlier versions also copied `hydra.exe` to `~/.hydra/shims/gh.exe` and `ssh.exe`, put that folder first on PATH, and dispatched on argv[0]: `gh` was checked before running the real one, and `ssh` added the environment's key. Windows Defender's ML detection flagged hydra builds as a trojan, most likely because of this, so hydra no longer copies itself under another program's name or puts its own folder ahead of PATH. A launch deletes a leftover shims folder and drops it from PATH (§4.3).
 
 ## 8. Error handling
 
@@ -292,7 +295,7 @@ hydra uninstall [wt]
 
 ### 9.1 Integrations (`hydra install`)
 
-`hydra install` is a verb with an optional target as the final argument, matching the other verb commands (`shell`, `run`, `bind`, `allow`); noun-first groups are kept for managing collections (`env`, `secret`). With no target it installs or repairs every integration it can: `shims`, then `wt` if Windows Terminal is present. It is idempotent. `hydra init` runs it at the end, so first-time setup is one command. `hydra uninstall [target]` removes what `install` created (the shims folder contents, the WT fragment) and nothing else. Later targets (`wezterm`, `iterm`, `prompt`) slot in the same way.
+`hydra install` is a verb with an optional target as the final argument, matching the other verb commands (`shell`, `run`, `bind`, `allow`); noun-first groups are kept for managing collections (`env`, `secret`). With no target it installs or repairs every integration it can: `wt` if Windows Terminal is present. It is idempotent. `hydra init` runs it at the end, so first-time setup is one command. `hydra uninstall [target]` removes what `install` created (the WT fragment) and nothing else. Later targets (`wezterm`, `iterm`, `prompt`) slot in the same way.
 
 **`wt` target.** `hydra install wt` writes `%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\hydra\hydra.json`, replacing the whole file each time, so removed or renamed environments disappear.
 
@@ -310,7 +313,7 @@ The generated init files prefix the prompt with `[<env>]` in the environment col
 
 - **Unit (`hydra-core`):** config parsing and validation errors; environment name validation; `env rename` rewriting of bindings and secret references (against a temp `HYDRA_HOME` and a fake secret store); WT profile generation including shell detection and stable GUIDs; binding resolution precedence; contribution merge and conflict detection; settings deep-merge; MCP exclude globs; CLAUDE.md concatenation; GitHub remote URL parsing; guard command classification.
 - **Provider tests:** each provider materialises into a temp `HYDRA_HOME`; assert files and contributed variables. Snapshot tests (`insta`) for generated gitconfig, merged settings.json, shell init files, and the WT fragment.
-- **Integration (Windows CI, GitHub Actions `windows-latest`):** build binaries; create an env; run the shimmed `git` against a local bare repo in bound and unbound folders; assert block, warn, strict-block, `hydra allow`, and exit-code passthrough. Secret store tests use a `hydra-test/` namespace and clean up.
+- **Integration (Windows CI, GitHub Actions `windows-latest`):** build binaries; create an env; run `git` (through hydra's hooks) against a local bare repo in bound and unbound folders; assert block, warn, strict-block, `hydra allow`, and exit-code passthrough. Secret store tests use a `hydra-test/` namespace and clean up.
 - **Runtime self-check:** `hydra doctor` compares actual identities (`gh api user`, `git config user.email`, Claude account, `aws sts get-caller-identity`, `gcloud config get account`, gws auth status) with expectations.
 
 ## 11. Assumptions to verify early in implementation
@@ -322,5 +325,5 @@ Each is checked by a small spike before the dependent provider is built; if one 
 3. **gws keyring entry** (encryption key for stored credentials) is either per-config-dir or harmless when shared. Fallback: gws credentials-file mode (§5).
 4. ✅ **Claude Code follows directory junctions** for `plugins/`, `skills/`, `commands/` — verified 2026-10-04 (`claude plugin list` through junctions).
 5. ✅ **No plugin path rewriting needed** — the base is linked, not copied (§6).
-6. ❌ **Claude Code on Windows resolves `git` through the inherited `PATH`** — false (verified 2026-10-04): its bash puts `/mingw64/bin` first. Guards use git hooks plus a Claude `PreToolUse` hook instead (§7.2); `gh` and Windows `ssh` shims do work.
+6. ❌ **Claude Code on Windows resolves `git` through the inherited `PATH`** — false (verified 2026-10-04): its bash puts `/mingw64/bin` first. Guards use git hooks plus a Claude `PreToolUse` hook instead (§7.2).
 7. **Windows Terminal reloads fragments live** when `hydra.json` changes. Fallback: print "restart Windows Terminal to see the change".

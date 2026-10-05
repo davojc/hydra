@@ -196,11 +196,10 @@ hydra: blocked git push - this folder belongs to work (rule E:/work/**), this te
 
 `hydra allow -- <command>` runs that one command past the guard. When Claude Code is blocked, it is told to ask you to run `hydra allow` in your own terminal, and it can't run `hydra allow` itself.
 
-**How it's enforced.** Three layers, because no single hook covers every way a command can run:
+**How it's enforced.** Two layers, because no single hook covers every way a command can run:
 
 1. **git hooks.** Each environment's generated gitconfig sets `core.hooksPath` to hydra's wrappers in `state/<env>/git/hooks`. The `pre-commit` and `pre-push` wrappers ask hydra first. Every wrapper then runs the hook your repo (or your own global `core.hooksPath`) would have run, so existing hooks keep working.
-2. **`gh` and `ssh` shims** in `~/.hydra/shims`, put first on `PATH` in hydra terminals. `gh` is checked and then run. `ssh` adds the environment's key.
-3. **A Claude Code hook.** Each environment's `settings.json` gets a `PreToolUse` hook on the `Bash` and `PowerShell` tools. It reads the command Claude is about to run, follows `cd` and `git -C`, and blocks it if the folder belongs to another environment. It also catches `--no-verify`.
+2. **A Claude Code hook.** Each environment's `settings.json` gets a `PreToolUse` hook on the `Bash` and `PowerShell` tools. It reads the command Claude is about to run, follows `cd` and `git -C`, and blocks it if the folder belongs to another environment. It also catches `--no-verify`, and checks `gh` write commands too.
 
 If a binding names an environment that doesn't exist, hydra prints `guard skipped` and allows the command.
 
@@ -209,11 +208,12 @@ If a binding names an environment that doesn't exist, hydra prints `guard skippe
 **Limits.** The guard stops mistakes. It isn't a security boundary.
 
 - `git commit --no-verify` and `git push --no-verify` skip git hooks outside Claude Code. (The Claude hook catches them.)
-- A repo that sets its own `core.hooksPath` (Husky, for example) replaces hydra's hooks, so the git guard is off there. `hydra whoami` says so. The `gh` shim and the Claude hook still apply.
+- A repo that sets its own `core.hooksPath` (Husky, for example) replaces hydra's hooks, so the git guard is off there. `hydra whoami` says so. The Claude hook still applies.
 - Inside a hydra terminal, `pre-commit install` refuses and `git lfs install` complains, because `core.hooksPath` is set. Run them from a normal terminal.
 - `git config --global` inside hydra edits the generated file, and hydra rewrites it on the next launch. Edit your real global file instead. The generated file's header names it.
 - The git hook looks up the binding at the repo root, so one `.hydra` or rule at the root of a repo covers all of it.
-- Git Bash's own `ssh` inside Claude Code isn't shimmed. PowerShell and hydra's own Git Bash terminals are.
+- `gh` write commands you type yourself aren't guarded, even in a folder bound to another environment. `gh` still uses the terminal's own environment's login, so it can't act as another account.
+- The environment's `ssh_key` reaches git through `core.sshCommand` in the generated gitconfig. Plain `ssh` or `scp` typed by hand uses ssh's normal key selection.
 
 ## Claude Code: separate accounts, shared setup
 
@@ -260,7 +260,6 @@ Output is coloured in terminals; set NO_COLOR=1 to turn it off.
   envs/<env>/          yours: env.toml, plus optional claude/ overrides
   state/<env>/         hydra's: each tool's folder, sign-ins, generated config
   state/<env>/git/hooks/  hydra's git hook wrappers (the guard)
-  shims/               gh.exe and ssh.exe copies of hydra, first on PATH in hydra terminals
   secrets.toml         names (never values) of stored secrets
 ```
 
@@ -288,13 +287,12 @@ Output is coloured in terminals; set NO_COLOR=1 to turn it off.
 | A Claude setting you changed disappeared | Your version is in `settings.json.bak`. Put lasting changes in `~/.claude/settings.json` or `envs/<env>/claude/settings.json`. |
 | `hydra: blocked git push - this folder belongs to work …` | The folder is bound to another environment. Open the right terminal (`hydra shell work`), or run it once with `hydra allow -- git push`. `hydra bind` shows which rule applies. |
 | `hydra: warning: guard skipped (… names unknown environment …)` | A binding names an environment that doesn't exist, so nothing was checked. Fix the name in `config.toml` or the `.hydra` file, or create the environment. |
-| `whoami` says the repo sets its own `core.hooksPath` | Husky or similar replaces hydra's git hooks in that repo, so the git guard is off there. The `gh` shim and Claude hook still guard it. |
-| `gh/ssh shims not refreshed` | hydra couldn't copy itself into `~/.hydra/shims`, usually because a `gh` or `ssh` from there is running. Close it and open a new terminal. |
+| `whoami` says the repo sets its own `core.hooksPath` | Husky or similar replaces hydra's git hooks in that repo, so the git guard is off there. The Claude hook still guards it. |
 | `whoami` shows the wrong account | The browser was signed in to the other account. Sign out inside that environment's terminal and sign in again. |
 
 ## What's not built yet
 
-- **`scp` / `sftp`** using the environment's key outside git (`ssh` is handled by the shim).
+- **`ssh` / `scp` / `sftp`** using the environment's key outside git.
 - **Windows Terminal profiles,** one coloured tab per environment.
 - **`hydra doctor`.**
 - **macOS and Linux.**

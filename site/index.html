@@ -429,17 +429,12 @@ hydra unbind E:\work              # remove the rule and/or .hydra file</pre>
         <div class="col">
           <h4 class="l">git hooks</h4>
           <p>Each environment's gitconfig sets <code>core.hooksPath</code> to hydra's wrappers.</p>
-          <ul><li><code>pre-commit</code> and <code>pre-push</code> ask hydra first</li><li>Then the repo's own hook, or your global one, runs as usual</li></ul>
-        </div>
-        <div class="col">
-          <h4 class="m">gh and ssh shims</h4>
-          <p>Copies of hydra in <code>~/.hydra/shims</code>, first on <code>PATH</code>.</p>
-          <ul><li><code>gh</code> is checked, then run</li><li><code>ssh</code> adds the environment's key</li></ul>
+          <ul><li><code>pre-commit</code> and <code>pre-push</code> ask hydra first</li><li>Then the repo's own hook, or your global one, runs as usual</li><li>The environment's <code>ssh_key</code> reaches git through <code>core.sshCommand</code></li></ul>
         </div>
         <div class="col">
           <h4 class="v">Claude Code hook</h4>
           <p>A <code>PreToolUse</code> hook on the <code>Bash</code> and <code>PowerShell</code> tools.</p>
-          <ul><li>Follows <code>cd</code> and <code>git -C</code></li><li>Catches <code>--no-verify</code></li></ul>
+          <ul><li>Follows <code>cd</code> and <code>git -C</code></li><li>Catches <code>--no-verify</code></li><li>Checks <code>gh</code> write commands too</li></ul>
         </div>
       </div>
       <p>If a binding names an environment that doesn't exist, hydra prints <code>guard skipped</code> and allows the command.</p>
@@ -449,11 +444,12 @@ hydra unbind E:\work              # remove the rule and/or .hydra file</pre>
       <p>The guard stops mistakes. It isn't a security boundary.</p>
       <ul>
         <li><code>--no-verify</code> skips git hooks outside Claude Code. The Claude hook catches it.</li>
-        <li>A repo that sets its own <code>core.hooksPath</code> (Husky, for example) replaces hydra's hooks, so the git guard is off there. <code>hydra whoami</code> says so. The <code>gh</code> shim and Claude hook still apply.</li>
+        <li>A repo that sets its own <code>core.hooksPath</code> (Husky, for example) replaces hydra's hooks, so the git guard is off there. <code>hydra whoami</code> says so. The Claude hook still applies.</li>
         <li>In a hydra terminal, <code>pre-commit install</code> refuses and <code>git lfs install</code> complains, because <code>core.hooksPath</code> is set. Run them from a normal terminal.</li>
         <li><code>git config --global</code> inside hydra edits the generated file, which hydra rewrites on the next launch. Edit your real global file instead. The generated file's header names it.</li>
         <li>The git hook looks up the binding at the repo root.</li>
-        <li>Git Bash's own <code>ssh</code> inside Claude Code isn't shimmed. PowerShell and hydra's own Git Bash terminals are.</li>
+        <li><code>gh</code> write commands you type yourself aren't guarded, even in a folder bound to another environment. <code>gh</code> still uses the terminal's own environment's login, so it can't act as another account.</li>
+        <li>Plain <code>ssh</code> or <code>scp</code> typed by hand uses ssh's normal key selection, not the environment's key.</li>
       </ul>
     </section>
 
@@ -507,7 +503,6 @@ value: ••••••••••••••••
 envs/&lt;env&gt;/          <span class="c">yours: env.toml, plus optional claude/ overrides</span>
 state/&lt;env&gt;/         <span class="c">hydra's: each tool's folder, sign-ins, generated config</span>
 state/&lt;env&gt;/git/hooks/  <span class="c">hydra's git hook wrappers (the guard)</span>
-shims/               <span class="c">gh.exe and ssh.exe copies of hydra, first on PATH</span>
 secrets.toml         <span class="c">names (never values) of stored secrets</span></pre>
       </div>
       <p><code>HYDRA_HOME</code> moves <code>~/.hydra</code>. Deleting <code>state/&lt;env&gt;</code> resets an environment, but you'll need to sign in again.</p>
@@ -528,8 +523,7 @@ secrets.toml         <span class="c">names (never values) of stored secrets</spa
             <tr><td><code>… is a real folder, not a link</code></td><td>Move anything you want to keep into <code>~/.claude</code>, delete that folder, and reopen the terminal.</td></tr>
             <tr><td><code>hydra: blocked git push - this folder belongs to work …</code></td><td>The folder is bound to another environment. Open the right terminal (<code>hydra shell work</code>) or run it once with <code>hydra allow -- git push</code>. <code>hydra bind</code> shows which rule applies.</td></tr>
             <tr><td><code>hydra: warning: guard skipped</code></td><td>A binding names an environment that doesn't exist, so nothing was checked. Fix the name in <code>config.toml</code> or the <code>.hydra</code> file, or create the environment.</td></tr>
-            <tr><td><code>whoami</code> says the repo sets its own <code>core.hooksPath</code></td><td>Husky or similar replaces hydra's git hooks in that repo, so the git guard is off there. The <code>gh</code> shim and Claude hook still guard it.</td></tr>
-            <tr><td><code>gh/ssh shims not refreshed</code></td><td>hydra couldn't copy itself into <code>~/.hydra/shims</code>, usually because a <code>gh</code> or <code>ssh</code> from there is running. Close it and open a new terminal.</td></tr>
+            <tr><td><code>whoami</code> says the repo sets its own <code>core.hooksPath</code></td><td>Husky or similar replaces hydra's git hooks in that repo, so the git guard is off there. The Claude hook still guards it.</td></tr>
             <tr><td>A Claude setting you changed disappeared</td><td>Your version is in <code>settings.json.bak</code>. Put lasting changes in <code>~/.claude/settings.json</code> or <code>envs/&lt;env&gt;/claude/settings.json</code>.</td></tr>
             <tr><td><code>hydra is in use - not updating</code></td><td>Close the listed hydra terminals, then run <code>hydra update</code> again.</td></tr>
           </tbody>
@@ -541,7 +535,7 @@ secrets.toml         <span class="c">names (never values) of stored secrets</spa
       <h2>Planned</h2>
       <p>These are designed but not built yet:</p>
       <ul>
-        <li><strong><code>scp</code> and <code>sftp</code></strong> using the environment's key outside git. <code>ssh</code> is already handled by the shim.</li>
+        <li><strong><code>ssh</code>, <code>scp</code> and <code>sftp</code></strong> using the environment's key outside git.</li>
         <li><strong>Windows Terminal profiles.</strong> One coloured tab per environment.</li>
         <li><strong><code>hydra doctor</code></strong> and macOS / Linux support.</li>
       </ul>

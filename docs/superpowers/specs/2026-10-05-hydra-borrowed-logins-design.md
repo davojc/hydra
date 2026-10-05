@@ -138,10 +138,16 @@ Unchanged. Guards compare environment names, not accounts. A folder bound to
 `personal` still blocks `git commit` from a `work` terminal even if `work`
 borrows personal's GitHub login.
 
-The guards and the ssh shim read only the borrower's own env.toml: the
-binding, `[github]` owners/strict (§3) and `[git] ssh_key`. An owner's
+The guards (git hooks and the Claude Code hook) read only the borrower's
+own env.toml: the binding and `[github]` owners/strict (§3). An owner's
 broken env.toml makes the borrower's launch fail closed, but never switches
-the borrower's guard or SSH key off.
+the borrower's guard off. `[git]` is never borrowed, so the `ssh_key` that
+reaches git through `core.sshCommand` is always the borrower's own.
+
+(Revised 2026-10-05: the gh/ssh shims this section used to cover were
+removed after Windows Defender's ML detection flagged hydra builds; hydra
+no longer copies itself under another program's name. See the main spec
+§7.2.)
 
 ## 6. Errors
 

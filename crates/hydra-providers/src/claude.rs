@@ -596,6 +596,35 @@ mod tests {
     }
 
     #[test]
+    fn a_borrower_uses_the_owners_overrides_not_its_own() {
+        let mut f = Fixture::new("[claude]\n");
+        with_base(&f);
+        let personal = hydra_core::name::EnvName::parse("personal").unwrap();
+        f.env.borrowed.insert("claude".into(), personal.clone());
+        // The borrower's own override folder is ignored...
+        let own = f.paths.env_dir(&f.name).join("claude");
+        std::fs::create_dir_all(own.join("skills").join("work-skill")).unwrap();
+        std::fs::write(own.join("settings.json"), r#"{"model":"sonnet"}"#).unwrap();
+        std::fs::write(own.join("CLAUDE.md"), "# Work only").unwrap();
+        // ...in favour of the owner's.
+        let owners = f.paths.env_dir(&personal).join("claude");
+        std::fs::create_dir_all(owners.join("skills").join("personal-skill")).unwrap();
+        std::fs::write(owners.join("settings.json"), r#"{"model":"haiku"}"#).unwrap();
+        std::fs::write(owners.join("CLAUDE.md"), "# Personal only").unwrap();
+        Claude.materialise(&f.ctx()).unwrap();
+        let dir = f.paths.state_dir(&personal).join("claude");
+        assert!(dir.join("skills").join("personal-skill").is_dir());
+        assert!(!dir.join("skills").join("work-skill").exists());
+        let settings = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+        assert!(settings.contains("\"haiku\"") && !settings.contains("\"sonnet\""));
+        let md = std::fs::read_to_string(dir.join("CLAUDE.md")).unwrap();
+        assert!(
+            md.contains("# Personal only") && !md.contains("# Work only"),
+            "{md}"
+        );
+    }
+
+    #[test]
     fn materialise_is_repeatable_and_follows_base_changes() {
         let f = Fixture::new("[claude]\n");
         with_base(&f);

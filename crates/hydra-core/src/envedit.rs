@@ -32,6 +32,7 @@ pub struct ToolValues {
     pub credentials: Option<String>, // gws: credentials ("secret:..." value)
     pub kube_config: Option<String>, // kube: config
     pub api_key: Option<String>,     // gemini: api_key ("secret:..." value)
+    pub from: Option<String>,        // any borrowable tool: from (owner env)
 }
 
 #[derive(Debug, PartialEq)]
@@ -51,6 +52,22 @@ fn has_table(doc: &DocumentMut, tool: &str) -> bool {
 
 /// Rejects values that don't belong to `tool`.
 fn check_applies(tool: &str, v: &ToolValues) -> Result<(), String> {
+    if v.from.is_some() {
+        if crate::borrow::NOT_BORROWABLE.contains(&tool) {
+            return Err(format!(
+                "{tool} can't be borrowed: commit author and SSH key stay per environment"
+            ));
+        }
+        let only_from = ToolValues {
+            from: v.from.clone(),
+            ..Default::default()
+        };
+        if *v != only_from {
+            return Err(
+                "--from can't be combined with other settings; the owner's are used".to_string(),
+            );
+        }
+    }
     let given = [
         (!v.mcp_exclude.is_empty(), "--mcp-exclude", "claude"),
         (!v.owners.is_empty(), "--owner", "github"),
@@ -162,6 +179,34 @@ pub fn add_tool(text: &str, tool: &str, v: &ToolValues) -> Result<(String, AddOu
     let tool = tool_name(tool)?;
     check_applies(tool, v)?;
     let mut doc = parse(text)?;
+    if let Some(owner) = &v.from {
+        let mut table = Table::new();
+        table.insert("from", value(owner.as_str()));
+        let existed = has_table(&doc, tool);
+        if !existed && doc.contains_key(tool) {
+            return Err(format!("{tool} in env.toml isn't a table"));
+        }
+        if existed {
+            let old = doc
+                .get(tool)
+                .and_then(|i| i.as_table())
+                .map(|t| t.decor().clone());
+            if let Some(d) = old {
+                *table.decor_mut() = d;
+            }
+        } else if !text.is_empty() && !text.ends_with("\n\n") {
+            let prefix = if text.ends_with('\n') { "\n" } else { "\n\n" };
+            table.decor_mut().set_prefix(prefix);
+        }
+        doc.insert(tool, Item::Table(table));
+        let out = doc.to_string();
+        let outcome = match (existed, out == text) {
+            (true, true) => AddOutcome::AlreadyPresent,
+            (true, false) => AddOutcome::Updated,
+            (false, _) => AddOutcome::Added,
+        };
+        return Ok((out, outcome));
+    }
     if has_table(&doc, tool) {
         let t = doc
             .get_mut(tool)
@@ -223,6 +268,43 @@ mod tests {
 
     fn vals() -> ToolValues {
         ToolValues::default()
+    }
+
+    #[test]
+    fn add_from_writes_only_from_and_replaces_settings() {
+        let v = ToolValues {
+            from: Some("personal".into()),
+            ..Default::default()
+        };
+        let (out, outcome) = add_tool("", "claude", &v).unwrap();
+        assert_eq!(outcome, AddOutcome::Added);
+        assert_eq!(out, "[claude]\nfrom = \"personal\"\n");
+        let (out, outcome) = add_tool("[claude]\nmcp.exclude = [\"x\"]\n", "claude", &v).unwrap();
+        assert_eq!(outcome, AddOutcome::Updated);
+        assert_eq!(out, "[claude]\nfrom = \"personal\"\n");
+        let (_, outcome) = add_tool(&out, "claude", &v).unwrap();
+        assert_eq!(outcome, AddOutcome::AlreadyPresent);
+    }
+
+    #[test]
+    fn add_from_refuses_git_and_other_flags() {
+        let git = ToolValues {
+            from: Some("personal".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            add_tool("", "git", &git).unwrap_err(),
+            "git can't be borrowed: commit author and SSH key stay per environment"
+        );
+        let mixed = ToolValues {
+            from: Some("personal".into()),
+            owners: vec!["me".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            add_tool("", "github", &mixed).unwrap_err(),
+            "--from can't be combined with other settings; the owner's are used"
+        );
     }
 
     #[test]

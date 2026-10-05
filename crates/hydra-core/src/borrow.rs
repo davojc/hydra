@@ -90,3 +90,74 @@ fn owner_section(
         )),
     }
 }
+
+/// Every environment that borrows something from `owner`, with the tools, sorted by name.
+/// Unreadable or broken env files are skipped (they fail on their own launch).
+pub fn borrowers(paths: &HydraPaths, owner: &EnvName) -> Vec<(EnvName, Vec<String>)> {
+    let Ok(list) = crate::envs::list(paths) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for n in list.valid {
+        let Ok(text) = std::fs::read_to_string(paths.env_file(&n)) else {
+            continue;
+        };
+        let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+        let Ok(doc) = toml::from_str::<toml::Table>(text) else {
+            continue;
+        };
+        let tools: Vec<String> = TOOLS
+            .iter()
+            .filter(|t| {
+                doc.get(**t)
+                    .and_then(|s| s.get("from"))
+                    .and_then(|f| f.as_str())
+                    == Some(owner.as_str())
+            })
+            .map(|t| t.to_string())
+            .collect();
+        if !tools.is_empty() {
+            out.push((n, tools));
+        }
+    }
+    out.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn borrowers_lists_who_borrows_what() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = HydraPaths::new(dir.path());
+        for (n, t) in [
+            ("personal", "[claude]\n[github]\n"),
+            (
+                "work",
+                "[claude]\nfrom = \"personal\"\n[github]\nfrom = \"personal\"\n",
+            ),
+            ("client", "codex = { from = \"personal\" }\n"),
+            ("other", "[claude]\nfrom = \"work\"\n"),
+            ("broken", "[[[ nope"),
+        ] {
+            let n = EnvName::parse(n).unwrap();
+            std::fs::create_dir_all(paths.env_dir(&n)).unwrap();
+            std::fs::write(paths.env_file(&n), t).unwrap();
+        }
+        let got = borrowers(&paths, &EnvName::parse("personal").unwrap());
+        let got: Vec<(String, Vec<String>)> =
+            got.into_iter().map(|(e, t)| (e.to_string(), t)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("client".to_string(), vec!["codex".to_string()]),
+                (
+                    "work".to_string(),
+                    vec!["claude".to_string(), "github".to_string()]
+                ),
+            ]
+        );
+    }
+}

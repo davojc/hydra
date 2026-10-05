@@ -73,6 +73,9 @@ pub enum Cmd {
         /// gemini: secret name holding the API key, e.g. work/gemini
         #[arg(long = "api-key-secret")]
         api_key_secret: Option<String>,
+        /// Borrow the tool's login and settings from another environment, e.g. --from personal
+        #[arg(long)]
+        from: Option<String>,
     },
     /// Turn a tool off for an environment (saved logins are kept)
     Remove { tool: String, env: Option<String> },

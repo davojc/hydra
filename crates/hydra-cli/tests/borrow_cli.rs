@@ -139,3 +139,57 @@ fn whoami_tags_borrowed_tools() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("from personal · "), "{stdout}");
 }
+
+#[test]
+fn add_from_writes_the_borrow_and_checks_the_owner() {
+    let h = Home::new();
+    h.write_env("personal", "label = \"p\"\n");
+    h.write_env("work", "label = \"w\"\n");
+    h.hydra()
+        .args(["add", "claude", "work", "--from", "personal"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("personal has no [claude]"));
+    assert_eq!(h.env_toml("work"), "label = \"w\"\n");
+    h.hydra()
+        .args(["add", "claude", "personal"])
+        .assert()
+        .success();
+    h.hydra()
+        .args(["add", "claude", "work", "--from", "personal"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "added claude to work (borrowed from personal)",
+        ));
+    assert!(
+        h.env_toml("work")
+            .contains("[claude]\nfrom = \"personal\"\n")
+    );
+}
+
+#[test]
+fn remove_refuses_an_owner_that_lends_and_frees_a_borrower() {
+    let h = Home::new();
+    h.write_env("personal", "[claude]\n");
+    h.write_env("work", "[claude]\nfrom = \"personal\"\n");
+    h.hydra()
+        .args(["remove", "claude", "personal"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("personal lends claude to work"))
+        .stderr(predicate::str::contains(
+            "-> remove it there first: hydra remove claude work",
+        ));
+    h.hydra()
+        .args(["remove", "claude", "work"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "removed claude from work; it was borrowed from personal, whose login is untouched",
+        ));
+    h.hydra()
+        .args(["remove", "claude", "personal"])
+        .assert()
+        .success();
+}

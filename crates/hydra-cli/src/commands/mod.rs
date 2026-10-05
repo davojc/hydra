@@ -50,6 +50,7 @@ pub fn run(cmd: Cmd) -> anyhow::Result<i32> {
             credentials_secret,
             kube_config,
             api_key_secret,
+            from,
         } => tools::add(
             &app,
             tool,
@@ -67,6 +68,7 @@ pub fn run(cmd: Cmd) -> anyhow::Result<i32> {
                 credentials_secret,
                 kube_config,
                 api_key_secret,
+                from,
             },
         ),
         Cmd::Remove { tool, env } => tools::remove(&app, tool, env),

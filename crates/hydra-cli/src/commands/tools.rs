@@ -23,6 +23,7 @@ pub struct Flags {
     pub credentials_secret: Option<String>,
     pub kube_config: Option<String>,
     pub api_key_secret: Option<String>,
+    pub from: Option<String>,
 }
 
 fn secret_value(flag: &str, path: Option<String>) -> anyhow::Result<Option<String>> {
@@ -49,6 +50,7 @@ impl Flags {
             credentials: secret_value("--credentials-secret", self.credentials_secret)?,
             kube_config: self.kube_config,
             api_key: secret_value("--api-key-secret", self.api_key_secret)?,
+            from: self.from,
         })
     }
 }
@@ -118,11 +120,22 @@ pub fn add(
         AddOutcome::Updated => ("updated", "in"),
     };
     write_env_file(app, &env, &new_text)?;
-    anstream::println!("{}", style::ok(format!("{verb} {tool} {prep} {env}")));
-    let mut next = format!("next: open a new {env} terminal (hydra shell {env})");
-    if has_sign_in(app, &env, &cfg, tool) {
-        next.push_str(" and sign in there");
-    }
+    let borrowed = cfg.borrowed.get(tool);
+    let tail = borrowed
+        .map(|o| format!(" (borrowed from {o})"))
+        .unwrap_or_default();
+    anstream::println!("{}", style::ok(format!("{verb} {tool} {prep} {env}{tail}")));
+    let next = if let Some(owner) = borrowed {
+        format!(
+            "next: open a new {env} terminal (hydra shell {env}); sign in from {owner} if it isn't already"
+        )
+    } else {
+        let mut next = format!("next: open a new {env} terminal (hydra shell {env})");
+        if has_sign_in(app, &env, &cfg, tool) {
+            next.push_str(" and sign in there");
+        }
+        next
+    };
     anstream::println!("{}", style::dim(next));
     note_if_running(app, &env)?;
     Ok(0)
@@ -164,7 +177,21 @@ fn list(app: &App, env: Option<String>) -> anyhow::Result<i32> {
 pub fn remove(app: &App, tool: String, env: Option<String>) -> anyhow::Result<i32> {
     let tool = envedit::tool_name(&tool).map_err(anyhow::Error::msg)?;
     let env = require_env(app, "remove", tool, env)?;
+    let lent_to: Vec<String> = hydra_core::borrow::borrowers(&app.paths, &env)
+        .into_iter()
+        .filter(|(_, tools)| tools.iter().any(|t| t == tool))
+        .map(|(n, _)| n.to_string())
+        .collect();
+    if let Some(first) = lent_to.first() {
+        anyhow::bail!(
+            "{env} lends {tool} to {}\n  -> remove it there first: hydra remove {tool} {first}",
+            lent_to.join(", ")
+        );
+    }
     let text = read_env_file(app, &env)?;
+    let was_borrowed = check(app, &env, &text)
+        .ok()
+        .and_then(|c| c.borrowed.get(tool).cloned());
     let (new_text, removed) = envedit::remove_tool(&text, tool).map_err(anyhow::Error::msg)?;
     if !removed {
         anstream::println!("{tool} isn't on in {env}");
@@ -172,15 +199,24 @@ pub fn remove(app: &App, tool: String, env: Option<String>) -> anyhow::Result<i3
     }
     check(app, &env, &new_text)?;
     write_env_file(app, &env, &new_text)?;
-    let folder = if tool == "github" { "gh" } else { tool };
-    let state = app.paths.state_dir(&env).join(folder);
-    anstream::println!(
-        "{}",
-        style::ok(format!(
-            "removed {tool} from {env}; saved logins stay in {}",
-            state.display()
-        ))
-    );
+    if let Some(owner) = was_borrowed {
+        anstream::println!(
+            "{}",
+            style::ok(format!(
+                "removed {tool} from {env}; it was borrowed from {owner}, whose login is untouched"
+            ))
+        );
+    } else {
+        let folder = if tool == "github" { "gh" } else { tool };
+        let state = app.paths.state_dir(&env).join(folder);
+        anstream::println!(
+            "{}",
+            style::ok(format!(
+                "removed {tool} from {env}; saved logins stay in {}",
+                state.display()
+            ))
+        );
+    }
     note_if_running(app, &env)?;
     Ok(0)
 }

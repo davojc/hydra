@@ -67,7 +67,6 @@ pub struct LaunchEnv {
     pub config: EnvConfig,
     pub set: BTreeMap<String, String>,
     pub unset: BTreeSet<String>,
-    pub path_prepend: Vec<PathBuf>,
     /// Folders taken out of the inherited PATH (compared case-insensitively, either separator).
     pub path_drop: Vec<PathBuf>,
 }
@@ -80,7 +79,6 @@ impl std::fmt::Debug for LaunchEnv {
             .field("config", &self.config)
             .field("set", &self.set.keys().collect::<Vec<_>>())
             .field("unset", &self.unset)
-            .field("path_prepend", &self.path_prepend)
             .field("path_drop", &self.path_drop)
             .finish()
     }
@@ -97,12 +95,13 @@ impl LaunchEnv {
         cmd.env("PATH", self.path_value(std::env::var_os("PATH")));
     }
 
+    /// The inherited PATH with the `path_drop` folders taken out.
     pub fn path_value(&self, current: Option<OsString>) -> OsString {
-        let mut parts = self.path_prepend.clone();
-        if let Some(cur) = current {
-            let drop: Vec<String> = self.path_drop.iter().map(|d| path_key(d)).collect();
-            parts.extend(std::env::split_paths(&cur).filter(|p| !drop.contains(&path_key(p))));
-        }
+        let Some(cur) = current else {
+            return OsString::new();
+        };
+        let drop: Vec<String> = self.path_drop.iter().map(|d| path_key(d)).collect();
+        let parts = std::env::split_paths(&cur).filter(|p| !drop.contains(&path_key(p)));
         std::env::join_paths(parts).unwrap_or_default()
     }
 }
@@ -266,7 +265,6 @@ pub fn prepare(
         config,
         set,
         unset,
-        path_prepend: merged.path_prepend,
         // A terminal opened by an older hydra may still have its shims folder first.
         path_drop: vec![paths.legacy_shims_dir()],
     })
@@ -545,29 +543,6 @@ mod tests {
             err,
             PrepareError::Config(ConfigError::UnknownEnv(_))
         ));
-    }
-
-    #[test]
-    fn path_value_prepends() {
-        let (_d, paths, name) = setup("");
-        let providers = vec![fake(
-            "x",
-            Contribution::new().prepend(PathBuf::from("C:/tools")),
-        )];
-        let env = run(
-            &paths,
-            &name,
-            &providers,
-            &MemoryStore::default(),
-            &PrepareOptions::default(),
-        )
-        .unwrap();
-        let joined = env.path_value(Some(OsString::from("C:/bin")));
-        let parts: Vec<PathBuf> = std::env::split_paths(&joined).collect();
-        assert_eq!(
-            parts,
-            vec![PathBuf::from("C:/tools"), PathBuf::from("C:/bin")]
-        );
     }
 
     #[test]

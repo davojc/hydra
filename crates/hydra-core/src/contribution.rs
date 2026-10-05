@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::secret::{SecretRef, SecretRefError};
 
@@ -15,7 +15,6 @@ pub struct Contribution {
     pub vars: BTreeMap<String, VarValue>,
     /// Variables to remove even though this provider is configured (they would override it).
     pub unset: BTreeSet<String>,
-    pub path_prepend: Vec<PathBuf>,
 }
 
 impl Contribution {
@@ -42,11 +41,6 @@ impl Contribution {
         self
     }
 
-    pub fn prepend(mut self, p: PathBuf) -> Self {
-        self.path_prepend.push(p);
-        self
-    }
-
     /// A config value: `secret:<env>/<key>` becomes a secret, anything else a literal.
     pub fn value(self, k: &str, raw: &str) -> Result<Self, SecretRefError> {
         Ok(match SecretRef::parse_value(raw)? {
@@ -61,7 +55,6 @@ pub struct Merged {
     /// Variable -> (provider id, value).
     pub vars: BTreeMap<String, (String, VarValue)>,
     pub unset: BTreeSet<String>,
-    pub path_prepend: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -91,7 +84,6 @@ pub fn merge(parts: Vec<(String, Contribution)>) -> Result<Merged, Vec<Conflict>
             m.vars.insert(k, (provider.clone(), v));
         }
         m.unset.extend(c.unset);
-        m.path_prepend.extend(c.path_prepend);
     }
     let set: Vec<String> = m.vars.keys().cloned().collect();
     m.unset
@@ -109,22 +101,14 @@ mod tests {
 
     #[test]
     fn merges_disjoint_contributions_in_order() {
-        let a = Contribution::new()
-            .literal("A", "1")
-            .prepend(PathBuf::from("p1"));
-        let b = Contribution::new()
-            .literal("B", "2")
-            .prepend(PathBuf::from("p2"));
+        let a = Contribution::new().literal("A", "1");
+        let b = Contribution::new().literal("B", "2");
         let m = merge(vec![("a".into(), a), ("b".into(), b)]).unwrap();
         assert_eq!(
             m.vars["A"],
             ("a".to_string(), VarValue::Literal("1".into()))
         );
         assert_eq!(m.vars["B"].0, "b");
-        assert_eq!(
-            m.path_prepend,
-            vec![PathBuf::from("p1"), PathBuf::from("p2")]
-        );
     }
 
     #[test]

@@ -202,12 +202,7 @@ pub fn shell(
         name: name.as_str(),
         rgb: launch.config.rgb().map(|c| (c.0, c.1, c.2)),
     };
-    let init = write_init(
-        kind,
-        &app.paths.state_dir(&name),
-        &style,
-        &launch.path_prepend,
-    )?;
+    let init = write_init(kind, &app.paths.state_dir(&name), &style)?;
     let mut cmd = shell_command(kind, &exe, &init);
     launch.apply(&mut cmd);
     if let Some(dir) = folder {

@@ -14,18 +14,6 @@ pub const VERSION: &str = match option_env!("HYDRA_VERSION") {
 };
 
 fn main() {
-    // Copies of hydra named gh.exe / ssh.exe (hydra's shims) act as those tools.
-    if let Some(shim) = shim_name() {
-        let args: Vec<String> = std::env::args_os()
-            .skip(1)
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        let result = match shim.as_str() {
-            "gh" => commands::guard::gh_shim(&args),
-            _ => commands::guard::ssh_shim(&args),
-        };
-        exit_with(result);
-    }
     remove_old_exe();
     let cli = cli::Cli::parse();
     exit_with(commands::run(cli.command));
@@ -39,16 +27,6 @@ fn exit_with(result: anyhow::Result<i32>) -> ! {
             std::process::exit(1);
         }
     }
-}
-
-/// "gh" or "ssh" when this exe was started under that name.
-fn shim_name() -> Option<String> {
-    let argv0 = std::env::args_os().next()?;
-    let stem = std::path::Path::new(&argv0)
-        .file_stem()?
-        .to_string_lossy()
-        .to_lowercase();
-    matches!(stem.as_str(), "gh" | "ssh").then_some(stem)
 }
 
 /// Finishes a previous `hydra update`: the replaced exe can only be deleted once it has stopped.

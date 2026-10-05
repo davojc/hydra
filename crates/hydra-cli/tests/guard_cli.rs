@@ -125,197 +125,6 @@ fn allow_runs_once_with_override() {
     assert_eq!(s.commit_count(), "1");
 }
 
-/// `<tmp>/shims/{gh,ssh}.exe` (copies of hydra) and `<tmp>/bin` with fake gh.cmd and ssh.cmd.
-fn shims(s: &Setup) -> PathBuf {
-    let shims = s.tmp().join("shims");
-    std::fs::create_dir_all(&shims).unwrap();
-    for name in ["gh.exe", "ssh.exe"] {
-        std::fs::copy(env!("CARGO_BIN_EXE_hydra"), shims.join(name)).unwrap();
-    }
-    let bin = s.tmp().join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    std::fs::write(bin.join("gh.cmd"), "@echo REAL GH %*\r\n@exit /b 7\r\n").unwrap();
-    std::fs::write(bin.join("ssh.cmd"), "@echo %*\r\n").unwrap();
-    shims
-}
-
-/// A shim run from the repo bound to `work`, with PATH = shims;bin;<system PATH>.
-fn run_shim(s: &Setup, exe: &str, env: &str, args: &[&str]) -> assert_cmd::assert::Assert {
-    let shims = shims(s);
-    let mut path = vec![shims.clone(), s.tmp().join("bin")];
-    path.extend(std::env::split_paths(
-        &std::env::var_os("PATH").unwrap_or_default(),
-    ));
-    s.h.command(shims.join(exe))
-        .args(args)
-        .current_dir(&s.repo)
-        .env("HYDRA_ENV", env)
-        .env("PATH", std::env::join_paths(path).unwrap())
-        .assert()
-}
-
-#[test]
-fn gh_shim_blocks_wrong_environment() {
-    let s = Setup::new();
-    run_shim(&s, "gh.exe", "personal", &["pr", "create", "--fill"])
-        .code(1)
-        .stderr(predicate::str::contains("blocked gh pr create"))
-        .stdout(predicate::str::contains("REAL GH").not());
-}
-
-#[test]
-fn gh_shim_passes_reads_and_right_env() {
-    let s = Setup::new();
-    run_shim(&s, "gh.exe", "personal", &["pr", "list"])
-        .code(7)
-        .stdout(predicate::str::contains("REAL GH pr list"));
-    run_shim(&s, "gh.exe", "work", &["pr", "create", "--fill"])
-        .code(7)
-        .stdout(predicate::str::contains("REAL GH pr create --fill"));
-}
-
-#[test]
-fn ssh_shim_adds_the_key() {
-    let s = Setup::new();
-    let key = s.tmp().join("id_work");
-    std::fs::write(&key, "key").unwrap();
-    s.h.write_env(
-        "work",
-        &format!(
-            "[git]\nname = \"Work\"\nemail = \"work@example.com\"\nssh_key = '{}'\n",
-            key.display()
-        ),
-    );
-    let out = run_shim(&s, "ssh.exe", "work", &["-T", "git@github.com"]).success();
-    // Rust quotes `IdentitiesOnly=yes` for the batch-file stand-in; a real ssh.exe gets the
-    // same argv either way.
-    let stdout = String::from_utf8_lossy(&out.get_output().stdout).replace('"', "");
-    assert!(
-        stdout.contains(&format!(
-            "-i {} -o IdentitiesOnly=yes -T git@github.com",
-            key.display()
-        )),
-        "{stdout:?}"
-    );
-}
-
-#[test]
-fn launch_installs_shims() {
-    let s = Setup::new();
-    s.h.hydra()
-        .args(["run", "work", "--", "cmd", "/c", "exit 0"])
-        .assert()
-        .success();
-    let shims = s.h.root().join("shims");
-    assert!(shims.join("gh.exe").is_file());
-    assert!(shims.join("ssh.exe").is_file());
-    if gh_installed() {
-        let out =
-            s.h.hydra()
-                .args(["run", "work", "--", "pwsh", "-NoProfile", "-Command"])
-                .arg("(Get-Command gh -ErrorAction SilentlyContinue).Source")
-                .output()
-                .unwrap();
-        let source = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        let parent = PathBuf::from(&source).parent().map(|p| p.to_path_buf());
-        assert_eq!(
-            parent.map(|p| p.to_string_lossy().to_lowercase()),
-            Some(shims.to_string_lossy().to_lowercase()),
-            "{source:?}"
-        );
-    }
-}
-
-#[test]
-fn gh_shim_warns_about_a_repo_outside_the_owners() {
-    let s = Setup::new();
-    s.h.write_env(
-        "work",
-        "[git]
-name = \"Work\"
-email = \"work@example.com\"
-[github]
-owners = [\"acme\"]
-",
-    );
-    run_shim(&s, "gh.exe", "work", &["pr", "create", "-R", "other/x"])
-        .code(7)
-        .stderr(predicate::str::contains(
-            "hydra: warning: other isn't in work's github owners [acme]",
-        ))
-        .stdout(predicate::str::contains("REAL GH pr create -R other/x"));
-}
-
-/// `<root>/shims/<name>` as `len` zero bytes, last modified at `mtime`.
-fn fake_shim(s: &Setup, name: &str, len: u64, mtime: std::time::SystemTime) -> PathBuf {
-    let dir = s.h.root().join("shims");
-    std::fs::create_dir_all(&dir).unwrap();
-    let shim = dir.join(name);
-    let f = std::fs::File::create(&shim).unwrap();
-    f.set_len(len).unwrap();
-    f.set_modified(mtime).unwrap();
-    shim
-}
-
-fn hydra_exe() -> (Vec<u8>, std::time::SystemTime) {
-    let exe = env!("CARGO_BIN_EXE_hydra");
-    let modified = std::fs::metadata(exe).unwrap().modified().unwrap();
-    (std::fs::read(exe).unwrap(), modified)
-}
-
-#[test]
-fn launch_refreshes_a_same_size_shim_older_than_hydra() {
-    let s = Setup::new();
-    let (bytes, modified) = hydra_exe();
-    let len = bytes.len() as u64;
-    let hour = std::time::Duration::from_secs(3600);
-    let old = fake_shim(&s, "gh.exe", len, modified - hour);
-    let newer = fake_shim(&s, "ssh.exe", len, modified + hour);
-    s.h.hydra()
-        .args(["run", "work", "--", "cmd", "/c", "exit 0"])
-        .assert()
-        .success();
-    assert!(
-        std::fs::read(&old).unwrap() == bytes,
-        "older shim not refreshed"
-    );
-    // The copy keeps hydra's time, so the next launch sees it as current.
-    assert!(std::fs::metadata(&old).unwrap().modified().unwrap() >= modified);
-    assert!(
-        std::fs::read(&newer).unwrap().iter().all(|b| *b == 0),
-        "a same-size shim newer than hydra is left alone"
-    );
-}
-
-#[test]
-#[cfg(windows)]
-fn launch_keeps_a_locked_stale_shim_and_notes_it() {
-    use std::os::windows::fs::OpenOptionsExt;
-    let s = Setup::new();
-    let shim = fake_shim(&s, "gh.exe", 10, std::time::SystemTime::now());
-    // No sharing at all: nothing can replace the file while this handle is open.
-    let _lock = std::fs::OpenOptions::new()
-        .read(true)
-        .share_mode(0)
-        .open(&shim)
-        .unwrap();
-    s.h.hydra()
-        .args(["run", "work", "--", "cmd", "/c", "exit 0"])
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("gh/ssh shims not refreshed"));
-    let dir = s.h.root().join("shims");
-    assert_eq!(std::fs::metadata(&shim).unwrap().len(), 10);
-    assert!(!dir.join("gh.exe.hydra-tmp").exists());
-    assert!(dir.join("ssh.exe").is_file());
-}
-
-/// Whether a real gh is on the machine's PATH.
-fn gh_installed() -> bool {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    std::env::split_paths(&path).any(|d| d.join("gh.exe").is_file())
-}
-
 #[test]
 fn repo_hooks_still_run() {
     let s = Setup::new();
@@ -419,11 +228,6 @@ fn a_binding_to_an_unknown_environment_allows_with_warning() {
             .stderr(predicate::str::contains(skipped))
             .stderr(predicate::str::contains(&warning));
         assert_eq!(s.commit_count(), "1");
-        // The gh shim.
-        run_shim(&s, "gh.exe", "personal", &["pr", "create", "--fill"])
-            .code(7)
-            .stderr(predicate::str::contains(skipped))
-            .stderr(predicate::str::contains(&warning));
         // Claude's hook.
         claude_hook(&s, "personal", &bash_input("git commit -m x", &dir))
             .success()
@@ -644,6 +448,25 @@ fn claude_hook_allows_other_commands() {
 }
 
 #[test]
+fn claude_hook_guards_gh_writes() {
+    let s = Setup::new();
+    claude_hook(&s, "personal", &bash_input("gh pr create --fill", &s.repo))
+        .code(2)
+        .stderr(predicate::str::contains("blocked gh pr create"));
+    claude_hook(&s, "personal", &bash_input("gh pr list", &s.repo)).success();
+    claude_hook(&s, "work", &bash_input("gh pr create --fill", &s.repo)).success();
+    s.h.write_env(
+        "work",
+        "[git]\nname = \"Work\"\nemail = \"work@example.com\"\n[github]\nowners = [\"acme\"]\n",
+    );
+    claude_hook(&s, "work", &bash_input("gh pr create -R other/x", &s.repo))
+        .success()
+        .stderr(predicate::str::contains(
+            "hydra: warning: other isn't in work's github owners [acme]",
+        ));
+}
+
+#[test]
 fn claude_is_told_to_ask_the_user_and_cannot_allow_itself() {
     let s = Setup::new();
     claude_hook(
@@ -773,7 +596,7 @@ fn borrower_with_a_broken_owner(s: &Setup) -> PathBuf {
 #[test]
 fn a_broken_owner_does_not_switch_the_borrowers_guard_off() {
     let s = Setup::new();
-    let key = borrower_with_a_broken_owner(&s);
+    borrower_with_a_broken_owner(&s);
     // The git hook.
     s.h.hydra()
         .args(["guard", "git", "pre-commit"])
@@ -789,21 +612,9 @@ fn a_broken_owner_does_not_switch_the_borrowers_guard_off() {
     claude_hook(&s, "personal", &bash_input("git commit -m x", &s.repo))
         .code(2)
         .stderr(predicate::str::contains("blocked git commit"));
-    // The gh shim.
-    run_shim(&s, "gh.exe", "personal", &["pr", "create", "--fill"])
-        .code(1)
-        .stderr(predicate::str::contains("blocked gh pr create"))
-        .stdout(predicate::str::contains("REAL GH").not());
-    // The ssh shim still adds the borrower's own key.
-    let out = run_shim(&s, "ssh.exe", "personal", &["-T", "git@github.com"]).success();
-    let stdout = String::from_utf8_lossy(&out.get_output().stdout).replace('"', "");
-    assert!(
-        stdout.contains(&format!(
-            "-i {} -o IdentitiesOnly=yes -T git@github.com",
-            key.display()
-        )),
-        "{stdout:?}"
-    );
+    claude_hook(&s, "personal", &bash_input("gh pr create --fill", &s.repo))
+        .code(2)
+        .stderr(predicate::str::contains("blocked gh pr create"));
 }
 
 #[test]
@@ -814,8 +625,8 @@ fn a_borrowed_github_guards_with_the_borrowers_own_owners() {
         "work",
         "[git]\nname = \"Work\"\nemail = \"work@example.com\"\n[github]\nfrom = \"personal\"\nowners = [\"acme\"]\n",
     );
-    run_shim(&s, "gh.exe", "work", &["pr", "create", "-R", "other/x"])
-        .code(7)
+    claude_hook(&s, "work", &bash_input("gh pr create -R other/x", &s.repo))
+        .success()
         .stderr(predicate::str::contains(
             "hydra: warning: other isn't in work's github owners [acme]",
         ));

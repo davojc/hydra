@@ -301,7 +301,7 @@ pub fn load_env(paths: &HydraPaths, name: &EnvName) -> Result<EnvConfig, ConfigE
 
 /// The environment's own settings, without reading any other environment: a borrowed
 /// section is left out, except `[github]`, which keeps its own owners and strict. For the
-/// guards and the ssh shim, which must not weaken when an owner's env.toml breaks.
+/// guards, which must not weaken when an owner's env.toml breaks.
 /// `borrowed` is empty.
 pub fn load_env_own(paths: &HydraPaths, name: &EnvName) -> Result<EnvConfig, ConfigError> {
     parse_with(paths, name, &read_env(paths, name)?, |table| {

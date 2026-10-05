@@ -1,6 +1,6 @@
-//! The folder guard: `hydra guard git` (run by hydra's git hooks), the gh and ssh shims, and
-//! `hydra allow`. Fails open: anything that goes wrong while loading the configuration allows
-//! the command with a warning.
+//! The folder guard: `hydra guard git` (run by hydra's git hooks), `hydra guard claude`
+//! (Claude Code's PreToolUse hook) and `hydra allow`. Fails open: anything that goes wrong
+//! while loading the configuration allows the command with a warning.
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -9,10 +9,10 @@ use hydra_core::bindings::{self, Binding};
 use hydra_core::config::{load_env_own, load_global};
 use hydra_core::guard::{
     ALLOW_HINT, CLAUDE_ALLOW_HINT, Check, Facts, GitAction, Verdict, checks_in_command_line,
-    classify_gh, decide, github_owner,
+    decide, github_owner,
 };
 use hydra_core::name::EnvName;
-use hydra_core::paths::{HydraPaths, expand_tilde};
+use hydra_core::paths::HydraPaths;
 use hydra_core::resolve::ALLOW_VAR;
 use hydra_platform::process::resolve_program;
 
@@ -141,24 +141,6 @@ fn verdict_in(
     decide(check, &facts)
 }
 
-/// gh.exe in a hydra terminal: guards gh's write commands, then runs the real gh.
-pub fn gh_shim(args: &[String]) -> anyhow::Result<i32> {
-    if let Some(check) = classify_gh(args) {
-        let repo = match &check {
-            Check::Gh { repo, .. } => repo.clone(),
-            Check::Git { .. } => None,
-        };
-        let code = guarded(&check, || match repo {
-            Some(r) => r.split('/').next().map(str::to_string),
-            None => std::env::current_dir().ok().and_then(|d| origin_owner(&d)),
-        });
-        if code != 0 {
-            return Ok(code);
-        }
-    }
-    run_inherited(Command::new(real_program("gh")?), args)
-}
-
 /// The owner of the current folder's `origin` remote, if it is on GitHub.
 fn origin_owner(cwd: &Path) -> Option<String> {
     let out = Command::new("git")
@@ -259,40 +241,6 @@ fn shell_path(d: &str, home: Option<&Path>) -> PathBuf {
     PathBuf::from(d)
 }
 
-/// ssh.exe in a hydra terminal: adds the environment's git ssh_key, then runs the real ssh.
-pub fn ssh_shim(args: &[String]) -> anyhow::Result<i32> {
-    let mut full: Vec<String> = Vec::new();
-    match ssh_key() {
-        Ok(Some(key)) => full.extend([
-            "-i".to_string(),
-            key.to_string_lossy().into_owned(),
-            "-o".to_string(),
-            "IdentitiesOnly=yes".to_string(),
-        ]),
-        Ok(None) => {}
-        Err(e) => anstream::eprintln!(
-            "{}",
-            style::warn(format!("hydra: warning: ssh key not added ({e:#})"))
-        ),
-    }
-    full.extend_from_slice(args);
-    run_inherited(Command::new(real_program("ssh")?), &full)
-}
-
-/// The current environment's git `ssh_key`, with `~` expanded.
-fn ssh_key() -> anyhow::Result<Option<PathBuf>> {
-    let Some(current) = std::env::var("HYDRA_ENV").ok().filter(|s| !s.is_empty()) else {
-        return Ok(None);
-    };
-    let paths = HydraPaths::discover()?;
-    let name = EnvName::parse(&current)?;
-    // git is never borrowed: read the env's own file, whatever its owners hold.
-    let Some(key) = load_env_own(&paths, &name)?.git.and_then(|g| g.ssh_key) else {
-        return Ok(None);
-    };
-    Ok(Some(expand_tilde(&key, &crate::app::user_home()?)))
-}
-
 /// `hydra allow -- <command...>`: runs the command once with the guard switched off.
 pub fn allow(command: &[String]) -> anyhow::Result<i32> {
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -311,26 +259,6 @@ fn run_inherited(mut cmd: Command, args: &[String]) -> anyhow::Result<i32> {
         .status()
         .with_context(|| format!("can't start {}", cmd.get_program().to_string_lossy()))?;
     Ok(status.code().unwrap_or(1))
-}
-
-/// The real `name`: found on PATH with hydra's shims folders left out.
-fn real_program(name: &str) -> anyhow::Result<PathBuf> {
-    let shim_dirs: Vec<PathBuf> = [
-        std::env::current_exe()
-            .ok()
-            .and_then(|e| e.parent().map(Path::to_path_buf)),
-        HydraPaths::discover().ok().map(|p| p.shims_dir()),
-    ]
-    .into_iter()
-    .flatten()
-    .filter_map(|d| d.canonicalize().ok())
-    .collect();
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let dirs = std::env::split_paths(&path)
-        .filter(|d| !d.canonicalize().is_ok_and(|c| shim_dirs.contains(&c)));
-    let path = std::env::join_paths(dirs).context("PATH holds a folder that can't be searched")?;
-    resolve_program(name, &path, std::env::var_os("PATHEXT").as_deref())
-        .ok_or_else(|| anyhow::anyhow!("{name} isn't installed or isn't on PATH"))
 }
 
 #[cfg(test)]

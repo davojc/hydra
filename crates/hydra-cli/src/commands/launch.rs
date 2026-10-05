@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitStatus;
 
 use anyhow::Context;
@@ -26,74 +26,14 @@ pub fn prepare_launch(
         inherited_env_vars: std::env::var(ENV_VARS_MARKER).ok(),
         ..opts.clone()
     };
-    let mut launch = prepare(
+    Ok(prepare(
         &app.paths,
         name,
         &app.user_home,
         &providers,
         app.store.as_ref(),
         &opts,
-    )?;
-    // First on PATH, so gh and ssh in the terminal go through hydra's guard.
-    launch
-        .path_prepend
-        .insert(0, refresh_shims(&app.paths.shims_dir()));
-    Ok(launch)
-}
-
-/// Makes `<dir>/gh.exe` and `ssh.exe` copies of the running hydra. A copy that can't be
-/// replaced (e.g. a shim that is running) is noted and left as it is.
-fn refresh_shims(dir: &Path) -> PathBuf {
-    if let Err(e) = install_shims(dir) {
-        anstream::eprintln!(
-            "{}",
-            style::dim(format!("hydra: note: gh/ssh shims not refreshed ({e:#})"))
-        );
-    }
-    dir.to_path_buf()
-}
-
-fn install_shims(dir: &Path) -> anyhow::Result<()> {
-    let exe = std::env::current_exe().context("can't find the hydra exe")?;
-    let meta = std::fs::metadata(&exe)?;
-    std::fs::create_dir_all(dir).with_context(|| format!("can't create {}", dir.display()))?;
-    let mut failed = Vec::new();
-    for name in ["gh.exe", "ssh.exe"] {
-        let shim = dir.join(name);
-        if is_current(&shim, &meta) {
-            continue;
-        }
-        if let Err(e) = replace_shim(&exe, &shim) {
-            failed.push(format!("{}: {e}", shim.display()));
-        }
-    }
-    anyhow::ensure!(failed.is_empty(), "{}", failed.join("; "));
-    Ok(())
-}
-
-/// A shim is current when it has the exe's size and isn't older than it (same-size builds,
-/// e.g. 0.5.0 and 0.5.1, differ only in the time).
-fn is_current(shim: &Path, exe: &std::fs::Metadata) -> bool {
-    let Ok(m) = std::fs::metadata(shim) else {
-        return false;
-    };
-    let older = match (m.modified(), exe.modified()) {
-        (Ok(s), Ok(e)) => s < e,
-        _ => true,
-    };
-    m.len() == exe.len() && !older
-}
-
-/// Copies beside the shim, then renames over it, so a shim is never half-written.
-fn replace_shim(exe: &Path, shim: &Path) -> std::io::Result<()> {
-    let mut tmp = shim.as_os_str().to_owned();
-    tmp.push(".hydra-tmp");
-    let tmp = PathBuf::from(tmp);
-    let result = std::fs::copy(exe, &tmp).and_then(|_| std::fs::rename(&tmp, shim));
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
+    )?)
 }
 
 /// Ctrl-C belongs to the child; hydra stays alive to return its exit code.

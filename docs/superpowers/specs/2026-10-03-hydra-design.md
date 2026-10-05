@@ -40,6 +40,7 @@ It is a personal tool with two goals:
 - **Secret store** — trait with a Windows Credential Manager implementation (`keyring` crate). Config holds only references: `secret:<env>/<key>`. Values never touch disk or logs.
 - **Binding** — maps a folder to an environment, via config glob rules or a `.hydra` file in the folder.
 - **Guard** — shims for `git` and `gh` that check write operations against bindings and allowed owners.
+- **Borrowed login** — an environment can borrow a tool from another (`[tool] from = "<owner>"`) and use the owner's tool folder; see `2026-10-05-hydra-borrowed-logins-design.md`.
 
 ## 4. Architecture
 

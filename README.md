@@ -19,7 +19,7 @@ Typical uses:
 - **Stop identity mix-ups.** Commits and pushes always use the environment's author, SSH key and GitHub login.
 - **Run Claude Code on several accounts at once.** Each environment has its own Claude sign-in, usage limits and history, and all of them share your skills, plugins, settings and MCP servers.
 
-> **Status:** early (0.5). Windows 11 with PowerShell 7 and Git for Windows. See [What's not built yet](#whats-not-built-yet).
+> **Status:** early (0.6). Windows 11 with PowerShell 7 and Git for Windows. See [What's not built yet](#whats-not-built-yet).
 
 ---
 
@@ -124,6 +124,38 @@ REGION = "eu-west"
 LINEAR_API_KEY = "secret:work/linear"   # store it with: hydra secret set work/linear
 ```
 
+## Borrowing a login
+
+If two environments use the same account, let one borrow the tool from the other instead of signing in twice. In `envs/work/env.toml`:
+
+```toml
+[claude]
+from = "personal"
+
+[github]
+from = "personal"
+```
+
+Or from the command line: `hydra add claude work --from personal`.
+
+- **The whole tool folder is shared,** not just the credential file: login, history, sessions and settings. Nothing is copied or synced, so a sign-in or refresh in `personal` is seen by `work` straight away.
+- **A borrowing section holds only `from`.** The owner's settings are used, so any other key there is an error. The owner must have the same tool turned on without `from`; chains aren't allowed, and an environment can't borrow from itself.
+- **Sign in from the owner.** If the borrowed tool isn't signed in, the terminal says where:
+
+  ```
+  hydra: claude: not signed in - work borrows it from personal
+    -> sign in there: hydra shell personal, then claude auth login
+  ```
+
+  `hydra whoami` shows the owner next to the account, for example `claude   from personal · you@example.com`.
+- **`git` can't be borrowed.** The commit author and SSH key stay per environment. Git over HTTPS signs in through `gh`, so borrowing `github` covers it.
+- **Guards still compare environment names.** A folder bound to `personal` still blocks `git commit` from a `work` terminal, even if `work` borrows personal's GitHub login.
+- **Removing and renaming are safe for owners.**
+  - `hydra remove <tool> work` on a borrower removes the section and leaves the owner's login alone.
+  - `hydra remove <tool> personal` refuses while another environment borrows that tool from it, and names them.
+  - `hydra env rm personal` refuses while any environment borrows from it (`work borrows claude, github from personal`).
+  - `hydra env rename personal home` rewrites `from = "personal"` in every borrower and lists the ones it changed.
+
 ## Folders and guards
 
 A folder can belong to an environment. hydra then opens the right terminal there, and blocks `git commit`, `git push` and `gh` write commands (`gh pr create`, `gh repo delete`, `gh api -X POST` and the like) when you run them from a terminal for a different environment. It applies to commands typed by you and to commands run by Claude Code.
@@ -204,7 +236,7 @@ Output is coloured in terminals; set NO_COLOR=1 to turn it off.
 |---|---|
 | `hydra init` | Create `~/.hydra` |
 | `hydra env new <name> [--home DIR]\|list\|edit\|rm\|rename` | Manage environments. `--home` sets where its terminals open and binds that folder. `rename` updates bindings, secrets and saved logins too. |
-| `hydra add [<tool>] [<env>] [flags]` | Turn a tool on: writes settings only, never signs in |
+| `hydra add [<tool>] [<env>] [flags]` | Turn a tool on: writes settings only, never signs in. `--from <env>` borrows the tool from another environment (see [Borrowing a login](#borrowing-a-login)). |
 | `hydra remove <tool> [<env>]` | Turn a tool off; saved logins are kept |
 | `hydra shell [<env>] [--shell pwsh\|bash] [--cwd DIR]` | Open a terminal in an environment. With no name, the environment comes from the current folder's binding. |
 | `hydra run <env> -- <command…>` | Run one command in an environment |
@@ -244,6 +276,8 @@ Output is coloured in terminals; set NO_COLOR=1 to turn it off.
 | Message | What to do |
 |---|---|
 | `hydra: <tool>: not signed in - …` | Sign in with that tool's own command inside the environment's terminal. |
+| `hydra: work borrows [x] from y, but y has no [x]` | Turn it on in the owner: `hydra add x y`. |
+| `hydra: work borrows [x] from y, which borrows it from z` | Borrowing doesn't chain. Borrow from the owner: `from = "z"`. |
 | `secret work/x isn't set` | `hydra secret set work/x` |
 | `…id_ed25519_work not found` | Fix the key path: `hydra add git work --ssh-key <path>` |
 | `CLAUDE_CONFIG_DIR` error when opening | Remove `CLAUDE_CONFIG_DIR` from `[env]`; `[claude]` sets it. Then sign in again. |

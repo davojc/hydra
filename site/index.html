@@ -168,6 +168,7 @@ body { margin: 0; }
     <ol>
       <li><a href="#how">How it works</a></li>
       <li><a href="#tools">Tools</a></li>
+      <li><a href="#borrow">Borrowing a login</a></li>
       <li><a href="#claude">Claude Code</a></li>
       <li><a href="#guards">Folders and guards</a></li>
       <li><a href="#secrets">Variables and secrets</a></li>
@@ -325,6 +326,43 @@ git      work@example.com                                 <span class="ok">ok</s
       </div>
     </section>
 
+    <section id="borrow">
+      <h2>Borrowing a login</h2>
+      <p>If two environments use the same account, let one borrow the tool from the other instead of signing in twice. In <code>envs/work/env.toml</code>:</p>
+      <div class="term">
+        <div class="term-bar"><span class="tab plain">~/.hydra/envs/work/env.toml</span></div>
+<pre><span class="k">[claude]</span>
+from = <span class="s">"personal"</span>
+
+<span class="k">[github]</span>
+from = <span class="s">"personal"</span></pre>
+      </div>
+      <p>Or from the command line: <code>hydra add claude work --from personal</code>.</p>
+      <ul>
+        <li><strong>The whole tool folder is shared,</strong> not just the credential file: login, history, sessions and settings. Nothing is copied or synced, so a sign-in or refresh in <code>personal</code> is seen by <code>work</code> straight away.</li>
+        <li><strong>A borrowing section holds only <code>from</code>.</strong> The owner's settings are used, so any other key there is an error. The owner must have the same tool turned on without <code>from</code>; chains aren't allowed, and an environment can't borrow from itself.</li>
+        <li><strong>Sign in from the owner.</strong> If the borrowed tool isn't signed in, the terminal says where. <code>hydra whoami</code> shows the owner next to the account.</li>
+      </ul>
+      <div class="term">
+        <div class="term-bar"><span class="tab work">work · pwsh</span></div>
+<pre><span class="p">PS&gt;</span> hydra shell work
+<span class="warn">hydra: claude: not signed in - work borrows it from personal</span>
+  -&gt; sign in there: hydra shell personal, then claude auth login</pre>
+      </div>
+      <ul>
+        <li><strong><code>git</code> can't be borrowed.</strong> The commit author and SSH key stay per environment. Git over HTTPS signs in through <code>gh</code>, so borrowing <code>github</code> covers it.</li>
+        <li><strong>Guards still compare environment names.</strong> A folder bound to <code>personal</code> still blocks <code>git commit</code> from a <code>work</code> terminal, even if <code>work</code> borrows personal's GitHub login.</li>
+        <li><strong>Removing and renaming are safe for owners.</strong>
+          <ul>
+            <li><code>hydra remove &lt;tool&gt; work</code> on a borrower removes the section and leaves the owner's login alone.</li>
+            <li><code>hydra remove &lt;tool&gt; personal</code> refuses while another environment borrows that tool from it, and names them.</li>
+            <li><code>hydra env rm personal</code> refuses while any environment borrows from it (<code>work borrows claude, github from personal</code>).</li>
+            <li><code>hydra env rename personal home</code> rewrites <code>from = "personal"</code> in every borrower and lists the ones it changed.</li>
+          </ul>
+        </li>
+      </ul>
+    </section>
+
     <section id="claude">
       <h2>Claude Code: separate accounts, shared setup</h2>
       <p>Each environment's Claude folder (<code>~/.hydra/state/&lt;env&gt;/claude</code>) is rebuilt from your existing <code>~/.claude</code> every time a terminal opens. hydra only ever <strong>reads</strong> <code>~/.claude</code> and <code>~/.claude.json</code>.</p>
@@ -442,7 +480,7 @@ value: ••••••••••••••••
           <tbody>
             <tr><td><code>hydra init</code></td><td>Creates <code>~/.hydra</code></td></tr>
             <tr><td><code>hydra env new|list|edit|rm|rename</code></td><td>Manages environments. <code>env new &lt;name&gt; --home DIR</code> sets where its terminals open and binds that folder. <code>rename</code> updates bindings, secrets and saved logins too.</td></tr>
-            <tr><td><code>hydra add [&lt;tool&gt;] [&lt;env&gt;]</code></td><td>Turns a tool on by writing its settings. Never signs in.</td></tr>
+            <tr><td><code>hydra add [&lt;tool&gt;] [&lt;env&gt;]</code></td><td>Turns a tool on by writing its settings. Never signs in. <code>--from &lt;env&gt;</code> borrows the tool from another environment (see <a href="#borrow">Borrowing a login</a>).</td></tr>
             <tr><td><code>hydra remove &lt;tool&gt; [&lt;env&gt;]</code></td><td>Turns a tool off. Saved logins are kept.</td></tr>
             <tr><td><code>hydra shell [&lt;env&gt;]</code></td><td>Opens a terminal in an environment. With no name, the environment comes from the current folder's binding. Options: <code>--shell pwsh|bash</code>, <code>--cwd DIR</code>.</td></tr>
             <tr><td><code>hydra run &lt;env&gt; -- &lt;command&gt;</code></td><td>Runs one command in an environment</td></tr>
@@ -479,6 +517,8 @@ secrets.toml         <span class="c">names (never values) of stored secrets</spa
           <thead><tr><th>Message</th><th>What to do</th></tr></thead>
           <tbody>
             <tr><td><code>hydra: &lt;tool&gt;: not signed in</code></td><td>Sign in with that tool's own command inside the environment's terminal.</td></tr>
+            <tr><td><code>hydra: work borrows [x] from y, but y has no [x]</code></td><td>Turn it on in the owner: <code>hydra add x y</code>.</td></tr>
+            <tr><td><code>hydra: work borrows [x] from y, which borrows it from z</code></td><td>Borrowing doesn't chain. Borrow from the owner: <code>from = "z"</code>.</td></tr>
             <tr><td><code>secret work/x isn't set</code></td><td><code>hydra secret set work/x</code></td></tr>
             <tr><td><code>…id_ed25519_work not found</code></td><td>Fix the key path: <code>hydra add git work --ssh-key &lt;path&gt;</code></td></tr>
             <tr><td><code>CLAUDE_CONFIG_DIR</code> error when opening</td><td>Remove <code>CLAUDE_CONFIG_DIR</code> from <code>[env]</code>; <code>[claude]</code> sets it. Then sign in again.</td></tr>

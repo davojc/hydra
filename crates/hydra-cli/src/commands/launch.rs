@@ -115,10 +115,41 @@ fn print_sign_in_hints(app: &App, name: &EnvName, launch: &LaunchEnv) {
         secrets: app.store.as_ref(),
     };
     for p in hydra_providers::all() {
-        if p.is_configured(&launch.config)
-            && let Some(hint) = p.sign_in_hint(&ctx)
-        {
-            anstream::eprintln!("{}", style::warn(format!("hydra: {}: {hint}", p.id())));
+        if !p.is_configured(&launch.config) {
+            continue;
+        }
+        let Some(hint) = p.sign_in_hint(&ctx) else {
+            continue;
+        };
+        match launch.config.borrowed.get(p.id()) {
+            Some(owner) => {
+                let fix = match hint.strip_prefix("not signed in - run ") {
+                    Some(cmd) => {
+                        anstream::eprintln!(
+                            "{}",
+                            style::warn(format!(
+                                "hydra: {}: not signed in - {name} borrows it from {owner}",
+                                p.id()
+                            ))
+                        );
+                        format!("  -> sign in there: hydra shell {owner}, then {cmd}")
+                    }
+                    None => {
+                        anstream::eprintln!(
+                            "{}",
+                            style::warn(format!(
+                                "hydra: {}: {hint} - {name} borrows it from {owner}",
+                                p.id()
+                            ))
+                        );
+                        format!("  -> fix it there: hydra shell {owner}")
+                    }
+                };
+                anstream::eprintln!("{}", style::dim(fix));
+            }
+            None => {
+                anstream::eprintln!("{}", style::warn(format!("hydra: {}: {hint}", p.id())));
+            }
         }
     }
 }

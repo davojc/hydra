@@ -52,7 +52,13 @@ pub fn run(app: &App, env: Option<String>) -> anyhow::Result<i32> {
     let mut rows: Vec<IdentityReport> = hydra_providers::all()
         .iter()
         .filter(|p| p.is_configured(&launch.config))
-        .map(|p| p.check(&ctx, &runner))
+        .map(|p| {
+            let mut r = p.check(&ctx, &runner);
+            if let Some(owner) = launch.config.borrowed.get(p.id()) {
+                r.detail = format!("from {owner} · {}", r.detail);
+            }
+            r
+        })
         .collect();
     group_google(&mut rows);
 

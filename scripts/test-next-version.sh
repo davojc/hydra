@@ -50,6 +50,7 @@ r="$(new_repo 0.4.0)"
 (cd "$r" && git tag v0.4.0)
 commit_file "$r" docs/guide.md "more docs"
 commit_file "$r" README.md "readme"
+commit_file "$r" site/index.html "site"
 check "docs-only changes skip" "$r" "skip"
 
 r="$(new_repo 0.4.0)"

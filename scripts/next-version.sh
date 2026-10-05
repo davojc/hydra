@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Decides the next release version. Run from the repo root.
-# Prints `skip` when nothing but docs changed since the last vX.Y.Z tag, else the version to release:
+# Prints `skip` when nothing but docs or the site changed since the last vX.Y.Z tag, else the version to release:
 #   no tags yet                         -> the workspace version in Cargo.toml
 #   Cargo.toml version > last tag       -> the Cargo.toml version
 #   otherwise                           -> the last tag with its patch number incremented
@@ -19,7 +19,7 @@ if [ -z "$last" ]; then
 fi
 
 changed="$(git diff --name-only "$last" HEAD)"
-if [ -z "$(printf '%s\n' "$changed" | grep -Ev '^docs/|\.md$' | grep -v '^$' || true)" ]; then
+if [ -z "$(printf '%s\n' "$changed" | grep -Ev '^docs/|^site/|\.md$' | grep -v '^$' || true)" ]; then
     echo skip
     exit 0
 fi

@@ -140,6 +140,8 @@ Or from the command line: `hydra add claude work --from personal`.
 
 - **The whole tool folder is shared,** not just the credential file: login, history, sessions and settings. Nothing is copied or synced, so a sign-in or refresh in `personal` is seen by `work` straight away.
 - **A borrowing section holds only `from`.** The owner's settings are used, so any other key there is an error. The owner must have the same tool turned on without `from`; chains aren't allowed, and an environment can't borrow from itself.
+- **Except `[github]` `owners` and `strict`.** They are guard policy, so they stay with each environment: `[github]` may set them next to `from` (`hydra add github work --from personal --owner acme --strict`). The borrower's own values are used, never the owner's; leaving them out means no owner list and not strict.
+- **Only the folder is borrowed.** A Claude login made with an API key in the owner's `[env]` (`ANTHROPIC_API_KEY` and the like) isn't borrowed; set it in the borrower's `[env]` too.
 - **Sign in from the owner.** If the borrowed tool isn't signed in, the terminal says where:
 
   ```
@@ -149,12 +151,13 @@ Or from the command line: `hydra add claude work --from personal`.
 
   `hydra whoami` shows the owner next to the account, for example `claude   from personal · you@example.com`.
 - **`git` can't be borrowed.** The commit author and SSH key stay per environment. Git over HTTPS signs in through `gh`, so borrowing `github` covers it.
-- **Guards still compare environment names.** A folder bound to `personal` still blocks `git commit` from a `work` terminal, even if `work` borrows personal's GitHub login.
+- **Guards still compare environment names.** A folder bound to `personal` still blocks `git commit` from a `work` terminal, even if `work` borrows personal's GitHub login. The guards and the SSH key read only the borrower's own env.toml.
+- **Editing the owner can break borrowers.** If `hydra env edit personal` removes a tool `work` borrows, `work` fails closed on its next launch and says why; its guard keeps working meanwhile, and `hydra whoami` shows the problem on that tool's line.
 - **Removing and renaming are safe for owners.**
   - `hydra remove <tool> work` on a borrower removes the section and leaves the owner's login alone.
   - `hydra remove <tool> personal` refuses while another environment borrows that tool from it, and names them.
   - `hydra env rm personal` refuses while any environment borrows from it (`work borrows claude, github from personal`).
-  - `hydra env rename personal home` rewrites `from = "personal"` in every borrower and lists the ones it changed.
+  - `hydra env rename personal home` rewrites `from = "personal"` in every borrower and lists the ones it changed. It refuses while a borrower's terminal is open.
 
 ## Folders and guards
 
@@ -235,7 +238,7 @@ Output is coloured in terminals; set NO_COLOR=1 to turn it off.
 | Command | |
 |---|---|
 | `hydra init` | Create `~/.hydra` |
-| `hydra env new <name> [--home DIR]\|list\|edit\|rm\|rename` | Manage environments. `--home` sets where its terminals open and binds that folder. `rename` updates bindings, secrets and saved logins too. |
+| `hydra env new <name> [--home DIR]\|list\|edit\|rm\|rename` | Manage environments. `--home` sets where its terminals open and binds that folder. `rename` updates bindings, secrets, saved logins and borrowers too. |
 | `hydra add [<tool>] [<env>] [flags]` | Turn a tool on: writes settings only, never signs in. `--from <env>` borrows the tool from another environment (see [Borrowing a login](#borrowing-a-login)). |
 | `hydra remove <tool> [<env>]` | Turn a tool off; saved logins are kept |
 | `hydra shell [<env>] [--shell pwsh\|bash] [--cwd DIR]` | Open a terminal in an environment. With no name, the environment comes from the current folder's binding. |
@@ -275,7 +278,7 @@ Output is coloured in terminals; set NO_COLOR=1 to turn it off.
 
 | Message | What to do |
 |---|---|
-| `hydra: <tool>: not signed in - …` | Sign in with that tool's own command inside the environment's terminal. |
+| `hydra: <tool>: not signed in - …` | Sign in with that tool's own command inside the environment's terminal. If it says `work borrows it from personal`, sign in from the owner: `hydra shell personal`. |
 | `hydra: work borrows [x] from y, but y has no [x]` | Turn it on in the owner: `hydra add x y`. |
 | `hydra: work borrows [x] from y, which borrows it from z` | Borrowing doesn't chain. Borrow from the owner: `from = "z"`. |
 | `secret work/x isn't set` | `hydra secret set work/x` |

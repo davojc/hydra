@@ -52,6 +52,11 @@ from = "personal"
 - `from` names the owner environment. A section with `from` has no other
   keys; anything else is a config error naming the key (the owner's settings
   are the ones used).
+- One exception: `[github]` may also set `owners` and `strict` next to
+  `from`. They are guard policy (§5), which stays per environment: the
+  borrower's own values are used, never the owner's, and an absent key means
+  an empty owner list and `strict = false`. The borrowed `[github]` otherwise
+  uses the owner's folder (`GH_CONFIG_DIR`).
 - The owner must have the same section without `from`. If it is missing, or
   itself borrows (no chains), or the owner environment doesn't exist, the
   borrower's config is invalid. Launch fails closed (spec §8), naming the
@@ -113,7 +118,9 @@ claude   from personal · you@example.com
 ### 4.4 Managing environments
 
 - `hydra add <tool> <env> --from <owner>` writes `[<tool>]\nfrom = "<owner>"`,
-  with the same validation as §3. `--from` with `git` is refused.
+  with the same validation as §3. `--from` with `git` is refused. `--from`
+  with any other flag is refused, except `--owner` and `--strict` for
+  `github` (§3).
 - `hydra remove <tool> <env>` on a borrower removes the section and never
   touches the owner's folder.
 - `hydra remove <tool> <owner>` refuses while other environments borrow that
@@ -131,10 +138,17 @@ Unchanged. Guards compare environment names, not accounts. A folder bound to
 `personal` still blocks `git commit` from a `work` terminal even if `work`
 borrows personal's GitHub login.
 
+The guards and the ssh shim read only the borrower's own env.toml: the
+binding, `[github]` owners/strict (§3) and `[git] ssh_key`. An owner's
+broken env.toml makes the borrower's launch fail closed, but never switches
+the borrower's guard or SSH key off.
+
 ## 6. Errors
 
 All errors follow spec §8. Invalid borrowing is a config error, and launch
-fails closed. `hydra whoami` reports it on the tool's line and carries on.
+fails closed. `hydra whoami` reports it on the tool's line (status missing,
+the error's first line) and carries on with the other tools; it counts as a
+problem, so whoami exits non-zero.
 
 ## 7. Testing
 

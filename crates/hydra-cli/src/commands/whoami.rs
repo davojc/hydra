@@ -1,6 +1,6 @@
 use anyhow::Context;
 use hydra_core::bindings;
-use hydra_core::config::load_global;
+use hydra_core::config::{ConfigError, load_env, load_env_lenient, load_global};
 use hydra_core::provider::{Ctx, IdentityReport, Status};
 use hydra_core::resolve::PrepareOptions;
 use hydra_platform::process::EnvRunner;
@@ -29,8 +29,15 @@ pub fn run(app: &App, env: Option<String>) -> anyhow::Result<i32> {
         .or_else(|| binding.as_ref().map(|b| b.env.clone()))
         .context("not in a hydra terminal or a bound folder; use hydra whoami --env <name>")?;
     let name = app.env_name(&env)?;
+    // A tool whose borrow is broken is reported on its own line; the rest still run.
+    let (config, broken) = match load_env(&app.paths, &name) {
+        Ok(c) => (c, Vec::new()),
+        Err(ConfigError::Borrow(_)) => load_env_lenient(&app.paths, &name)?,
+        Err(e) => return Err(e.into()),
+    };
     let opts = PrepareOptions {
         allow_missing_secrets: true,
+        config: Some(config),
         ..Default::default()
     };
     let launch = launch::prepare_launch(app, &name, &opts)?;
@@ -49,17 +56,25 @@ pub fn run(app: &App, env: Option<String>) -> anyhow::Result<i32> {
         style::env_name(&name, launch.config.rgb().map(|c| (c.0, c.1, c.2))),
         launch.config.label_or(&name)
     );
-    let mut rows: Vec<IdentityReport> = hydra_providers::all()
-        .iter()
-        .filter(|p| p.is_configured(&launch.config))
-        .map(|p| {
-            let mut r = p.check(&ctx, &runner);
-            if let Some(owner) = launch.config.borrowed.get(p.id()) {
-                r.detail = format!("from {owner} · {}", r.detail);
-            }
-            r
-        })
-        .collect();
+    let mut rows: Vec<IdentityReport> = Vec::new();
+    for p in hydra_providers::all() {
+        if let Some((_, e)) = broken.iter().find(|(tool, _)| tool == p.id()) {
+            rows.push(IdentityReport {
+                provider: p.id().to_string(),
+                status: Status::Missing,
+                detail: e.lines().next().unwrap_or_default().to_string(),
+            });
+            continue;
+        }
+        if !p.is_configured(&launch.config) {
+            continue;
+        }
+        let mut r = p.check(&ctx, &runner);
+        if let Some(owner) = launch.config.borrowed.get(p.id()) {
+            r.detail = format!("from {owner} · {}", r.detail);
+        }
+        rows.push(r);
+    }
     group_google(&mut rows);
 
     let mut problems = 0;

@@ -55,6 +55,9 @@ pub struct PrepareOptions {
     /// `HYDRA_ENV_VARS` from the parent process: `[env]` names set by an enclosing hydra
     /// environment, which must not leak into this one.
     pub inherited_env_vars: Option<String>,
+    /// `hydra whoami`: this configuration (e.g. with broken borrows left out) instead of
+    /// loading env.toml.
+    pub config: Option<EnvConfig>,
 }
 
 /// The environment to apply to a child process.
@@ -110,7 +113,10 @@ pub fn prepare(
     secrets: &dyn SecretStore,
     opts: &PrepareOptions,
 ) -> Result<LaunchEnv, PrepareError> {
-    let config = load_env(paths, name)?;
+    let config = match &opts.config {
+        Some(c) => c.clone(),
+        None => load_env(paths, name)?,
+    };
     let ctx = Ctx {
         name,
         env: &config,

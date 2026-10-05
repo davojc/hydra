@@ -141,6 +141,36 @@ fn whoami_tags_borrowed_tools() {
 }
 
 #[test]
+fn whoami_reports_a_broken_borrow_on_its_line_and_carries_on() {
+    let h = Home::new();
+    let user = fake_user(&h);
+    h.write_env("personal", "[claude]\n");
+    h.write_env(
+        "work",
+        "[codex]\nfrom = \"personal\"\n\n[claude]\nfrom = \"personal\"\n\n[kube]\nconfig = \"~/.kube/work\"\n",
+    );
+    let out = hydra_as(&h, &user)
+        .args(["whoami", "--env", "work"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let codex = stdout
+        .lines()
+        .find(|l| l.starts_with("codex"))
+        .unwrap_or_else(|| panic!("no codex row: {stdout}"));
+    assert!(
+        codex.contains("work borrows [codex] from personal, but personal has no [codex]"),
+        "{codex}"
+    );
+    assert!(codex.contains("missing"), "{codex}");
+    assert!(!stdout.contains("-> add it there"), "{stdout}");
+    assert!(stdout.contains("from personal · "), "{stdout}");
+    assert!(stdout.lines().any(|l| l.starts_with("kube")), "{stdout}");
+    assert!(stdout.lines().any(|l| l.starts_with("folder")), "{stdout}");
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
 fn add_from_writes_the_borrow_and_checks_the_owner() {
     let h = Home::new();
     h.write_env("personal", "label = \"p\"\n");

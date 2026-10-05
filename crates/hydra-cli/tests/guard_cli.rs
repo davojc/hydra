@@ -750,3 +750,73 @@ fn claude_hook_checks_powershell_commands_too() {
         .stderr(predicate::str::contains("blocked git push"));
     claude_hook(&s, "personal", &input("Get-ChildItem")).success();
 }
+
+/// `personal` borrows codex and github from `work` (the owner the repo is bound to), with its
+/// own ssh key and github owners; then `work` loses [codex] and [github], so every borrow breaks.
+fn borrower_with_a_broken_owner(s: &Setup) -> PathBuf {
+    let key = s.tmp().join("id_personal");
+    std::fs::write(&key, "key").unwrap();
+    s.h.write_env(
+        "personal",
+        &format!(
+            "[git]\nname = \"Me\"\nemail = \"me@example.com\"\nssh_key = '{}'\n\n[codex]\nfrom = \"work\"\n\n[github]\nfrom = \"work\"\nowners = [\"me\"]\n",
+            key.display()
+        ),
+    );
+    s.h.write_env(
+        "work",
+        "[git]\nname = \"Work\"\nemail = \"work@example.com\"\n",
+    );
+    key
+}
+
+#[test]
+fn a_broken_owner_does_not_switch_the_borrowers_guard_off() {
+    let s = Setup::new();
+    let key = borrower_with_a_broken_owner(&s);
+    // The git hook.
+    s.h.hydra()
+        .args(["guard", "git", "pre-commit"])
+        .current_dir(&s.repo)
+        .env("HYDRA_ENV", "personal")
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "blocked git commit - this folder belongs to work",
+        ))
+        .stderr(predicate::str::contains("guard skipped").not());
+    // Claude's hook.
+    claude_hook(&s, "personal", &bash_input("git commit -m x", &s.repo))
+        .code(2)
+        .stderr(predicate::str::contains("blocked git commit"));
+    // The gh shim.
+    run_shim(&s, "gh.exe", "personal", &["pr", "create", "--fill"])
+        .code(1)
+        .stderr(predicate::str::contains("blocked gh pr create"))
+        .stdout(predicate::str::contains("REAL GH").not());
+    // The ssh shim still adds the borrower's own key.
+    let out = run_shim(&s, "ssh.exe", "personal", &["-T", "git@github.com"]).success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).replace('"', "");
+    assert!(
+        stdout.contains(&format!(
+            "-i {} -o IdentitiesOnly=yes -T git@github.com",
+            key.display()
+        )),
+        "{stdout:?}"
+    );
+}
+
+#[test]
+fn a_borrowed_github_guards_with_the_borrowers_own_owners() {
+    let s = Setup::new();
+    s.h.write_env("personal", "[github]\nowners = [\"other\"]\n");
+    s.h.write_env(
+        "work",
+        "[git]\nname = \"Work\"\nemail = \"work@example.com\"\n[github]\nfrom = \"personal\"\nowners = [\"acme\"]\n",
+    );
+    run_shim(&s, "gh.exe", "work", &["pr", "create", "-R", "other/x"])
+        .code(7)
+        .stderr(predicate::str::contains(
+            "hydra: warning: other isn't in work's github owners [acme]",
+        ));
+}

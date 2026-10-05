@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::Context;
 use hydra_core::bindings::{self, Binding};
-use hydra_core::config::{load_env, load_global};
+use hydra_core::config::{load_env_own, load_global};
 use hydra_core::guard::{
     ALLOW_HINT, CLAUDE_ALLOW_HINT, Check, Facts, GitAction, Verdict, checks_in_command_line,
     classify_gh, decide, github_owner,
@@ -30,7 +30,8 @@ fn load(current: &str, folder: &Path) -> anyhow::Result<Loaded> {
     let paths = HydraPaths::discover()?;
     let rules = load_global(&paths)?.bindings;
     let name = EnvName::parse(current)?;
-    let github = load_env(&paths, &name)?.github;
+    // The env's own file only: an owner's broken env.toml must not switch the guard off.
+    let github = load_env_own(&paths, &name)?.github;
     let binding = bindings::resolve(folder, &rules);
     // A binding to an environment that doesn't exist (a typo, a deleted env, `env = ""`) is
     // malformed: skip the guard rather than block everything in the folder.
@@ -285,7 +286,8 @@ fn ssh_key() -> anyhow::Result<Option<PathBuf>> {
     };
     let paths = HydraPaths::discover()?;
     let name = EnvName::parse(&current)?;
-    let Some(key) = load_env(&paths, &name)?.git.and_then(|g| g.ssh_key) else {
+    // git is never borrowed: read the env's own file, whatever its owners hold.
+    let Some(key) = load_env_own(&paths, &name)?.git.and_then(|g| g.ssh_key) else {
         return Ok(None);
     };
     Ok(Some(expand_tilde(&key, &crate::app::user_home()?)))

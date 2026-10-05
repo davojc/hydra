@@ -189,9 +189,8 @@ pub fn remove(app: &App, tool: String, env: Option<String>) -> anyhow::Result<i3
         );
     }
     let text = read_env_file(app, &env)?;
-    let was_borrowed = check(app, &env, &text)
-        .ok()
-        .and_then(|c| c.borrowed.get(tool).cloned());
+    // From the env's own text: the owner may be the broken part.
+    let was_borrowed = hydra_core::borrow::declared_owner(&text, tool);
     let (new_text, removed) = envedit::remove_tool(&text, tool).map_err(anyhow::Error::msg)?;
     if !removed {
         anstream::println!("{tool} isn't on in {env}");

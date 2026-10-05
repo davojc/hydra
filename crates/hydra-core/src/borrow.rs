@@ -167,6 +167,14 @@ fn owner_section(
     }
 }
 
+/// The `from` that env.toml `text` itself names for `tool`, without reading the owner (so it
+/// works when the owner is broken). None if the text doesn't parse or the tool isn't borrowed.
+pub fn declared_owner(text: &str, tool: &str) -> Option<String> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let doc = toml::from_str::<toml::Table>(text).ok()?;
+    doc.get(tool)?.get("from")?.as_str().map(str::to_string)
+}
+
 /// Every environment that borrows something from `owner`, with the tools, sorted by name.
 /// Unreadable or broken env files are skipped (they fail on their own launch).
 pub fn borrowers(paths: &HydraPaths, owner: &EnvName) -> Vec<(EnvName, Vec<String>)> {
@@ -203,6 +211,19 @@ pub fn borrowers(paths: &HydraPaths, owner: &EnvName) -> Vec<(EnvName, Vec<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declared_owner_reads_only_the_text() {
+        let text = "[claude]\nfrom = \"personal\"\n[codex]\n";
+        assert_eq!(declared_owner(text, "claude").as_deref(), Some("personal"));
+        assert_eq!(declared_owner(text, "codex"), None);
+        assert_eq!(declared_owner(text, "aws"), None);
+        assert_eq!(
+            declared_owner("\u{feff}codex = { from = \"p\" }\r\n", "codex").as_deref(),
+            Some("p")
+        );
+        assert_eq!(declared_owner("[[[ nope", "claude"), None);
+    }
 
     #[test]
     fn borrowers_lists_who_borrows_what() {

@@ -171,6 +171,58 @@ fn whoami_reports_a_broken_borrow_on_its_line_and_carries_on() {
 }
 
 #[test]
+fn auth_on_a_borrowed_tool_names_the_owner() {
+    let h = Home::new();
+    let user = fake_user(&h);
+    // A stand-in `codex login` that succeeds, first on PATH.
+    let bin = h.dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("codex.cmd"), "@exit /b 0\r\n").unwrap();
+    let mut path = vec![bin];
+    path.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    h.write_env(
+        "personal",
+        "[codex]\n\n[gemini]\napi_key = \"secret:personal/gemini\"\n",
+    );
+    h.write_env(
+        "work",
+        "[codex]\nfrom = \"personal\"\n\n[gemini]\nfrom = \"personal\"\n",
+    );
+    hydra_as(&h, &user)
+        .args(["auth", "codex", "work"])
+        .env("PATH", std::env::join_paths(path).unwrap())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "signed in: codex for work (borrowed from personal - this updates personal's login)",
+        ));
+    hydra_as(&h, &user)
+        .args(["auth", "gemini", "work"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "store its secret with hydra secret set personal/<key>",
+        ));
+}
+
+#[test]
+fn remove_from_a_borrower_with_a_broken_owner_still_says_borrowed() {
+    let h = Home::new();
+    h.write_env("personal", "label = \"p\"\n");
+    h.write_env("work", "[codex]\nfrom = \"personal\"\n");
+    h.hydra()
+        .args(["remove", "codex", "work"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "removed codex from work; it was borrowed from personal, whose login is untouched",
+        ));
+    assert_eq!(h.env_toml("work"), "");
+}
+
+#[test]
 fn add_from_writes_the_borrow_and_checks_the_owner() {
     let h = Home::new();
     h.write_env("personal", "label = \"p\"\n");

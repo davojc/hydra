@@ -32,10 +32,13 @@ pub fn run(app: &App, provider: String, env: String) -> anyhow::Result<i32> {
         user_home: &app.user_home,
         secrets: app.store.as_ref(),
     };
+    // A borrowed tool signs in to (and keeps its secrets in) the owner's environment.
+    let owner = launch.config.borrowed.get(p.id());
     let argv = p.auth_command(&ctx).with_context(|| {
         format!(
-            "{} has no sign-in command; store its secret with hydra secret set {name}/<key>",
-            p.id()
+            "{} has no sign-in command; store its secret with hydra secret set {}/<key>",
+            p.id(),
+            owner.unwrap_or(&name)
         )
     })?;
     let runner = EnvRunner { launch: &launch };
@@ -48,6 +51,12 @@ pub fn run(app: &App, provider: String, env: String) -> anyhow::Result<i32> {
     }
     p.after_auth(&ctx, &runner)
         .map_err(|e| anyhow::anyhow!("{}", e.message))?;
-    anstream::println!("{}", style::ok(format!("signed in: {} for {name}", p.id())));
+    let tail = owner
+        .map(|o| format!(" (borrowed from {o} - this updates {o}'s login)"))
+        .unwrap_or_default();
+    anstream::println!(
+        "{}",
+        style::ok(format!("signed in: {} for {name}{tail}", p.id()))
+    );
     Ok(0)
 }

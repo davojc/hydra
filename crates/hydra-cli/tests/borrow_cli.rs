@@ -169,6 +169,33 @@ fn add_from_writes_the_borrow_and_checks_the_owner() {
 }
 
 #[test]
+fn add_from_github_takes_owner_and_strict_but_no_other_flag() {
+    let h = Home::new();
+    h.write_env("personal", "[github]\nowners = [\"me\"]\n");
+    h.write_env("work", "label = \"w\"\n");
+    h.hydra()
+        .args(["add", "github", "work", "--from", "personal"])
+        .args(["--owner", "acme", "--strict"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "added github to work (borrowed from personal)",
+        ));
+    assert_eq!(
+        h.env_toml("work"),
+        "label = \"w\"\n\n[github]\nfrom = \"personal\"\nowners = [\"acme\"]\nstrict = true\n"
+    );
+    h.hydra()
+        .args(["add", "claude", "work", "--from", "personal"])
+        .args(["--mcp-exclude", "x"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--from can't be combined with other settings",
+        ));
+}
+
+#[test]
 fn remove_refuses_an_owner_that_lends_and_frees_a_borrower() {
     let h = Home::new();
     h.write_env("personal", "[claude]\n");

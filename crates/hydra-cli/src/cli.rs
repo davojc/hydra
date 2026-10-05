@@ -74,6 +74,7 @@ pub enum Cmd {
         #[arg(long = "api-key-secret")]
         api_key_secret: Option<String>,
         /// Borrow the tool's login and settings from another environment, e.g. --from personal
+        /// (github keeps its own --owner and --strict)
         #[arg(long)]
         from: Option<String>,
     },

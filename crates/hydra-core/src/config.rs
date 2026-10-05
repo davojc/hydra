@@ -258,15 +258,29 @@ pub fn load_global(paths: &HydraPaths) -> Result<GlobalConfig, ConfigError> {
 /// Parses env.toml text for `name`: borrowed sections are filled in from their owners,
 /// then the result is validated.
 pub fn parse_env(paths: &HydraPaths, name: &EnvName, text: &str) -> Result<EnvConfig, ConfigError> {
+    parse_with(paths, name, text, |table| {
+        crate::borrow::resolve(paths, name, table).map_err(ConfigError::Borrow)
+    })
+}
+
+/// Parses `text` after `adjust` has changed its table (borrowing); `adjust` returns which tools
+/// are borrowed from whom. Then validates.
+fn parse_with(
+    paths: &HydraPaths,
+    name: &EnvName,
+    text: &str,
+    adjust: impl FnOnce(&mut toml::Table) -> Result<BTreeMap<String, EnvName>, ConfigError>,
+) -> Result<EnvConfig, ConfigError> {
     let path = paths.env_file(name);
     let invalid = |message: String| ConfigError::Invalid {
         path: path.clone(),
         message,
     };
     let mut table: toml::Table = toml::from_str(text).map_err(|e| invalid(e.to_string()))?;
-    let borrowed = crate::borrow::resolve(paths, name, &mut table).map_err(ConfigError::Borrow)?;
-    // Without borrowing, parse the text itself so errors keep their line numbers.
-    let parsed: Result<EnvConfig, toml::de::Error> = if borrowed.is_empty() {
+    let original = table.clone();
+    let borrowed = adjust(&mut table)?;
+    // When nothing changed, parse the text itself so errors keep their line numbers.
+    let parsed: Result<EnvConfig, toml::de::Error> = if table == original {
         toml::from_str(text)
     } else {
         table.try_into()
@@ -277,11 +291,38 @@ pub fn parse_env(paths: &HydraPaths, name: &EnvName, text: &str) -> Result<EnvCo
     Ok(cfg)
 }
 
+fn read_env(paths: &HydraPaths, name: &EnvName) -> Result<String, ConfigError> {
+    read_toml(&paths.env_file(name))?.ok_or_else(|| ConfigError::UnknownEnv(name.clone()))
+}
+
 pub fn load_env(paths: &HydraPaths, name: &EnvName) -> Result<EnvConfig, ConfigError> {
-    let Some(text) = read_toml(&paths.env_file(name))? else {
-        return Err(ConfigError::UnknownEnv(name.clone()));
-    };
-    parse_env(paths, name, &text)
+    parse_env(paths, name, &read_env(paths, name)?)
+}
+
+/// The environment's own settings, without reading any other environment: a borrowed
+/// section is left out, except `[github]`, which keeps its own owners and strict. For the
+/// guards and the ssh shim, which must not weaken when an owner's env.toml breaks.
+/// `borrowed` is empty.
+pub fn load_env_own(paths: &HydraPaths, name: &EnvName) -> Result<EnvConfig, ConfigError> {
+    parse_with(paths, name, &read_env(paths, name)?, |table| {
+        crate::borrow::keep_own(table);
+        Ok(BTreeMap::new())
+    })
+}
+
+/// Like [`load_env`], but a tool that can't be borrowed is left out instead of failing the
+/// environment; it is returned with the error (for `hydra whoami`).
+pub fn load_env_lenient(
+    paths: &HydraPaths,
+    name: &EnvName,
+) -> Result<(EnvConfig, Vec<(String, String)>), ConfigError> {
+    let mut failed = Vec::new();
+    let cfg = parse_with(paths, name, &read_env(paths, name)?, |table| {
+        let (borrowed, f) = crate::borrow::resolve_lenient(paths, name, table);
+        failed = f;
+        Ok(borrowed)
+    })?;
+    Ok((cfg, failed))
 }
 
 #[cfg(test)]
@@ -505,7 +546,8 @@ LINEAR_API_KEY = "secret:work/linear"
         );
         let c = load_env(&paths, &name).unwrap();
         assert_eq!(c.claude.unwrap().mcp.exclude, vec!["x"]);
-        assert_eq!(c.github.unwrap().owners, vec!["me"]);
+        // [github] owners and strict are guard policy: never taken from the owner.
+        assert_eq!(c.github.unwrap(), GithubConfig::default());
         assert_eq!(c.borrowed["claude"].as_str(), "personal");
         assert_eq!(c.borrowed["github"].as_str(), "personal");
         assert!(!c.borrowed.contains_key("git"));
@@ -562,12 +604,92 @@ LINEAR_API_KEY = "secret:work/linear"
     #[test]
     fn borrowed_section_with_other_keys_is_an_error() {
         let e = borrow_err(
-            "[github]\nfrom = \"personal\"\nstrict = true\n",
+            "[github]\nfrom = \"personal\"\nstrict = true\ntoken = \"x\"\n",
             Some("[github]\n"),
         );
         assert_eq!(
             e,
-            "[github] borrows from personal, so it can't also set strict\n  -> remove strict; personal's [github] settings are used"
+            "[github] borrows from personal, so it can't also set token\n  -> remove token; personal's [github] settings are used"
+        );
+        // owners and strict are allowed next to from in [github] only.
+        let e = borrow_err(
+            "[claude]\nfrom = \"personal\"\nstrict = true\n",
+            Some("[claude]\n"),
+        );
+        assert_eq!(
+            e,
+            "[claude] borrows from personal, so it can't also set strict\n  -> remove strict; personal's [claude] settings are used"
+        );
+    }
+
+    #[test]
+    fn borrowed_github_keeps_the_borrowers_own_owners_and_strict() {
+        let (_d, paths, name) =
+            setup("[github]\nfrom = \"personal\"\nowners = [\"acme\"]\nstrict = true\n");
+        add_env(
+            &paths,
+            "personal",
+            "[github]\nowners = [\"me\"]\nstrict = false\n",
+        );
+        let c = load_env(&paths, &name).unwrap();
+        let g = c.github.unwrap();
+        assert_eq!(g.owners, vec!["acme"]);
+        assert!(g.strict);
+        assert_eq!(c.borrowed["github"].as_str(), "personal");
+    }
+
+    #[test]
+    fn borrowed_github_does_not_inherit_the_owners_policy() {
+        let (_d, paths, name) = setup("[github]\nfrom = \"personal\"\n");
+        add_env(
+            &paths,
+            "personal",
+            "[github]\nowners = [\"me\"]\nstrict = true\n",
+        );
+        let c = load_env(&paths, &name).unwrap();
+        assert_eq!(c.github.unwrap(), GithubConfig::default());
+        assert_eq!(c.borrowed["github"].as_str(), "personal");
+    }
+
+    #[test]
+    fn own_load_ignores_the_owner() {
+        let work = "[git]\nssh_key = \"~/.ssh/work\"\n[github]\nfrom = \"personal\"\nowners = [\"acme\"]\nstrict = true\n[codex]\nfrom = \"personal\"\n[aws]\nfrom = \"personal\"\n";
+        // No personal at all: borrowing fails, the env's own settings still load.
+        let (_d, paths, name) = setup(work);
+        assert!(matches!(
+            load_env(&paths, &name),
+            Err(ConfigError::Borrow(_))
+        ));
+        let c = load_env_own(&paths, &name).unwrap();
+        assert_eq!(c.git.unwrap().ssh_key.as_deref(), Some("~/.ssh/work"));
+        let g = c.github.unwrap();
+        assert_eq!(g.owners, vec!["acme"]);
+        assert!(g.strict);
+        assert!(c.codex.is_none() && c.aws.is_none());
+        assert!(c.borrowed.is_empty());
+        // The env's own mistakes are still errors, with line numbers when nothing was borrowed.
+        let (_d, paths, name) = setup("[git]\nemial = \"x\"\n");
+        let e = load_env_own(&paths, &name).unwrap_err().to_string();
+        assert!(e.contains("emial") && e.contains("line 2"), "{e}");
+    }
+
+    #[test]
+    fn lenient_load_leaves_out_only_the_broken_borrow() {
+        let (_d, paths, name) = setup(
+            "label = \"w\"\n[claude]\nfrom = \"personal\"\n[codex]\nfrom = \"personal\"\n[gcloud]\n",
+        );
+        add_env(&paths, "personal", "[claude]\n");
+        let (c, failed) = load_env_lenient(&paths, &name).unwrap();
+        assert_eq!(c.label.as_deref(), Some("w"));
+        assert!(c.claude.is_some() && c.gcloud.is_some() && c.codex.is_none());
+        assert_eq!(c.borrowed["claude"].as_str(), "personal");
+        assert!(!c.borrowed.contains_key("codex"));
+        assert_eq!(
+            failed,
+            vec![(
+                "codex".to_string(),
+                "work borrows [codex] from personal, but personal has no [codex]\n  -> add it there: hydra add codex personal".to_string()
+            )]
         );
     }
 

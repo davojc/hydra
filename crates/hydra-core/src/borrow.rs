@@ -8,6 +8,16 @@ use crate::paths::HydraPaths;
 /// Tools that can't be borrowed: commit author and keys stay per environment.
 pub const NOT_BORROWABLE: &[&str] = &["git"];
 
+/// Keys a borrowed section still sets itself: `[github]` owners and strict are guard policy,
+/// which stays per environment.
+pub fn own_keys(tool: &str) -> &'static [&'static str] {
+    if tool == "github" {
+        &["owners", "strict"]
+    } else {
+        &[]
+    }
+}
+
 /// Replaces each `[tool] from = "<owner>"` section in `table` with the owner's
 /// section and returns which tools are borrowed from whom. Errors are
 /// user-facing, with `  -> ` fix lines.
@@ -17,29 +27,95 @@ pub fn resolve(
     table: &mut toml::Table,
 ) -> Result<BTreeMap<String, EnvName>, String> {
     let mut borrowed = BTreeMap::new();
-    for tool in TOOLS {
-        let Some(toml::Value::Table(section)) = table.get(*tool) else {
-            continue;
-        };
-        let Some(from) = section.get("from") else {
-            continue;
-        };
-        if NOT_BORROWABLE.contains(tool) {
-            return Err(format!(
-                "[{tool}] can't be borrowed: commit author and SSH key stay per environment\n  -> set [{tool}] in {name} itself"
-            ));
-        }
-        let owner = owner_name(name, tool, from)?;
-        if let Some(extra) = section.keys().find(|k| *k != "from") {
-            return Err(format!(
-                "[{tool}] borrows from {owner}, so it can't also set {extra}\n  -> remove {extra}; {owner}'s [{tool}] settings are used"
-            ));
-        }
-        let owned = owner_section(paths, name, tool, &owner)?;
+    for (tool, section) in borrowing(table) {
+        let (owned, owner) = resolve_one(paths, name, tool, &section)?;
         table.insert(tool.to_string(), toml::Value::Table(owned));
         borrowed.insert(tool.to_string(), owner);
     }
     Ok(borrowed)
+}
+
+/// Like [`resolve`], but a section that can't be borrowed doesn't fail the whole table: it
+/// is removed, and its tool and error are returned (in TOOLS order) next to what was borrowed.
+pub fn resolve_lenient(
+    paths: &HydraPaths,
+    name: &EnvName,
+    table: &mut toml::Table,
+) -> (BTreeMap<String, EnvName>, Vec<(String, String)>) {
+    let mut borrowed = BTreeMap::new();
+    let mut failed = Vec::new();
+    for (tool, section) in borrowing(table) {
+        match resolve_one(paths, name, tool, &section) {
+            Ok((owned, owner)) => {
+                table.insert(tool.to_string(), toml::Value::Table(owned));
+                borrowed.insert(tool.to_string(), owner);
+            }
+            Err(e) => {
+                table.remove(tool);
+                failed.push((tool.to_string(), e));
+            }
+        }
+    }
+    (borrowed, failed)
+}
+
+/// Keeps only the environment's own settings, without reading any other environment: a
+/// borrowed section is removed, except for the keys it still sets itself ([`own_keys`]).
+pub fn keep_own(table: &mut toml::Table) {
+    for (tool, mut section) in borrowing(table) {
+        let keep = own_keys(tool);
+        if keep.is_empty() {
+            table.remove(tool);
+        } else {
+            section.retain(|k, _| keep.contains(&k));
+            table.insert(tool.to_string(), toml::Value::Table(section));
+        }
+    }
+}
+
+/// The tool sections in `table` that have a `from` key, in TOOLS order.
+fn borrowing(table: &toml::Table) -> Vec<(&'static str, toml::Table)> {
+    TOOLS
+        .iter()
+        .filter_map(|tool| match table.get(*tool) {
+            Some(toml::Value::Table(s)) if s.contains_key("from") => Some((*tool, s.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The owner's section for one borrowing `section`, with the borrower's own keys in place of
+/// the owner's, and the owner's name.
+fn resolve_one(
+    paths: &HydraPaths,
+    name: &EnvName,
+    tool: &str,
+    section: &toml::Table,
+) -> Result<(toml::Table, EnvName), String> {
+    if NOT_BORROWABLE.contains(&tool) {
+        return Err(format!(
+            "[{tool}] can't be borrowed: commit author and SSH key stay per environment\n  -> set [{tool}] in {name} itself"
+        ));
+    }
+    let from = section.get("from").expect("a borrowing section has from");
+    let owner = owner_name(name, tool, from)?;
+    let keep = own_keys(tool);
+    if let Some(extra) = section
+        .keys()
+        .find(|k| *k != "from" && !keep.contains(&k.as_str()))
+    {
+        return Err(format!(
+            "[{tool}] borrows from {owner}, so it can't also set {extra}\n  -> remove {extra}; {owner}'s [{tool}] settings are used"
+        ));
+    }
+    let mut owned = owner_section(paths, name, tool, &owner)?;
+    for key in keep {
+        owned.remove(*key);
+        if let Some(v) = section.get(*key) {
+            owned.insert(key.to_string(), v.clone());
+        }
+    }
+    Ok((owned, owner))
 }
 
 fn owner_name(name: &EnvName, tool: &str, from: &toml::Value) -> Result<EnvName, String> {

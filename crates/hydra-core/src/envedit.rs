@@ -58,8 +58,12 @@ fn check_applies(tool: &str, v: &ToolValues) -> Result<(), String> {
                 "{tool} can't be borrowed: commit author and SSH key stay per environment"
             ));
         }
+        // [github] owners and strict are guard policy, which stays per environment.
+        let own = tool == "github";
         let only_from = ToolValues {
             from: v.from.clone(),
+            owners: if own { v.owners.clone() } else { Vec::new() },
+            strict: if own { v.strict } else { None },
             ..Default::default()
         };
         if *v != only_from {
@@ -186,6 +190,17 @@ pub fn add_tool(text: &str, tool: &str, v: &ToolValues) -> Result<(String, AddOu
         if !existed && doc.contains_key(tool) {
             return Err(format!("{tool} in env.toml isn't a table"));
         }
+        // The keys a borrowed section keeps (github owners/strict): the old values, then the flags.
+        if let Some(old) = doc.get(tool).and_then(Item::as_table_like) {
+            for key in crate::borrow::own_keys(tool) {
+                if let Some(Item::Value(val)) = old.get(key) {
+                    table.insert(key, Item::Value(val.clone()));
+                }
+            }
+        }
+        if tool == "github" {
+            fill(&mut table, tool, v)?;
+        }
         if existed {
             let old = doc
                 .get(tool)
@@ -298,12 +313,53 @@ mod tests {
         );
         let mixed = ToolValues {
             from: Some("personal".into()),
+            mcp_exclude: vec!["x".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            add_tool("", "claude", &mixed).unwrap_err(),
+            "--from can't be combined with other settings; the owner's are used"
+        );
+        let mixed = ToolValues {
+            from: Some("personal".into()),
             owners: vec!["me".into()],
             ..Default::default()
         };
         assert_eq!(
-            add_tool("", "github", &mixed).unwrap_err(),
+            add_tool("", "claude", &mixed).unwrap_err(),
             "--from can't be combined with other settings; the owner's are used"
+        );
+    }
+
+    #[test]
+    fn add_from_github_keeps_its_own_owners_and_strict() {
+        let v = ToolValues {
+            from: Some("personal".into()),
+            owners: vec!["acme".into()],
+            strict: Some(true),
+            ..Default::default()
+        };
+        let (out, outcome) = add_tool("", "github", &v).unwrap();
+        assert_eq!(outcome, AddOutcome::Added);
+        assert_eq!(
+            out,
+            "[github]\nfrom = \"personal\"\nowners = [\"acme\"]\nstrict = true\n"
+        );
+        // Turning an owned [github] into a borrowed one keeps its guard policy.
+        let only_from = ToolValues {
+            from: Some("personal".into()),
+            ..Default::default()
+        };
+        let (out, outcome) = add_tool(
+            "[github]\nowners = [\"acme\"]\nstrict = true\n",
+            "github",
+            &only_from,
+        )
+        .unwrap();
+        assert_eq!(outcome, AddOutcome::Updated);
+        assert_eq!(
+            out,
+            "[github]\nfrom = \"personal\"\nowners = [\"acme\"]\nstrict = true\n"
         );
     }
 

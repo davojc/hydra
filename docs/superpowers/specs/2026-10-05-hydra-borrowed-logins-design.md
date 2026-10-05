@@ -107,7 +107,7 @@ the message just points to the owner, where the login belongs.
 A borrowed tool shows its owner next to the account:
 
 ```
-claude   from personal   you@example.com
+claude   from personal · you@example.com
 ```
 
 ### 4.4 Managing environments

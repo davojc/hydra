@@ -292,3 +292,80 @@ fn run_works_without_github_sign_in() {
         .success()
         .stdout(predicate::str::contains("[]"));
 }
+
+#[test]
+fn launch_removes_an_old_shims_folder() {
+    let h = Home::new();
+    h.write_env("work", "");
+    let shims = h.root().join("shims");
+    std::fs::create_dir_all(&shims).unwrap();
+    std::fs::write(shims.join("gh.exe"), "old").unwrap();
+    std::fs::write(shims.join("ssh.exe"), "old").unwrap();
+    h.hydra()
+        .args(["run", "work", "--", "cmd", "/c", "exit 0"])
+        .assert()
+        .success();
+    assert!(!shims.exists());
+}
+
+#[test]
+#[cfg(windows)]
+fn launch_notes_a_locked_old_shim_and_carries_on() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let h = Home::new();
+    h.write_env("work", "");
+    let shims = h.root().join("shims");
+    std::fs::create_dir_all(&shims).unwrap();
+    let gh = shims.join("gh.exe");
+    std::fs::write(&gh, "old").unwrap();
+    // No sharing at all: nothing can delete the file while this handle is open.
+    let _lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&gh)
+        .unwrap();
+    h.hydra()
+        .args(["run", "work", "--", "cmd", "/c", "exit 0"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("can't remove old shims folder"));
+}
+
+#[test]
+fn launch_drops_the_old_shims_folder_from_path() {
+    let h = Home::new();
+    h.write_env("work", "");
+    let shims = h.root().join("shims");
+    let shouty = shims.to_string_lossy().replace('\\', "/").to_uppercase();
+    let mut path = vec![
+        shims.clone(),
+        std::path::PathBuf::from(format!("{shouty}/")),
+    ];
+    path.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let out = h
+        .hydra()
+        .args(run_args("work", show("PATH")))
+        .env("PATH", std::env::join_paths(path).unwrap())
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_lowercase();
+    let shims = shims.to_string_lossy().to_lowercase();
+    assert!(stdout.contains("system32"), "{stdout}");
+    assert!(!stdout.contains(&shims), "{stdout}");
+    assert!(!stdout.contains(&shims.replace('\\', "/")), "{stdout}");
+}
+
+#[test]
+fn launch_never_creates_a_shims_folder() {
+    let h = Home::new();
+    h.write_env("work", "");
+    h.hydra()
+        .args(["run", "work", "--", "cmd", "/c", "exit 0"])
+        .assert()
+        .success();
+    h.hydra().args(["whoami", "work"]).output().unwrap();
+    assert!(h.root().is_dir());
+    assert!(!h.root().join("shims").exists());
+}

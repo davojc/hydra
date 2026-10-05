@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
 use anyhow::Context;
@@ -21,6 +21,7 @@ pub fn prepare_launch(
     name: &EnvName,
     opts: &PrepareOptions,
 ) -> anyhow::Result<LaunchEnv> {
+    remove_legacy_shims(&app.paths.legacy_shims_dir());
     let providers = hydra_providers::all();
     let opts = PrepareOptions {
         inherited_env_vars: std::env::var(ENV_VARS_MARKER).ok(),
@@ -34,6 +35,23 @@ pub fn prepare_launch(
         app.store.as_ref(),
         &opts,
     )?)
+}
+
+/// Deletes the gh/ssh shims folder an older hydra made. Best effort: a file that is in use
+/// (a shim still running in an old terminal) is noted and left for the next launch.
+fn remove_legacy_shims(dir: &Path) {
+    if !dir.exists() {
+        return;
+    }
+    if let Err(e) = std::fs::remove_dir_all(dir) {
+        anstream::eprintln!(
+            "{}",
+            style::dim(format!(
+                "hydra: note: can't remove old shims folder {} yet ({e})",
+                dir.display()
+            ))
+        );
+    }
 }
 
 /// Ctrl-C belongs to the child; hydra stays alive to return its exit code.

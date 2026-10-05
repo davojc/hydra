@@ -21,7 +21,7 @@ impl Home {
         self.command(env!("CARGO_BIN_EXE_hydra"))
     }
 
-    /// `program` (e.g. a copy of hydra named gh.exe) with the same hermetic environment.
+    /// `program` with the same hermetic environment.
     pub fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> assert_cmd::Command {
         let mut c = assert_cmd::Command::new(program);
         let service = format!(

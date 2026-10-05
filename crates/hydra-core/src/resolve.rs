@@ -68,6 +68,8 @@ pub struct LaunchEnv {
     pub set: BTreeMap<String, String>,
     pub unset: BTreeSet<String>,
     pub path_prepend: Vec<PathBuf>,
+    /// Folders taken out of the inherited PATH (compared case-insensitively, either separator).
+    pub path_drop: Vec<PathBuf>,
 }
 
 /// Shows the names of the variables it sets, never their values (some are secrets).
@@ -79,6 +81,7 @@ impl std::fmt::Debug for LaunchEnv {
             .field("set", &self.set.keys().collect::<Vec<_>>())
             .field("unset", &self.unset)
             .field("path_prepend", &self.path_prepend)
+            .field("path_drop", &self.path_drop)
             .finish()
     }
 }
@@ -97,10 +100,19 @@ impl LaunchEnv {
     pub fn path_value(&self, current: Option<OsString>) -> OsString {
         let mut parts = self.path_prepend.clone();
         if let Some(cur) = current {
-            parts.extend(std::env::split_paths(&cur));
+            let drop: Vec<String> = self.path_drop.iter().map(|d| path_key(d)).collect();
+            parts.extend(std::env::split_paths(&cur).filter(|p| !drop.contains(&path_key(p))));
         }
         std::env::join_paths(parts).unwrap_or_default()
     }
+}
+
+/// A PATH entry for comparison: lowercase, `\` separators, no trailing separator.
+fn path_key(p: &Path) -> String {
+    p.to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_lowercase()
 }
 
 /// Materialises every configured provider and builds the environment. Fails closed:
@@ -255,6 +267,8 @@ pub fn prepare(
         set,
         unset,
         path_prepend: merged.path_prepend,
+        // A terminal opened by an older hydra may still have its shims folder first.
+        path_drop: vec![paths.legacy_shims_dir()],
     })
 }
 
@@ -538,7 +552,7 @@ mod tests {
         let (_d, paths, name) = setup("");
         let providers = vec![fake(
             "x",
-            Contribution::new().prepend(PathBuf::from("C:/shims")),
+            Contribution::new().prepend(PathBuf::from("C:/tools")),
         )];
         let env = run(
             &paths,
@@ -552,7 +566,34 @@ mod tests {
         let parts: Vec<PathBuf> = std::env::split_paths(&joined).collect();
         assert_eq!(
             parts,
-            vec![PathBuf::from("C:/shims"), PathBuf::from("C:/bin")]
+            vec![PathBuf::from("C:/tools"), PathBuf::from("C:/bin")]
+        );
+    }
+
+    #[test]
+    fn path_value_drops_the_old_shims_folder() {
+        let (_d, paths, name) = setup("");
+        let env = run(
+            &paths,
+            &name,
+            &[],
+            &MemoryStore::default(),
+            &PrepareOptions::default(),
+        )
+        .unwrap();
+        let shims = paths.legacy_shims_dir().to_string_lossy().into_owned();
+        let shouty = format!("{}\\", shims.replace('\\', "/").to_uppercase());
+        let current = std::env::join_paths([
+            PathBuf::from(&shims),
+            PathBuf::from("C:/bin"),
+            PathBuf::from(&shouty),
+            PathBuf::from("C:/shims"),
+        ])
+        .unwrap();
+        let parts: Vec<PathBuf> = std::env::split_paths(&env.path_value(Some(current))).collect();
+        assert_eq!(
+            parts,
+            vec![PathBuf::from("C:/bin"), PathBuf::from("C:/shims")]
         );
     }
 

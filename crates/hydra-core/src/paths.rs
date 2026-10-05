@@ -51,7 +51,8 @@ impl HydraPaths {
     pub fn state_dir(&self, n: &EnvName) -> PathBuf {
         self.state_root().join(n.as_str())
     }
-    pub fn shims_dir(&self) -> PathBuf {
+    /// Where older hydra versions kept their gh/ssh shims. Deleted on launch, dropped from PATH.
+    pub fn legacy_shims_dir(&self) -> PathBuf {
         self.root.join("shims")
     }
 }
@@ -80,7 +81,7 @@ mod tests {
         assert_eq!(p.env_file(&work), Path::new("/h/envs/work/env.toml"));
         assert_eq!(p.state_dir(&work), Path::new("/h/state/work"));
         assert_eq!(p.base_dir(), Path::new("/h/base"));
-        assert_eq!(p.shims_dir(), Path::new("/h/shims"));
+        assert_eq!(p.legacy_shims_dir(), Path::new("/h/shims"));
     }
 
     #[test]

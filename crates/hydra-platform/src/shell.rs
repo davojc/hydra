@@ -71,6 +71,21 @@ pub fn to_msys(p: &Path) -> String {
     }
 }
 
+/// PowerShell single-quoted string. PowerShell treats the typographic quotes ‘ ’ ‚ ‛ as
+/// single quotes too, so each of them is doubled along with `'`.
+pub fn pwsh_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
+            out.push(c);
+        }
+        out.push(c);
+    }
+    out.push('\'');
+    out
+}
+
 /// POSIX single-quoted string.
 pub fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))

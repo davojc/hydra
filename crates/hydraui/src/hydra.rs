@@ -16,7 +16,7 @@ use hydra_core::resolve::{ENV_VARS_MARKER, LaunchEnv, PrepareError, PrepareOptio
 use hydra_core::secret::{SecretRef, SecretStore};
 use hydra_platform::keyring_store::KeyringStore;
 use hydra_platform::process::EnvRunner;
-use hydra_platform::shell::{ShellKind, sh_quote};
+use hydra_platform::shell::{ShellKind, pwsh_quote, sh_quote};
 use hydraui_term::{GridSize, Pane, SpawnSpec, TermEvent};
 
 use crate::palette::env_tint;
@@ -333,10 +333,7 @@ impl Hydra {
 pub fn command_line(shell: ShellKind, argv: &[String]) -> String {
     match shell {
         ShellKind::Pwsh => {
-            let words: Vec<String> = argv
-                .iter()
-                .map(|a| format!("'{}'", a.replace('\'', "''")))
-                .collect();
+            let words: Vec<String> = argv.iter().map(|a| pwsh_quote(a)).collect();
             format!("& {}", words.join(" "))
         }
         ShellKind::Bash => argv
@@ -725,6 +722,10 @@ mod tests {
 
     #[test]
     fn command_lines_quote_every_word() {
+        assert_eq!(
+            command_line(ShellKind::Pwsh, &["a‘b‛c".to_string()]),
+            "& 'a‘‘b‛‛c'"
+        );
         let argv = vec![
             "C:\\Program Files\\x\\gh.exe".to_string(),
             "it's".to_string(),

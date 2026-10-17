@@ -3,7 +3,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
-use hydra_platform::shell::{ShellKind, sh_quote};
+use hydra_platform::shell::{ShellKind, pwsh_quote, sh_quote};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
@@ -144,7 +144,7 @@ pub fn editor_command(
 pub fn quote_path(shell: ShellKind, path: &Path) -> String {
     let text = path.to_string_lossy();
     match shell {
-        ShellKind::Pwsh => format!("'{}'", text.replace('\'', "''")),
+        ShellKind::Pwsh => pwsh_quote(&text),
         ShellKind::Bash => sh_quote(&text.replace('\\', "/")),
     }
 }
@@ -245,6 +245,12 @@ mod tests {
 
     #[test]
     fn paths_are_quoted_for_each_shell() {
+        // pwsh reads ‘ ’ ‚ ‛ as quotes too: each is doubled.
+        let curly = Path::new("C:\\Downloads\\David’s notes.txt");
+        assert_eq!(
+            quote_path(ShellKind::Pwsh, curly),
+            "'C:\\Downloads\\David’’s notes.txt'"
+        );
         let p = Path::new("C:\\work\\it's [here]");
         assert_eq!(quote_path(ShellKind::Pwsh, p), "'C:\\work\\it''s [here]'");
         assert_eq!(quote_path(ShellKind::Bash, p), "'C:/work/it'\\''s [here]'");

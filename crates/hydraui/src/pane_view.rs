@@ -145,6 +145,12 @@ fn hit_cell(dx: f32, dy: f32, cell: (f32, f32), size: GridSize) -> Option<(usize
     inside.then(|| grid_cell(dx, dy, cell, size))
 }
 
+/// The console host titles a pane with its program's path (`C:\...\pwsh.exe`) until the
+/// program sets a title of its own; that path names nothing useful, so the folder is used.
+fn is_program_path(title: &str) -> bool {
+    title.to_ascii_lowercase().ends_with(".exe")
+}
+
 fn grid_point(display_offset: usize, row: usize, col: usize) -> GridPoint {
     viewport_to_point(display_offset, GridPoint::new(row, Column(col)))
 }
@@ -261,7 +267,7 @@ impl PaneView {
             }
             TermEvent::Prompt(p) => self.prompt = Some(p),
             TermEvent::Title(t) => {
-                self.title = (!t.is_empty()).then_some(t);
+                self.title = (!t.is_empty() && !is_program_path(&t)).then_some(t);
                 cx.emit(PaneEvent::TitleChanged);
             }
             TermEvent::Bell => {}
@@ -959,6 +965,23 @@ impl Render for PaneView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_programs_exe_path_isnt_a_title() {
+        assert!(is_program_path(
+            "C:\\Program Files\\PowerShell\\7\\pwsh.exe"
+        ));
+        assert!(is_program_path(
+            "Administrator: C:\\WINDOWS\\system32\\cmd.exe"
+        ));
+        assert!(is_program_path(
+            "C:\\Program Files\\Git\\usr\\bin\\bash.EXE"
+        ));
+        assert!(is_program_path("pwsh.exe"));
+        assert!(!is_program_path("vim - notes.txt"));
+        assert!(!is_program_path("make.exe build"));
+        assert!(!is_program_path(""));
+    }
 
     #[test]
     fn positions_outside_the_grid_are_not_cells() {

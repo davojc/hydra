@@ -1,5 +1,7 @@
 //! The window's content (spec §7.1, §7.5, §7.6): the tab strip, the active tab's split panes
 //! with draggable dividers, the status bar, and the commands bound to keys.
+mod sets;
+
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -16,6 +18,7 @@ use gpui::{
 use gpui_component::command::{Command, CommandItem, CommandState};
 use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, WindowExt, h_flex, v_flex};
+use hydraui_sets::LoadedSets;
 
 use crate::config::UiConfig;
 use crate::hydra::{Hydra, PaneRequest, STATUS_TTL, StatusCache, accounts_summary};
@@ -25,7 +28,7 @@ use crate::keys::{
 };
 use crate::pane_view::{PaneEvent, PaneView, TermStyle};
 use crate::split::{Axis, Dir, PaneId, Tree};
-use crate::tabs::{TabId, Tabs};
+use crate::tabs::{Closed, TabId, Tabs};
 
 /// A divider being dragged: the split's path in the active tab's tree.
 struct Drag {
@@ -44,6 +47,12 @@ pub struct Workspace {
     status: StatusCache,
     refreshing: HashSet<String>,
     drag: Option<Drag>,
+    loaded: LoadedSets,
+    /// Loaded sets whose file changed since loading.
+    changed_sets: HashSet<String>,
+    /// Set groups folded away in the tab strip.
+    collapsed: HashSet<String>,
+    _set_watch: Task<()>,
     /// Each split's on-screen bounds at the last paint, by path, for divider drags.
     split_bounds: Rc<RefCell<HashMap<Vec<usize>, Bounds<Pixels>>>>,
     focus: FocusHandle,
@@ -69,6 +78,17 @@ impl Workspace {
                 }
             }
         });
+        // A loaded set's file edited or deleted: offer a reload (spec §5.4).
+        let set_watch = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(2))
+                    .await;
+                if this.update(cx, |ws, cx| ws.check_sets(cx)).is_err() {
+                    break;
+                }
+            }
+        });
         // After the window's Root exists: toasts and dialogs live in it.
         cx.spawn_in(window, async move |this, cx| {
             let _ = this.update_in(cx, |ws, window, cx| ws.startup(problems, window, cx));
@@ -85,6 +105,10 @@ impl Workspace {
             status: StatusCache::default(),
             refreshing: HashSet::new(),
             drag: None,
+            loaded: LoadedSets::default(),
+            changed_sets: HashSet::new(),
+            collapsed: HashSet::new(),
+            _set_watch: set_watch,
             split_bounds: Rc::default(),
             focus: cx.focus_handle(),
             title: String::new(),
@@ -98,8 +122,11 @@ impl Workspace {
         for p in problems {
             window.push_notification(Notification::warning(p).title("hydraui settings"), cx);
         }
-        let home = self.hydra.user_home.clone();
-        self.new_tab_in(home, window, cx);
+        // The sets open at last exit (spec §5.4); a plain tab when there were none.
+        if !self.restore_session(window, cx) {
+            let home = self.hydra.user_home.clone();
+            self.new_tab_in(home, window, cx);
+        }
     }
 
     /// A Loose tab in `cwd`: the folder's environment, else `default_env`, else ask.
@@ -161,6 +188,17 @@ impl Workspace {
     ) -> PaneId {
         self.next_pane += 1;
         let id = self.next_pane;
+        self.create_pane(id, request, window, cx);
+        id
+    }
+
+    fn create_pane(
+        &mut self,
+        id: PaneId,
+        request: PaneRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let tint = self.hydra.tint(&request.env);
         self.tints.insert(request.env.clone(), tint);
         let (hydra, style) = (self.hydra.clone(), self.style.clone());
@@ -174,7 +212,6 @@ impl Workspace {
         });
         self.subs.insert(id, sub);
         self.panes.insert(id, view);
-        id
     }
 
     fn focused(&self) -> Option<Entity<PaneView>> {
@@ -252,7 +289,9 @@ impl Workspace {
         let Some(id) = self.tabs.active().map(|t| t.focused) else {
             return;
         };
-        self.tabs.close_pane(id);
+        if let Closed::Tab(tab) = self.tabs.close_pane(id) {
+            self.tab_gone(tab, window, cx);
+        }
         self.drop_pane(id);
         self.focus_active(window, cx);
         cx.notify();
@@ -262,6 +301,7 @@ impl Workspace {
         for id in self.tabs.close_tab(tab) {
             self.drop_pane(id);
         }
+        self.tab_gone(tab, window, cx);
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -496,13 +536,13 @@ impl Workspace {
             .border_b_1()
             .border_color(border);
         for (set, ids) in self.tabs.groups() {
-            strip = strip.child(
-                div()
-                    .px_2()
-                    .text_sm()
-                    .text_color(muted)
-                    .child(set.unwrap_or_else(|| "Loose".into())),
-            );
+            strip = match &set {
+                Some(name) => strip.child(self.render_set_header(name, muted, cx)),
+                None => strip.child(div().px_2().text_sm().text_color(muted).child("Loose")),
+            };
+            if set.as_ref().is_some_and(|s| self.collapsed.contains(s)) {
+                continue;
+            }
             for id in ids {
                 let Some(tab) = self.tabs.get(id) else {
                     continue;

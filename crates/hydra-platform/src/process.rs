@@ -47,6 +47,18 @@ pub fn resolve_program(program: &str, path: &OsStr, pathext: Option<&OsStr>) -> 
     None
 }
 
+/// Marks a command that runs in the background (its output is captured): on Windows it
+/// gets no console window, which a GUI parent such as hydraui would otherwise pop up for it.
+pub fn hide_window(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// Runs programs with a prepared environment applied.
 pub struct EnvRunner<'a> {
     pub launch: &'a LaunchEnv,
@@ -66,7 +78,7 @@ impl EnvRunner<'_> {
 impl CommandRunner for EnvRunner<'_> {
     fn output(&self, program: &str, args: &[&str]) -> Result<String, String> {
         let mut cmd = self.command(program)?;
-        cmd.args(args).stdin(Stdio::null());
+        hide_window(cmd.args(args).stdin(Stdio::null()));
         let out = cmd.output().map_err(|e| e.to_string())?;
         if out.status.success() {
             Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
@@ -110,6 +122,49 @@ mod tests {
         assert_eq!(
             resolve_program("definitely-not-installed", &empty, None),
             None
+        );
+    }
+
+    /// Runs `console_window_probe` in a copy of this test binary that has no console, as a
+    /// GUI app such as hydraui has none: a background child must not get a console window.
+    #[test]
+    #[cfg(windows)]
+    fn background_commands_get_no_console_window_under_a_gui_parent() {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "process::tests::console_window_probe",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("HYDRA_CONSOLE_PROBE", "1")
+            .creation_flags(DETACHED_PROCESS)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("console window: 0"), "{text}");
+    }
+
+    #[test]
+    #[ignore = "run by background_commands_get_no_console_window_under_a_gui_parent"]
+    #[cfg(windows)]
+    fn console_window_probe() {
+        if std::env::var_os("HYDRA_CONSOLE_PROBE").is_none() {
+            return;
+        }
+        let mut cmd = Command::new("powershell.exe");
+        cmd.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Add-Type -Name W -Namespace N -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern System.IntPtr GetConsoleWindow();'; [N.W]::GetConsoleWindow()",
+        ]);
+        let out = hide_window(&mut cmd).output().unwrap();
+        println!(
+            "console window: {}",
+            String::from_utf8_lossy(&out.stdout).trim()
         );
     }
 }

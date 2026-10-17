@@ -38,6 +38,22 @@ use crate::split::{Axis, Dir, PaneId, Tree};
 use crate::tabs::{Closed, TabId, Tabs};
 
 /// A divider being dragged: the split's path in the active tab's tree.
+/// The file tree's width: it starts at the default, can't be dragged narrower than the
+/// minimum, and always leaves the panes at least `MIN_PANES_WIDTH`.
+const DEFAULT_TREE_WIDTH: f32 = 260.0;
+const MIN_TREE_WIDTH: f32 = 140.0;
+const MIN_PANES_WIDTH: f32 = 200.0;
+
+/// The tree's width with its divider dragged to `x` pixels from the tree's left edge, in a
+/// window `window_width` wide.
+fn tree_width_at(x: f32, window_width: f32) -> f32 {
+    if !x.is_finite() {
+        return DEFAULT_TREE_WIDTH;
+    }
+    let max = (window_width - MIN_PANES_WIDTH).max(MIN_TREE_WIDTH);
+    x.clamp(MIN_TREE_WIDTH, max)
+}
+
 struct Drag {
     path: Vec<usize>,
     axis: Axis,
@@ -69,6 +85,11 @@ pub struct Workspace {
     _set_watch: Task<()>,
     tree: Option<Entity<FileTreeView>>,
     tree_sub: Option<Subscription>,
+    tree_width: f32,
+    /// The divider between the tree and the panes is being dragged.
+    tree_drag: bool,
+    /// The tree panel's bounds at the last paint, for the drag.
+    tree_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// Each split's on-screen bounds at the last paint, by path, for divider drags.
     split_bounds: Rc<RefCell<HashMap<Vec<usize>, Bounds<Pixels>>>>,
     focus: FocusHandle,
@@ -142,6 +163,9 @@ impl Workspace {
             _set_watch: set_watch,
             tree: None,
             tree_sub: None,
+            tree_width: DEFAULT_TREE_WIDTH,
+            tree_drag: false,
+            tree_bounds: Rc::default(),
             split_bounds: Rc::default(),
             focus: cx.focus_handle(),
             title: String::new(),
@@ -525,7 +549,14 @@ impl Workspace {
         rgb(self.tints.get(env).copied().unwrap_or(0x808080)).into()
     }
 
-    fn drag_to(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+    fn drag_to(&mut self, pos: Point<Pixels>, window_width: f32, cx: &mut Context<Self>) {
+        if self.tree_drag {
+            if let Some(b) = self.tree_bounds.get() {
+                self.tree_width = tree_width_at(f32::from(pos.x - b.origin.x), window_width);
+                cx.notify();
+            }
+            return;
+        }
         let Some(drag) = &self.drag else {
             return;
         };
@@ -551,9 +582,10 @@ impl Workspace {
             |_, _, _| {},
             move |_, _, window, _| {
                 let on_move = ws.clone();
-                window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
+                window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, cx| {
                     if phase == DispatchPhase::Bubble {
-                        on_move.update(cx, |ws, cx| ws.drag_to(ev.position, cx));
+                        let width = f32::from(window.viewport_size().width);
+                        on_move.update(cx, |ws, cx| ws.drag_to(ev.position, width, cx));
                     }
                 });
                 let on_up = ws.clone();
@@ -561,6 +593,7 @@ impl Workspace {
                     if phase == DispatchPhase::Bubble {
                         on_up.update(cx, |ws, cx| {
                             ws.drag = None;
+                            ws.tree_drag = false;
                             cx.notify();
                         });
                     }
@@ -855,19 +888,62 @@ impl Render for Workspace {
                     .min_h_0()
                     .items_start()
                     .when_some(self.tree.clone(), |d, tree| {
+                        let store = self.tree_bounds.clone();
                         d.child(
                             div()
-                                .w(px(260.))
+                                .w(px(self.tree_width))
                                 .h_full()
                                 .flex_none()
-                                .border_r_1()
-                                .border_color(border)
+                                .relative()
+                                .child(
+                                    canvas(
+                                        move |bounds, _, _| store.set(Some(bounds)),
+                                        |_, _, _, _| {},
+                                    )
+                                    .absolute()
+                                    .top_0()
+                                    .left_0()
+                                    .size_full(),
+                                )
                                 .child(tree),
+                        )
+                        .child(
+                            div()
+                                .id("tree-divider")
+                                .w(px(4.))
+                                .h_full()
+                                .flex_none()
+                                .bg(border)
+                                .cursor(CursorStyle::ResizeLeftRight)
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|ws, _, _, cx| {
+                                        ws.tree_drag = true;
+                                        cx.notify();
+                                    }),
+                                ),
                         )
                     })
                     .child(div().flex_1().min_w_0().h_full().child(body)),
             )
             .child(self.render_status(border, muted, cx))
-            .when(self.drag.is_some(), |d| d.child(self.drag_listener(cx)))
+            .when(self.drag.is_some() || self.tree_drag, |d| {
+                d.child(self.drag_listener(cx))
+            })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_tree_width_follows_the_pointer_within_limits() {
+        assert_eq!(tree_width_at(300.0, 1200.0), 300.0);
+        assert_eq!(tree_width_at(50.0, 1200.0), MIN_TREE_WIDTH);
+        assert_eq!(tree_width_at(1150.0, 1200.0), 1200.0 - MIN_PANES_WIDTH);
+        // A window too narrow for both keeps the tree at its minimum.
+        assert_eq!(tree_width_at(300.0, 250.0), MIN_TREE_WIDTH);
+        assert_eq!(tree_width_at(f32::NAN, 1200.0), DEFAULT_TREE_WIDTH);
     }
 }

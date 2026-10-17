@@ -18,10 +18,19 @@ use crate::file_tree::{FileTree, Row};
 pub enum TreeEvent {
     /// Insert the file's quoted path at the cursor.
     Insert(PathBuf),
-    /// Open the file in `editor`, else with the OS default.
-    Open(PathBuf),
+    /// Show the file in the tab's file pane (spec §7.8).
+    Show(PathBuf),
     /// Change the shell's folder (only offered at a prompt).
     Cd(PathBuf),
+}
+
+/// A click on a file: show it; with Ctrl, insert its path (spec §7.3).
+pub fn file_click(ctrl: bool, path: PathBuf) -> TreeEvent {
+    if ctrl {
+        TreeEvent::Insert(path)
+    } else {
+        TreeEvent::Show(path)
+    }
 }
 
 pub struct FileTreeView {
@@ -116,10 +125,8 @@ impl FileTreeView {
             }
             self.sync_watches();
             cx.notify();
-        } else if ev.modifiers().control {
-            cx.emit(TreeEvent::Open(path));
         } else {
-            cx.emit(TreeEvent::Insert(path));
+            cx.emit(file_click(ev.modifiers().control, path));
         }
     }
 }
@@ -148,7 +155,7 @@ impl Render for FileTreeView {
                         };
                         let label = format!("{marker}{}", row.entry.name);
                         let tip: SharedString = if !row.entry.is_dir {
-                            "Click: insert the path · Ctrl+click: open".into()
+                            "Click: open · Ctrl+click: insert the path".into()
                         } else if can_cd {
                             "Double-click: cd here".into()
                         } else {
@@ -168,5 +175,17 @@ impl Render for FileTreeView {
                             .child(label)
                     })),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn click_shows_a_file_and_ctrl_click_inserts_its_path() {
+        let p = PathBuf::from("C:/x/a.md");
+        assert_eq!(file_click(false, p.clone()), TreeEvent::Show(p.clone()));
+        assert_eq!(file_click(true, p.clone()), TreeEvent::Insert(p));
     }
 }

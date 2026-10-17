@@ -430,7 +430,8 @@ still unsaved.
 **Closing.** Closing a file tab with unsaved edits asks Save / Discard /
 Cancel. Closing the last file tab closes the pane and the terminal gets the
 width back. Closing the pane (`Ctrl+W` while it has the focus, or closing the
-tab) asks once when any file has unsaved edits.
+tab) asks once when any file has unsaved edits. Closing a tab's last terminal
+closes the tab, asking first when its file pane has unsaved edits.
 
 **Changes on disk** (`notify`, as the tree): a file with no unsaved edits
 reloads; one with edits shows "changed on disk" with Reload / Keep mine. A

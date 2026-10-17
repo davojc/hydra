@@ -77,7 +77,7 @@ impl Workspace {
             let TabLayout {
                 tree,
                 terminals: panes,
-                files: _,
+                files,
             } = tab_layout(tab, &mut || {
                 *next += 1;
                 *next
@@ -85,6 +85,9 @@ impl Workspace {
             let focused = panes[0].0;
             for (id, request) in panes {
                 self.create_pane(id, request, window, cx);
+            }
+            if let Some((id, f)) = files {
+                self.create_files_pane(id, &f.files, f.active, window, cx);
             }
             tabs.push(self.tabs.add_tree(
                 Some(spec.name.clone()),
@@ -130,6 +133,29 @@ impl Workspace {
     /// Closes a set's tabs, asking first when commands are running; `reload` opens it again
     /// from its file afterwards (spec §5.4: reload is unload + load).
     pub(super) fn unload_set(
+        &mut self,
+        name: &str,
+        reload: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(set) = self.loaded.get(name) else {
+            return;
+        };
+        let panes: Vec<_> = set
+            .tabs
+            .iter()
+            .filter_map(|t| self.tabs.get(*t))
+            .flat_map(|t| t.tree.panes())
+            .collect();
+        let name = name.to_string();
+        self.confirm_unsaved(panes, window, cx, move |ws, w, cx| {
+            ws.unload_set_asking(&name, reload, w, cx)
+        });
+    }
+
+    /// `unload_set` once unsaved edits are dealt with: asks when commands are running.
+    fn unload_set_asking(
         &mut self,
         name: &str,
         reload: bool,
@@ -197,6 +223,10 @@ impl Workspace {
 
     pub(super) fn save_session(&self, window: &mut Window, cx: &mut App) {
         let pane = |id| {
+            if let Some(f) = self.files.get(&id) {
+                let (files, active) = f.read(cx).saved();
+                return Some(SavedPane::Files { files, active });
+            }
             self.panes.get(&id).map(|v| {
                 let v = v.read(cx);
                 SavedPane::Terminal {
@@ -266,7 +296,7 @@ impl Workspace {
             let TabLayout {
                 tree,
                 terminals: panes,
-                files: _,
+                files,
             } = tab_layout(&spec, &mut || {
                 *next += 1;
                 *next
@@ -274,6 +304,9 @@ impl Workspace {
             let focused = panes[0].0;
             for (id, request) in panes {
                 self.create_pane(id, request, window, cx);
+            }
+            if let Some((id, f)) = files {
+                self.create_files_pane(id, &f.files, f.active, window, cx);
             }
             self.tabs.add_tree(None, None, tree, focused);
             any = true;

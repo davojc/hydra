@@ -1,0 +1,242 @@
+//! The file tree's model (spec §7.3): folders read one level at a time when first shown,
+//! `.gitignore` respected, and the shell text for inserting a path or changing folder.
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
+
+use hydra_platform::shell::{ShellKind, sh_quote};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    pub path: PathBuf,
+    pub name: String,
+    pub is_dir: bool,
+}
+
+/// A folder's entries: folders first, then by name ignoring case; without what `.gitignore`
+/// files in the folder or above it exclude (repository or not), and without `.git`. One level
+/// only, so a big folder costs nothing until it is opened.
+pub fn list_dir(dir: &Path) -> Vec<Entry> {
+    let mut out: Vec<Entry> = ignore::WalkBuilder::new(dir)
+        .max_depth(Some(1))
+        .hidden(false)
+        .require_git(false)
+        .filter_entry(|e| e.file_name() != ".git")
+        .build()
+        .filter_map(Result::ok)
+        .filter(|e| e.depth() == 1)
+        .map(|e| Entry {
+            is_dir: e.file_type().is_some_and(|t| t.is_dir()),
+            name: e.file_name().to_string_lossy().into_owned(),
+            path: e.into_path(),
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    out
+}
+
+/// A visible row: an entry at its depth below the root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Row {
+    pub entry: Entry,
+    pub depth: usize,
+    pub expanded: bool,
+}
+
+/// The tree under a root: which folders are open, and their listings, read when first shown.
+#[derive(Debug, Default)]
+pub struct FileTree {
+    root: PathBuf,
+    open: BTreeSet<PathBuf>,
+    listings: HashMap<PathBuf, Vec<Entry>>,
+}
+
+impl FileTree {
+    pub fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            ..Default::default()
+        }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Moves to a new root (the focused pane's folder), starting closed. Returns whether it
+    /// changed.
+    pub fn set_root(&mut self, root: PathBuf) -> bool {
+        if root == self.root {
+            return false;
+        }
+        *self = FileTree::new(root);
+        true
+    }
+
+    pub fn toggle(&mut self, dir: &Path) {
+        if !self.open.remove(dir) {
+            self.open.insert(dir.to_path_buf());
+        }
+    }
+
+    /// The open folders, for the watcher.
+    pub fn open_dirs(&self) -> impl Iterator<Item = &PathBuf> {
+        self.open.iter()
+    }
+
+    /// Forgets a folder's listing so it is read again (after a change on disk).
+    pub fn refresh(&mut self, dir: &Path) {
+        self.listings.remove(dir);
+    }
+
+    /// The root's entries, with each open folder's entries below it.
+    pub fn rows(&mut self) -> Vec<Row> {
+        let mut out = Vec::new();
+        let root = self.root.clone();
+        self.push_rows(&root, 0, &mut out);
+        out
+    }
+
+    fn push_rows(&mut self, dir: &Path, depth: usize, out: &mut Vec<Row>) {
+        let entries = self
+            .listings
+            .entry(dir.to_path_buf())
+            .or_insert_with(|| list_dir(dir))
+            .clone();
+        for entry in entries {
+            let expanded = entry.is_dir && self.open.contains(&entry.path);
+            let path = entry.path.clone();
+            out.push(Row {
+                entry,
+                depth,
+                expanded,
+            });
+            if expanded {
+                self.push_rows(&path, depth + 1, out);
+            }
+        }
+    }
+}
+
+/// A path as one word for the shell: single-quoted for pwsh, and single-quoted with forward
+/// slashes for Git Bash.
+pub fn quote_path(shell: ShellKind, path: &Path) -> String {
+    let text = path.to_string_lossy();
+    match shell {
+        ShellKind::Pwsh => format!("'{}'", text.replace('\'', "''")),
+        ShellKind::Bash => sh_quote(&text.replace('\\', "/")),
+    }
+}
+
+/// What double-clicking a folder types: change folder, then Enter. pwsh uses `-LiteralPath`
+/// so `[` and `]` in a name aren't wildcards.
+pub fn cd_command(shell: ShellKind, dir: &Path) -> String {
+    match shell {
+        ShellKind::Pwsh => format!("Set-Location -LiteralPath {}\r", quote_path(shell, dir)),
+        ShellKind::Bash => format!("cd {}\r", quote_path(shell, dir)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// src/ (with inner.rs), target/ (ignored), Zeta/, .git/, and files.
+    fn project() -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path();
+        for dir in ["src", "target", "Zeta", ".git"] {
+            std::fs::create_dir_all(p.join(dir)).unwrap();
+        }
+        for file in [
+            "b.txt",
+            "A.md",
+            "x.log",
+            ".env",
+            "src/inner.rs",
+            "target/out.bin",
+        ] {
+            std::fs::write(p.join(file), "").unwrap();
+        }
+        std::fs::write(p.join(".gitignore"), "target/\n*.log\n").unwrap();
+        d
+    }
+
+    fn names(entries: &[Entry]) -> Vec<&str> {
+        entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    #[test]
+    fn a_listing_is_one_level_folders_first_without_ignored_files() {
+        let d = project();
+        let entries = list_dir(d.path());
+        assert_eq!(
+            names(&entries),
+            vec!["src", "Zeta", ".env", ".gitignore", "A.md", "b.txt"]
+        );
+        assert!(entries[0].is_dir && !entries[2].is_dir);
+        assert_eq!(entries[0].path, d.path().join("src"));
+    }
+
+    #[test]
+    fn open_folders_show_their_entries_below_them() {
+        let d = project();
+        let mut tree = FileTree::new(d.path().to_path_buf());
+        assert_eq!(tree.rows().len(), 6);
+        tree.toggle(&d.path().join("src"));
+        let rows = tree.rows();
+        assert_eq!(rows[0].entry.name, "src");
+        assert!(rows[0].expanded);
+        assert_eq!(
+            (rows[1].entry.name.as_str(), rows[1].depth),
+            ("inner.rs", 1)
+        );
+        assert_eq!(tree.open_dirs().count(), 1);
+        tree.toggle(&d.path().join("src"));
+        assert_eq!(tree.rows().len(), 6);
+    }
+
+    #[test]
+    fn listings_are_kept_until_refreshed() {
+        let d = project();
+        let mut tree = FileTree::new(d.path().to_path_buf());
+        assert_eq!(tree.rows().len(), 6);
+        std::fs::write(d.path().join("new.txt"), "").unwrap();
+        assert_eq!(tree.rows().len(), 6);
+        tree.refresh(d.path());
+        assert_eq!(tree.rows().len(), 7);
+    }
+
+    #[test]
+    fn a_new_root_starts_closed() {
+        let d = project();
+        let mut tree = FileTree::new(d.path().to_path_buf());
+        tree.toggle(&d.path().join("src"));
+        assert!(!tree.set_root(d.path().to_path_buf()));
+        assert!(tree.set_root(d.path().join("src")));
+        assert_eq!(tree.root(), d.path().join("src"));
+        assert_eq!(tree.open_dirs().count(), 0);
+        assert_eq!(
+            names(&tree.rows().into_iter().map(|r| r.entry).collect::<Vec<_>>()),
+            vec!["inner.rs"]
+        );
+    }
+
+    #[test]
+    fn paths_are_quoted_for_each_shell() {
+        let p = Path::new("C:\\work\\it's [here]");
+        assert_eq!(quote_path(ShellKind::Pwsh, p), "'C:\\work\\it''s [here]'");
+        assert_eq!(quote_path(ShellKind::Bash, p), "'C:/work/it'\\''s [here]'");
+        assert_eq!(
+            cd_command(ShellKind::Pwsh, p),
+            "Set-Location -LiteralPath 'C:\\work\\it''s [here]'\r"
+        );
+        assert_eq!(
+            cd_command(ShellKind::Bash, p),
+            "cd 'C:/work/it'\\''s [here]'\r"
+        );
+    }
+}

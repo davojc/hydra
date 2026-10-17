@@ -20,6 +20,7 @@ gpui_platform.workspace = true
 gpui-kit-assets.workspace = true
 gpui-component.workspace = true
 futures.workspace = true
+ignore.workspace = true
 serde.workspace = true
 toml.workspace = true
 

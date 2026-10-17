@@ -1,3 +1,4 @@
+#![windows_subsystem = "windows"]
 //! hydraui.exe: a desktop terminal for hydra environments.
 use std::sync::Arc;
 
@@ -14,10 +15,7 @@ use hydraui::workspace::Workspace;
 fn main() {
     let (hydra, hydra_problem) = match Hydra::from_env() {
         Ok(h) => h,
-        Err(e) => {
-            eprintln!("hydraui: {e}");
-            std::process::exit(1);
-        }
+        Err(e) => fatal(&e),
     };
     let (ui, ui_problems) = config::load(&hydra.paths);
     let (palette, colour_problems) = Palette::from_config(&ui.colors);
@@ -66,7 +64,24 @@ fn main() {
                     cx.new(|cx| Workspace::new(Arc::new(hydra), ui, style, problems, window, cx));
                 cx.new(|cx| Root::new(workspace, window, cx))
             })
-            .expect("hydraui can't open its window");
+            .unwrap_or_else(|e| fatal(&format!("hydraui can't open its window: {e}")));
             cx.activate(true);
         });
+}
+
+/// A GUI exe has no console: say why it can't start in a message box, then exit.
+fn fatal(message: &str) -> ! {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let (text, title) = (wide(message), wide("hydraui"));
+    // SAFETY: both strings are NUL-terminated UTF-16 that outlive the call.
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        )
+    };
+    std::process::exit(1)
 }

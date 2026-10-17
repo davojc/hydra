@@ -47,6 +47,7 @@ pub struct TermStyle {
 pub enum PaneEvent {
     Focused,
     CwdChanged,
+    PromptChanged,
     TitleChanged,
     Exited,
 }
@@ -166,6 +167,7 @@ impl PaneView {
     ) -> Self {
         let focus = cx.focus_handle();
         let on_focus = cx.on_focus(&focus, window, |_, _, cx| cx.emit(PaneEvent::Focused));
+        let warnings: Vec<String> = request.note.iter().cloned().collect();
         let mut view = Self {
             id,
             cwd: request.cwd.clone(),
@@ -173,7 +175,7 @@ impl PaneView {
             hydra,
             style,
             slot: Slot::Starting,
-            warnings: Vec::new(),
+            warnings,
             prompt: None,
             title: None,
             focus,
@@ -215,6 +217,17 @@ impl PaneView {
         })
     }
 
+    /// Text for the shell as if typed (a path from the file tree, a `cd`).
+    pub fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.send(text.as_bytes(), cx);
+    }
+
+    /// New font and colours (Reload config): drawn from the next frame.
+    pub fn set_style(&mut self, style: Arc<TermStyle>, cx: &mut Context<Self>) {
+        self.style = style;
+        cx.notify();
+    }
+
     /// Runs `prepare` and starts the shell off the UI thread. Also Retry and restart, so an
     /// edited env.toml applies (spec §6.4).
     fn start(&mut self, cx: &mut Context<Self>) {
@@ -246,7 +259,13 @@ impl PaneView {
             Ok(s) => {
                 // The view may have been laid out at another size while the shell started.
                 let _ = s.pane.resize(self.size);
-                self.warnings = s.warnings;
+                self.warnings = self
+                    .request
+                    .note
+                    .iter()
+                    .cloned()
+                    .chain(s.warnings)
+                    .collect();
                 self._tasks.push(pump(s.events, generation, cx));
                 self.slot = Slot::Running(s.pane);
             }
@@ -265,7 +284,10 @@ impl PaneView {
                 self.cwd = p;
                 cx.emit(PaneEvent::CwdChanged);
             }
-            TermEvent::Prompt(p) => self.prompt = Some(p),
+            TermEvent::Prompt(p) => {
+                self.prompt = Some(p);
+                cx.emit(PaneEvent::PromptChanged);
+            }
             TermEvent::Title(t) => {
                 self.title = (!t.is_empty() && !is_program_path(&t)).then_some(t);
                 cx.emit(PaneEvent::TitleChanged);

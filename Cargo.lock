@@ -2942,10 +2942,15 @@ dependencies = [
  "hydra-core",
  "hydra-platform",
  "hydra-providers",
+ "hydraui-sets",
  "hydraui-term",
+ "ignore",
+ "notify",
  "serde",
  "tempfile",
  "toml 0.8.23",
+ "windows-sys 0.61.2",
+ "winresource",
 ]
 
 [[package]]

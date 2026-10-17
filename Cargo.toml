@@ -12,11 +12,14 @@ hydra-core = { path = "crates/hydra-core" }
 hydra-platform = { path = "crates/hydra-platform" }
 hydra-providers = { path = "crates/hydra-providers" }
 hydraui-term = { path = "crates/hydraui-term" }
+hydraui-sets = { path = "crates/hydraui-sets" }
 gpui = { package = "gpui-pre", version = "=0.3.9" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["font-kit", "runtime_shaders"] }
 gpui-component = "=0.7.3"
 gpui-kit-assets = "=0.7.3"
 futures = "0.3"
+ignore = "0.4"
+notify = "8"
 anstream = "1"
 anstyle = "1"
 anyhow = "1"
@@ -38,5 +41,5 @@ semver = "1"
 sha2 = "0.10"
 ureq = "2"
 portable-pty = "0.9.0"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 alacritty_terminal = "0.26.0"

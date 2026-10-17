@@ -14,13 +14,20 @@ hydra-platform.workspace = true
 hydra-providers.workspace = true
 dirs.workspace = true
 hydraui-term.workspace = true
+hydraui-sets.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 gpui-kit-assets.workspace = true
 gpui-component.workspace = true
 futures.workspace = true
+ignore.workspace = true
+notify.workspace = true
+windows-sys.workspace = true
 serde.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[build-dependencies]
+winresource = "0.1"

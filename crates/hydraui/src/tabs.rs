@@ -9,6 +9,8 @@ pub struct Tab {
     pub id: TabId,
     /// The set that opened it; `None` is the Loose group.
     pub set: Option<String>,
+    /// The set file's title for the tab; Loose tabs have none and show their pane's label.
+    pub title: Option<String>,
     pub tree: Tree,
     pub focused: PaneId,
 }
@@ -54,9 +56,20 @@ impl Tabs {
         self.active().map(|t| t.id)
     }
 
-    /// Adds a one-pane tab after the last tab of its set (a new set goes before the Loose
-    /// tabs; a Loose tab goes last) and makes it active.
+    /// Adds a one-pane Loose-style tab; see `add_tree`.
     pub fn add(&mut self, set: Option<String>, pane: PaneId) -> TabId {
+        self.add_tree(set, None, Tree::Leaf(pane), pane)
+    }
+
+    /// Adds a tab after the last tab of its set (a new set goes before the Loose tabs; a
+    /// Loose tab goes last) and makes it active.
+    pub fn add_tree(
+        &mut self,
+        set: Option<String>,
+        title: Option<String>,
+        tree: Tree,
+        focused: PaneId,
+    ) -> TabId {
         self.next_id += 1;
         let id = self.next_id;
         let at = match &set {
@@ -78,8 +91,9 @@ impl Tabs {
             Tab {
                 id,
                 set,
-                tree: Tree::Leaf(pane),
-                focused: pane,
+                title,
+                tree,
+                focused,
             },
         );
         self.active = at;
@@ -292,5 +306,29 @@ mod tests {
         assert!(t.groups().is_empty());
         let b = t.add(None, 6);
         assert_eq!(t.active_id(), Some(b));
+    }
+
+    #[test]
+    fn add_tree_keeps_the_layout_title_and_focus() {
+        let mut t = Tabs::default();
+        t.add(None, 1);
+        let tree = Tree::Split {
+            axis: Axis::Row,
+            ratio: 0.6,
+            first: Box::new(Tree::Leaf(2)),
+            second: Box::new(Tree::Leaf(3)),
+        };
+        let id = t.add_tree(Some("client-a".into()), Some("api".into()), tree.clone(), 2);
+        let tab = t.get(id).unwrap();
+        assert_eq!(tab.tree, tree);
+        assert_eq!(tab.focused, 2);
+        assert_eq!(tab.title.as_deref(), Some("api"));
+        assert_eq!(t.active_id(), Some(id));
+        assert_eq!(
+            t.iter().next().unwrap().id,
+            id,
+            "a set's tab goes before the Loose tabs"
+        );
+        assert_eq!(t.get(t.tab_of(1).unwrap()).unwrap().title, None);
     }
 }

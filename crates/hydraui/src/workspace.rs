@@ -1,8 +1,11 @@
 //! The window's content (spec §7.1, §7.5, §7.6): the tab strip, the active tab's split panes
 //! with draggable dividers, the status bar, and the commands bound to keys.
+mod launcher;
+mod sets;
+
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -16,16 +19,21 @@ use gpui::{
 use gpui_component::command::{Command, CommandItem, CommandState};
 use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, WindowExt, h_flex, v_flex};
+use hydraui_sets::LoadedSets;
+
+use hydraui_term::PromptState;
 
 use crate::config::UiConfig;
+use crate::file_tree::{cd_command, editor_command, quote_path};
+use crate::file_tree_view::{FileTreeView, TreeEvent};
 use crate::hydra::{Hydra, PaneRequest, STATUS_TTL, StatusCache, accounts_summary};
 use crate::keys::{
-    ClosePane, FocusDown, FocusLeft, FocusRight, FocusUp, NewTab, NextTab, PreviousTab, SplitDown,
-    SplitRight,
+    ClosePane, FileTree, FocusDown, FocusLeft, FocusRight, FocusUp, NewTab, NextTab, PreviousTab,
+    SplitDown, SplitRight,
 };
 use crate::pane_view::{PaneEvent, PaneView, TermStyle};
 use crate::split::{Axis, Dir, PaneId, Tree};
-use crate::tabs::{TabId, Tabs};
+use crate::tabs::{Closed, TabId, Tabs};
 
 /// A divider being dragged: the split's path in the active tab's tree.
 struct Drag {
@@ -44,6 +52,14 @@ pub struct Workspace {
     status: StatusCache,
     refreshing: HashSet<String>,
     drag: Option<Drag>,
+    loaded: LoadedSets,
+    /// Loaded sets whose file changed since loading.
+    changed_sets: HashSet<String>,
+    /// Set groups folded away in the tab strip.
+    collapsed: HashSet<String>,
+    _set_watch: Task<()>,
+    tree: Option<Entity<FileTreeView>>,
+    tree_sub: Option<Subscription>,
     /// Each split's on-screen bounds at the last paint, by path, for divider drags.
     split_bounds: Rc<RefCell<HashMap<Vec<usize>, Bounds<Pixels>>>>,
     focus: FocusHandle,
@@ -69,6 +85,17 @@ impl Workspace {
                 }
             }
         });
+        // A loaded set's file edited or deleted: offer a reload (spec §5.4).
+        let set_watch = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(2))
+                    .await;
+                if this.update(cx, |ws, cx| ws.check_sets(cx)).is_err() {
+                    break;
+                }
+            }
+        });
         // After the window's Root exists: toasts and dialogs live in it.
         cx.spawn_in(window, async move |this, cx| {
             let _ = this.update_in(cx, |ws, window, cx| ws.startup(problems, window, cx));
@@ -85,6 +112,12 @@ impl Workspace {
             status: StatusCache::default(),
             refreshing: HashSet::new(),
             drag: None,
+            loaded: LoadedSets::default(),
+            changed_sets: HashSet::new(),
+            collapsed: HashSet::new(),
+            _set_watch: set_watch,
+            tree: None,
+            tree_sub: None,
             split_bounds: Rc::default(),
             focus: cx.focus_handle(),
             title: String::new(),
@@ -98,8 +131,11 @@ impl Workspace {
         for p in problems {
             window.push_notification(Notification::warning(p).title("hydraui settings"), cx);
         }
-        let home = self.hydra.user_home.clone();
-        self.new_tab_in(home, window, cx);
+        // The sets open at last exit (spec §5.4); a plain tab when there were none.
+        if !self.restore_session(window, cx) {
+            let home = self.hydra.user_home.clone();
+            self.new_tab_in(home, window, cx);
+        }
     }
 
     /// A Loose tab in `cwd`: the folder's environment, else `default_env`, else ask.
@@ -147,16 +183,19 @@ impl Workspace {
 
     fn open_tab(&mut self, env: String, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let shell = self.hydra.shell(self.ui.default_shell.as_deref());
-        let id = self.new_pane(
-            PaneRequest {
-                env,
-                cwd,
-                shell,
-                command: None,
-            },
-            window,
-            cx,
-        );
+        self.open_request(PaneRequest::new(env, cwd, shell), window, cx);
+    }
+
+    /// The focused pane's folder, else the user's home.
+    fn focused_cwd(&self, cx: &App) -> PathBuf {
+        self.focused()
+            .map(|v| v.read(cx).cwd().clone())
+            .unwrap_or_else(|| self.hydra.user_home.clone())
+    }
+
+    /// A Loose tab running `request`.
+    fn open_request(&mut self, request: PaneRequest, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.new_pane(request, window, cx);
         self.tabs.add(None, id);
         self.focus_soon(id, window, cx);
         cx.notify();
@@ -170,6 +209,17 @@ impl Workspace {
     ) -> PaneId {
         self.next_pane += 1;
         let id = self.next_pane;
+        self.create_pane(id, request, window, cx);
+        id
+    }
+
+    fn create_pane(
+        &mut self,
+        id: PaneId,
+        request: PaneRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let tint = self.hydra.tint(&request.env);
         self.tints.insert(request.env.clone(), tint);
         let (hydra, style) = (self.hydra.clone(), self.style.clone());
@@ -179,11 +229,11 @@ impl Workspace {
                 ws.tabs.focus_pane(id);
                 ws.refresh_status(cx);
             }
+            ws.sync_tree(cx);
             cx.notify();
         });
         self.subs.insert(id, sub);
         self.panes.insert(id, view);
-        id
     }
 
     fn focused(&self) -> Option<Entity<PaneView>> {
@@ -221,10 +271,7 @@ impl Workspace {
     }
 
     fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
-        let cwd = self
-            .focused()
-            .map(|v| v.read(cx).cwd().clone())
-            .unwrap_or_else(|| self.hydra.user_home.clone());
+        let cwd = self.focused_cwd(cx);
         self.new_tab_in(cwd, window, cx);
     }
 
@@ -235,12 +282,7 @@ impl Workspace {
         };
         let request = {
             let v = from.read(cx);
-            PaneRequest {
-                env: v.env().to_string(),
-                cwd: v.cwd().clone(),
-                shell: v.request.shell,
-                command: None,
-            }
+            PaneRequest::new(v.env(), v.cwd().clone(), v.request.shell)
         };
         let id = self.new_pane(request, window, cx);
         self.tabs.split_focused(axis, id);
@@ -266,7 +308,9 @@ impl Workspace {
         let Some(id) = self.tabs.active().map(|t| t.focused) else {
             return;
         };
-        self.tabs.close_pane(id);
+        if let Closed::Tab(tab) = self.tabs.close_pane(id) {
+            self.tab_gone(tab, window, cx);
+        }
         self.drop_pane(id);
         self.focus_active(window, cx);
         cx.notify();
@@ -276,6 +320,7 @@ impl Workspace {
         for id in self.tabs.close_tab(tab) {
             self.drop_pane(id);
         }
+        self.tab_gone(tab, window, cx);
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -336,6 +381,81 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    fn toggle_tree(&mut self, _: &FileTree, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tree.take().is_some() {
+            self.tree_sub = None;
+        } else {
+            let root = self.focused_cwd(cx);
+            let view = cx.new(|cx| FileTreeView::new(root, cx));
+            self.tree_sub = Some(cx.subscribe_in(
+                &view,
+                window,
+                |ws, _, ev: &TreeEvent, window, cx| ws.on_tree_event(ev, window, cx),
+            ));
+            self.tree = Some(view);
+            self.sync_tree(cx);
+        }
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// Roots the tree at the focused pane's folder; `cd` only while it is at its prompt.
+    fn sync_tree(&mut self, cx: &mut Context<Self>) {
+        let (Some(tree), Some(view)) = (self.tree.clone(), self.focused()) else {
+            return;
+        };
+        let (cwd, at_prompt) = {
+            let v = view.read(cx);
+            (v.cwd().clone(), v.prompt() == Some(PromptState::AtPrompt))
+        };
+        tree.update(cx, |t, cx| {
+            t.set_root(cwd, cx);
+            t.set_can_cd(at_prompt, cx);
+        });
+    }
+
+    fn on_tree_event(&mut self, ev: &TreeEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.focused() else {
+            return;
+        };
+        match ev {
+            TreeEvent::Insert(path) => view.update(cx, |v, cx| {
+                let text = format!("{} ", quote_path(v.request.shell, path));
+                v.insert_text(&text, cx);
+            }),
+            TreeEvent::Cd(dir) => view.update(cx, |v, cx| {
+                if v.prompt() == Some(PromptState::AtPrompt) {
+                    let text = cd_command(v.request.shell, dir);
+                    v.insert_text(&text, cx);
+                }
+            }),
+            TreeEvent::Open(path) => self.open_file(path, window, cx),
+        }
+        self.focus_active(window, cx);
+    }
+
+    /// Opens a file in `editor` (a program name or path; `.cmd` launchers such as VS Code's
+    /// `code` work), else with the OS default.
+    fn open_file(&self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.ui.editor.as_deref() else {
+            cx.open_with_system(path);
+            return;
+        };
+        let search = std::env::var_os("PATH").unwrap_or_default();
+        let mut cmd = editor_command(
+            editor,
+            path,
+            &search,
+            std::env::var_os("PATHEXT").as_deref(),
+        );
+        if let Err(e) = cmd.spawn() {
+            window.push_notification(
+                Notification::error(format!("can't start {editor}: {e}")).title("Open file"),
+                cx,
+            );
+        }
     }
 
     fn tint(&self, env: &str) -> Hsla {
@@ -510,13 +630,13 @@ impl Workspace {
             .border_b_1()
             .border_color(border);
         for (set, ids) in self.tabs.groups() {
-            strip = strip.child(
-                div()
-                    .px_2()
-                    .text_sm()
-                    .text_color(muted)
-                    .child(set.unwrap_or_else(|| "Loose".into())),
-            );
+            strip = match &set {
+                Some(name) => strip.child(self.render_set_header(name, muted, cx)),
+                None => strip.child(div().px_2().text_sm().text_color(muted).child("Loose")),
+            };
+            if set.as_ref().is_some_and(|s| self.collapsed.contains(s)) {
+                continue;
+            }
             for id in ids {
                 let Some(tab) = self.tabs.get(id) else {
                     continue;
@@ -530,6 +650,7 @@ impl Workspace {
                     })
                     .unwrap_or_default();
                 let tint = self.tint(&env);
+                let label = tab.title.clone().unwrap_or(label);
                 strip = strip.child(
                     h_flex()
                         .id(("tab", id))
@@ -644,8 +765,27 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::focus_down))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
+            .on_action(cx.listener(Self::open_launcher))
+            .on_action(cx.listener(Self::toggle_tree))
             .child(self.render_tab_strip(bar, border, muted, cx))
-            .child(div().flex_1().min_h_0().child(body))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .items_start()
+                    .when_some(self.tree.clone(), |d, tree| {
+                        d.child(
+                            div()
+                                .w(px(260.))
+                                .h_full()
+                                .flex_none()
+                                .border_r_1()
+                                .border_color(border)
+                                .child(tree),
+                        )
+                    })
+                    .child(div().flex_1().min_w_0().h_full().child(body)),
+            )
             .child(self.render_status(border, muted, cx))
             .when(self.drag.is_some(), |d| d.child(self.drag_listener(cx)))
     }

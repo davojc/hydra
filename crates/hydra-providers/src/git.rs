@@ -177,13 +177,13 @@ pub fn render_hook(name: &EnvName, hook: &str, hydra_exe: &str, chain_dir: &str)
 /// precedence first) that sets it, directly or through an `[include]`. Empty when none does or git can't be run.
 fn user_hooks_path(files: &[PathBuf]) -> String {
     for f in files.iter().rev().filter(|f| f.is_file()) {
-        let out = std::process::Command::new("git")
-            .arg("config")
+        let mut git = std::process::Command::new("git");
+        git.arg("config")
             .arg("--file")
             .arg(f)
             .args(["--includes", "--type=path", "--get", "core.hooksPath"])
-            .stdin(std::process::Stdio::null())
-            .output();
+            .stdin(std::process::Stdio::null());
+        let out = hydra_platform::process::hide_window(&mut git).output();
         if let Ok(o) = out
             && o.status.success()
         {

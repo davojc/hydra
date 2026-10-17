@@ -1,21 +1,22 @@
 //! hydraui's link to hydra (spec §3.1, §4, §7.1): environments, `prepare` with guards off,
 //! starting panes, and the identity checks for the status bar. No UI.
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use hydra_core::bindings;
-use hydra_core::config::{GlobalConfig, load_env, load_global};
+use hydra_core::config::{EnvConfig, GlobalConfig, load_env, load_global};
 use hydra_core::envs;
 use hydra_core::name::EnvName;
 use hydra_core::paths::HydraPaths;
 use hydra_core::provider::{Ctx, IdentityReport, Provider, Status, Warnings};
 use hydra_core::resolve::{ENV_VARS_MARKER, LaunchEnv, PrepareError, PrepareOptions, prepare};
+use hydra_core::secret::{SecretRef, SecretStore};
 use hydra_platform::keyring_store::KeyringStore;
 use hydra_platform::process::EnvRunner;
-use hydra_platform::shell::ShellKind;
+use hydra_platform::shell::{ShellKind, pwsh_quote, sh_quote};
 use hydraui_term::{GridSize, Pane, SpawnSpec, TermEvent};
 
 use crate::palette::env_tint;
@@ -28,6 +29,27 @@ pub struct PaneRequest {
     pub shell: ShellKind,
     /// Shell text run after the shell starts.
     pub command: Option<String>,
+    /// Shown in the pane's warning strip (e.g. the folder is bound to another environment).
+    pub note: Option<String>,
+    /// Variables the pane's shell must not inherit (a sign-in's `auth_unset`).
+    pub drop_vars: Vec<String>,
+    /// Start even when a referenced secret isn't stored (signing in is how it gets stored).
+    pub allow_missing_secrets: bool,
+}
+
+impl PaneRequest {
+    /// A plain shell in `env` at `cwd`.
+    pub fn new(env: impl Into<String>, cwd: PathBuf, shell: ShellKind) -> Self {
+        Self {
+            env: env.into(),
+            cwd,
+            shell,
+            command: None,
+            note: None,
+            drop_vars: Vec::new(),
+            allow_missing_secrets: false,
+        }
+    }
 }
 
 /// A started pane, with the warnings `prepare` gave (shown as the pane's strip).
@@ -42,7 +64,7 @@ pub struct Hydra {
     pub user_home: PathBuf,
     /// hydra's config.toml: bindings, `default_shell`, `git_bash`.
     pub global: GlobalConfig,
-    store: KeyringStore,
+    store: Box<dyn SecretStore + Send + Sync>,
     /// `prepare` rewrites state files through fixed temp names, so two at once (a pane
     /// starting while the status bar runs whoami) take turns.
     prepare_turn: Mutex<()>,
@@ -58,14 +80,14 @@ impl Hydra {
             Some(h) => PathBuf::from(h),
             None => dirs::home_dir().ok_or("can't find your home folder")?,
         };
-        let store = KeyringStore::from_env(&paths);
+        let store = Box::new(KeyringStore::from_env(&paths));
         Ok(Hydra::new(paths, user_home, store))
     }
 
     pub fn new(
         paths: HydraPaths,
         user_home: PathBuf,
-        store: KeyringStore,
+        store: Box<dyn SecretStore + Send + Sync>,
     ) -> (Hydra, Option<String>) {
         let (global, problem) = match load_global(&paths) {
             Ok(g) => (g, None),
@@ -135,16 +157,36 @@ impl Hydra {
         env_tint(env, rgb)
     }
 
-    /// `prepare` for a hydraui pane: guards off (spec §4.1).
-    pub fn prepare(&self, env: &str) -> Result<LaunchEnv, String> {
-        let name = EnvName::parse(env).map_err(|e| e.to_string())?;
+    /// `prepare` for a pane: guards off (spec §4.1), plus a sign-in's dropped variables and
+    /// leniency about missing secrets.
+    pub fn prepare(&self, req: &PaneRequest) -> Result<LaunchEnv, String> {
+        let name = EnvName::parse(&req.env).map_err(|e| e.to_string())?;
         let opts = PrepareOptions {
             no_guards: true,
+            allow_missing_secrets: req.allow_missing_secrets,
+            drop_vars: req.drop_vars.clone(),
             inherited_env_vars: std::env::var(ENV_VARS_MARKER).ok(),
             ..Default::default()
         };
         self.prepare_in_turn(&name, &hydra_providers::all(), &opts)
             .map_err(|e| e.to_string())
+    }
+
+    fn ctx<'a>(
+        &'a self,
+        name: &'a EnvName,
+        config: &'a EnvConfig,
+        warnings: &'a Warnings,
+    ) -> Ctx<'a> {
+        Ctx {
+            name,
+            env: config,
+            paths: &self.paths,
+            user_home: &self.user_home,
+            secrets: self.store.as_ref(),
+            guards: false,
+            warnings,
+        }
     }
 
     fn prepare_in_turn(
@@ -159,7 +201,7 @@ impl Hydra {
             name,
             &self.user_home,
             providers,
-            &self.store,
+            self.store.as_ref(),
             opts,
         )
     }
@@ -167,7 +209,7 @@ impl Hydra {
     /// Prepares the environment and starts the pane's shell. The error is the pane's banner
     /// text (spec §7.5).
     pub fn start(&self, req: &PaneRequest, size: GridSize) -> Result<Started, String> {
-        let launch = self.prepare(&req.env)?;
+        let launch = self.prepare(req)?;
         let warnings = launch.warnings.clone();
         let spec = SpawnSpec {
             paths: self.paths.clone(),
@@ -203,21 +245,131 @@ impl Hydra {
             return Vec::new();
         };
         let warnings = Warnings::default();
-        let ctx = Ctx {
-            name: &name,
-            env: &launch.config,
-            paths: &self.paths,
-            user_home: &self.user_home,
-            secrets: &self.store,
-            guards: false,
-            warnings: &warnings,
-        };
+        let ctx = self.ctx(&name, &launch.config, &warnings);
         let runner = EnvRunner { launch: &launch };
         providers
             .iter()
             .filter(|p| p.is_configured(&launch.config))
             .map(|p| p.check(&ctx, &runner))
             .collect()
+    }
+
+    /// The tools in `env` that have a sign-in command (what `hydra auth <tool> <env>`
+    /// accepts), by id.
+    pub fn sign_ins(&self, env: &str) -> Vec<String> {
+        let Ok(name) = EnvName::parse(env) else {
+            return Vec::new();
+        };
+        let Ok(config) = load_env(&self.paths, &name) else {
+            return Vec::new();
+        };
+        let warnings = Warnings::default();
+        let ctx = self.ctx(&name, &config, &warnings);
+        hydra_providers::all()
+            .iter()
+            .filter(|p| p.is_configured(&config) && p.auth_command(&ctx).is_some())
+            .map(|p| p.id().to_string())
+            .collect()
+    }
+
+    /// A pane that signs `tool` in for `env` as `hydra auth <tool> <env>` does (spec §7.4):
+    /// the tool's sign-in command as the startup command, its `auth_unset` variables dropped,
+    /// missing secrets allowed.
+    pub fn sign_in_request(
+        &self,
+        env: &str,
+        tool: &str,
+        cwd: PathBuf,
+        shell: ShellKind,
+    ) -> Result<PaneRequest, String> {
+        let p = hydra_providers::by_id(tool).ok_or_else(|| format!("unknown tool {tool:?}"))?;
+        let mut req = PaneRequest::new(env, cwd, shell);
+        req.allow_missing_secrets = true;
+        req.drop_vars = p.auth_unset().iter().map(|s| s.to_string()).collect();
+        let launch = self.prepare(&req)?;
+        if !p.is_configured(&launch.config) {
+            return Err(format!(
+                "{id} isn't configured for {env}; add a [{id}] section to its env.toml",
+                id = p.id()
+            ));
+        }
+        let warnings = Warnings::default();
+        let argv = p
+            .auth_command(&self.ctx(&launch.name, &launch.config, &warnings))
+            .ok_or_else(|| {
+                format!(
+                    "{} has no sign-in command; store its secret with Set secret",
+                    p.id()
+                )
+            })?;
+        req.command = Some(command_line(shell, &argv));
+        Ok(req)
+    }
+
+    /// The `secret:` references in `env`'s env.toml that aren't stored yet, as `env/key`.
+    pub fn missing_secrets(&self, env: &str) -> Vec<String> {
+        let Ok(name) = EnvName::parse(env) else {
+            return Vec::new();
+        };
+        match std::fs::read_to_string(self.paths.env_file(&name)) {
+            Ok(text) => missing_secrets(&text, self.store.as_ref()),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Stores a secret through hydra's store, which also keeps secrets.toml's index. The
+    /// value is kept exactly as typed; an empty or blank one is refused.
+    pub fn set_secret(&self, path: &str, value: &str) -> Result<(), String> {
+        let r = SecretRef::parse_path(path.trim()).map_err(|e| e.to_string())?;
+        if value.trim().is_empty() {
+            return Err(format!("{}: the value is empty", r.path()));
+        }
+        self.store.set(&r, value).map_err(|e| e.to_string())
+    }
+}
+
+/// `argv` as one command line for `shell`, every word quoted, so paths with spaces or
+/// apostrophes stay one word.
+pub fn command_line(shell: ShellKind, argv: &[String]) -> String {
+    match shell {
+        ShellKind::Pwsh => {
+            let words: Vec<String> = argv.iter().map(|a| pwsh_quote(a)).collect();
+            format!("& {}", words.join(" "))
+        }
+        ShellKind::Bash => argv
+            .iter()
+            .map(|a| sh_quote(a))
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+/// The `secret:` references anywhere in env.toml text that `store` doesn't hold, as sorted
+/// `env/key` paths. Text that isn't TOML has none.
+pub fn missing_secrets(env_toml: &str, store: &dyn SecretStore) -> Vec<String> {
+    let Ok(table) =
+        toml::from_str::<toml::Table>(env_toml.strip_prefix('\u{feff}').unwrap_or(env_toml))
+    else {
+        return Vec::new();
+    };
+    let mut refs = BTreeSet::new();
+    collect_refs(&toml::Value::Table(table), &mut refs);
+    refs.into_iter()
+        .filter(|r| matches!(store.get(r), Ok(None)))
+        .map(|r| r.path())
+        .collect()
+}
+
+fn collect_refs(value: &toml::Value, out: &mut BTreeSet<SecretRef>) {
+    match value {
+        toml::Value::String(s) => {
+            if let Ok(Some(r)) = SecretRef::parse_value(s) {
+                out.insert(r);
+            }
+        }
+        toml::Value::Array(items) => items.iter().for_each(|v| collect_refs(v, out)),
+        toml::Value::Table(t) => t.values().for_each(|v| collect_refs(v, out)),
+        _ => {}
     }
 }
 
@@ -264,6 +416,7 @@ impl StatusCache {
 
 #[cfg(test)]
 mod tests {
+    use hydra_core::secret::{MemoryStore, SecretRef, SecretStore};
     use hydra_platform::shell::find_shell;
 
     use super::*;
@@ -280,7 +433,15 @@ mod tests {
     fn fx(config: &str) -> Fx {
         let d = tempfile::tempdir().unwrap();
         let paths = HydraPaths::new(d.path().join(".hydra"));
-        for (env, toml) in [("work", ""), ("personal", "color = \"#112233\"\n")] {
+        for (env, toml) in [
+            ("work", ""),
+            ("personal", "color = \"#112233\"\n"),
+            ("gh", "[github]\n"),
+            (
+                "keyed",
+                "[env]\nLINEAR_API_KEY = \"secret:keyed/linear\"\nPLAIN = \"x\"\n",
+            ),
+        ] {
             let n = EnvName::parse(env).unwrap();
             std::fs::create_dir_all(paths.env_dir(&n)).unwrap();
             std::fs::write(paths.env_file(&n), toml).unwrap();
@@ -291,11 +452,11 @@ mod tests {
         std::fs::create_dir_all(&free).unwrap();
         let fwd = bound.to_string_lossy().replace('\\', "/");
         std::fs::write(paths.config_file(), config.replace("BOUND", &fwd)).unwrap();
-        let store = KeyringStore::new(
-            format!("hydraui-test-{}", std::process::id()),
-            paths.secret_index(),
+        let (hydra, problem) = Hydra::new(
+            paths,
+            d.path().join("home"),
+            Box::new(MemoryStore::default()),
         );
-        let (hydra, problem) = Hydra::new(paths, d.path().join("home"), store);
         assert_eq!(problem, None);
         Fx {
             _d: d,
@@ -312,7 +473,7 @@ mod tests {
         let f = fx("");
         let mut names = f.hydra.env_names();
         names.sort();
-        assert_eq!(names, vec!["personal", "work"]);
+        assert_eq!(names, vec!["gh", "keyed", "personal", "work"]);
         assert!(f.hydra.env_exists("work"));
         assert!(!f.hydra.env_exists("nobody"));
         assert!(!f.hydra.env_exists("Not A Name"));
@@ -355,8 +516,11 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let paths = HydraPaths::new(d.path());
         std::fs::write(paths.config_file(), "bindings = 3\n").unwrap();
-        let store = KeyringStore::new("hydraui-test-unused", paths.secret_index());
-        let (hydra, problem) = Hydra::new(paths, d.path().to_path_buf(), store);
+        let (hydra, problem) = Hydra::new(
+            paths,
+            d.path().to_path_buf(),
+            Box::new(MemoryStore::default()),
+        );
         assert!(problem.unwrap().contains("config.toml"));
         assert!(hydra.global.bindings.is_empty());
     }
@@ -364,8 +528,20 @@ mod tests {
     #[test]
     fn prepare_works_and_a_missing_environment_says_so() {
         let f = fx("");
-        assert_eq!(f.hydra.prepare("work").unwrap().name.as_str(), "work");
-        assert!(f.hydra.prepare("nobody").unwrap_err().contains("nobody"));
+        assert_eq!(
+            f.hydra
+                .prepare(&PaneRequest::new("work", f.free.clone(), ShellKind::Pwsh))
+                .unwrap()
+                .name
+                .as_str(),
+            "work"
+        );
+        assert!(
+            f.hydra
+                .prepare(&PaneRequest::new("nobody", f.free.clone(), ShellKind::Pwsh))
+                .unwrap_err()
+                .contains("nobody")
+        );
     }
 
     #[test]
@@ -375,7 +551,15 @@ mod tests {
             let f = fx("");
             let results: Vec<Result<LaunchEnv, String>> = std::thread::scope(|s| {
                 let handles: Vec<_> = (0..8)
-                    .map(|_| s.spawn(|| f.hydra.prepare("work")))
+                    .map(|_| {
+                        s.spawn(|| {
+                            f.hydra.prepare(&PaneRequest::new(
+                                "work",
+                                f.free.clone(),
+                                ShellKind::Pwsh,
+                            ))
+                        })
+                    })
                     .collect();
                 handles.into_iter().map(|h| h.join().unwrap()).collect()
             });
@@ -401,12 +585,7 @@ mod tests {
             return;
         }
         let f = fx("");
-        let req = PaneRequest {
-            env: "work".into(),
-            cwd: f.free.clone(),
-            shell: ShellKind::Pwsh,
-            command: None,
-        };
+        let req = PaneRequest::new("work", f.free.clone(), ShellKind::Pwsh);
         let started = f
             .hydra
             .start(&req, GridSize { cols: 80, rows: 24 })
@@ -453,5 +632,111 @@ mod tests {
         assert!(c.is_fresh("work", t0 + Duration::from_secs(59)));
         assert!(!c.is_fresh("work", t0 + STATUS_TTL));
         assert_eq!(c.get("work"), Some("github: x"));
+    }
+
+    #[test]
+    fn prepare_needs_secrets_unless_signing_in() {
+        let f = fx("");
+        let mut req = PaneRequest::new("keyed", f.free.clone(), ShellKind::Pwsh);
+        assert!(f.hydra.prepare(&req).is_err());
+        req.allow_missing_secrets = true;
+        assert!(f.hydra.prepare(&req).is_ok());
+    }
+
+    #[test]
+    fn missing_secrets_are_the_unstored_references() {
+        let store = MemoryStore::default();
+        store
+            .set(&SecretRef::parse_path("work/b").unwrap(), "1")
+            .unwrap();
+        let text = "[env]\nA = \"secret:work/a\"\nB = \"secret:work/b\"\nC = \"plain\"\n\
+                    [gws]\nlist = [\"secret:acme/x\"]\n";
+        assert_eq!(missing_secrets(text, &store), vec!["acme/x", "work/a"]);
+        assert!(missing_secrets("not toml [", &store).is_empty());
+        let f = fx("");
+        assert_eq!(f.hydra.missing_secrets("keyed"), vec!["keyed/linear"]);
+        assert!(f.hydra.missing_secrets("work").is_empty());
+        assert!(f.hydra.missing_secrets("nobody").is_empty());
+    }
+
+    #[test]
+    fn set_secret_stores_exactly_and_refuses_blank_values() {
+        let f = fx("");
+        f.hydra.set_secret("keyed/linear", "  a b  ").unwrap();
+        assert!(f.hydra.missing_secrets("keyed").is_empty());
+        let stored = f
+            .hydra
+            .store
+            .get(&SecretRef::parse_path("keyed/linear").unwrap())
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("  a b  "));
+        assert!(
+            f.hydra
+                .set_secret("keyed/other", "   ")
+                .unwrap_err()
+                .contains("empty")
+        );
+        assert!(f.hydra.set_secret("no-slash", "x").is_err());
+    }
+
+    #[test]
+    fn sign_ins_are_the_configured_tools_with_a_sign_in_command() {
+        let f = fx("");
+        assert_eq!(f.hydra.sign_ins("gh"), vec!["github"]);
+        assert!(f.hydra.sign_ins("work").is_empty());
+        assert!(f.hydra.sign_ins("nobody").is_empty());
+    }
+
+    #[test]
+    fn a_sign_in_pane_runs_the_tools_own_command() {
+        let f = fx("");
+        let req = f
+            .hydra
+            .sign_in_request("gh", "github", f.free.clone(), ShellKind::Pwsh)
+            .unwrap();
+        assert_eq!(
+            req.command.as_deref(),
+            Some("& 'gh' 'auth' 'login' '--hostname' 'github.com'")
+        );
+        let unset: Vec<String> = hydra_providers::by_id("github")
+            .unwrap()
+            .auth_unset()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(req.drop_vars, unset);
+        assert!(req.allow_missing_secrets);
+        assert!(
+            f.hydra
+                .sign_in_request("work", "github", f.free.clone(), ShellKind::Pwsh)
+                .unwrap_err()
+                .contains("isn't configured")
+        );
+        assert!(
+            f.hydra
+                .sign_in_request("gh", "nope", f.free.clone(), ShellKind::Pwsh)
+                .unwrap_err()
+                .contains("nope")
+        );
+    }
+
+    #[test]
+    fn command_lines_quote_every_word() {
+        assert_eq!(
+            command_line(ShellKind::Pwsh, &["a‘b‛c".to_string()]),
+            "& 'a‘‘b‛‛c'"
+        );
+        let argv = vec![
+            "C:\\Program Files\\x\\gh.exe".to_string(),
+            "it's".to_string(),
+        ];
+        assert_eq!(
+            command_line(ShellKind::Pwsh, &argv),
+            "& 'C:\\Program Files\\x\\gh.exe' 'it''s'"
+        );
+        assert_eq!(
+            command_line(ShellKind::Bash, &argv),
+            "'C:\\Program Files\\x\\gh.exe' 'it'\\''s'"
+        );
     }
 }

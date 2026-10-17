@@ -1,6 +1,5 @@
 //! hydraui's commands and their keys (spec §7.6): the defaults, `[keys]` overrides from
-//! config.toml, and the GPUI actions they dispatch. The launcher and file tree commands
-//! arrive with those features (plan 4).
+//! config.toml, and the GPUI actions they dispatch.
 use std::collections::BTreeMap;
 
 use gpui::{Action, DummyKeyboardMapper, KeyBinding, Keystroke};
@@ -20,7 +19,9 @@ gpui::actions!(
         PreviousTab,
         CopyText,
         PasteText,
-        Find
+        Find,
+        Launcher,
+        FileTree
     ]
 );
 
@@ -39,10 +40,12 @@ pub enum Command {
     Copy,
     Paste,
     Find,
+    Launcher,
+    FileTree,
 }
 
 impl Command {
-    pub const ALL: [Command; 13] = [
+    pub const ALL: [Command; 15] = [
         Command::NewTab,
         Command::ClosePane,
         Command::SplitRight,
@@ -56,6 +59,8 @@ impl Command {
         Command::Copy,
         Command::Paste,
         Command::Find,
+        Command::Launcher,
+        Command::FileTree,
     ];
 
     /// The name under `[keys]` in config.toml.
@@ -74,6 +79,8 @@ impl Command {
             Command::Copy => "copy",
             Command::Paste => "paste",
             Command::Find => "find",
+            Command::Launcher => "launcher",
+            Command::FileTree => "file_tree",
         }
     }
 
@@ -93,6 +100,8 @@ impl Command {
             Command::Copy => "ctrl-shift-c",
             Command::Paste => "ctrl-shift-v",
             Command::Find => "ctrl-f",
+            Command::Launcher => "ctrl-shift-p",
+            Command::FileTree => "ctrl-b",
         }
     }
 
@@ -111,6 +120,8 @@ impl Command {
             Command::Copy => Box::new(CopyText),
             Command::Paste => Box::new(PasteText),
             Command::Find => Box::new(Find),
+            Command::Launcher => Box::new(Launcher),
+            Command::FileTree => Box::new(FileTree),
         }
     }
 }
@@ -184,6 +195,9 @@ mod tests {
         assert_eq!(keys.len(), Command::ALL.len());
         assert!(keys.contains(&(Command::SplitRight, "ctrl-shift-d".to_string())));
         assert!(keys.contains(&(Command::NextTab, "ctrl-tab".to_string())));
+        assert!(keys.contains(&(Command::Launcher, "ctrl-shift-p".to_string())));
+        assert!(keys.contains(&(Command::FileTree, "ctrl-b".to_string())));
+        assert_eq!(Command::FileTree.name(), "file_tree");
         assert_eq!(Command::Copy.name(), "copy");
     }
 

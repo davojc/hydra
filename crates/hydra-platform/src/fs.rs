@@ -13,12 +13,13 @@ fn write_restricted(path: &Path, contents: &str) -> std::io::Result<()> {
     std::fs::write(path, contents)?;
     let user =
         std::env::var("USERNAME").map_err(|_| std::io::Error::other("USERNAME isn't set"))?;
-    let status = std::process::Command::new("icacls")
+    let mut icacls = std::process::Command::new("icacls");
+    icacls
         .arg(path)
         .args(["/inheritance:r", "/grant:r"])
         .arg(format!("{user}:F"))
-        .stdout(std::process::Stdio::null())
-        .status()?;
+        .stdout(std::process::Stdio::null());
+    let status = crate::process::hide_window(&mut icacls).status()?;
     if status.success() {
         Ok(())
     } else {

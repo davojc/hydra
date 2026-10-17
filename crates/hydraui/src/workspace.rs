@@ -16,9 +16,10 @@ use gpui::{
     Hsla, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Subscription,
     Task, Window, canvas, div, px, relative, rgb, transparent_black,
 };
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandItem, CommandState};
 use gpui_component::notification::Notification;
-use gpui_component::{ActiveTheme, WindowExt, h_flex, v_flex};
+use gpui_component::{ActiveTheme, IconName, Selectable, Sizable, WindowExt, h_flex, v_flex};
 use hydraui_sets::LoadedSets;
 
 use hydraui_term::PromptState;
@@ -26,6 +27,7 @@ use hydraui_term::PromptState;
 use crate::config::UiConfig;
 use crate::file_tree::{cd_command, editor_command, quote_path};
 use crate::file_tree_view::{FileTreeView, TreeEvent};
+use crate::git_status;
 use crate::hydra::{Hydra, PaneRequest, STATUS_TTL, StatusCache, accounts_summary};
 use crate::keys::{
     ClosePane, FileTree, FocusDown, FocusLeft, FocusRight, FocusUp, NewTab, NextTab, PreviousTab,
@@ -36,6 +38,22 @@ use crate::split::{Axis, Dir, PaneId, Tree};
 use crate::tabs::{Closed, TabId, Tabs};
 
 /// A divider being dragged: the split's path in the active tab's tree.
+/// The file tree's width: it starts at the default, can't be dragged narrower than the
+/// minimum, and always leaves the panes at least `MIN_PANES_WIDTH`.
+const DEFAULT_TREE_WIDTH: f32 = 260.0;
+const MIN_TREE_WIDTH: f32 = 140.0;
+const MIN_PANES_WIDTH: f32 = 200.0;
+
+/// The tree's width with its divider dragged to `x` pixels from the tree's left edge, in a
+/// window `window_width` wide.
+fn tree_width_at(x: f32, window_width: f32) -> f32 {
+    if !x.is_finite() {
+        return DEFAULT_TREE_WIDTH;
+    }
+    let max = (window_width - MIN_PANES_WIDTH).max(MIN_TREE_WIDTH);
+    x.clamp(MIN_TREE_WIDTH, max)
+}
+
 struct Drag {
     path: Vec<usize>,
     axis: Axis,
@@ -51,6 +69,13 @@ pub struct Workspace {
     next_pane: PaneId,
     status: StatusCache,
     refreshing: HashSet<String>,
+    /// The focused pane's repository summary, for the folder it was read in; `None` text when
+    /// that folder isn't in a repository.
+    git: Option<(PathBuf, Option<String>)>,
+    /// A `git status` is running; `git_again` asks for another once it finishes.
+    git_busy: bool,
+    git_again: bool,
+    _git_watch: Task<()>,
     drag: Option<Drag>,
     loaded: LoadedSets,
     /// Loaded sets whose file changed since loading.
@@ -60,6 +85,11 @@ pub struct Workspace {
     _set_watch: Task<()>,
     tree: Option<Entity<FileTreeView>>,
     tree_sub: Option<Subscription>,
+    tree_width: f32,
+    /// The divider between the tree and the panes is being dragged.
+    tree_drag: bool,
+    /// The tree panel's bounds at the last paint, for the drag.
+    tree_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// Each split's on-screen bounds at the last paint, by path, for divider drags.
     split_bounds: Rc<RefCell<HashMap<Vec<usize>, Bounds<Pixels>>>>,
     focus: FocusHandle,
@@ -86,6 +116,17 @@ impl Workspace {
             }
         });
         // A loaded set's file edited or deleted: offer a reload (spec §5.4).
+        // Picks up edits made outside the terminal (an editor saving, another tool).
+        let git_watch = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(15))
+                    .await;
+                if this.update(cx, |ws, cx| ws.refresh_git(cx)).is_err() {
+                    break;
+                }
+            }
+        });
         let set_watch = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -111,6 +152,10 @@ impl Workspace {
             next_pane: 0,
             status: StatusCache::default(),
             refreshing: HashSet::new(),
+            git: None,
+            git_busy: false,
+            git_again: false,
+            _git_watch: git_watch,
             drag: None,
             loaded: LoadedSets::default(),
             changed_sets: HashSet::new(),
@@ -118,6 +163,9 @@ impl Workspace {
             _set_watch: set_watch,
             tree: None,
             tree_sub: None,
+            tree_width: DEFAULT_TREE_WIDTH,
+            tree_drag: false,
+            tree_bounds: Rc::default(),
             split_bounds: Rc::default(),
             focus: cx.focus_handle(),
             title: String::new(),
@@ -131,11 +179,17 @@ impl Workspace {
         for p in problems {
             window.push_notification(Notification::warning(p).title("hydraui settings"), cx);
         }
-        // The sets open at last exit (spec §5.4); a plain tab when there were none.
+        // What was open at last exit (spec §5.4); a plain tab when there was nothing.
         if !self.restore_session(window, cx) {
             let home = self.hydra.user_home.clone();
             self.new_tab_in(home, window, cx);
         }
+        // Each pane's folder as it is when the window closes.
+        let ws = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            let _ = ws.update(cx, |ws, cx| ws.save_session(window, cx));
+            true
+        });
     }
 
     /// A Loose tab in `cwd`: the folder's environment, else `default_env`, else ask.
@@ -198,6 +252,7 @@ impl Workspace {
         let id = self.new_pane(request, window, cx);
         self.tabs.add(None, id);
         self.focus_soon(id, window, cx);
+        self.save_session(window, cx);
         cx.notify();
     }
 
@@ -224,10 +279,19 @@ impl Workspace {
         self.tints.insert(request.env.clone(), tint);
         let (hydra, style) = (self.hydra.clone(), self.style.clone());
         let view = cx.new(|cx| PaneView::new(id, request, hydra, style, window, cx));
-        let sub = cx.subscribe_in(&view, window, move |ws, _, ev: &PaneEvent, _, cx| {
+        let sub = cx.subscribe_in(&view, window, move |ws, view, ev: &PaneEvent, _, cx| {
             if *ev == PaneEvent::Focused {
                 ws.tabs.focus_pane(id);
                 ws.refresh_status(cx);
+            }
+            // The focused pane's repository: on focus, on `cd`, and when a command finishes.
+            let focused = ws.tabs.active().is_some_and(|t| t.focused == id);
+            let back_at_prompt = *ev == PaneEvent::PromptChanged
+                && view.read(cx).prompt() == Some(PromptState::AtPrompt);
+            if focused
+                && (matches!(ev, PaneEvent::Focused | PaneEvent::CwdChanged) || back_at_prompt)
+            {
+                ws.refresh_git(cx);
             }
             ws.sync_tree(cx);
             cx.notify();
@@ -287,6 +351,7 @@ impl Workspace {
         let id = self.new_pane(request, window, cx);
         self.tabs.split_focused(axis, id);
         self.focus_pane(id, window, cx);
+        self.save_session(window, cx);
         cx.notify();
     }
 
@@ -313,6 +378,7 @@ impl Workspace {
         }
         self.drop_pane(id);
         self.focus_active(window, cx);
+        self.save_session(window, cx);
         cx.notify();
     }
 
@@ -322,6 +388,7 @@ impl Workspace {
         }
         self.tab_gone(tab, window, cx);
         self.focus_active(window, cx);
+        self.save_session(window, cx);
         cx.notify();
     }
 
@@ -361,6 +428,36 @@ impl Workspace {
     }
 
     /// Checks the focused environment's accounts off the UI thread, at most once a minute.
+    /// Reads the focused pane's repository off the UI thread; one `git status` at a time.
+    fn refresh_git(&mut self, cx: &mut Context<Self>) {
+        if self.git_busy {
+            self.git_again = true;
+            return;
+        }
+        let Some(view) = self.focused() else {
+            return;
+        };
+        let cwd = view.read(cx).cwd().clone();
+        self.git_busy = true;
+        cx.spawn(async move |this, cx| {
+            let dir = cwd.clone();
+            let line = cx
+                .background_spawn(
+                    async move { git_status::read(&dir).map(|s| git_status::summary(&s)) },
+                )
+                .await;
+            let _ = this.update(cx, |ws, cx| {
+                ws.git = Some((cwd, line));
+                ws.git_busy = false;
+                if std::mem::take(&mut ws.git_again) {
+                    ws.refresh_git(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn refresh_status(&mut self, cx: &mut Context<Self>) {
         let Some(env) = self.focused().map(|v| v.read(cx).env().to_string()) else {
             return;
@@ -397,6 +494,7 @@ impl Workspace {
             self.tree = Some(view);
             self.sync_tree(cx);
         }
+        self.save_session(window, cx);
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -462,7 +560,14 @@ impl Workspace {
         rgb(self.tints.get(env).copied().unwrap_or(0x808080)).into()
     }
 
-    fn drag_to(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+    fn drag_to(&mut self, pos: Point<Pixels>, window_width: f32, cx: &mut Context<Self>) {
+        if self.tree_drag {
+            if let Some(b) = self.tree_bounds.get() {
+                self.tree_width = tree_width_at(f32::from(pos.x - b.origin.x), window_width);
+                cx.notify();
+            }
+            return;
+        }
         let Some(drag) = &self.drag else {
             return;
         };
@@ -488,9 +593,10 @@ impl Workspace {
             |_, _, _| {},
             move |_, _, window, _| {
                 let on_move = ws.clone();
-                window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
+                window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, cx| {
                     if phase == DispatchPhase::Bubble {
-                        on_move.update(cx, |ws, cx| ws.drag_to(ev.position, cx));
+                        let width = f32::from(window.viewport_size().width);
+                        on_move.update(cx, |ws, cx| ws.drag_to(ev.position, width, cx));
                     }
                 });
                 let on_up = ws.clone();
@@ -498,6 +604,7 @@ impl Workspace {
                     if phase == DispatchPhase::Bubble {
                         on_up.update(cx, |ws, cx| {
                             ws.drag = None;
+                            ws.tree_drag = false;
                             cx.notify();
                         });
                     }
@@ -628,7 +735,19 @@ impl Workspace {
             .gap_1()
             .bg(bg)
             .border_b_1()
-            .border_color(border);
+            .border_color(border)
+            // The file tree, as Ctrl+B; highlighted while it is open.
+            .child(
+                Button::new("toggle-file-tree")
+                    .icon(IconName::Folder)
+                    .ghost()
+                    .small()
+                    .selected(self.tree.is_some())
+                    .tooltip("File tree (Ctrl+B)")
+                    .on_click(
+                        cx.listener(|ws, _, window, cx| ws.toggle_tree(&FileTree, window, cx)),
+                    ),
+            );
         for (set, ids) in self.tabs.groups() {
             strip = match &set {
                 Some(name) => strip.child(self.render_set_header(name, muted, cx)),
@@ -710,9 +829,15 @@ impl Workspace {
             let v = view.read(cx);
             let env = v.env().to_string();
             let accounts = self.status.get(&env).unwrap_or("…").to_string();
+            // Only a summary read in this pane's current folder; a stale one would mislead.
+            let git = match &self.git {
+                Some((dir, Some(line))) if dir == v.cwd() => Some(line.clone()),
+                _ => None,
+            };
             bar = bar
                 .child(div().text_color(self.tint(&env)).child(env))
                 .child(div().flex_1().truncate().child(accounts))
+                .when_some(git, |b, line| b.child(div().flex_none().child(line)))
                 .child(div().child(v.cwd().display().to_string()));
         }
         bar
@@ -774,19 +899,62 @@ impl Render for Workspace {
                     .min_h_0()
                     .items_start()
                     .when_some(self.tree.clone(), |d, tree| {
+                        let store = self.tree_bounds.clone();
                         d.child(
                             div()
-                                .w(px(260.))
+                                .w(px(self.tree_width))
                                 .h_full()
                                 .flex_none()
-                                .border_r_1()
-                                .border_color(border)
+                                .relative()
+                                .child(
+                                    canvas(
+                                        move |bounds, _, _| store.set(Some(bounds)),
+                                        |_, _, _, _| {},
+                                    )
+                                    .absolute()
+                                    .top_0()
+                                    .left_0()
+                                    .size_full(),
+                                )
                                 .child(tree),
+                        )
+                        .child(
+                            div()
+                                .id("tree-divider")
+                                .w(px(4.))
+                                .h_full()
+                                .flex_none()
+                                .bg(border)
+                                .cursor(CursorStyle::ResizeLeftRight)
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|ws, _, _, cx| {
+                                        ws.tree_drag = true;
+                                        cx.notify();
+                                    }),
+                                ),
                         )
                     })
                     .child(div().flex_1().min_w_0().h_full().child(body)),
             )
             .child(self.render_status(border, muted, cx))
-            .when(self.drag.is_some(), |d| d.child(self.drag_listener(cx)))
+            .when(self.drag.is_some() || self.tree_drag, |d| {
+                d.child(self.drag_listener(cx))
+            })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_tree_width_follows_the_pointer_within_limits() {
+        assert_eq!(tree_width_at(300.0, 1200.0), 300.0);
+        assert_eq!(tree_width_at(50.0, 1200.0), MIN_TREE_WIDTH);
+        assert_eq!(tree_width_at(1150.0, 1200.0), 1200.0 - MIN_PANES_WIDTH);
+        // A window too narrow for both keeps the tree at its minimum.
+        assert_eq!(tree_width_at(300.0, 250.0), MIN_TREE_WIDTH);
+        assert_eq!(tree_width_at(f32::NAN, 1200.0), DEFAULT_TREE_WIDTH);
     }
 }

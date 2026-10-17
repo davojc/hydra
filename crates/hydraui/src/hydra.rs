@@ -1,6 +1,7 @@
 //! hydraui's link to hydra (spec §3.1, §4, §7.1): environments, `prepare` with guards off,
 //! starting panes, and the identity checks for the status bar. No UI.
 use std::collections::{BTreeSet, HashMap};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::mpsc::Receiver;
@@ -18,6 +19,8 @@ use hydra_platform::keyring_store::KeyringStore;
 use hydra_platform::process::EnvRunner;
 use hydra_platform::shell::{ShellKind, pwsh_quote, sh_quote};
 use hydraui_term::{GridSize, Pane, SpawnSpec, TermEvent};
+
+use hydra_providers::claude::is_session_marker;
 
 use crate::palette::env_tint;
 
@@ -219,7 +222,7 @@ impl Hydra {
             git_bash: self.global.git_bash.clone(),
             command: req.command.clone(),
             size,
-            inherited: std::env::vars_os().collect(),
+            inherited: inherited_env(std::env::vars_os()),
         };
         let (pane, events) = Pane::spawn(spec).map_err(|e| e.to_string())?;
         Ok(Started {
@@ -326,6 +329,16 @@ impl Hydra {
         }
         self.store.set(&r, value).map_err(|e| e.to_string())
     }
+}
+
+/// The environment a pane starts from: hydraui's own, without a Claude Code session's markers
+/// (hydraui may have been started from inside one; a pane is a session of its own).
+pub fn inherited_env(
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Vec<(OsString, OsString)> {
+    vars.into_iter()
+        .filter(|(k, _)| !k.to_str().is_some_and(is_session_marker))
+        .collect()
 }
 
 /// `argv` as one command line for `shell`, every word quoted, so paths with spaces or
@@ -738,5 +751,20 @@ mod tests {
             command_line(ShellKind::Bash, &argv),
             "'C:\\Program Files\\x\\gh.exe' 'it'\\''s'"
         );
+    }
+
+    #[test]
+    fn panes_dont_inherit_a_claude_code_session() {
+        let vars: Vec<(OsString, OsString)> = vec![
+            ("CLAUDECODE".into(), "1".into()),
+            ("CLAUDE_CODE_CHILD_SESSION".into(), "1".into()),
+            ("Path".into(), "C:/x".into()),
+            ("CLAUDE_CODE_OAUTH_TOKEN".into(), "t".into()),
+        ];
+        let kept: Vec<String> = inherited_env(vars)
+            .into_iter()
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(kept, vec!["Path", "CLAUDE_CODE_OAUTH_TOKEN"]);
     }
 }

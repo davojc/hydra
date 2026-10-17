@@ -83,7 +83,7 @@ hydra ignores this folder.
 ~/.hydra/hydraui/
   config.toml      UI settings: font, theme, default env, [keys], editor
   sets/<name>.toml set definitions, hand-edited
-  session.toml     sets loaded at last exit (written by hydraui)
+  session.toml     what was open at last exit (written by hydraui)
 ```
 
 hydraui reads, but does not edit, `config.toml` `[bindings]`, `envs/` and
@@ -209,9 +209,15 @@ modification time at load.
 - A tab can't move between sets; ad-hoc tabs belong to the "Loose" group.
 - If a loaded set's file changes, its group header shows "changed — reload?".
   Reload is unload + load. Running panes are never changed in place.
-- `session.toml` lists loaded sets in order. On start, hydraui loads them
-  again; startup commands run again. An invalid or deleted set is skipped
-  with a toast.
+- `session.toml` records what was open: the loaded sets in order; the Loose
+  tabs in the set file's tab format (layout, ratios, and each pane's env,
+  shell and current folder); whether the file tree was open and its width;
+  and the active tab's position in the strip. It is written when tabs,
+  splits, sets or the tree change, and when the window closes. On start,
+  hydraui loads the sets again (startup commands run again), then reopens the
+  Loose tabs, the tree and the active tab. An invalid or deleted set, or a
+  Loose tab whose env or folder is gone, is skipped with a toast. Scrollback,
+  running commands, window size and dragged ratios in set tabs are not kept.
 
 ## 6. Terminal core (`hydraui-term`)
 

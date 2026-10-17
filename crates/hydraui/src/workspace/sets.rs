@@ -1,6 +1,6 @@
 //! Sets in the window (spec §5.4): loading a set opens its tabs, unloading closes them
-//! (asking first when commands are running), a changed file offers a reload, and the loaded
-//! sets are saved for the next start.
+//! (asking first when commands are running), a changed file offers a reload; and what was
+//! open (sets, Loose tabs, the file tree, the active tab) is saved for the next start.
 use std::collections::HashSet;
 
 use gpui::prelude::*;
@@ -10,12 +10,13 @@ use gpui_component::notification::Notification;
 use gpui_component::{Sizable, WindowExt, h_flex, v_flex};
 use hydraui_sets::{
     Context as SetContext, LoadedSet, Session, SetSpec, file_modified, load_set, read_session,
-    write_session,
+    resolve_loose, write_session,
 };
 use hydraui_term::PromptState;
 
-use super::Workspace;
-use crate::layout::tab_layout;
+use super::{DEFAULT_TREE_WIDTH, Workspace, tree_width_at};
+use crate::keys::FileTree;
+use crate::layout::{SavedPane, tab_file, tab_layout};
 use crate::tabs::TabId;
 
 /// What to ask before unloading `set` when some of its panes are running a command (OSC 133);
@@ -191,12 +192,34 @@ impl Workspace {
     }
 
     pub(super) fn save_session(&self, window: &mut Window, cx: &mut App) {
+        let pane = |id| {
+            self.panes.get(&id).map(|v| {
+                let v = v.read(cx);
+                SavedPane {
+                    env: v.env().to_string(),
+                    cwd: v.cwd().clone(),
+                    shell: v.request.shell,
+                }
+            })
+        };
+        let loose = self
+            .tabs
+            .iter()
+            .filter(|t| t.set.is_none())
+            .filter_map(|t| tab_file(&t.tree, &pane))
+            .collect();
+        let active = self.tabs.active_id();
         let session = Session {
             sets: self.loaded.names(),
+            active: self.tabs.iter().position(|t| Some(t.id) == active),
+            tree: self.tree.is_some(),
+            tree_width: (self.tree.is_some() && self.tree_width != DEFAULT_TREE_WIDTH)
+                .then_some(self.tree_width),
+            loose,
         };
         if let Err(e) = write_session(&self.hydra.paths, &session) {
             window.push_notification(
-                Notification::warning(format!("can't save the open sets: {e}")).title("hydraui"),
+                Notification::warning(format!("can't save what is open: {e}")).title("hydraui"),
                 cx,
             );
         }
@@ -211,19 +234,64 @@ impl Workspace {
         }
     }
 
-    /// Reopens the sets open at last exit; one that fails is skipped with a toast (and so
-    /// dropped from the session). Returns whether any opened.
+    /// Reopens what was open at last exit: the sets, then the Loose tabs, then the file tree
+    /// and the active tab. A set or tab that fails is skipped with a toast (and so dropped
+    /// from the session). Returns whether any tab opened.
     pub(super) fn restore_session(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let names = read_session(&self.hydra.paths).sets;
-        if names.is_empty() {
-            return false;
-        }
+        let session = read_session(&self.hydra.paths);
         let mut any = false;
-        for name in &names {
+        for name in &session.sets {
             any |= self.load_set(name, window, cx);
         }
+        for tab in &session.loose {
+            let spec = match resolve_loose(&self.set_context(), tab) {
+                Ok(spec) => spec,
+                Err(problems) => {
+                    window.push_notification(
+                        Notification::warning(problems.join(
+                            "
+",
+                        ))
+                        .title("Can't reopen a tab"),
+                        cx,
+                    );
+                    continue;
+                }
+            };
+            let next = &mut self.next_pane;
+            let (tree, panes) = tab_layout(&spec, &mut || {
+                *next += 1;
+                *next
+            });
+            let focused = panes[0].0;
+            for (id, request) in panes {
+                self.create_pane(id, request, window, cx);
+            }
+            self.tabs.add_tree(None, None, tree, focused);
+            any = true;
+        }
+        if !any {
+            return false;
+        }
+        if session.tree && self.tree.is_none() {
+            let width = f32::from(window.viewport_size().width);
+            self.tree_width =
+                tree_width_at(session.tree_width.unwrap_or(DEFAULT_TREE_WIDTH), width);
+            self.toggle_tree(&FileTree, window, cx);
+        }
+        let saved = session
+            .active
+            .and_then(|i| self.tabs.iter().nth(i).map(|t| t.id));
+        if let Some(id) = saved {
+            self.tabs.activate(id);
+        }
+        // After the sets' own focus requests, so the active tab keeps the keyboard.
+        if let Some(focused) = self.tabs.active().map(|t| t.focused) {
+            self.focus_soon(focused, window, cx);
+        }
         self.save_session(window, cx);
-        any
+        cx.notify();
+        true
     }
 
     /// A set's group label in the tab strip: collapse toggle, "changed - reload?", reload,

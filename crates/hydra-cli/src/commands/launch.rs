@@ -218,6 +218,8 @@ pub fn shell(
     let init = write_init(kind, &app.paths.state_dir(&name), &style)?;
     let mut cmd = shell_command(kind, &exe, &init);
     launch.apply(&mut cmd);
+    // A shell opened from inside Claude Code is a new session, not part of that one.
+    hydra_providers::claude::clear_session_markers(&mut cmd);
     if let Some(dir) = folder {
         cmd.current_dir(dir);
     }

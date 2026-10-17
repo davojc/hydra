@@ -415,13 +415,16 @@ else the OS default).
   chosen by extension, line numbers and find (`Ctrl+F`). `Ctrl+S` saves.
 - **Rendered**: Markdown, read-only, reflecting unsaved edits. Markdown files
   open in Rendered, others in Raw. Links open in the browser when clicked;
-  images aren't fetched from the network; nothing runs.
+  images load only from local files, never from the network; only `http`,
+  `https` and `mailto` links open; nothing runs.
 
 **Reading.** A file over 5 MB, or binary (a NUL byte in the first 8 KB, or not
 valid UTF-8), shows "can't show this file" with Open in editor; so does one
 that can't be read, with the reason. A file's line endings (CRLF or LF) and
 UTF-8 BOM are recorded on load and written back on save: a save changes only
-what was edited.
+what was edited. (A file with mixed line endings is saved with its first
+line's ending throughout.) Text pasted with Windows line endings is saved
+with the file's own.
 
 **Saving** is atomic: a temporary file beside the original, then a replace.
 A save that fails (read-only, locked, folder gone) is a toast; the edits stay,

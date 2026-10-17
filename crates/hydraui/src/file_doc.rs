@@ -1,7 +1,8 @@
 //! Reading and saving a file for the file pane (spec §7.8): too big or binary can't be shown,
 //! line endings and a BOM come back on save, saves are atomic; and what a change on disk means.
+use std::borrow::Cow;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub const MAX_BYTES: u64 = 5 * 1024 * 1024;
 const SNIFF: usize = 8 * 1024;
@@ -35,7 +36,17 @@ pub fn decode(bytes: &[u8]) -> Result<FileDoc, String> {
     })
 }
 
+/// `\r\n` and lone `\r` as `\n`: the editor can hold them after a paste from Windows.
+pub fn normalize(text: &str) -> Cow<'_, str> {
+    if text.contains('\r') {
+        Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
 pub fn encode(text: &str, crlf: bool, bom: bool) -> Vec<u8> {
+    let text = normalize(text);
     let mut out = Vec::with_capacity(text.len() + 3);
     if bom {
         out.extend_from_slice(BOM);
@@ -116,24 +127,40 @@ pub fn language(path: &Path) -> &'static str {
     }
 }
 
-/// `![alt](http…)` → `[alt](http…)`: Rendered never fetches from the network (spec §7.8).
-pub fn defang_remote_images(markdown: &str) -> String {
-    let mut out = String::with_capacity(markdown.len());
-    let mut rest = markdown;
-    while let Some(i) = rest.find("![") {
-        out.push_str(&rest[..i]);
-        let tail = &rest[i + 1..];
-        let remote = tail
-            .find("](")
-            .map(|j| &tail[j + 2..])
-            .is_some_and(|url| url.starts_with("http://") || url.starts_with("https://"));
-        if !remote {
-            out.push('!');
-        }
-        rest = tail;
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImageUse {
+    Local(PathBuf),
+    Blocked,
+}
+
+/// What Rendered does with an image: a local file (relative to the Markdown file's folder)
+/// loads; anything with a URL scheme, or protocol-relative, is never fetched (spec §7.8).
+pub fn image_use(uri: &str, dir: &Path) -> ImageUse {
+    let u = uri.trim();
+    let has_scheme = u.find(':').is_some_and(|i| {
+        // A drive letter (`C:`) is a path, not a scheme.
+        i > 1
+            && u[..i]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+    });
+    if u.is_empty() || has_scheme || u.starts_with("//") || u.starts_with("\\\\") {
+        return ImageUse::Blocked;
     }
-    out.push_str(rest);
-    out
+    let p = Path::new(u);
+    ImageUse::Local(if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        dir.join(p)
+    })
+}
+
+/// Whether clicking a link in Rendered opens it: web and mail only; nothing runs (spec §7.8).
+pub fn link_opens(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    ["http://", "https://", "mailto:"]
+        .iter()
+        .any(|s| lower.starts_with(s))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -143,6 +170,31 @@ pub enum DiskChange {
     /// Changed on disk while there are unsaved edits (or it can't be read now).
     Changed,
     Deleted,
+}
+
+/// The disk-state marks on a file tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DiskFlags {
+    /// Changed on disk while there were unsaved edits.
+    pub changed: bool,
+    pub deleted: bool,
+}
+
+/// The marks after a change on disk: a file that exists again isn't deleted, and a reload
+/// clears both.
+pub fn flags_after(f: DiskFlags, change: &DiskChange) -> DiskFlags {
+    match change {
+        DiskChange::Nothing => DiskFlags {
+            deleted: false,
+            ..f
+        },
+        DiskChange::Reload(_) => DiskFlags::default(),
+        DiskChange::Changed => DiskFlags {
+            changed: true,
+            deleted: false,
+        },
+        DiskChange::Deleted => DiskFlags { deleted: true, ..f },
+    }
 }
 
 /// What a change on disk means for an open file: `saved` is what was last loaded or saved,
@@ -158,6 +210,8 @@ pub fn on_disk(saved: &FileDoc, dirty: bool, now: Option<Result<FileDoc, String>
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     #[test]
@@ -262,15 +316,6 @@ mod tests {
         assert_eq!(language(Path::new("x.tsx")), "tsx");
     }
 
-    #[test]
-    fn remote_images_become_links() {
-        let md = "![logo](https://example.com/a.png) and ![local](img/b.png)";
-        assert_eq!(
-            defang_remote_images(md),
-            "[logo](https://example.com/a.png) and ![local](img/b.png)"
-        );
-    }
-
     fn doc(t: &str) -> FileDoc {
         FileDoc {
             text: t.into(),
@@ -305,6 +350,83 @@ mod tests {
         assert_eq!(
             on_disk(&doc("a"), true, Some(Err("binary file".into()))),
             DiskChange::Changed
+        );
+    }
+
+    #[test]
+    fn pasted_windows_line_endings_dont_double_up_on_save() {
+        assert_eq!(normalize("a\r\nb\rc\n"), "a\nb\nc\n");
+        assert_eq!(encode("a\r\nb\n", true, false), b"a\r\nb\r\n".to_vec());
+        assert_eq!(encode("a\r\nb\n", false, false), b"a\nb\n".to_vec());
+    }
+
+    #[test]
+    fn only_local_images_load() {
+        let dir = Path::new("C:/docs");
+        assert_eq!(
+            image_use("img/a.png", dir),
+            ImageUse::Local(dir.join("img/a.png"))
+        );
+        assert_eq!(
+            image_use("C:/pics/b.png", dir),
+            ImageUse::Local(PathBuf::from("C:/pics/b.png"))
+        );
+        for remote in [
+            "https://example.com/a.png",
+            "HTTPS://example.com/a.png",
+            " http://example.com/a.png",
+            "ftp://example.com/a.png",
+            "//example.com/a.png",
+            "data:image/png;base64,AAAA",
+        ] {
+            assert_eq!(image_use(remote, dir), ImageUse::Blocked, "{remote}");
+        }
+    }
+
+    #[test]
+    fn links_open_only_for_web_and_mail() {
+        assert!(link_opens("https://example.com"));
+        assert!(link_opens("HTTP://example.com"));
+        assert!(link_opens("mailto:a@b.c"));
+        assert!(!link_opens("file:///C:/evil.exe"));
+        assert!(!link_opens("ms-settings:"));
+        assert!(!link_opens("C:\\Windows\\notepad.exe"));
+    }
+
+    #[test]
+    fn a_file_back_on_disk_is_no_longer_deleted() {
+        let deleted = DiskFlags {
+            changed: false,
+            deleted: true,
+        };
+        assert_eq!(
+            flags_after(deleted, &DiskChange::Nothing),
+            DiskFlags {
+                changed: false,
+                deleted: false
+            }
+        );
+        assert_eq!(
+            flags_after(deleted, &DiskChange::Changed),
+            DiskFlags {
+                changed: true,
+                deleted: false
+            }
+        );
+        let changed = DiskFlags {
+            changed: true,
+            deleted: false,
+        };
+        assert_eq!(
+            flags_after(changed, &DiskChange::Reload(doc("x"))),
+            DiskFlags::default()
+        );
+        assert_eq!(
+            flags_after(changed, &DiskChange::Deleted),
+            DiskFlags {
+                changed: true,
+                deleted: true
+            }
         );
     }
 }

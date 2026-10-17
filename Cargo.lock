@@ -2952,6 +2952,7 @@ version = "0.6.0"
 dependencies = [
  "dirs 6.0.0",
  "futures",
+ "gpui-base",
  "gpui-component",
  "gpui-kit-assets",
  "gpui-pre",

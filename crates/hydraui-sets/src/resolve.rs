@@ -235,10 +235,13 @@ impl Resolver<'_> {
                 return None;
             }
             // Missing files are dropped (spec §5.1); an empty file pane collapses in its split.
+            // Each file once: Windows paths ignore case and slash direction.
+            let key = |p: &Path| p.to_string_lossy().replace('/', "\\").to_lowercase();
+            let mut seen = std::collections::HashSet::new();
             let files: Vec<PathBuf> = list
                 .iter()
                 .map(|f| self.cwd(Some(f), &inh.cwd))
-                .filter(|p| p.is_file())
+                .filter(|p| p.is_file() && seen.insert(key(p)))
                 .collect();
             let active = n.active.unwrap_or(0).min(files.len().saturating_sub(1));
             return Some(Node::Files(FilesSpec { files, active }));
@@ -720,6 +723,16 @@ layout = { split = "right", command = "x", panes = [ { }, { } ] }
             matches!(spec.tabs[0].root, Node::Pane(_)),
             "the split collapses to the terminal"
         );
+    }
+
+    #[test]
+    fn a_file_listed_twice_opens_once() {
+        let fx = Fx::new();
+        std::fs::write(fx.root.join("a.md"), "a").unwrap();
+        std::fs::write(fx.root.join("b.md"), "b").unwrap();
+        let spec = with_files(&fx, "\"a.md\", \"A.MD\", \"b.md\"").unwrap();
+        let files = spec.tabs[0].root.files().unwrap();
+        assert_eq!(files.files, vec![fx.written("a.md"), fx.written("b.md")]);
     }
 
     #[test]

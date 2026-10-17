@@ -202,8 +202,17 @@ impl Workspace {
         // Each pane's folder as it is when the window closes.
         let ws = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
-            let _ = ws.update(cx, |ws, cx| ws.save_session(window, cx));
-            true
+            ws.update(cx, |ws, cx| {
+                ws.save_session(window, cx);
+                // Unsaved edits: ask first, and close from the dialog (spec §7.8).
+                let all: Vec<PaneId> = ws.files.keys().copied().collect();
+                if ws.unsaved_in(&all, cx).is_empty() {
+                    return true;
+                }
+                ws.confirm_unsaved(all, window, cx, |_, w, _| w.remove_window());
+                false
+            })
+            .unwrap_or(true)
         });
     }
 

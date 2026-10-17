@@ -13,13 +13,14 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Editor, EditorState, InputEvent};
 use gpui_component::notification::Notification;
-use gpui_component::text::TextView;
 use gpui_component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
-use crate::file_doc::{self, DiskChange, FileDoc};
+use crate::file_doc::{self, DiskChange, DiskFlags, FileDoc, ImageUse};
 use crate::keys::SaveFile;
 use crate::open_files::{after_close, find};
+
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FilePaneEvent {
@@ -50,8 +51,7 @@ struct FileTab {
     path: PathBuf,
     body: Body,
     dirty: bool,
-    changed_on_disk: bool,
-    deleted: bool,
+    disk: DiskFlags,
 }
 
 pub struct FilePane {
@@ -132,8 +132,7 @@ impl FilePane {
             path,
             body,
             dirty: false,
-            changed_on_disk: false,
-            deleted: false,
+            disk: DiskFlags::default(),
         });
     }
 
@@ -169,7 +168,7 @@ impl FilePane {
         if let Some(t) = self.tabs.iter_mut().find(|t| t.path == path)
             && let Body::Text { editor, saved, .. } = &t.body
         {
-            t.dirty = editor.read(cx).value().as_ref() != saved.text;
+            t.dirty = file_doc::normalize(editor.read(cx).value().as_ref()) != saved.text;
             cx.notify();
         }
     }
@@ -213,15 +212,14 @@ impl FilePane {
             return Ok(());
         };
         let doc = FileDoc {
-            text: editor.read(cx).value().to_string(),
+            text: file_doc::normalize(editor.read(cx).value().as_ref()).into_owned(),
             crlf: saved.crlf,
             bom: saved.bom,
         };
         file_doc::save(&t.path, &doc)?;
         *saved = doc;
         t.dirty = false;
-        t.changed_on_disk = false;
-        t.deleted = false;
+        t.disk = DiskFlags::default();
         cx.notify();
         Ok(())
     }
@@ -324,23 +322,22 @@ impl FilePane {
     }
 
     fn disk_changed(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(t) = self.tabs.iter_mut().find(|t| t.path == path) else {
+        // The event spells the path as it is on disk; ours may differ in case or slashes.
+        let paths: Vec<PathBuf> = self.tabs.iter().map(|t| t.path.clone()).collect();
+        let Some(i) = find(&paths, path) else {
             return;
         };
+        let t = &mut self.tabs[i];
         let Body::Text { editor, saved, .. } = &mut t.body else {
             return;
         };
-        let now = path.is_file().then(|| file_doc::load(path));
-        match file_doc::on_disk(saved, t.dirty, now) {
-            DiskChange::Nothing => {}
-            DiskChange::Reload(doc) => {
-                let text = doc.text.clone();
-                editor.update(cx, |e, cx| e.set_value(text, window, cx));
-                *saved = doc;
-                t.deleted = false;
-            }
-            DiskChange::Changed => t.changed_on_disk = true,
-            DiskChange::Deleted => t.deleted = true,
+        let now = t.path.is_file().then(|| file_doc::load(&t.path));
+        let change = file_doc::on_disk(saved, t.dirty, now);
+        t.disk = file_doc::flags_after(t.disk, &change);
+        if let DiskChange::Reload(doc) = change {
+            let text = doc.text.clone();
+            editor.update(cx, |e, cx| e.set_value(text, window, cx));
+            *saved = doc;
         }
         cx.notify();
     }
@@ -356,7 +353,7 @@ impl FilePane {
             editor.update(cx, |e, cx| e.set_value(text, window, cx));
             *saved = doc;
             t.dirty = false;
-            t.changed_on_disk = false;
+            t.disk = DiskFlags::default();
         }
         cx.notify();
     }
@@ -469,7 +466,7 @@ impl Render for FilePane {
                 })),
         );
         let banner =
-            if t.deleted {
+            if t.disk.deleted {
                 Some(
                     div()
                         .px_2()
@@ -478,7 +475,7 @@ impl Render for FilePane {
                         .child("Deleted on disk. Save writes it back.")
                         .into_any_element(),
                 )
-            } else if t.changed_on_disk {
+            } else if t.disk.changed {
                 Some(
                     h_flex()
                         .px_2()
@@ -495,7 +492,7 @@ impl Render for FilePane {
                         .child(Button::new("keep").label("Keep mine").xsmall().on_click(
                             cx.listener(|p, _, _, cx| {
                                 if let Some(t) = p.tabs.get_mut(p.active) {
-                                    t.changed_on_disk = false;
+                                    t.disk.changed = false;
                                 }
                                 cx.notify();
                             }),
@@ -526,17 +523,33 @@ impl Render for FilePane {
                 view: View::Rendered,
                 ..
             } => {
-                let md = file_doc::defang_remote_images(editor.read(cx).value().as_ref());
+                let md = editor.read(cx).value();
+                let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
                 div()
                     .size_full()
                     .p_3()
                     .child(
-                        TextView::markdown(
+                        gpui_base::TextView::markdown(
                             SharedString::from(format!("md-{}", path.display())),
                             md,
                         )
                         .selectable(true)
-                        .scrollable(true),
+                        .scrollable(true)
+                        // Local images only; nothing is fetched (spec §7.8).
+                        .image_source(move |uri| match file_doc::image_use(uri, &dir) {
+                            ImageUse::Local(p) => {
+                                gpui::ImageSource::Resource(gpui::Resource::Path(Arc::from(p)))
+                            }
+                            ImageUse::Blocked => {
+                                gpui::ImageSource::Resource(gpui::Resource::Embedded("".into()))
+                            }
+                        })
+                        // Web and mail links open in the browser; nothing else runs.
+                        .on_link_click(|url, _, _, cx| {
+                            if file_doc::link_opens(url) {
+                                cx.open_url(url);
+                            }
+                        }),
                     )
                     .into_any_element()
             }

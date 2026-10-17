@@ -147,16 +147,7 @@ impl Workspace {
 
     fn open_tab(&mut self, env: String, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let shell = self.hydra.shell(self.ui.default_shell.as_deref());
-        let id = self.new_pane(
-            PaneRequest {
-                env,
-                cwd,
-                shell,
-                command: None,
-            },
-            window,
-            cx,
-        );
+        let id = self.new_pane(PaneRequest::new(env, cwd, shell), window, cx);
         self.tabs.add(None, id);
         self.focus_soon(id, window, cx);
         cx.notify();
@@ -235,12 +226,7 @@ impl Workspace {
         };
         let request = {
             let v = from.read(cx);
-            PaneRequest {
-                env: v.env().to_string(),
-                cwd: v.cwd().clone(),
-                shell: v.request.shell,
-                command: None,
-            }
+            PaneRequest::new(v.env(), v.cwd().clone(), v.request.shell)
         };
         let id = self.new_pane(request, window, cx);
         self.tabs.split_focused(axis, id);
@@ -530,6 +516,7 @@ impl Workspace {
                     })
                     .unwrap_or_default();
                 let tint = self.tint(&env);
+                let label = tab.title.clone().unwrap_or(label);
                 strip = strip.child(
                     h_flex()
                         .id(("tab", id))

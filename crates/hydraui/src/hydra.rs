@@ -28,6 +28,21 @@ pub struct PaneRequest {
     pub shell: ShellKind,
     /// Shell text run after the shell starts.
     pub command: Option<String>,
+    /// Shown in the pane's warning strip (e.g. the folder is bound to another environment).
+    pub note: Option<String>,
+}
+
+impl PaneRequest {
+    /// A plain shell in `env` at `cwd`.
+    pub fn new(env: impl Into<String>, cwd: PathBuf, shell: ShellKind) -> Self {
+        Self {
+            env: env.into(),
+            cwd,
+            shell,
+            command: None,
+            note: None,
+        }
+    }
 }
 
 /// A started pane, with the warnings `prepare` gave (shown as the pane's strip).
@@ -401,12 +416,7 @@ mod tests {
             return;
         }
         let f = fx("");
-        let req = PaneRequest {
-            env: "work".into(),
-            cwd: f.free.clone(),
-            shell: ShellKind::Pwsh,
-            command: None,
-        };
+        let req = PaneRequest::new("work", f.free.clone(), ShellKind::Pwsh);
         let started = f
             .hydra
             .start(&req, GridSize { cols: 80, rows: 24 })

@@ -8,7 +8,9 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use hydra_core::bindings;
-use hydra_core::config::{EnvConfig, GlobalConfig, load_env, load_global};
+use hydra_core::borrow::declared_owner;
+use hydra_core::config::{EnvConfig, GlobalConfig, load_env, load_global, parse_env};
+use hydra_core::envedit::{self, ToolValues};
 use hydra_core::envs;
 use hydra_core::name::EnvName;
 use hydra_core::paths::HydraPaths;
@@ -22,6 +24,7 @@ use hydraui_term::{GridSize, Pane, SpawnSpec, TermEvent};
 
 use hydra_providers::claude::is_session_marker;
 
+use crate::accounts::{AddChoice, add_choices};
 use crate::palette::env_tint;
 
 /// What a pane runs.
@@ -257,6 +260,60 @@ impl Hydra {
             .collect()
     }
 
+    /// `env`'s env.toml, without a byte-order mark.
+    fn env_text(&self, env: &str) -> Result<String, String> {
+        let name = EnvName::parse(env).map_err(|e| e.to_string())?;
+        let file = self.paths.env_file(&name);
+        let text = std::fs::read_to_string(&file)
+            .map_err(|e| format!("can't read {}: {e}", file.display()))?;
+        Ok(text.strip_prefix('\u{feff}').unwrap_or(&text).to_string())
+    }
+
+    /// Turns `tool` on for `env`, as `hydra add` does: with its own login, or `from` another
+    /// environment's. The edited env.toml is checked first; nothing is written if it fails.
+    pub fn add_tool(&self, env: &str, tool: &str, from: Option<&str>) -> Result<(), String> {
+        let text = self.env_text(env)?;
+        let values = ToolValues {
+            from: from.map(str::to_string),
+            ..Default::default()
+        };
+        let (new_text, _) = envedit::add_tool(&text, tool, &values)?;
+        let name = EnvName::parse(env).map_err(|e| e.to_string())?;
+        parse_env(&self.paths, &name, &new_text).map_err(|e| e.to_string())?;
+        let file = self.paths.env_file(&name);
+        std::fs::write(&file, new_text).map_err(|e| format!("can't write {}: {e}", file.display()))
+    }
+
+    /// The accounts that can be added to `env`: sign-ins for the tools it doesn't have, and the
+    /// tools other environments have with their own login.
+    pub fn account_choices(&self, env: &str) -> Vec<AddChoice> {
+        let tools = |text: &str| -> Vec<String> {
+            envedit::tools_in(text)
+                .unwrap_or_default()
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        };
+        let Ok(text) = self.env_text(env) else {
+            return Vec::new();
+        };
+        let mut names = self.env_names();
+        names.sort();
+        let others: Vec<(String, Vec<String>)> = names
+            .into_iter()
+            .filter(|n| n != env)
+            .filter_map(|n| {
+                let t = self.env_text(&n).ok()?;
+                let owned = tools(&t)
+                    .into_iter()
+                    .filter(|tool| declared_owner(&t, tool).is_none())
+                    .collect();
+                Some((n, owned))
+            })
+            .collect();
+        add_choices(&tools(&text), &others)
+    }
+
     /// The tools in `env` that have a sign-in command (what `hydra auth <tool> <env>`
     /// accepts), by id.
     pub fn sign_ins(&self, env: &str) -> Vec<String> {
@@ -489,6 +546,65 @@ mod tests {
     }
 
     const BOUND: &str = "[bindings]\n\"BOUND/**\" = \"personal\"\n";
+
+    #[test]
+    fn adding_a_tool_turns_it_on_ready_to_sign_in() {
+        let f = fx("");
+        f.hydra.add_tool("work", "github", None).unwrap();
+        assert_eq!(f.hydra.sign_ins("work"), vec!["github"]);
+    }
+
+    #[test]
+    fn every_sign_in_tool_can_be_added_and_signed_in() {
+        let f = fx("");
+        for tool in crate::accounts::SIGN_IN_TOOLS {
+            f.hydra.add_tool("work", tool, None).unwrap();
+            assert!(
+                f.hydra.sign_ins("work").contains(&tool.to_string()),
+                "{tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tool_can_be_borrowed_from_an_env_that_has_it() {
+        let f = fx("");
+        f.hydra.add_tool("work", "github", Some("gh")).unwrap();
+        let text =
+            std::fs::read_to_string(f.hydra.paths.env_file(&EnvName::parse("work").unwrap()))
+                .unwrap();
+        assert!(text.contains("from = \"gh\""), "{text}");
+    }
+
+    #[test]
+    fn a_tool_that_doesnt_check_out_leaves_env_toml_alone() {
+        let f = fx("");
+        let file = f.hydra.paths.env_file(&EnvName::parse("work").unwrap());
+        let before = std::fs::read_to_string(&file).unwrap();
+        // personal has no github to lend.
+        assert!(
+            f.hydra
+                .add_tool("work", "github", Some("personal"))
+                .is_err()
+        );
+        assert!(f.hydra.add_tool("work", "nope", None).is_err());
+        assert!(f.hydra.add_tool("nobody", "github", None).is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+    }
+
+    #[test]
+    fn account_choices_skip_whats_on_and_borrow_what_others_own() {
+        let f = fx("");
+        let work = f.hydra.account_choices("work");
+        assert!(work.contains(&AddChoice::SignIn("github".into())));
+        assert!(work.contains(&AddChoice::Borrow {
+            tool: "github".into(),
+            from: "gh".into()
+        }));
+        let gh = f.hydra.account_choices("gh");
+        assert!(!gh.iter().any(|c| matches!(c,
+            AddChoice::SignIn(t) | AddChoice::Borrow { tool: t, .. } if t == "github")));
+    }
 
     #[test]
     fn lists_environments() {

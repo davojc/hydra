@@ -97,6 +97,8 @@ pub struct Workspace {
     title: String,
     subs: HashMap<PaneId, Subscription>,
     _timer: Task<()>,
+    /// Whether the status bar's accounts popover is open.
+    accounts_open: bool,
 }
 
 impl Workspace {
@@ -172,6 +174,7 @@ impl Workspace {
             title: String::new(),
             subs: HashMap::new(),
             _timer: timer,
+            accounts_open: false,
         }
     }
 

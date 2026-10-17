@@ -160,6 +160,18 @@ pub fn add_guard_hook(settings_json: &str, command: &str) -> Result<String, Stri
     Ok(text)
 }
 
+/// The command of the guard hook already in the settings JSON, if any.
+pub fn guard_hook_command(settings_json: &str) -> Option<String> {
+    let root: Value = serde_json::from_str(settings_json).ok()?;
+    root["hooks"]["PreToolUse"]
+        .as_array()?
+        .iter()
+        .flat_map(|e| e["hooks"].as_array().into_iter().flatten())
+        .filter_map(|h| h["command"].as_str())
+        .find(|c| c.contains(" guard claude"))
+        .map(str::to_string)
+}
+
 /// Base CLAUDE.md followed by the environment's own section. `None` when neither exists.
 pub fn render_claude_md(env: &str, base: Option<&str>, over: Option<&str>) -> Option<String> {
     if base.is_none() && over.is_none() {
@@ -250,6 +262,17 @@ mod tests {
         assert_eq!(pre[0]["hooks"][0]["command"], "mine.sh");
         assert_eq!(v["model"], "opus");
         assert_eq!(v["hooks"]["Stop"], json!([]));
+    }
+
+    #[test]
+    fn finds_the_guard_hook_command() {
+        let with = add_guard_hook("{}", "\"C:/x/hydra.exe\" guard claude").unwrap();
+        assert_eq!(
+            guard_hook_command(&with).as_deref(),
+            Some("\"C:/x/hydra.exe\" guard claude")
+        );
+        assert_eq!(guard_hook_command("{}"), None);
+        assert_eq!(guard_hook_command("not json"), None);
     }
 
     #[test]

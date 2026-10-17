@@ -8,7 +8,9 @@ use hydra_core::provider::{
 };
 use hydra_platform::links::{is_link, link_dir, points_at, unlink};
 
-use crate::claude_files::{add_guard_hook, merge_settings, render_claude_md, sync_mcp};
+use crate::claude_files::{
+    add_guard_hook, guard_hook_command, merge_settings, render_claude_md, sync_mcp,
+};
 use crate::report::report;
 
 pub struct Claude;
@@ -347,7 +349,12 @@ impl Provider for Claude {
                 over_settings.display()
             ));
         }
-        let settings = with_guard_hook(merged.text, ctx.warnings);
+        let settings = if ctx.guards {
+            with_guard_hook(merged.text, ctx.warnings)
+        } else {
+            let current = read_opt(&l.dir.join("settings.json"))?;
+            keep_guard_hook(merged.text, current.as_deref(), ctx.warnings)
+        };
         let env = ctx.tool_owner("claude").as_str();
         let md = render_claude_md(
             env,
@@ -449,6 +456,21 @@ fn with_guard_hook(text: String, warnings: &Warnings) -> String {
         Ok(with_hook) => with_hook,
         Err(e) => {
             warnings.push(format!("hydra: claude: guard hook not added ({e})"));
+            text
+        }
+    }
+}
+
+/// hydraui (guards off): keep the guard hook a `hydra shell` launch put in the current
+/// settings.json, so hydraui neither adds nor removes it.
+fn keep_guard_hook(text: String, current: Option<&str>, warnings: &Warnings) -> String {
+    let Some(command) = current.and_then(guard_hook_command) else {
+        return text;
+    };
+    match add_guard_hook(&text, &command) {
+        Ok(with_hook) => with_hook,
+        Err(e) => {
+            warnings.push(format!("hydra: claude: guard hook not kept ({e})"));
             text
         }
     }
@@ -768,6 +790,27 @@ mod tests {
         assert!(text.contains("PreToolUse"), "{text}");
         // Stable across launches: the second materialise changes nothing and makes no .bak.
         Claude.materialise(&f.ctx()).unwrap();
+        assert!(!cfg_dir(&f).join("settings.json.bak").exists());
+    }
+
+    #[test]
+    fn without_guards_a_fresh_environment_gets_no_guard_hook() {
+        let mut f = Fixture::new("[claude]\n");
+        f.guards = false;
+        Claude.materialise(&f.ctx()).unwrap();
+        let text = std::fs::read_to_string(cfg_dir(&f).join("settings.json")).unwrap();
+        assert!(!text.contains("guard claude"), "{text}");
+    }
+
+    #[test]
+    fn without_guards_the_hook_a_cli_launch_wrote_is_kept() {
+        let mut f = Fixture::new("[claude]\n");
+        Claude.materialise(&f.ctx()).unwrap();
+        let before = std::fs::read_to_string(cfg_dir(&f).join("settings.json")).unwrap();
+        f.guards = false;
+        Claude.materialise(&f.ctx()).unwrap();
+        let after = std::fs::read_to_string(cfg_dir(&f).join("settings.json")).unwrap();
+        assert_eq!(after, before);
         assert!(!cfg_dir(&f).join("settings.json.bak").exists());
     }
 

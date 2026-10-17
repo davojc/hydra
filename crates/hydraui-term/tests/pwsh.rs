@@ -194,3 +194,22 @@ fn exited(process: HANDLE, ms: u32) -> bool {
     // SAFETY: `process` is a live handle from `open_process`.
     unsafe { WaitForSingleObject(process, ms) == WAIT_OBJECT_0 }
 }
+
+#[test]
+fn writing_to_a_busy_shell_does_not_block() {
+    let fx = Fx::new();
+    let Some((pane, _rx)) = fx.spawn(PWSH, Some("Start-Sleep 60")) else {
+        return;
+    };
+    std::thread::sleep(Duration::from_secs(3));
+    let chunk = vec![b'x'; 64 * 1024];
+    let start = Instant::now();
+    for _ in 0..128 {
+        pane.write(&chunk).unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "8 MB of input blocked for {:?}",
+            start.elapsed()
+        );
+    }
+}

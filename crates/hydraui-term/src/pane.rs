@@ -172,12 +172,9 @@ impl Pane {
 
     /// Sends input (keys, pasted text) to the shell.
     pub fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
-        let mut w = self
-            .writer
-            .lock()
-            .map_err(|_| std::io::Error::other("the pane's writer is poisoned"))?;
-        w.write_all(bytes)?;
-        w.flush()
+        self.writer
+            .send(bytes.to_vec())
+            .map_err(|_| std::io::Error::other("the pane's shell input is closed"))
     }
 
     /// Resizes the PTY and the grid together.
@@ -263,7 +260,19 @@ fn start(
         }
     };
     // From here on an early return drops `job`, which ends the shell.
-    let writer: Writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(pty_err)?));
+    let mut pipe = pair.master.take_writer().map_err(pty_err)?;
+    let (writer, input): (Writer, _) = channel::<Vec<u8>>();
+    std::thread::Builder::new()
+        .name("hydraui-pty-write".into())
+        .spawn(move || {
+            // Ends when the pane and its listener are gone, or the PTY closes.
+            for bytes in input {
+                if pipe.write_all(&bytes).and_then(|()| pipe.flush()).is_err() {
+                    break;
+                }
+            }
+        })
+        .map_err(io("start the writer thread"))?;
     let reader = pair.master.try_clone_reader().map_err(pty_err)?;
     let (tx, rx) = channel();
     let listener = Listener {

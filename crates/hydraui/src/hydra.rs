@@ -2,6 +2,7 @@
 //! starting panes, and the identity checks for the status bar. No UI.
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
@@ -10,8 +11,8 @@ use hydra_core::config::{GlobalConfig, load_env, load_global};
 use hydra_core::envs;
 use hydra_core::name::EnvName;
 use hydra_core::paths::HydraPaths;
-use hydra_core::provider::{Ctx, IdentityReport, Status, Warnings};
-use hydra_core::resolve::{ENV_VARS_MARKER, LaunchEnv, PrepareOptions, prepare};
+use hydra_core::provider::{Ctx, IdentityReport, Provider, Status, Warnings};
+use hydra_core::resolve::{ENV_VARS_MARKER, LaunchEnv, PrepareError, PrepareOptions, prepare};
 use hydra_platform::keyring_store::KeyringStore;
 use hydra_platform::process::EnvRunner;
 use hydra_platform::shell::ShellKind;
@@ -42,6 +43,9 @@ pub struct Hydra {
     /// hydra's config.toml: bindings, `default_shell`, `git_bash`.
     pub global: GlobalConfig,
     store: KeyringStore,
+    /// `prepare` rewrites state files through fixed temp names, so two at once (a pane
+    /// starting while the status bar runs whoami) take turns.
+    prepare_turn: Mutex<()>,
 }
 
 impl Hydra {
@@ -79,6 +83,7 @@ impl Hydra {
                 user_home,
                 global,
                 store,
+                prepare_turn: Mutex::new(()),
             },
             problem,
         )
@@ -138,15 +143,25 @@ impl Hydra {
             inherited_env_vars: std::env::var(ENV_VARS_MARKER).ok(),
             ..Default::default()
         };
+        self.prepare_in_turn(&name, &hydra_providers::all(), &opts)
+            .map_err(|e| e.to_string())
+    }
+
+    fn prepare_in_turn(
+        &self,
+        name: &EnvName,
+        providers: &[Box<dyn Provider>],
+        opts: &PrepareOptions,
+    ) -> Result<LaunchEnv, PrepareError> {
+        let _turn = self.prepare_turn.lock().unwrap_or_else(|e| e.into_inner());
         prepare(
             &self.paths,
-            &name,
+            name,
             &self.user_home,
-            &hydra_providers::all(),
+            providers,
             &self.store,
-            &opts,
+            opts,
         )
-        .map_err(|e| e.to_string())
     }
 
     /// Prepares the environment and starts the pane's shell. The error is the pane's banner
@@ -184,14 +199,7 @@ impl Hydra {
             ..Default::default()
         };
         let providers = hydra_providers::all();
-        let Ok(launch) = prepare(
-            &self.paths,
-            &name,
-            &self.user_home,
-            &providers,
-            &self.store,
-            &opts,
-        ) else {
+        let Ok(launch) = self.prepare_in_turn(&name, &providers, &opts) else {
             return Vec::new();
         };
         let warnings = Warnings::default();
@@ -358,6 +366,23 @@ mod tests {
         let f = fx("");
         assert_eq!(f.hydra.prepare("work").unwrap().name.as_str(), "work");
         assert!(f.hydra.prepare("nobody").unwrap_err().contains("nobody"));
+    }
+
+    #[test]
+    fn prepare_from_several_threads_at_once_all_succeed() {
+        // A pane starting while the status bar runs whoami on the same environment.
+        for _ in 0..5 {
+            let f = fx("");
+            let results: Vec<Result<LaunchEnv, String>> = std::thread::scope(|s| {
+                let handles: Vec<_> = (0..8)
+                    .map(|_| s.spawn(|| f.hydra.prepare("work")))
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            for r in results {
+                assert!(r.is_ok(), "{:?}", r.err());
+            }
+        }
     }
 
     #[test]

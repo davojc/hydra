@@ -748,10 +748,15 @@ impl Workspace {
                         cx.listener(|ws, _, window, cx| ws.toggle_tree(&FileTree, window, cx)),
                     ),
             );
+        // "Loose" only tells tabs apart from a set's, so it shows only beside one.
+        let has_sets = self.tabs.has_sets();
         for (set, ids) in self.tabs.groups() {
             strip = match &set {
                 Some(name) => strip.child(self.render_set_header(name, muted, cx)),
-                None => strip.child(div().px_2().text_sm().text_color(muted).child("Loose")),
+                None if has_sets => {
+                    strip.child(div().px_2().text_sm().text_color(muted).child("Loose"))
+                }
+                None => strip,
             };
             if set.as_ref().is_some_and(|s| self.collapsed.contains(s)) {
                 continue;

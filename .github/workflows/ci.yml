@@ -44,7 +44,7 @@ jobs:
         shell: bash
         env:
           HYDRA_VERSION: ${{ steps.decide.outputs.version }}
-        run: cargo build --release -p hydra-cli
+        run: cargo build --release -p hydra-cli -p hydraui
       - name: Package
         if: steps.decide.outputs.release == 'true'
         shell: bash
@@ -54,6 +54,11 @@ jobs:
           cd dist
           sha256sum hydra-x86_64-pc-windows-msvc.exe | awk '{print tolower($1) "  hydra-x86_64-pc-windows-msvc.exe"}' > hydra-x86_64-pc-windows-msvc.exe.sha256
           cat hydra-x86_64-pc-windows-msvc.exe.sha256
+          cd ..
+          cp target/release/hydraui.exe dist/hydraui-x86_64-pc-windows-msvc.exe
+          cd dist
+          sha256sum hydraui-x86_64-pc-windows-msvc.exe | awk '{print tolower($1) "  hydraui-x86_64-pc-windows-msvc.exe"}' > hydraui-x86_64-pc-windows-msvc.exe.sha256
+          cat hydraui-x86_64-pc-windows-msvc.exe.sha256
       - name: Check the version
         if: steps.decide.outputs.release == 'true'
         shell: bash

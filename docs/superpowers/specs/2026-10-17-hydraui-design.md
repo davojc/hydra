@@ -366,7 +366,9 @@ focused pane's environment and current folder.
 
 `hydraui.exe` is a GUI-subsystem exe (`windows_subsystem = "windows"`) with
 version info like `hydra.exe`. It runs on its own; `hydra.exe` is not
-required. The release zip ships both; `scripts/` builds both. `hydra update`
+required. Each release ships both executables
+(`hydra-x86_64-pc-windows-msvc.exe` and `hydraui-x86_64-pc-windows-msvc.exe`,
+each with a `.sha256`); `scripts/deploy.ps1` builds and installs both. `hydra update`
 updating hydraui too is out of scope.
 
 ## 8. Errors summary

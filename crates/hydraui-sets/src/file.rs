@@ -1,5 +1,5 @@
 //! The set file as written: every field optional, checked later by `resolve`.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -11,28 +11,41 @@ pub struct SetFile {
     pub tabs: Vec<TabFile>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TabFile {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub layout: Option<NodeFile>,
 }
 
 /// A layout node: a split when `split` is set, otherwise a pane. One struct (not an untagged
 /// enum) so a typo gets serde's "unknown field" error instead of "no variant matched".
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeFile {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub split: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ratio: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub panes: Option<Vec<NodeFile>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
 }
 

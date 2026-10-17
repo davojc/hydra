@@ -106,6 +106,24 @@ pub fn parse_set(ctx: &Context, name: &str, file: &Path, text: &str) -> Result<S
     }
 }
 
+/// A tab saved in session.toml, checked like a set's tab with nothing inherited from a set:
+/// the tab, or what's wrong with it (an environment deleted, a folder gone).
+pub fn resolve_loose(ctx: &Context, tab: &TabFile) -> Result<TabSpec, Vec<String>> {
+    let mut r = Resolver {
+        ctx,
+        problems: Vec::new(),
+    };
+    let inherited = Inherited {
+        env: None,
+        cwd: ctx.user_home.to_path_buf(),
+        shell: None,
+    };
+    match r.tab(1, tab, &inherited) {
+        Some(spec) if r.problems.is_empty() => Ok(spec),
+        _ => Err(r.problems),
+    }
+}
+
 /// Values handed down from set to tab to pane.
 #[derive(Clone)]
 struct Inherited {
@@ -622,5 +640,25 @@ layout = { split = "right", command = "x", panes = [ { }, { } ] }
     fn no_sets_folder_means_no_sets() {
         let fx = Fx::new();
         assert!(list_sets(&fx.paths).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_saved_loose_tab_resolves_or_says_why_not() {
+        let fx = Fx::new();
+        let tab = |dir: &str| {
+            let text = format!(
+                "[[tab]]
+env = \"work\"
+cwd = \"{}\"
+",
+                fwd(&fx.root.join(dir))
+            );
+            file::parse(&text).unwrap().tabs.remove(0)
+        };
+        let spec = resolve_loose(&fx.ctx(), &tab("api")).unwrap();
+        assert_eq!(spec.root.panes()[0].cwd, fx.root.join("api"));
+        assert_eq!(spec.root.panes()[0].env.as_str(), "work");
+        let problems = resolve_loose(&fx.ctx(), &tab("gone")).unwrap_err();
+        assert!(problems[0].contains("doesn't exist"), "{problems:?}");
     }
 }

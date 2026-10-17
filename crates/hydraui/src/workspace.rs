@@ -179,11 +179,17 @@ impl Workspace {
         for p in problems {
             window.push_notification(Notification::warning(p).title("hydraui settings"), cx);
         }
-        // The sets open at last exit (spec §5.4); a plain tab when there were none.
+        // What was open at last exit (spec §5.4); a plain tab when there was nothing.
         if !self.restore_session(window, cx) {
             let home = self.hydra.user_home.clone();
             self.new_tab_in(home, window, cx);
         }
+        // Each pane's folder as it is when the window closes.
+        let ws = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            let _ = ws.update(cx, |ws, cx| ws.save_session(window, cx));
+            true
+        });
     }
 
     /// A Loose tab in `cwd`: the folder's environment, else `default_env`, else ask.
@@ -246,6 +252,7 @@ impl Workspace {
         let id = self.new_pane(request, window, cx);
         self.tabs.add(None, id);
         self.focus_soon(id, window, cx);
+        self.save_session(window, cx);
         cx.notify();
     }
 
@@ -344,6 +351,7 @@ impl Workspace {
         let id = self.new_pane(request, window, cx);
         self.tabs.split_focused(axis, id);
         self.focus_pane(id, window, cx);
+        self.save_session(window, cx);
         cx.notify();
     }
 
@@ -370,6 +378,7 @@ impl Workspace {
         }
         self.drop_pane(id);
         self.focus_active(window, cx);
+        self.save_session(window, cx);
         cx.notify();
     }
 
@@ -379,6 +388,7 @@ impl Workspace {
         }
         self.tab_gone(tab, window, cx);
         self.focus_active(window, cx);
+        self.save_session(window, cx);
         cx.notify();
     }
 
@@ -484,6 +494,7 @@ impl Workspace {
             self.tree = Some(view);
             self.sync_tree(cx);
         }
+        self.save_session(window, cx);
         self.focus_active(window, cx);
         cx.notify();
     }

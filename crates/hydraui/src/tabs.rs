@@ -36,6 +36,11 @@ impl Tabs {
         self.tabs.is_empty()
     }
 
+    /// Whether any open tab belongs to a set.
+    pub fn has_sets(&self) -> bool {
+        self.tabs.iter().any(|t| t.set.is_some())
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &Tab> {
         self.tabs.iter()
     }
@@ -216,6 +221,18 @@ mod tests {
 
     fn ids(t: &Tabs) -> Vec<TabId> {
         t.iter().map(|tab| tab.id).collect()
+    }
+
+    #[test]
+    fn has_sets_only_while_a_set_tab_is_open() {
+        let mut t = Tabs::default();
+        assert!(!t.has_sets());
+        t.add(None, 1);
+        assert!(!t.has_sets());
+        let b = t.add(Some("client-a".into()), 2);
+        assert!(t.has_sets());
+        t.close_tab(b);
+        assert!(!t.has_sets());
     }
 
     #[test]

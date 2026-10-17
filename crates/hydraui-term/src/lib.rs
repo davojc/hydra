@@ -2,6 +2,7 @@
 //! `alacritty_terminal` grid, and the shell-integration events. Windows only; no UI.
 pub mod command;
 pub mod init;
+pub mod job;
 pub mod osc;
 
 pub use init::clear_pane_inits;

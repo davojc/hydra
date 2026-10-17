@@ -520,6 +520,7 @@ dependencies = [
  "hydra-platform",
  "portable-pty",
  "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

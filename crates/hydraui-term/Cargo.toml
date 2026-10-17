@@ -8,6 +8,7 @@ rust-version.workspace = true
 hydra-core.workspace = true
 hydra-platform.workspace = true
 portable-pty.workspace = true
+windows-sys.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

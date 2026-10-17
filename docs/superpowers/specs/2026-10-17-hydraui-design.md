@@ -23,7 +23,8 @@ same environments, bindings and secrets.
 - Several sets can be loaded at once; each tab shows which set and which
   environment it belongs to.
 - A pane gets exactly the isolation `hydra shell <env>` gives: same variables
-  set and removed, same fail-closed rules, same git and Claude guards.
+  set and removed, same fail-closed rules, same git identity. The one
+  exception is the folder guard, which hydraui leaves out (§4.1).
 - An environment created with `hydra env new` / `hydra add` is usable in
   hydraui without restarting it, and the reverse for secrets set in hydraui.
 - A file tree shows the focused pane's current folder.
@@ -99,13 +100,23 @@ the environment as in use while a hydraui pane has it open.
 
 Each change keeps the CLI's behaviour identical.
 
-1. **Guard exe is injectable.** Add `guard_exe: Option<PathBuf>` to
-   `PrepareOptions`, passed down to the git provider (`git.rs`, hook wrapper
-   `hydra_exe=`) and the Claude provider (`claude.rs`, PreToolUse hook
-   `"<exe>" guard claude`). `None` keeps today's `current_exe()`. hydraui
-   passes the `hydra.exe` beside `hydraui.exe`, falling back to `hydra.exe` on
-   `PATH`. If neither exists, launch fails closed with a "hydra.exe not
-   found" error: hydraui never writes hooks that point at itself.
+1. **Guards can be left out.** Add `guards: bool` to `PrepareOptions`
+   (default `true`, the CLI's behaviour). hydraui passes `false` (user
+   decision: a push to the wrong account fails on credentials, so hydraui
+   doesn't need the folder guard). With `false`:
+   - The git provider writes `state/<env>/git/gitconfig-noguard`, the same
+     content without `core.hooksPath`, writes no hook wrappers, and points
+     `GIT_CONFIG_GLOBAL` at it. The CLI's `gitconfig` and `hooks/` are left
+     untouched, so open `hydra shell` terminals keep their guard.
+   - The Claude provider neither adds nor removes the PreToolUse hook: it
+     keeps whatever the existing `settings.json` has. (`settings.json` sits
+     in the environment's Claude folder with its sign-in, so it can't be
+     split per tool.) If the CLI has launched the environment, Claude in a
+     hydraui pane is still guarded through `hydra.exe`; if `hydra.exe` is
+     gone, the hook fails open.
+
+   hydraui never needs `hydra.exe`, and nothing calls `hydraui.exe` from a
+   hook.
 2. **Warnings are returned, not printed.** Provider warnings currently go to
    stderr (the Claude provider's `warn`). Collect them in a
    `LaunchEnv::warnings: Vec<String>`; the CLI prints them as it does now,
@@ -171,8 +182,8 @@ files count). If none applies, the set is invalid: "pane 2 of tab "api" has no
 environment and E:/work/client-a/api isn't bound".
 
 If an explicit `env` differs from the folder's binding, the pane opens with a
-warning badge ("this folder is bound to personal"); the guard will block
-commits there.
+warning badge ("this folder is bound to personal"). It is the only signal:
+hydraui panes have no folder guard (§4.1).
 
 ### 5.3 Validation
 
@@ -324,7 +335,6 @@ respected; `notify` keeps it current.
 - Warnings from `prepare` (§4.2): a dismissible strip at the top of the pane.
 - Set or `config.toml` errors: a toast naming file and line; the launcher
   marks the set invalid.
-- `hydra.exe` not found: launch fails with that error (§4.1).
 
 ### 7.6 Ad-hoc tabs and keys
 
@@ -349,8 +359,9 @@ focused pane's environment and current folder.
 ### 7.7 Packaging
 
 `hydraui.exe` is a GUI-subsystem exe (`windows_subsystem = "windows"`) with
-version info like `hydra.exe`. The release zip ships both side by side;
-`scripts/` builds both. `hydra update` updating hydraui too is out of scope.
+version info like `hydra.exe`. It runs on its own; `hydra.exe` is not
+required. The release zip ships both; `scripts/` builds both. `hydra update`
+updating hydraui too is out of scope.
 
 ## 8. Errors summary
 
@@ -359,7 +370,6 @@ version info like `hydra.exe`. The release zip ships both side by side;
 | Set TOML invalid / env unresolvable | Set doesn't open; toast with file and line |
 | `prepare` fails for a pane | That pane shows banner + Retry; rest of set opens |
 | Shell not found | Pane banner naming the shell and how to install it |
-| `hydra.exe` not found | Pane banner; no hooks written |
 | Shell exits | "exited (code)", Enter restarts with fresh `prepare` |
 | Set file changed while loaded | "changed — reload?" on the group |
 | No OSC 133 from shell | No running-command confirm; tree `cd` disabled |
@@ -390,7 +400,12 @@ version info like `hydra.exe`. The release zip ships both side by side;
   UI stack (egui with `egui_term` is the fallback) before building further.
   `hydraui-sets`, `hydraui-term` and the §4 changes don't depend on GPUI.
 - **Shared state with the CLI.** Both tools regenerate `state/<env>/` on
-  launch. They run the same code from one workspace, so the output is the
-  same; hook wrappers point at `hydra.exe` in both cases.
+  launch from the same code. The only difference is the guard (§4.1), and
+  hydraui writes its guard-free gitconfig to its own file so it can't switch
+  off the guard for CLI terminals.
+- **No folder guard in hydraui panes.** Credentials stop a push to a repo
+  the account can't reach, but not a local commit, and not a push when both
+  accounts can reach the repo. Each environment's git author still applies,
+  so commits are attributed correctly. Accepted by the user.
 - **Shell integration vs user profiles.** Heavily customised prompts can
   break OSC 133; the features that need it degrade as in §6.3.

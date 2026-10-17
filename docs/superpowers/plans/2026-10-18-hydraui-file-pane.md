@@ -908,7 +908,7 @@ The existing `a_saved_tab_reopens_as_the_same_layout` test rewrites `cwd` with s
         };
 ```
 
-and the new test builds its `Context` the same way that test does (temp `HydraPaths` with env `work`, empty bindings, `user_home: d.path()`), in place of `ctx_fixture`.
+and the new test builds its `Context` the same way that test does (temp `HydraPaths` with env `work`, empty bindings, `user_home: d.path()`), as written above.
 
 `workspace/sets.rs` callers open terminals only in this task. A set or session that has a file pane opens without it until Task 6 adds file panes to the workspace; that intermediate state is fine because nothing writes file panes yet:
 

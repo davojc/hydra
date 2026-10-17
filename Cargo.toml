@@ -11,6 +11,7 @@ rust-version = "1.89"
 hydra-core = { path = "crates/hydra-core" }
 hydra-platform = { path = "crates/hydra-platform" }
 hydra-providers = { path = "crates/hydra-providers" }
+hydraui-term = { path = "crates/hydraui-term" }
 anstream = "1"
 anstyle = "1"
 anyhow = "1"

@@ -588,6 +588,7 @@ version = "0.6.0"
 dependencies = [
  "hydra-core",
  "hydra-platform",
+ "hydraui-term",
  "serde",
  "tempfile",
  "toml 0.8.23",

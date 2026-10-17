@@ -31,7 +31,7 @@ use crate::hydra::{Hydra, PaneRequest, Started};
 use crate::input::{
     Mods, MouseKind, ReportButton, Wheel, key_bytes, mouse_report, paste_bytes, wheel,
 };
-use crate::keys::{CopyText, Find, PasteText};
+use crate::keys::{CopyText, Find, PasteText, TerminalBackTab, TerminalTab};
 use crate::palette::Palette;
 use crate::split::PaneId;
 
@@ -385,6 +385,24 @@ impl PaneView {
             self.send(&bytes, cx);
             // Also stops Windows turning the key into text for the input handler.
             cx.stop_propagation();
+        }
+    }
+
+    /// Tab or Shift+Tab to the shell, as the key would be sent (bound so the window doesn't
+    /// take it to move the focus).
+    fn send_tab(&mut self, shift: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus.is_focused(window) || !matches!(self.slot, Slot::Running(_)) {
+            return;
+        }
+        let Some(mode) = self.mode() else {
+            return;
+        };
+        let modifiers = Modifiers {
+            shift,
+            ..Default::default()
+        };
+        if let Some(bytes) = key_bytes("tab", None, mods(modifiers), mode) {
+            self.send(&bytes, cx);
         }
     }
 
@@ -925,6 +943,8 @@ impl Render for PaneView {
             .on_action(cx.listener(Self::copy_text))
             .on_action(cx.listener(Self::paste_text))
             .on_action(cx.listener(Self::find))
+            .on_action(cx.listener(|v, _: &TerminalTab, w, cx| v.send_tab(false, w, cx)))
+            .on_action(cx.listener(|v, _: &TerminalBackTab, w, cx| v.send_tab(true, w, cx)))
             .when(!self.warnings.is_empty(), |d| {
                 d.child(
                     h_flex()

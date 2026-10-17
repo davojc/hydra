@@ -21,9 +21,20 @@ gpui::actions!(
         PasteText,
         Find,
         Launcher,
-        FileTree
+        FileTree,
+        TerminalTab,
+        TerminalBackTab
     ]
 );
+
+/// Tab and Shift+Tab for the shell (completion), inside a pane. Without these, gpui-component's
+/// Root takes them to move the focus between controls.
+pub fn terminal_bindings() -> Vec<KeyBinding> {
+    vec![
+        KeyBinding::new("tab", TerminalTab, Some("Terminal")),
+        KeyBinding::new("shift-tab", TerminalBackTab, Some("Terminal")),
+    ]
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
@@ -180,6 +191,28 @@ pub fn bindings(keys: &[(Command, String)]) -> Vec<KeyBinding> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    gpui::actions!(test_root, [RootTab]);
+
+    #[test]
+    fn tab_and_shift_tab_reach_the_terminal_not_focus_cycling() {
+        // gpui-component's Root binds tab to move the focus; the terminal sits inside it.
+        let mut keymap = gpui::Keymap::new(terminal_bindings());
+        keymap.add_bindings([
+            KeyBinding::new("tab", RootTab, Some("Root")),
+            KeyBinding::new("shift-tab", RootTab, Some("Root")),
+        ]);
+        let stack = [
+            gpui::KeyContext::parse("Root").unwrap(),
+            gpui::KeyContext::parse("Terminal").unwrap(),
+        ];
+        let first = |key: &str| {
+            let (found, _) = keymap.bindings_for_input(&[Keystroke::parse(key).unwrap()], &stack);
+            found[0].action().boxed_clone()
+        };
+        assert!(first("tab").partial_eq(&TerminalTab));
+        assert!(first("shift-tab").partial_eq(&TerminalBackTab));
+    }
 
     fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs

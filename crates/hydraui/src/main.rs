@@ -38,6 +38,7 @@ fn main() {
             };
             Theme::change(mode, None, cx);
             cx.bind_keys(keys::bindings(&keymap));
+            cx.bind_keys(keys::terminal_bindings());
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();

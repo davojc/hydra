@@ -1,5 +1,6 @@
 //! The window's content (spec §7.1, §7.5, §7.6): the tab strip, the active tab's split panes
 //! with draggable dividers, the status bar, and the commands bound to keys.
+mod launcher;
 mod sets;
 
 use std::cell::{Cell, RefCell};
@@ -174,7 +175,19 @@ impl Workspace {
 
     fn open_tab(&mut self, env: String, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let shell = self.hydra.shell(self.ui.default_shell.as_deref());
-        let id = self.new_pane(PaneRequest::new(env, cwd, shell), window, cx);
+        self.open_request(PaneRequest::new(env, cwd, shell), window, cx);
+    }
+
+    /// The focused pane's folder, else the user's home.
+    fn focused_cwd(&self, cx: &App) -> PathBuf {
+        self.focused()
+            .map(|v| v.read(cx).cwd().clone())
+            .unwrap_or_else(|| self.hydra.user_home.clone())
+    }
+
+    /// A Loose tab running `request`.
+    fn open_request(&mut self, request: PaneRequest, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.new_pane(request, window, cx);
         self.tabs.add(None, id);
         self.focus_soon(id, window, cx);
         cx.notify();
@@ -249,10 +262,7 @@ impl Workspace {
     }
 
     fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
-        let cwd = self
-            .focused()
-            .map(|v| v.read(cx).cwd().clone())
-            .unwrap_or_else(|| self.hydra.user_home.clone());
+        let cwd = self.focused_cwd(cx);
         self.new_tab_in(cwd, window, cx);
     }
 
@@ -671,6 +681,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::focus_down))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
+            .on_action(cx.listener(Self::open_launcher))
             .child(self.render_tab_strip(bar, border, muted, cx))
             .child(div().flex_1().min_h_0().child(body))
             .child(self.render_status(border, muted, cx))

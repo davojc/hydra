@@ -216,6 +216,12 @@ impl PaneView {
         })
     }
 
+    /// New font and colours (Reload config): drawn from the next frame.
+    pub fn set_style(&mut self, style: Arc<TermStyle>, cx: &mut Context<Self>) {
+        self.style = style;
+        cx.notify();
+    }
+
     /// Runs `prepare` and starts the shell off the UI thread. Also Retry and restart, so an
     /// edited env.toml applies (spec §6.4).
     fn start(&mut self, cx: &mut Context<Self>) {

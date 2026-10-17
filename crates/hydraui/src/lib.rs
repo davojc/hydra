@@ -3,6 +3,7 @@
 pub mod accounts;
 pub mod config;
 pub mod file_doc;
+pub mod file_pane;
 pub mod file_tree;
 pub mod file_tree_view;
 pub mod frame;

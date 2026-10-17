@@ -23,9 +23,15 @@ gpui::actions!(
         Launcher,
         FileTree,
         TerminalTab,
-        TerminalBackTab
+        TerminalBackTab,
+        SaveFile
     ]
 );
+
+/// Ctrl+S in a file pane (spec §7.8).
+pub fn file_pane_bindings() -> Vec<KeyBinding> {
+    vec![KeyBinding::new("ctrl-s", SaveFile, Some("FilePane"))]
+}
 
 /// Tab and Shift+Tab for the shell (completion), inside a pane. Without these, gpui-component's
 /// Root takes them to move the focus between controls.
@@ -193,6 +199,17 @@ mod tests {
     use super::*;
 
     gpui::actions!(test_root, [RootTab]);
+
+    #[test]
+    fn ctrl_s_saves_in_a_file_pane() {
+        let keymap = gpui::Keymap::new(file_pane_bindings());
+        let stack = [
+            gpui::KeyContext::parse("Workspace").unwrap(),
+            gpui::KeyContext::parse("FilePane").unwrap(),
+        ];
+        let (found, _) = keymap.bindings_for_input(&[Keystroke::parse("ctrl-s").unwrap()], &stack);
+        assert!(found[0].action().partial_eq(&SaveFile));
+    }
 
     #[test]
     fn tab_and_shift_tab_reach_the_terminal_not_focus_cycling() {

@@ -112,7 +112,6 @@ pub fn language(path: &Path) -> &'static str {
         Some("c" | "h") => "c",
         Some("cpp" | "cc" | "cxx" | "hpp" | "hh") => "cpp",
         Some("cs") => "csharp",
-        Some("sql") => "sql",
         _ => "text",
     }
 }

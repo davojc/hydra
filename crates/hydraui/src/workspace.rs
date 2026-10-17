@@ -1,5 +1,6 @@
 //! The window's content (spec §7.1, §7.5, §7.6): the tab strip, the active tab's split panes
 //! with draggable dividers, the status bar, and the commands bound to keys.
+mod accounts;
 mod launcher;
 mod sets;
 
@@ -468,12 +469,10 @@ impl Workspace {
         let hydra = self.hydra.clone();
         cx.spawn(async move |this, cx| {
             let e = env.clone();
-            let summary = cx
-                .background_spawn(async move { accounts_summary(&hydra.whoami(&e)) })
-                .await;
+            let reports = cx.background_spawn(async move { hydra.whoami(&e) }).await;
             let _ = this.update(cx, |ws, cx| {
                 ws.refreshing.remove(&env);
-                ws.status.store(env, summary, Instant::now());
+                ws.status.store(env, reports, Instant::now());
                 cx.notify();
             });
         })
@@ -831,16 +830,21 @@ impl Workspace {
             .border_color(border)
             .text_color(muted);
         if let Some(view) = self.focused() {
+            let env = view.read(cx).env().to_string();
+            let env_name = self.render_env_accounts(env.clone(), self.tint(&env), cx);
             let v = view.read(cx);
-            let env = v.env().to_string();
-            let accounts = self.status.get(&env).unwrap_or("…").to_string();
+            let accounts = self
+                .status
+                .get(&env)
+                .map(accounts_summary)
+                .unwrap_or_else(|| "…".into());
             // Only a summary read in this pane's current folder; a stale one would mislead.
             let git = match &self.git {
                 Some((dir, Some(line))) if dir == v.cwd() => Some(line.clone()),
                 _ => None,
             };
             bar = bar
-                .child(div().text_color(self.tint(&env)).child(env))
+                .child(env_name)
                 .child(div().flex_1().truncate().child(accounts))
                 .when_some(git, |b, line| b.child(div().flex_none().child(line)))
                 .child(div().child(v.cwd().display().to_string()));

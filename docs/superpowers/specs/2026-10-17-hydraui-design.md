@@ -306,6 +306,10 @@ disabled.
 - The status bar shows the focused pane's environment, the accounts reported
   by hydra's whoami logic (cached, refreshed on focus change and every 60 s),
   and its current folder.
+- Clicking the environment's name opens its accounts: one row per provider
+  check (✓ ok, ! mismatch, ✗ missing, · info, with the detail, such as an AWS
+  ARN or a GitHub login), and Refresh to check again now. Display only for
+  now; signing in, or borrowing another environment's identity, comes later.
 
 ### 7.2 Terminal view
 

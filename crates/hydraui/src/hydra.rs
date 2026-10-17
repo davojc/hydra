@@ -1,6 +1,6 @@
 //! hydraui's link to hydra (spec §3.1, §4, §7.1): environments, `prepare` with guards off,
 //! starting panes, and the identity checks for the status bar. No UI.
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -404,26 +404,35 @@ pub fn accounts_summary(reports: &[IdentityReport]) -> String {
 /// (spec §7.1).
 pub const STATUS_TTL: Duration = Duration::from_secs(60);
 
-/// The last accounts summary per environment.
+/// The last account checks per environment.
 #[derive(Debug, Default)]
 pub struct StatusCache {
-    entries: HashMap<String, (Instant, String)>,
+    entries: HashMap<String, (Instant, Vec<IdentityReport>)>,
+    expired: HashSet<String>,
 }
 
 impl StatusCache {
-    /// The last summary, however old.
-    pub fn get(&self, env: &str) -> Option<&str> {
-        self.entries.get(env).map(|(_, s)| s.as_str())
+    /// The last checks, however old.
+    pub fn get(&self, env: &str) -> Option<&[IdentityReport]> {
+        self.entries.get(env).map(|(_, r)| r.as_slice())
     }
 
     pub fn is_fresh(&self, env: &str, now: Instant) -> bool {
-        self.entries
-            .get(env)
-            .is_some_and(|(at, _)| now.duration_since(*at) < STATUS_TTL)
+        !self.expired.contains(env)
+            && self
+                .entries
+                .get(env)
+                .is_some_and(|(at, _)| now.duration_since(*at) < STATUS_TTL)
     }
 
-    pub fn store(&mut self, env: String, summary: String, now: Instant) {
-        self.entries.insert(env, (now, summary));
+    /// Checks again on the next refresh, still showing the last result until then.
+    pub fn expire(&mut self, env: &str) {
+        self.expired.insert(env.to_string());
+    }
+
+    pub fn store(&mut self, env: String, reports: Vec<IdentityReport>, now: Instant) {
+        self.expired.remove(&env);
+        self.entries.insert(env, (now, reports));
     }
 }
 
@@ -641,10 +650,27 @@ mod tests {
         let t0 = Instant::now();
         assert!(!c.is_fresh("work", t0));
         assert_eq!(c.get("work"), None);
-        c.store("work".into(), "github: x".into(), t0);
+        let found = vec![IdentityReport {
+            provider: "github".into(),
+            status: Status::Ok,
+            detail: "x".into(),
+        }];
+        c.store("work".into(), found.clone(), t0);
         assert!(c.is_fresh("work", t0 + Duration::from_secs(59)));
         assert!(!c.is_fresh("work", t0 + STATUS_TTL));
-        assert_eq!(c.get("work"), Some("github: x"));
+        assert_eq!(c.get("work"), Some(found.as_slice()));
+    }
+
+    #[test]
+    fn an_expired_env_is_checked_again_but_keeps_its_last_result() {
+        let mut c = StatusCache::default();
+        let t0 = Instant::now();
+        c.store("work".into(), Vec::new(), t0);
+        c.expire("work");
+        assert!(!c.is_fresh("work", t0));
+        assert_eq!(c.get("work"), Some(&[][..]));
+        c.store("work".into(), Vec::new(), t0);
+        assert!(c.is_fresh("work", t0));
     }
 
     #[test]

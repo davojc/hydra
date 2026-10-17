@@ -38,6 +38,7 @@ fn node<F: FnMut() -> PaneId>(
             panes.push((id, req));
             Tree::Leaf(id)
         }
+        Node::Files(_) => Tree::Leaf(next_id()),
         Node::Split {
             dir,
             ratio,

@@ -34,6 +34,8 @@ pub enum Node {
         second: Box<Node>,
     },
     Pane(PaneSpec),
+    /// A file pane (spec §7.8).
+    Files(FilesSpec),
 }
 
 impl Node {
@@ -41,6 +43,7 @@ impl Node {
     pub fn panes(&self) -> Vec<&PaneSpec> {
         match self {
             Node::Pane(p) => vec![p],
+            Node::Files(_) => Vec::new(),
             Node::Split { first, second, .. } => {
                 let mut v = first.panes();
                 v.extend(second.panes());
@@ -48,6 +51,25 @@ impl Node {
             }
         }
     }
+}
+
+impl Node {
+    /// The tab's file pane, if it has one.
+    pub fn files(&self) -> Option<&FilesSpec> {
+        match self {
+            Node::Pane(_) => None,
+            Node::Files(f) => Some(f),
+            Node::Split { first, second, .. } => first.files().or_else(|| second.files()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FilesSpec {
+    /// Existing files, in file-tab order.
+    pub files: Vec<PathBuf>,
+    /// Always a valid index into `files` (0 when there are none).
+    pub active: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]

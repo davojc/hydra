@@ -11,4 +11,4 @@ pub use resolve::{
     Context, SetError, list_sets, load_set, parse_set, resolve_loose, set_file, sets_dir,
 };
 pub use session::{Session, read_session, session_file, write_session};
-pub use spec::{Node, PaneSpec, SetSpec, SplitDir, TabSpec};
+pub use spec::{FilesSpec, Node, PaneSpec, SetSpec, SplitDir, TabSpec};

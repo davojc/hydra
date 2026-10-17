@@ -5,6 +5,7 @@ pub mod frame;
 pub mod hydra;
 pub mod input;
 pub mod keys;
+pub mod launcher;
 pub mod layout;
 pub mod palette;
 pub mod pane_view;

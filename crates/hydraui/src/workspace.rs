@@ -210,6 +210,11 @@ impl Workspace {
             self.new_env_dialog(window, cx);
             return;
         }
+        // Each environment with its colour, as on its tabs.
+        let swatches: Vec<(String, Hsla)> = envs
+            .iter()
+            .map(|e| (e.clone(), rgb(self.hydra.tint(e)).into()))
+            .collect();
         let state = cx.new(|cx| CommandState::new(window, cx));
         let workspace = cx.entity();
         let first = Cell::new(true);
@@ -221,9 +226,10 @@ impl Workspace {
             dialog.title("Open a tab in…").child(
                 Command::new(&state)
                     .items(
-                        envs.iter()
-                            .map(|e| CommandItem::new().label(e.clone()))
-                            .chain([CommandItem::new().label("New environment…")]),
+                        swatches
+                            .iter()
+                            .map(|(e, colour)| env_item(e, Some(*colour)))
+                            .chain([env_item("New environment…", None)]),
                     )
                     .placeholder("Environment")
                     .on_confirm(move |ix, window, cx| {
@@ -953,6 +959,31 @@ impl Render for Workspace {
                 d.child(self.drag_listener(cx))
             })
     }
+}
+
+/// A row of the environment picker: a square in the environment's colour (`+` for the
+/// entry that creates one), then its name, which is also what the search matches.
+fn env_item(label: &str, colour: Option<Hsla>) -> CommandItem {
+    let text = label.to_string();
+    CommandItem::new()
+        .label(label.to_string())
+        .child(move |_, cx| {
+            let mark = div()
+                .size(px(12.))
+                .flex_none()
+                .rounded_sm()
+                .flex()
+                .items_center()
+                .justify_center();
+            let mark = match colour {
+                Some(c) => mark.bg(c),
+                None => mark
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("+"),
+            };
+            h_flex().gap_2().child(mark).child(text.clone())
+        })
 }
 
 #[cfg(test)]

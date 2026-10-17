@@ -213,6 +213,7 @@ pub fn shell(
     let style = PromptStyle {
         name: name.as_str(),
         rgb: launch.config.rgb().map(|c| (c.0, c.1, c.2)),
+        integration: false,
     };
     let init = write_init(kind, &app.paths.state_dir(&name), &style)?;
     let mut cmd = shell_command(kind, &exe, &init);

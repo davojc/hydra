@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -27,6 +28,8 @@ impl ShellKind {
 pub struct PromptStyle<'a> {
     pub name: &'a str,
     pub rgb: Option<(u8, u8, u8)>,
+    /// hydraui: also mark the prompt (OSC 133) and the folder (OSC 7).
+    pub integration: bool,
 }
 
 pub fn find_shell(kind: ShellKind, git_bash: Option<&Path>) -> Option<PathBuf> {
@@ -86,9 +89,13 @@ pub fn render_pwsh_init(style: &PromptStyle) -> String {
         None => format!("[{}] ", style.name),
     };
     s.push_str("$function:__hydra_prompt = $function:prompt\n");
-    s.push_str(&format!(
-        "function global:prompt {{ \"{tag}\" + (& $function:__hydra_prompt) }}\n"
-    ));
+    if style.integration {
+        s.push_str(&pwsh_integration(&tag));
+    } else {
+        s.push_str(&format!(
+            "function global:prompt {{ \"{tag}\" + (& $function:__hydra_prompt) }}\n"
+        ));
+    }
     s
 }
 
@@ -100,7 +107,88 @@ pub fn render_bash_init(style: &PromptStyle) -> String {
         Some((r, g, b)) => format!("\\[\\e[38;2;{r};{g};{b}m\\][{}]\\[\\e[0m\\] ", style.name),
         None => format!("[{}] ", style.name),
     };
-    s.push_str(&format!("PS1={}\"$PS1\"\n", sh_quote(&tag)));
+    if style.integration {
+        s.push_str(&format!(
+            "PS1={}\"$PS1\"'\\[\\e]133;B\\a\\]'\n",
+            sh_quote(&tag)
+        ));
+        s.push_str(BASH_INTEGRATION);
+    } else {
+        s.push_str(&format!("PS1={}\"$PS1\"\n", sh_quote(&tag)));
+    }
+    s
+}
+
+/// hydraui's pwsh prompt: OSC 133 D (last exit code, only after a command), OSC 7 (folder),
+/// A, the tagged prompt, B; and OSC 133 C when a command line is accepted. Expects
+/// `$function:__hydra_prompt` to hold the user's prompt.
+fn pwsh_integration(tag: &str) -> String {
+    let mut s = String::from(
+        r#"function global:prompt {
+  $ok = $global:?
+  $code = if ($ok) { 0 } elseif ($global:LASTEXITCODE) { $global:LASTEXITCODE } else { 1 }
+  $e = [char]27; $b = [char]7; $out = ''
+  if ($global:__hydraui_ran) { $out += "$e]133;D;$code$b" }
+  $global:__hydraui_ran = $false
+  $loc = $executionContext.SessionState.Path.CurrentLocation
+  if ($loc.Provider.Name -eq 'FileSystem') { $out += "$e]7;file://$env:COMPUTERNAME/$($loc.ProviderPath -replace '\\', '/')$b" }
+"#,
+    );
+    s.push_str(&format!(
+        "  $out + \"$e]133;A$b\" + \"{tag}\" + (& $function:__hydra_prompt) + \"$e]133;B$b\"\n}}\n"
+    ));
+    s.push_str(
+        r#"Import-Module PSReadLine -ErrorAction SilentlyContinue
+if (Test-Path Function:\PSConsoleHostReadLine) {
+  $global:__hydraui_readline = $function:PSConsoleHostReadLine
+  function global:PSConsoleHostReadLine { $line = & $global:__hydraui_readline; $global:__hydraui_ran = $true; [Console]::Write("$([char]27)]133;C$([char]7)"); $line }
+}
+"#,
+    );
+    s
+}
+
+/// hydraui's bash prompt marks, the same sequence as pwsh's. The DEBUG trap fires C only for
+/// the first command after a prompt: `__hydraui_armed` is set by the last PROMPT_COMMAND entry.
+const BASH_INTEGRATION: &str = r#"__hydraui_prompt() {
+  local ec=$?
+  if [ -n "$__hydraui_ran" ]; then printf '\e]133;D;%s\a' "$ec"; fi
+  __hydraui_ran=
+  printf '\e]7;file://%s/%s\a' "$HOSTNAME" "$(pwd -W 2>/dev/null || pwd)"
+  printf '\e]133;A\a'
+  return $ec
+}
+__hydraui_preexec() {
+  if [ -n "$__hydraui_armed" ]; then
+    __hydraui_armed=
+    __hydraui_ran=1
+    printf '\e]133;C\a'
+  fi
+}
+__hydraui_pc=${PROMPT_COMMAND%;}
+PROMPT_COMMAND="__hydraui_prompt${__hydraui_pc:+;$__hydraui_pc};__hydraui_armed=1"
+trap '__hydraui_preexec' DEBUG
+"#;
+
+/// The init script for `kind`, then `startup` (shell text, run as typed) when given. With
+/// integration on, the startup command is marked as running so its exit code is reported.
+pub fn render_init(kind: ShellKind, style: &PromptStyle, startup: Option<&str>) -> String {
+    let mut s = match kind {
+        ShellKind::Pwsh => render_pwsh_init(style),
+        ShellKind::Bash => render_bash_init(style),
+    };
+    if let Some(cmd) = startup {
+        if style.integration {
+            s.push_str(match kind {
+                ShellKind::Pwsh => {
+                    "$global:__hydraui_ran = $true; [Console]::Write(\"$([char]27)]133;C$([char]7)\")\n"
+                }
+                ShellKind::Bash => "__hydraui_ran=1; printf '\\e]133;C\\a'\n",
+            });
+        }
+        s.push_str(cmd);
+        s.push('\n');
+    }
     s
 }
 
@@ -112,29 +200,47 @@ pub fn write_init(
 ) -> std::io::Result<PathBuf> {
     let dir = state_dir.join("shell");
     std::fs::create_dir_all(&dir)?;
-    let (file, text) = match kind {
-        ShellKind::Pwsh => ("init.ps1", render_pwsh_init(style)),
-        ShellKind::Bash => ("init.bash", render_bash_init(style)),
+    let file = match kind {
+        ShellKind::Pwsh => "init.ps1",
+        ShellKind::Bash => "init.bash",
     };
+    let text = render_init(kind, style, None);
     let path = dir.join(file);
     std::fs::write(&path, text)?;
     Ok(path)
 }
 
+/// Arguments and extra variables that start `kind` running `init`, for callers that don't
+/// use `std::process::Command` (hydraui's PTY).
+pub fn shell_launch(
+    kind: ShellKind,
+    init: &Path,
+) -> (Vec<OsString>, Vec<(&'static str, &'static str)>) {
+    match kind {
+        ShellKind::Pwsh => (
+            vec![
+                "-NoLogo".into(),
+                "-NoProfile".into(),
+                "-NoExit".into(),
+                "-Command".into(),
+                format!(". '{}'", init.to_string_lossy().replace('\'', "''")).into(),
+            ],
+            vec![],
+        ),
+        ShellKind::Bash => (
+            vec!["--rcfile".into(), to_msys(init).into(), "-i".into()],
+            // Stops Git Bash's /etc/profile from cd-ing to ~.
+            vec![("CHERE_INVOKING", "1")],
+        ),
+    }
+}
+
 pub fn shell_command(kind: ShellKind, exe: &Path, init: &Path) -> Command {
     let mut cmd = Command::new(exe);
-    match kind {
-        ShellKind::Pwsh => {
-            cmd.args(["-NoLogo", "-NoProfile", "-NoExit", "-Command"]);
-            cmd.arg(format!(
-                ". '{}'",
-                init.to_string_lossy().replace('\'', "''")
-            ));
-        }
-        ShellKind::Bash => {
-            cmd.env("CHERE_INVOKING", "1"); // stops Git Bash's /etc/profile from cd-ing to ~
-            cmd.arg("--rcfile").arg(to_msys(init)).arg("-i");
-        }
+    let (args, vars) = shell_launch(kind, init);
+    cmd.args(args);
+    for (k, v) in vars {
+        cmd.env(k, v);
     }
     cmd
 }
@@ -146,6 +252,7 @@ mod tests {
     const TEAL: PromptStyle = PromptStyle {
         name: "work",
         rgb: Some((31, 154, 138)),
+        integration: false,
     };
 
     #[test]
@@ -177,9 +284,121 @@ mod tests {
         let style = PromptStyle {
             name: "work",
             rgb: None,
+            integration: false,
         };
         assert!(render_pwsh_init(&style).contains("function global:prompt { \"[work] \" +"));
         assert!(render_bash_init(&style).contains("PS1='[work] '\"$PS1\""));
+    }
+
+    const TEAL_UI: PromptStyle = PromptStyle {
+        name: "work",
+        rgb: None,
+        integration: true,
+    };
+
+    #[test]
+    fn integration_off_leaves_the_cli_scripts_alone() {
+        assert_eq!(
+            render_init(ShellKind::Pwsh, &TEAL, None),
+            render_pwsh_init(&TEAL)
+        );
+        assert_eq!(
+            render_init(ShellKind::Bash, &TEAL, None),
+            render_bash_init(&TEAL)
+        );
+    }
+
+    #[test]
+    fn pwsh_startup_command_runs_last_and_is_marked_as_running() {
+        let s = render_init(ShellKind::Pwsh, &TEAL_UI, Some("npm run dev"));
+        assert!(s.contains("PSConsoleHostReadLine"), "{s}");
+        assert!(
+            s.ends_with(
+                "$global:__hydraui_ran = $true; [Console]::Write(\"$([char]27)]133;C$([char]7)\")\nnpm run dev\n"
+            ),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn bash_startup_command_runs_last_and_is_marked_as_running() {
+        let s = render_init(ShellKind::Bash, &TEAL_UI, Some("npm run dev"));
+        assert!(s.contains("trap '__hydraui_preexec' DEBUG"), "{s}");
+        assert!(
+            s.ends_with("__hydraui_ran=1; printf '\\e]133;C\\a'\nnpm run dev\n"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn shell_launch_matches_shell_command() {
+        let init = Path::new("C:\\h\\init.ps1");
+        let (args, vars) = shell_launch(ShellKind::Pwsh, init);
+        let cmd = shell_command(ShellKind::Pwsh, Path::new("pwsh.exe"), init);
+        assert_eq!(
+            args,
+            cmd.get_args().map(|a| a.to_owned()).collect::<Vec<_>>()
+        );
+        assert!(vars.is_empty());
+        let (_, vars) = shell_launch(ShellKind::Bash, Path::new("C:\\h\\init.bash"));
+        assert_eq!(vars, vec![("CHERE_INVOKING", "1")]);
+    }
+
+    /// A folder whose name needs quoting in both shells.
+    fn awkward_folder() -> (tempfile::TempDir, PathBuf) {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("it's here");
+        std::fs::create_dir_all(&f).unwrap();
+        (d, f)
+    }
+
+    #[test]
+    fn pwsh_integration_marks_prompt_exit_code_and_folder() {
+        let Some(exe) = find_shell(ShellKind::Pwsh, None) else {
+            eprintln!("skipped: pwsh isn't installed");
+            return;
+        };
+        let (d, folder) = awkward_folder();
+        let script = format!(
+            "function global:prompt {{ 'PS> ' }}\n$function:__hydra_prompt = $function:prompt\n{}Set-Location -LiteralPath '{}'\n$global:__hydraui_ran = $true\ncmd /c exit 3\nprompt\n",
+            pwsh_integration("[work] "),
+            folder.to_string_lossy().replace('\'', "''")
+        );
+        let file = d.path().join("t.ps1");
+        std::fs::write(&file, script).unwrap();
+        let out = Command::new(exe)
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
+            .arg(&file)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("\x1b]133;D;3\x07"), "{text:?}");
+        assert!(text.contains("\x1b]7;file://"), "{text:?}");
+        assert!(text.contains("/it's here\x07"), "{text:?}");
+        assert!(
+            text.contains("\x1b]133;A\x07[work] PS> \x1b]133;B\x07"),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn bash_integration_marks_prompt_exit_code_and_folder() {
+        let Some(exe) = find_shell(ShellKind::Bash, None) else {
+            eprintln!("skipped: Git Bash isn't installed");
+            return;
+        };
+        let (_d, folder) = awkward_folder();
+        let script = format!("{BASH_INTEGRATION}__hydraui_ran=1\n(exit 4)\n__hydraui_prompt\n");
+        let out = Command::new(exe)
+            .args(["--norc", "--noprofile", "-c", &script])
+            .current_dir(&folder)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("\x1b]133;D;4\x07"), "{text:?}");
+        assert!(text.contains("\x1b]7;file://"), "{text:?}");
+        assert!(text.contains("/it's here\x07"), "{text:?}");
+        assert!(text.ends_with("\x1b]133;A\x07"), "{text:?}");
     }
 
     #[test]

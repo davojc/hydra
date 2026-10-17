@@ -341,6 +341,10 @@ respected; `notify` keeps it current.
 - Sets, marked loaded/unloaded/invalid: Enter loads or focuses; a second
   action unloads.
 - Environments: open an ad-hoc tab in that environment.
+- **New environment**: name it (checked as it is typed: a valid name, not
+  taken), create it as `hydra env new` does, and open a tab in it. Also the
+  last entry of the "Open a tab in…" picker, and what that picker opens when
+  there are no environments yet.
 - **Sign in**: pick environment and tool; runs the same sign-in command as
   `hydra auth <tool> <env>` in a new pane in that environment.
 - **Set secret**: pick `<env>/<key>` (from references in `env.toml` that

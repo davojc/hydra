@@ -207,13 +207,7 @@ impl Workspace {
     fn pick_env(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let envs = self.hydra.env_names();
         if envs.is_empty() {
-            window.push_notification(
-                Notification::warning(
-                    "No hydra environments yet: create one with `hydra env new <name>`.",
-                )
-                .title("hydraui"),
-                cx,
-            );
+            self.new_env_dialog(window, cx);
             return;
         }
         let state = cx.new(|cx| CommandState::new(window, cx));
@@ -226,13 +220,18 @@ impl Workspace {
             let (choices, workspace, cwd) = (envs.clone(), workspace.clone(), cwd.clone());
             dialog.title("Open a tab in…").child(
                 Command::new(&state)
-                    .items(envs.iter().map(|e| CommandItem::new().label(e.clone())))
+                    .items(
+                        envs.iter()
+                            .map(|e| CommandItem::new().label(e.clone()))
+                            .chain([CommandItem::new().label("New environment…")]),
+                    )
                     .placeholder("Environment")
                     .on_confirm(move |ix, window, cx| {
-                        if let Some(env) = choices.get(ix.row).cloned() {
-                            window.close_dialog(cx);
-                            workspace
-                                .update(cx, |ws, cx| ws.open_tab(env, cwd.clone(), window, cx));
+                        window.close_dialog(cx);
+                        match choices.get(ix.row).cloned() {
+                            Some(env) => workspace
+                                .update(cx, |ws, cx| ws.open_tab(env, cwd.clone(), window, cx)),
+                            None => workspace.update(cx, |ws, cx| ws.new_env_dialog(window, cx)),
                         }
                     }),
             )

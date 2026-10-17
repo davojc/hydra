@@ -20,6 +20,8 @@ pub enum Action {
         env: String,
         tool: String,
     },
+    /// Create an environment, named in the dialog.
+    NewEnv,
     /// Store a value for this `env/key`.
     SetSecret(String),
     /// Store a value for an `env/key` typed in the dialog.
@@ -80,6 +82,7 @@ pub fn entries(
             Action::SetSecret(path.clone()),
         );
     }
+    add("New environment…".into(), Action::NewEnv);
     add("Set secret: other…".into(), Action::NewSecret);
     add("Open config folder".into(), Action::OpenConfigFolder);
     add("Reload config".into(), Action::ReloadConfig);
@@ -117,6 +120,7 @@ mod tests {
                 "New tab: work",
                 "Sign in: github in work",
                 "Set secret: work/linear",
+                "New environment…",
                 "Set secret: other…",
                 "Open config folder",
                 "Reload config",
@@ -137,7 +141,8 @@ mod tests {
             }
         );
         assert_eq!(got[6].action, Action::SetSecret("work/linear".into()));
-        assert_eq!(got[7].action, Action::NewSecret);
+        assert_eq!(got[7].action, Action::NewEnv);
+        assert_eq!(got[8].action, Action::NewSecret);
     }
 
     #[test]
@@ -146,7 +151,13 @@ mod tests {
         let labels: Vec<&str> = got.iter().map(|e| e.label.as_str()).collect();
         assert_eq!(
             labels,
-            vec!["Set secret: other…", "Open config folder", "Reload config"]
+            vec![
+                "New environment…",
+                "Set secret: other…",
+                "Open config folder",
+                "Reload config"
+            ]
         );
+        assert_eq!(got[0].action, Action::NewEnv);
     }
 }

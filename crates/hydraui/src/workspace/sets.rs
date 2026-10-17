@@ -16,7 +16,7 @@ use hydraui_term::PromptState;
 
 use super::{DEFAULT_TREE_WIDTH, Workspace, tree_width_at};
 use crate::keys::FileTree;
-use crate::layout::{SavedPane, tab_file, tab_layout};
+use crate::layout::{SavedPane, TabLayout, tab_file, tab_layout};
 use crate::tabs::TabId;
 
 /// What to ask before unloading `set` when some of its panes are running a command (OSC 133);
@@ -74,7 +74,11 @@ impl Workspace {
         let mut tabs = Vec::new();
         for tab in &spec.tabs {
             let next = &mut self.next_pane;
-            let (tree, panes) = tab_layout(tab, &mut || {
+            let TabLayout {
+                tree,
+                terminals: panes,
+                files: _,
+            } = tab_layout(tab, &mut || {
                 *next += 1;
                 *next
             });
@@ -195,7 +199,7 @@ impl Workspace {
         let pane = |id| {
             self.panes.get(&id).map(|v| {
                 let v = v.read(cx);
-                SavedPane {
+                SavedPane::Terminal {
                     env: v.env().to_string(),
                     cwd: v.cwd().clone(),
                     shell: v.request.shell,
@@ -259,7 +263,11 @@ impl Workspace {
                 }
             };
             let next = &mut self.next_pane;
-            let (tree, panes) = tab_layout(&spec, &mut || {
+            let TabLayout {
+                tree,
+                terminals: panes,
+                files: _,
+            } = tab_layout(&spec, &mut || {
                 *next += 1;
                 *next
             });

@@ -21,11 +21,10 @@ use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, WindowExt, h_flex, v_flex};
 use hydraui_sets::LoadedSets;
 
-use hydra_platform::process::resolve_program;
 use hydraui_term::PromptState;
 
 use crate::config::UiConfig;
-use crate::file_tree::{cd_command, quote_path};
+use crate::file_tree::{cd_command, editor_command, quote_path};
 use crate::file_tree_view::{FileTreeView, TreeEvent};
 use crate::hydra::{Hydra, PaneRequest, STATUS_TTL, StatusCache, accounts_summary};
 use crate::keys::{
@@ -445,19 +444,13 @@ impl Workspace {
             return;
         };
         let search = std::env::var_os("PATH").unwrap_or_default();
-        let program = resolve_program(editor, &search, std::env::var_os("PATHEXT").as_deref())
-            .unwrap_or_else(|| PathBuf::from(editor));
-        let script = program
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
-        let mut cmd = if script {
-            let mut c = std::process::Command::new("cmd");
-            c.arg("/c").arg(&program);
-            c
-        } else {
-            std::process::Command::new(&program)
-        };
-        if let Err(e) = cmd.arg(path).spawn() {
+        let mut cmd = editor_command(
+            editor,
+            path,
+            &search,
+            std::env::var_os("PATHEXT").as_deref(),
+        );
+        if let Err(e) = cmd.spawn() {
             window.push_notification(
                 Notification::error(format!("can't start {editor}: {e}")).title("Open file"),
                 cx,

@@ -121,6 +121,24 @@ impl FileTree {
     }
 }
 
+/// The command that opens `path` in `editor` (a program name or path, found on `search` like
+/// a shell would, so `.cmd` launchers such as VS Code's `code` work). It shows no console.
+pub fn editor_command(
+    editor: &str,
+    path: &Path,
+    search: &std::ffi::OsStr,
+    pathext: Option<&std::ffi::OsStr>,
+) -> std::process::Command {
+    let program = hydra_platform::process::resolve_program(editor, search, pathext)
+        .unwrap_or_else(|| PathBuf::from(editor));
+    // Run directly, `.cmd` included: Rust quotes a batch file's arguments safely, where
+    // `cmd /c` would mangle quotes around paths with spaces and obey `&` in a name.
+    let mut cmd = std::process::Command::new(program);
+    cmd.arg(path);
+    hydra_platform::process::hide_window(&mut cmd);
+    cmd
+}
+
 /// A path as one word for the shell: single-quoted for pwsh, and single-quoted with forward
 /// slashes for Git Bash.
 pub fn quote_path(shell: ShellKind, path: &Path) -> String {
@@ -238,5 +256,26 @@ mod tests {
             cd_command(ShellKind::Bash, p),
             "cd 'C:/work/it'\\''s [here]'\r"
         );
+    }
+
+    #[test]
+    fn a_cmd_editor_gets_the_path_whole() {
+        let d = tempfile::tempdir().unwrap();
+        let bin = d.path().join("my editor");
+        std::fs::create_dir_all(&bin).unwrap();
+        // Writes its first argument, as given, next to itself.
+        std::fs::write(
+            bin.join("ed.cmd"),
+            "@echo %1> \"%~dp0out.txt\"
+",
+        )
+        .unwrap();
+        let file = d.path().join("my dir").join("a&b.txt");
+        let status = editor_command("ed", &file, bin.as_os_str(), Some(".CMD".as_ref()))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let got = std::fs::read_to_string(bin.join("out.txt")).unwrap_or_default();
+        assert_eq!(got.trim(), format!("\"{}\"", file.display()));
     }
 }

@@ -90,15 +90,42 @@ impl std::fmt::Debug for LaunchEnv {
     }
 }
 
+/// One change `apply` makes to a child's environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvChange {
+    Remove(String),
+    Set(String, OsString),
+}
+
 impl LaunchEnv {
     pub fn apply(&self, cmd: &mut Command) {
-        for k in &self.unset {
-            cmd.env_remove(k);
+        for change in self.env_changes(std::env::var_os("PATH")) {
+            match change {
+                EnvChange::Remove(k) => {
+                    cmd.env_remove(k);
+                }
+                EnvChange::Set(k, v) => {
+                    cmd.env(k, v);
+                }
+            }
         }
-        for (k, v) in &self.set {
-            cmd.env(k, v);
-        }
-        cmd.env("PATH", self.path_value(std::env::var_os("PATH")));
+    }
+
+    /// What `apply` does, for callers without a `std::process::Command` (hydraui's PTY):
+    /// removals, then values, then PATH built from `current_path`.
+    pub fn env_changes(&self, current_path: Option<OsString>) -> Vec<EnvChange> {
+        let mut out: Vec<EnvChange> = self
+            .unset
+            .iter()
+            .map(|k| EnvChange::Remove(k.clone()))
+            .collect();
+        out.extend(
+            self.set
+                .iter()
+                .map(|(k, v)| EnvChange::Set(k.clone(), v.into())),
+        );
+        out.push(EnvChange::Set("PATH".into(), self.path_value(current_path)));
+        out
     }
 
     /// The inherited PATH with the `path_drop` folders taken out.
@@ -285,6 +312,52 @@ pub fn prepare(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_launch() -> LaunchEnv {
+        LaunchEnv {
+            name: EnvName::parse("work").unwrap(),
+            config: EnvConfig::default(),
+            set: BTreeMap::from([("A".to_string(), "1".to_string())]),
+            unset: BTreeSet::from(["GH_TOKEN".to_string()]),
+            path_drop: vec![PathBuf::from("C:\\old")],
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn env_changes_lists_removals_then_values_then_path() {
+        let path = std::env::join_paths(["C:\\old", "C:\\keep"]).unwrap();
+        assert_eq!(
+            sample_launch().env_changes(Some(path)),
+            vec![
+                EnvChange::Remove("GH_TOKEN".into()),
+                EnvChange::Set("A".into(), "1".into()),
+                EnvChange::Set("PATH".into(), "C:\\keep".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_does_what_env_changes_says() {
+        let launch = sample_launch();
+        let mut cmd = Command::new("x");
+        launch.apply(&mut cmd);
+        let mut got: Vec<(OsString, Option<OsString>)> = cmd
+            .get_envs()
+            .map(|(k, v)| (k.to_owned(), v.map(|v| v.to_owned())))
+            .collect();
+        let mut want: Vec<(OsString, Option<OsString>)> = launch
+            .env_changes(std::env::var_os("PATH"))
+            .into_iter()
+            .map(|c| match c {
+                EnvChange::Remove(k) => (k.into(), None),
+                EnvChange::Set(k, v) => (k.into(), Some(v)),
+            })
+            .collect();
+        got.sort();
+        want.sort();
+        assert_eq!(got, want);
+    }
     use crate::contribution::Contribution;
     use crate::provider::{CommandRunner, IdentityReport, ProviderError, Status};
     use crate::secret::{MemoryStore, SecretRef};

@@ -135,6 +135,16 @@ fn grid_cell(dx: f32, dy: f32, cell: (f32, f32), size: GridSize) -> (usize, usiz
     (row, col, side)
 }
 
+/// The cell at an offset from the grid's corner, or `None` outside the grid (the warning
+/// strip, the find box, the padding): clicks there aren't the program's.
+fn hit_cell(dx: f32, dy: f32, cell: (f32, f32), size: GridSize) -> Option<(usize, usize, Side)> {
+    let inside = dx >= 0.0
+        && dy >= 0.0
+        && dx < cell.0 * f32::from(size.cols)
+        && dy < cell.1 * f32::from(size.rows);
+    inside.then(|| grid_cell(dx, dy, cell, size))
+}
+
 fn grid_point(display_offset: usize, row: usize, col: usize) -> GridPoint {
     viewport_to_point(display_offset, GridPoint::new(row, Column(col)))
 }
@@ -297,6 +307,18 @@ impl PaneView {
         Some(pane.with_term(|t| build_frame(t, &self.style.palette, focused)))
     }
 
+    /// The cell under a window position, or `None` off the grid.
+    fn hit_at(&self, pos: Point<Pixels>) -> Option<(usize, usize, Side)> {
+        let (cw, ch) = self.cell?;
+        hit_cell(
+            f32::from(pos.x - self.origin.x),
+            f32::from(pos.y - self.origin.y),
+            (f32::from(cw), f32::from(ch)),
+            self.size,
+        )
+    }
+
+    /// The nearest cell to a window position, for drags that leave the grid.
     fn cell_at(&self, pos: Point<Pixels>) -> Option<(usize, usize, Side)> {
         let (cw, ch) = self.cell?;
         Some(grid_cell(
@@ -340,7 +362,7 @@ impl PaneView {
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
-        let (Slot::Running(pane), Some((row, col, side))) = (&self.slot, self.cell_at(ev.position))
+        let (Slot::Running(pane), Some((row, col, side))) = (&self.slot, self.hit_at(ev.position))
         else {
             return;
         };
@@ -423,7 +445,7 @@ impl PaneView {
         pos: Point<Pixels>,
         m: Modifiers,
     ) {
-        let (Slot::Running(pane), Some((row, col, _))) = (&self.slot, self.cell_at(pos)) else {
+        let (Slot::Running(pane), Some((row, col, _))) = (&self.slot, self.hit_at(pos)) else {
             return;
         };
         if m.shift {
@@ -468,7 +490,7 @@ impl PaneView {
         if lines == 0 {
             return;
         }
-        let (row, col, _) = self.cell_at(ev.position).unwrap_or((0, 0, Side::Left));
+        let (row, col, _) = self.hit_at(ev.position).unwrap_or((0, 0, Side::Left));
         let mode = pane.with_term(|t| *t.mode());
         match wheel(lines, col, row, mods(ev.modifiers), mode) {
             Wheel::Send(bytes) => {
@@ -875,12 +897,6 @@ impl Render for PaneView {
             .on_action(cx.listener(Self::copy_text))
             .on_action(cx.listener(Self::paste_text))
             .on_action(cx.listener(Self::find))
-            .on_any_mouse_down(cx.listener(Self::on_mouse_down))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up))
-            .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up))
-            .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .on_scroll_wheel(cx.listener(Self::on_scroll))
             .when(!self.warnings.is_empty(), |d| {
                 d.child(
                     h_flex()
@@ -928,6 +944,13 @@ impl Render for PaneView {
                     .overflow_hidden()
                     .p_1()
                     .cursor_text()
+                    // Only the grid area: clicks in the strips above are theirs.
+                    .on_any_mouse_down(cx.listener(Self::on_mouse_down))
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                    .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up))
+                    .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up))
+                    .on_mouse_move(cx.listener(Self::on_mouse_move))
+                    .on_scroll_wheel(cx.listener(Self::on_scroll))
                     .child(body),
             )
     }
@@ -936,6 +959,17 @@ impl Render for PaneView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn positions_outside_the_grid_are_not_cells() {
+        let size = GridSize { cols: 80, rows: 24 };
+        let cell = (10.0, 20.0);
+        assert_eq!(hit_cell(-1.0, 5.0, cell, size), None);
+        assert_eq!(hit_cell(5.0, -1.0, cell, size), None);
+        assert_eq!(hit_cell(800.0, 5.0, cell, size), None);
+        assert_eq!(hit_cell(5.0, 480.0, cell, size), None);
+        assert_eq!(hit_cell(26.0, 41.0, cell, size), Some((2, 2, Side::Right)));
+    }
 
     #[test]
     fn cells_are_found_from_offsets_and_clamped_to_the_grid() {

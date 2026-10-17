@@ -138,6 +138,20 @@ impl Tabs {
         Some(old)
     }
 
+    /// Splits `target`, in whichever tab holds it, focuses `new` there and makes that tab
+    /// active.
+    pub fn split_pane(&mut self, target: PaneId, axis: Axis, new: PaneId) -> bool {
+        let Some(i) = self.tabs.iter().position(|t| t.tree.contains(target)) else {
+            return false;
+        };
+        if !self.tabs[i].tree.split(target, axis, new) {
+            return false;
+        }
+        self.active = i;
+        self.tabs[i].focused = new;
+        true
+    }
+
     /// Moves focus within the active tab; returns the newly focused pane.
     pub fn focus_dir(&mut self, dir: Dir) -> Option<PaneId> {
         let tab = self.active_mut()?;
@@ -233,6 +247,20 @@ mod tests {
         assert!(t.has_sets());
         t.close_tab(b);
         assert!(!t.has_sets());
+    }
+
+    #[test]
+    fn split_pane_splits_that_pane_and_focuses_the_new_one() {
+        let mut t = Tabs::default();
+        let a = t.add(None, 1);
+        let b = t.add(None, 2);
+        assert_eq!(t.active_id(), Some(b));
+        assert!(t.split_pane(1, Axis::Row, 3));
+        assert_eq!(t.active_id(), Some(a));
+        let tab = t.active().unwrap();
+        assert_eq!(tab.focused, 3);
+        assert_eq!(tab.tree.panes(), vec![1, 3]);
+        assert!(!t.split_pane(42, Axis::Row, 4));
     }
 
     #[test]

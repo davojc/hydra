@@ -5,3 +5,4 @@ pub mod frame;
 pub mod input;
 pub mod palette;
 pub mod split;
+pub mod tabs;

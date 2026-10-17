@@ -7,7 +7,7 @@ use crate::config::{ConfigError, EnvConfig, load_env};
 use crate::contribution::{VarValue, merge};
 use crate::name::EnvName;
 use crate::paths::HydraPaths;
-use crate::provider::{Ctx, Provider};
+use crate::provider::{Ctx, Provider, Warnings};
 use crate::secret::SecretStore;
 
 /// Id of the provider for arbitrary `[env]` variables.
@@ -32,6 +32,8 @@ pub enum PrepareError {
     Failed {
         env: EnvName,
         failures: Vec<Failure>,
+        /// Warnings providers gave before the launch failed.
+        warnings: Vec<String>,
     },
 }
 
@@ -58,6 +60,8 @@ pub struct PrepareOptions {
     /// `hydra whoami`: this configuration (e.g. with broken borrows left out) instead of
     /// loading env.toml.
     pub config: Option<EnvConfig>,
+    /// hydraui: leave out the folder guard's hooks (spec: hydraui §4.1).
+    pub no_guards: bool,
 }
 
 /// The environment to apply to a child process.
@@ -69,6 +73,7 @@ pub struct LaunchEnv {
     pub unset: BTreeSet<String>,
     /// Folders taken out of the inherited PATH (compared case-insensitively, either separator).
     pub path_drop: Vec<PathBuf>,
+    pub warnings: Vec<String>,
 }
 
 /// Shows the names of the variables it sets, never their values (some are secrets).
@@ -80,6 +85,7 @@ impl std::fmt::Debug for LaunchEnv {
             .field("set", &self.set.keys().collect::<Vec<_>>())
             .field("unset", &self.unset)
             .field("path_drop", &self.path_drop)
+            .field("warnings", &self.warnings)
             .finish()
     }
 }
@@ -128,12 +134,15 @@ pub fn prepare(
         Some(c) => c.clone(),
         None => load_env(paths, name)?,
     };
+    let warnings = Warnings::default();
     let ctx = Ctx {
         name,
         env: &config,
         paths,
         user_home,
         secrets,
+        guards: !opts.no_guards,
+        warnings: &warnings,
     };
     let mut failures = Vec::new();
     let mut parts = Vec::new();
@@ -171,6 +180,7 @@ pub fn prepare(
             return Err(PrepareError::Failed {
                 env: name.clone(),
                 failures,
+                warnings: warnings.take(),
             });
         }
     };
@@ -213,6 +223,7 @@ pub fn prepare(
         return Err(PrepareError::Failed {
             env: name.clone(),
             failures,
+            warnings: warnings.take(),
         });
     }
 
@@ -267,6 +278,7 @@ pub fn prepare(
         unset,
         // A terminal opened by an older hydra may still have its shims folder first.
         path_drop: vec![paths.legacy_shims_dir()],
+        warnings: warnings.take(),
     })
 }
 
@@ -640,5 +652,87 @@ mod tests {
         let shown = format!("{env:?}");
         assert!(shown.contains("TOKEN"), "{shown}");
         assert!(!shown.contains("s3cret-v4lue"), "{shown}");
+    }
+
+    /// A provider that reports what it saw as a warning.
+    struct Warner;
+
+    impl Provider for Warner {
+        fn id(&self) -> &'static str {
+            "warner"
+        }
+        fn is_configured(&self, _: &EnvConfig) -> bool {
+            true
+        }
+        fn managed_vars(&self) -> &'static [&'static str] {
+            &[]
+        }
+        fn materialise(&self, ctx: &Ctx) -> Result<(), ProviderError> {
+            ctx.warnings.push(format!("guards {}", ctx.guards));
+            Ok(())
+        }
+        fn contribute(&self, _: &Ctx) -> Result<Contribution, ProviderError> {
+            Ok(Contribution::new())
+        }
+        fn check(&self, _: &Ctx, _: &dyn CommandRunner) -> IdentityReport {
+            IdentityReport {
+                provider: "warner".into(),
+                status: Status::Info,
+                detail: String::new(),
+            }
+        }
+    }
+
+    #[test]
+    fn warnings_come_back_with_the_launch() {
+        let (_d, paths, name) = setup("");
+        let providers: Vec<Box<dyn Provider>> = vec![Box::new(Warner)];
+        let env = run(
+            &paths,
+            &name,
+            &providers,
+            &MemoryStore::default(),
+            &PrepareOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(env.warnings, vec!["guards true".to_string()]);
+    }
+
+    #[test]
+    fn no_guards_reaches_the_providers() {
+        let (_d, paths, name) = setup("");
+        let providers: Vec<Box<dyn Provider>> = vec![Box::new(Warner)];
+        let opts = PrepareOptions {
+            no_guards: true,
+            ..Default::default()
+        };
+        let env = run(&paths, &name, &providers, &MemoryStore::default(), &opts).unwrap();
+        assert_eq!(env.warnings, vec!["guards false".to_string()]);
+    }
+
+    #[test]
+    fn warnings_come_back_with_a_failure_too() {
+        let (_d, paths, name) = setup("");
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(Warner),
+            Box::new(Fake {
+                id: "github",
+                on: true,
+                managed: &[],
+                contribution: Contribution::new(),
+                fail: Some("no token"),
+            }),
+        ];
+        let PrepareError::Failed { warnings, .. } = run(
+            &paths,
+            &name,
+            &providers,
+            &MemoryStore::default(),
+            &PrepareOptions::default(),
+        )
+        .unwrap_err() else {
+            panic!("expected Failed")
+        };
+        assert_eq!(warnings, vec!["guards true".to_string()]);
     }
 }

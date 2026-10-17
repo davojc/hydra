@@ -1,6 +1,6 @@
 use anyhow::Context;
 use hydra_core::config::load_env;
-use hydra_core::provider::Ctx;
+use hydra_core::provider::{Ctx, Warnings};
 use hydra_core::resolve::PrepareOptions;
 use hydra_platform::process::EnvRunner;
 
@@ -31,6 +31,8 @@ pub fn run(app: &App, provider: String, env: String) -> anyhow::Result<i32> {
         paths: &app.paths,
         user_home: &app.user_home,
         secrets: app.store.as_ref(),
+        guards: true,
+        warnings: &Warnings::default(),
     };
     // A borrowed tool signs in to (and keeps its secrets in) the owner's environment.
     let owner = launch.config.borrowed.get(p.id());

@@ -8,8 +8,8 @@ use hydra_core::envs;
 use hydra_core::lock::hold_shared;
 use hydra_core::name::EnvName;
 use hydra_core::paths::expand_tilde;
-use hydra_core::provider::Ctx;
-use hydra_core::resolve::{ENV_VARS_MARKER, LaunchEnv, PrepareOptions, prepare};
+use hydra_core::provider::{Ctx, Warnings};
+use hydra_core::resolve::{ENV_VARS_MARKER, LaunchEnv, PrepareError, PrepareOptions, prepare};
 use hydra_platform::process::EnvRunner;
 use hydra_platform::shell::{PromptStyle, ShellKind, find_shell, shell_command, write_init};
 
@@ -27,14 +27,24 @@ pub fn prepare_launch(
         inherited_env_vars: std::env::var(ENV_VARS_MARKER).ok(),
         ..opts.clone()
     };
-    Ok(prepare(
+    let result = prepare(
         &app.paths,
         name,
         &app.user_home,
         &providers,
         app.store.as_ref(),
         &opts,
-    )?)
+    );
+    // Same place and colour as when providers printed them themselves.
+    let warnings: &[String] = match &result {
+        Ok(launch) => &launch.warnings,
+        Err(PrepareError::Failed { warnings, .. }) => warnings,
+        Err(_) => &[],
+    };
+    for w in warnings {
+        anstream::eprintln!("{}", style::warn(w));
+    }
+    Ok(result?)
 }
 
 /// Deletes the gh/ssh shims folder an older hydra made. Best effort: a file that is in use
@@ -71,6 +81,8 @@ fn print_sign_in_hints(app: &App, name: &EnvName, launch: &LaunchEnv) {
         paths: &app.paths,
         user_home: &app.user_home,
         secrets: app.store.as_ref(),
+        guards: true,
+        warnings: &Warnings::default(),
     };
     for p in hydra_providers::all() {
         if !p.is_configured(&launch.config) {

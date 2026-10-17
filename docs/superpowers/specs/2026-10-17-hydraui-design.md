@@ -129,8 +129,9 @@ Each change keeps the CLI's behaviour identical.
    When true, `render_pwsh_init` / `render_bash_init` also emit OSC 7 and
    OSC 133 (§6.3) and run an optional startup command after loading the
    user's profiles. The CLI passes `false`; the rendered scripts are unchanged.
-5. **Startup command in init.** `write_init` takes `startup: Option<&str>`,
-   appended after the prompt setup. hydraui writes per-pane init scripts to
+5. **Startup command in init.** `render_init(kind, style, startup)` renders an
+   init script with an optional startup command appended after the prompt
+   setup; `write_init` is unchanged for the CLI. hydraui writes per-pane init scripts to
    `state/<env>/shell/hydraui/<pane-id>.ps1|.bash` so parallel panes don't
    overwrite each other or the CLI's `init.ps1`; the folder is cleared of
    stale files at hydraui start.

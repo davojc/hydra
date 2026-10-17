@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use hydra_core::config::EnvConfig;
 use hydra_core::name::EnvName;
 use hydra_core::paths::HydraPaths;
-use hydra_core::provider::{CommandRunner, Ctx};
+use hydra_core::provider::{CommandRunner, Ctx, Warnings};
 use hydra_core::secret::MemoryStore;
 
 /// A temporary hydra home with one environment named `work`.
@@ -16,6 +16,8 @@ pub struct Fixture {
     pub env: EnvConfig,
     pub home: PathBuf,
     pub store: MemoryStore,
+    pub guards: bool,
+    pub warnings: Warnings,
 }
 
 impl Fixture {
@@ -32,6 +34,8 @@ impl Fixture {
             env,
             home,
             store: MemoryStore::default(),
+            guards: true,
+            warnings: Warnings::default(),
         }
     }
 
@@ -42,6 +46,8 @@ impl Fixture {
             paths: &self.paths,
             user_home: &self.home,
             secrets: &self.store,
+            guards: self.guards,
+            warnings: &self.warnings,
         }
     }
 }

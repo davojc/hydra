@@ -7,7 +7,7 @@ use crate::config::{ConfigError, EnvConfig, load_env};
 use crate::contribution::{VarValue, merge};
 use crate::name::EnvName;
 use crate::paths::HydraPaths;
-use crate::provider::{Ctx, Provider};
+use crate::provider::{Ctx, Provider, Warnings};
 use crate::secret::SecretStore;
 
 /// Id of the provider for arbitrary `[env]` variables.
@@ -32,6 +32,8 @@ pub enum PrepareError {
     Failed {
         env: EnvName,
         failures: Vec<Failure>,
+        /// Warnings providers gave before the launch failed.
+        warnings: Vec<String>,
     },
 }
 
@@ -58,6 +60,8 @@ pub struct PrepareOptions {
     /// `hydra whoami`: this configuration (e.g. with broken borrows left out) instead of
     /// loading env.toml.
     pub config: Option<EnvConfig>,
+    /// hydraui: leave out the folder guard's hooks (spec: hydraui §4.1).
+    pub no_guards: bool,
 }
 
 /// The environment to apply to a child process.
@@ -69,6 +73,7 @@ pub struct LaunchEnv {
     pub unset: BTreeSet<String>,
     /// Folders taken out of the inherited PATH (compared case-insensitively, either separator).
     pub path_drop: Vec<PathBuf>,
+    pub warnings: Vec<String>,
 }
 
 /// Shows the names of the variables it sets, never their values (some are secrets).
@@ -80,19 +85,47 @@ impl std::fmt::Debug for LaunchEnv {
             .field("set", &self.set.keys().collect::<Vec<_>>())
             .field("unset", &self.unset)
             .field("path_drop", &self.path_drop)
+            .field("warnings", &self.warnings)
             .finish()
     }
 }
 
+/// One change `apply` makes to a child's environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvChange {
+    Remove(String),
+    Set(String, OsString),
+}
+
 impl LaunchEnv {
     pub fn apply(&self, cmd: &mut Command) {
-        for k in &self.unset {
-            cmd.env_remove(k);
+        for change in self.env_changes(std::env::var_os("PATH")) {
+            match change {
+                EnvChange::Remove(k) => {
+                    cmd.env_remove(k);
+                }
+                EnvChange::Set(k, v) => {
+                    cmd.env(k, v);
+                }
+            }
         }
-        for (k, v) in &self.set {
-            cmd.env(k, v);
-        }
-        cmd.env("PATH", self.path_value(std::env::var_os("PATH")));
+    }
+
+    /// What `apply` does, for callers without a `std::process::Command` (hydraui's PTY):
+    /// removals, then values, then PATH built from `current_path`.
+    pub fn env_changes(&self, current_path: Option<OsString>) -> Vec<EnvChange> {
+        let mut out: Vec<EnvChange> = self
+            .unset
+            .iter()
+            .map(|k| EnvChange::Remove(k.clone()))
+            .collect();
+        out.extend(
+            self.set
+                .iter()
+                .map(|(k, v)| EnvChange::Set(k.clone(), v.into())),
+        );
+        out.push(EnvChange::Set("PATH".into(), self.path_value(current_path)));
+        out
     }
 
     /// The inherited PATH with the `path_drop` folders taken out.
@@ -128,12 +161,15 @@ pub fn prepare(
         Some(c) => c.clone(),
         None => load_env(paths, name)?,
     };
+    let warnings = Warnings::default();
     let ctx = Ctx {
         name,
         env: &config,
         paths,
         user_home,
         secrets,
+        guards: !opts.no_guards,
+        warnings: &warnings,
     };
     let mut failures = Vec::new();
     let mut parts = Vec::new();
@@ -171,6 +207,7 @@ pub fn prepare(
             return Err(PrepareError::Failed {
                 env: name.clone(),
                 failures,
+                warnings: warnings.take(),
             });
         }
     };
@@ -213,6 +250,7 @@ pub fn prepare(
         return Err(PrepareError::Failed {
             env: name.clone(),
             failures,
+            warnings: warnings.take(),
         });
     }
 
@@ -267,12 +305,59 @@ pub fn prepare(
         unset,
         // A terminal opened by an older hydra may still have its shims folder first.
         path_drop: vec![paths.legacy_shims_dir()],
+        warnings: warnings.take(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_launch() -> LaunchEnv {
+        LaunchEnv {
+            name: EnvName::parse("work").unwrap(),
+            config: EnvConfig::default(),
+            set: BTreeMap::from([("A".to_string(), "1".to_string())]),
+            unset: BTreeSet::from(["GH_TOKEN".to_string()]),
+            path_drop: vec![PathBuf::from("C:\\old")],
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn env_changes_lists_removals_then_values_then_path() {
+        let path = std::env::join_paths(["C:\\old", "C:\\keep"]).unwrap();
+        assert_eq!(
+            sample_launch().env_changes(Some(path)),
+            vec![
+                EnvChange::Remove("GH_TOKEN".into()),
+                EnvChange::Set("A".into(), "1".into()),
+                EnvChange::Set("PATH".into(), "C:\\keep".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_does_what_env_changes_says() {
+        let launch = sample_launch();
+        let mut cmd = Command::new("x");
+        launch.apply(&mut cmd);
+        let mut got: Vec<(OsString, Option<OsString>)> = cmd
+            .get_envs()
+            .map(|(k, v)| (k.to_owned(), v.map(|v| v.to_owned())))
+            .collect();
+        let mut want: Vec<(OsString, Option<OsString>)> = launch
+            .env_changes(std::env::var_os("PATH"))
+            .into_iter()
+            .map(|c| match c {
+                EnvChange::Remove(k) => (k.into(), None),
+                EnvChange::Set(k, v) => (k.into(), Some(v)),
+            })
+            .collect();
+        got.sort();
+        want.sort();
+        assert_eq!(got, want);
+    }
     use crate::contribution::Contribution;
     use crate::provider::{CommandRunner, IdentityReport, ProviderError, Status};
     use crate::secret::{MemoryStore, SecretRef};
@@ -640,5 +725,87 @@ mod tests {
         let shown = format!("{env:?}");
         assert!(shown.contains("TOKEN"), "{shown}");
         assert!(!shown.contains("s3cret-v4lue"), "{shown}");
+    }
+
+    /// A provider that reports what it saw as a warning.
+    struct Warner;
+
+    impl Provider for Warner {
+        fn id(&self) -> &'static str {
+            "warner"
+        }
+        fn is_configured(&self, _: &EnvConfig) -> bool {
+            true
+        }
+        fn managed_vars(&self) -> &'static [&'static str] {
+            &[]
+        }
+        fn materialise(&self, ctx: &Ctx) -> Result<(), ProviderError> {
+            ctx.warnings.push(format!("guards {}", ctx.guards));
+            Ok(())
+        }
+        fn contribute(&self, _: &Ctx) -> Result<Contribution, ProviderError> {
+            Ok(Contribution::new())
+        }
+        fn check(&self, _: &Ctx, _: &dyn CommandRunner) -> IdentityReport {
+            IdentityReport {
+                provider: "warner".into(),
+                status: Status::Info,
+                detail: String::new(),
+            }
+        }
+    }
+
+    #[test]
+    fn warnings_come_back_with_the_launch() {
+        let (_d, paths, name) = setup("");
+        let providers: Vec<Box<dyn Provider>> = vec![Box::new(Warner)];
+        let env = run(
+            &paths,
+            &name,
+            &providers,
+            &MemoryStore::default(),
+            &PrepareOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(env.warnings, vec!["guards true".to_string()]);
+    }
+
+    #[test]
+    fn no_guards_reaches_the_providers() {
+        let (_d, paths, name) = setup("");
+        let providers: Vec<Box<dyn Provider>> = vec![Box::new(Warner)];
+        let opts = PrepareOptions {
+            no_guards: true,
+            ..Default::default()
+        };
+        let env = run(&paths, &name, &providers, &MemoryStore::default(), &opts).unwrap();
+        assert_eq!(env.warnings, vec!["guards false".to_string()]);
+    }
+
+    #[test]
+    fn warnings_come_back_with_a_failure_too() {
+        let (_d, paths, name) = setup("");
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(Warner),
+            Box::new(Fake {
+                id: "github",
+                on: true,
+                managed: &[],
+                contribution: Contribution::new(),
+                fail: Some("no token"),
+            }),
+        ];
+        let PrepareError::Failed { warnings, .. } = run(
+            &paths,
+            &name,
+            &providers,
+            &MemoryStore::default(),
+            &PrepareOptions::default(),
+        )
+        .unwrap_err() else {
+            panic!("expected Failed")
+        };
+        assert_eq!(warnings, vec!["guards true".to_string()]);
     }
 }

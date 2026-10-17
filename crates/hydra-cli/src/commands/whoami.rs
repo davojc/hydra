@@ -1,7 +1,7 @@
 use anyhow::Context;
 use hydra_core::bindings;
 use hydra_core::config::{ConfigError, load_env, load_env_lenient, load_global};
-use hydra_core::provider::{Ctx, IdentityReport, Status};
+use hydra_core::provider::{Ctx, IdentityReport, Status, Warnings};
 use hydra_core::resolve::PrepareOptions;
 use hydra_platform::process::EnvRunner;
 
@@ -47,6 +47,8 @@ pub fn run(app: &App, env: Option<String>) -> anyhow::Result<i32> {
         paths: &app.paths,
         user_home: &app.user_home,
         secrets: app.store.as_ref(),
+        guards: true,
+        warnings: &Warnings::default(),
     };
     let runner = EnvRunner { launch: &launch };
 

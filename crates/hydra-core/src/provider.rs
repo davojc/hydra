@@ -6,6 +6,20 @@ use crate::name::EnvName;
 use crate::paths::HydraPaths;
 use crate::secret::{SecretRef, SecretStore};
 
+/// Notes a launch has for the user (a setting ignored, a backup kept). Providers push them;
+/// the caller shows them (the CLI on stderr, hydraui in the pane).
+#[derive(Debug, Default)]
+pub struct Warnings(std::cell::RefCell<Vec<String>>);
+
+impl Warnings {
+    pub fn push(&self, w: impl Into<String>) {
+        self.0.borrow_mut().push(w.into());
+    }
+    pub fn take(&self) -> Vec<String> {
+        self.0.take()
+    }
+}
+
 /// Everything a provider may look at while preparing one environment.
 pub struct Ctx<'a> {
     pub name: &'a EnvName,
@@ -13,6 +27,10 @@ pub struct Ctx<'a> {
     pub paths: &'a HydraPaths,
     pub user_home: &'a Path,
     pub secrets: &'a dyn SecretStore,
+    /// Write the folder guard's hooks (git hook wrappers, Claude's PreToolUse hook). hydraui
+    /// launches with `false`.
+    pub guards: bool,
+    pub warnings: &'a Warnings,
 }
 
 impl Ctx<'_> {
@@ -139,6 +157,8 @@ mod tests {
             paths: &paths,
             user_home: Path::new("C:/u"),
             secrets: &store,
+            guards: true,
+            warnings: &Warnings::default(),
         };
         let state = |e: &str| paths.state_dir(&EnvName::parse(e).unwrap());
         assert_eq!(ctx.provider_dir("gh"), state("personal").join("gh"));

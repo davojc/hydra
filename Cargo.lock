@@ -472,6 +472,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hydraui-sets"
+version = "0.6.0"
+dependencies = [
+ "hydra-core",
+ "hydra-platform",
+ "serde",
+ "tempfile",
+ "thiserror",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "icu_collections"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

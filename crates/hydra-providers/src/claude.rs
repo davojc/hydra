@@ -3,10 +3,14 @@ use std::path::{Path, PathBuf};
 use hydra_core::config::{EnvConfig, load_global};
 use hydra_core::contribution::Contribution;
 use hydra_core::paths::expand_tilde;
-use hydra_core::provider::{CommandRunner, Ctx, IdentityReport, Provider, ProviderError, Status};
+use hydra_core::provider::{
+    CommandRunner, Ctx, IdentityReport, Provider, ProviderError, Status, Warnings,
+};
 use hydra_platform::links::{is_link, link_dir, points_at, unlink};
 
-use crate::claude_files::{add_guard_hook, merge_settings, render_claude_md, sync_mcp};
+use crate::claude_files::{
+    add_guard_hook, guard_hook_command, merge_settings, render_claude_md, sync_mcp,
+};
 use crate::report::report;
 
 pub struct Claude;
@@ -339,13 +343,18 @@ impl Provider for Claude {
         )
         .map_err(ProviderError::new)?;
         if !merged.dropped.is_empty() {
-            warn(&format!(
+            ctx.warnings.push(format!(
                 "hydra: claude: ignored {} from your shared settings.json (they would give every environment the same sign-in); set them in {} if one environment needs them",
                 merged.dropped.join(", "),
                 over_settings.display()
             ));
         }
-        let settings = with_guard_hook(merged.text);
+        let settings = if ctx.guards {
+            with_guard_hook(merged.text, ctx.warnings)
+        } else {
+            let current = read_opt(&l.dir.join("settings.json"))?;
+            keep_guard_hook(merged.text, current.as_deref(), ctx.warnings)
+        };
         let env = ctx.tool_owner("claude").as_str();
         let md = render_claude_md(
             env,
@@ -354,7 +363,7 @@ impl Provider for Claude {
         );
         for (file, content) in [("settings.json", Some(settings)), ("CLAUDE.md", md)] {
             if let Some(warning) = write_generated(&l, env, file, content.as_deref())? {
-                warn(&warning);
+                ctx.warnings.push(warning);
             }
         }
         let state_path = l.dir.join(".claude.json");
@@ -433,11 +442,11 @@ impl Provider for Claude {
 
 /// Adds hydra's PreToolUse guard hook to the generated settings. Skipped with a warning when
 /// hydra's own path is unknown or the settings can't take it.
-fn with_guard_hook(text: String) -> String {
+fn with_guard_hook(text: String, warnings: &Warnings) -> String {
     let exe = match std::env::current_exe() {
         Ok(e) => e.to_string_lossy().replace('\\', "/"),
         Err(e) => {
-            warn(&format!(
+            warnings.push(format!(
                 "hydra: claude: guard hook not added (can't find hydra's own path: {e})"
             ));
             return text;
@@ -446,16 +455,25 @@ fn with_guard_hook(text: String) -> String {
     match add_guard_hook(&text, &format!("\"{exe}\" guard claude")) {
         Ok(with_hook) => with_hook,
         Err(e) => {
-            warn(&format!("hydra: claude: guard hook not added ({e})"));
+            warnings.push(format!("hydra: claude: guard hook not added ({e})"));
             text
         }
     }
 }
 
-/// Prints a warning to stderr in yellow (plain when stderr isn't a terminal).
-fn warn(text: &str) {
-    let style = anstyle::Style::new().fg_color(Some(anstyle::AnsiColor::Yellow.into()));
-    anstream::eprintln!("{style}{text}{style:#}");
+/// hydraui (guards off): keep the guard hook a `hydra shell` launch put in the current
+/// settings.json, so hydraui neither adds nor removes it.
+fn keep_guard_hook(text: String, current: Option<&str>, warnings: &Warnings) -> String {
+    let Some(command) = current.and_then(guard_hook_command) else {
+        return text;
+    };
+    match add_guard_hook(&text, &command) {
+        Ok(with_hook) => with_hook,
+        Err(e) => {
+            warnings.push(format!("hydra: claude: guard hook not kept ({e})"));
+            text
+        }
+    }
 }
 
 #[cfg(test)]
@@ -642,7 +660,22 @@ mod tests {
             std::fs::create_dir_all(f.home.join(".claude").join("commands")).unwrap();
             std::thread::scope(|s| {
                 let handles: Vec<_> = (0..4)
-                    .map(|_| s.spawn(|| Claude.materialise(&f.ctx())))
+                    .map(|_| {
+                        s.spawn(|| {
+                            // Warnings isn't Sync, so each thread keeps its own.
+                            let warnings = Warnings::default();
+                            let ctx = Ctx {
+                                name: &f.name,
+                                env: &f.env,
+                                paths: &f.paths,
+                                user_home: &f.home,
+                                secrets: &f.store,
+                                guards: f.guards,
+                                warnings: &warnings,
+                            };
+                            Claude.materialise(&ctx)
+                        })
+                    })
                     .collect();
                 for h in handles {
                     h.join()
@@ -761,6 +794,27 @@ mod tests {
     }
 
     #[test]
+    fn without_guards_a_fresh_environment_gets_no_guard_hook() {
+        let mut f = Fixture::new("[claude]\n");
+        f.guards = false;
+        Claude.materialise(&f.ctx()).unwrap();
+        let text = std::fs::read_to_string(cfg_dir(&f).join("settings.json")).unwrap();
+        assert!(!text.contains("guard claude"), "{text}");
+    }
+
+    #[test]
+    fn without_guards_the_hook_a_cli_launch_wrote_is_kept() {
+        let mut f = Fixture::new("[claude]\n");
+        Claude.materialise(&f.ctx()).unwrap();
+        let before = std::fs::read_to_string(cfg_dir(&f).join("settings.json")).unwrap();
+        f.guards = false;
+        Claude.materialise(&f.ctx()).unwrap();
+        let after = std::fs::read_to_string(cfg_dir(&f).join("settings.json")).unwrap();
+        assert_eq!(after, before);
+        assert!(!cfg_dir(&f).join("settings.json.bak").exists());
+    }
+
+    #[test]
     fn shared_sign_in_settings_never_reach_the_environment() {
         let f = Fixture::new("[claude]\n");
         let base = f.home.join(".claude");
@@ -860,6 +914,7 @@ mod tests {
             merge_settings(Some((Path::new("x"), r#"{"model":"haiku"}"#)), None, &[])
                 .unwrap()
                 .text,
+            &Warnings::default(),
         );
         std::fs::write(dir.join("settings.json"), &next).unwrap();
         Claude.materialise(&f.ctx()).unwrap();
@@ -941,7 +996,7 @@ mod tests {
         assert!(dir.is_dir());
         assert_eq!(
             std::fs::read_to_string(dir.join("settings.json")).unwrap(),
-            with_guard_hook("{}\n".to_string())
+            with_guard_hook("{}\n".to_string(), &Warnings::default())
         );
         assert!(!dir.join("CLAUDE.md").exists());
     }

@@ -3,7 +3,7 @@ use hydra_core::config::EnvConfig;
 use hydra_core::envedit::{self, AddOutcome, TOOLS, ToolValues};
 use hydra_core::lock;
 use hydra_core::name::EnvName;
-use hydra_core::provider::Ctx;
+use hydra_core::provider::{Ctx, Warnings};
 use hydra_core::secret::SecretRef;
 
 use crate::app::App;
@@ -152,6 +152,8 @@ fn has_sign_in(app: &App, env: &EnvName, cfg: &EnvConfig, tool: &str) -> bool {
         paths: &app.paths,
         user_home: &app.user_home,
         secrets: app.store.as_ref(),
+        guards: true,
+        warnings: &Warnings::default(),
     };
     p.auth_command(&ctx).is_some()
 }

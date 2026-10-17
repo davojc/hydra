@@ -6,5 +6,6 @@ pub mod hydra;
 pub mod input;
 pub mod keys;
 pub mod palette;
+pub mod pane_view;
 pub mod split;
 pub mod tabs;

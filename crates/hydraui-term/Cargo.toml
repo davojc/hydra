@@ -1,0 +1,16 @@
+[package]
+name = "hydraui-term"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+alacritty_terminal.workspace = true
+hydra-core.workspace = true
+hydra-platform.workspace = true
+portable-pty.workspace = true
+thiserror.workspace = true
+windows-sys.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

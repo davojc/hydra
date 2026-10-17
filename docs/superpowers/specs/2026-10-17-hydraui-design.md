@@ -217,14 +217,17 @@ modification time at load.
 
 ### 6.1 Starting a pane
 
-`Pane::spawn(PaneSpec) -> Result<Pane, SpawnError>`, where `PaneSpec` holds
-the env name, cwd, shell kind, startup command and the `LaunchEnv` already
-prepared by the app:
+`Pane::spawn(SpawnSpec) -> Result<(Pane, Receiver<TermEvent>), SpawnError>`,
+where `SpawnSpec` (named apart from `hydraui-sets`' `PaneSpec`) holds hydra's
+paths, the `LaunchEnv` already prepared by the app, the cwd (which must
+exist), shell kind, `git_bash` setting, startup command, grid size and the
+inherited environment:
 
 1. `find_shell`; missing shell → error.
 2. Write the per-pane init script (§4.4–4.5) with integration on.
 3. Build the command as `shell_command` does, as a `portable_pty::CommandBuilder`,
-   applying `env_changes()`. Start it in a ConPTY sized to the pane.
+   applying `env_changes()` on top of `TERM=xterm-256color` and
+   `COLORTERM=truecolor` (an environment's `[env]` can override them). Start it in a ConPTY sized to the pane.
 4. Assign the child to a new Windows **Job Object** with
    `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so closing the pane ends the whole
    process tree (`npm` → `node`, etc.).
@@ -244,7 +247,9 @@ enum PromptState { AtPrompt, CommandRunning, CommandDone(Option<i32>) }
 ```
 
 The UI renders from the shared grid at most once per frame on `Wakeup`, so
-heavy output never blocks input. Input goes the other way through the PTY
+heavy output never blocks input. A pane sends one `Wakeup` until the app next
+reads the grid (`Pane::with_term`), so heavy output never floods the channel
+either. `Title("")` means the title was reset. Input goes the other way through the PTY
 writer. Resizes go to both the PTY and `Term`.
 
 ### 6.3 Shell integration

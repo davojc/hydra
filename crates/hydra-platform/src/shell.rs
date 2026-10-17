@@ -126,7 +126,8 @@ fn pwsh_integration(tag: &str) -> String {
     let mut s = String::from(
         r#"function global:prompt {
   $ok = $global:?
-  $code = if ($ok) { 0 } elseif ($global:LASTEXITCODE) { $global:LASTEXITCODE } else { 1 }
+  $code = if ($null -ne $global:__hydraui_code) { $global:__hydraui_code } elseif ($ok) { 0 } elseif ($global:LASTEXITCODE) { $global:LASTEXITCODE } else { 1 }
+  $global:__hydraui_code = $null
   $e = [char]27; $b = [char]7; $out = ''
   if ($global:__hydraui_ran) { $out += "$e]133;D;$code$b" }
   $global:__hydraui_ran = $false
@@ -188,6 +189,13 @@ pub fn render_init(kind: ShellKind, style: &PromptStyle, startup: Option<&str>) 
         }
         s.push_str(cmd);
         s.push('\n');
+        if style.integration && kind == ShellKind::Pwsh {
+            // The first prompt's `$?` describes the `-Command ". 'init.ps1'"` that ran this
+            // script, not the startup command, so record the command's own status here.
+            s.push_str(
+                "$global:__hydraui_code = if ($?) { 0 } elseif ($LASTEXITCODE) { $LASTEXITCODE } else { 1 }\n",
+            );
+        }
     }
     s
 }
@@ -314,7 +322,7 @@ mod tests {
         assert!(s.contains("PSConsoleHostReadLine"), "{s}");
         assert!(
             s.ends_with(
-                "$global:__hydraui_ran = $true; [Console]::Write(\"$([char]27)]133;C$([char]7)\")\nnpm run dev\n"
+                "$global:__hydraui_ran = $true; [Console]::Write(\"$([char]27)]133;C$([char]7)\")\nnpm run dev\n$global:__hydraui_code = if ($?) { 0 } elseif ($LASTEXITCODE) { $LASTEXITCODE } else { 1 }\n"
             ),
             "{s}"
         );

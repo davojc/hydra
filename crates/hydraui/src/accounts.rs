@@ -28,7 +28,7 @@ pub fn rows(reports: &[IdentityReport]) -> Vec<Row> {
 }
 
 /// The tools added with nothing but a sign-in: no values to ask for first.
-pub const SIGN_IN_TOOLS: &[&str] = &["claude", "github", "azure", "gcloud", "codex"];
+pub const SIGN_IN_TOOLS: &[&str] = &["claude", "github", "azure", "gcloud", "codex", "gws"];
 
 /// An account to add to an environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +84,7 @@ mod tests {
                 AddChoice::SignIn("azure".into()),
                 AddChoice::SignIn("gcloud".into()),
                 AddChoice::SignIn("codex".into()),
+                AddChoice::SignIn("gws".into()),
             ]
         );
         assert_eq!(got[0].label(), "Sign in to claude");

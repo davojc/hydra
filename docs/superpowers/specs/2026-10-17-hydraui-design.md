@@ -310,9 +310,9 @@ disabled.
   check (✓ ok, ! mismatch, ✗ missing, · info, with the detail, such as an AWS
   ARN or a GitHub login), and Refresh to check again now. Its "Add account…"
   picker turns a tool on in env.toml (as `hydra add`) for the tools that need
-  only a sign-in (claude, github, azure, gcloud, codex), then signs in to it
+  only a sign-in (claude, github, azure, gcloud, codex, gws), then signs in to it
   in a new tab; or borrows a tool another environment has with its own login
-  (`from = "<env>"`). Tools that need values first (git, aws, gws, gemini,
+  (`from = "<env>"`). Tools that need values first (git, aws, gemini,
   kube) are added with `hydra add`.
 
 ### 7.2 Terminal view

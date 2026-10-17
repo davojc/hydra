@@ -47,6 +47,7 @@ pub struct TermStyle {
 pub enum PaneEvent {
     Focused,
     CwdChanged,
+    PromptChanged,
     TitleChanged,
     Exited,
 }
@@ -216,6 +217,11 @@ impl PaneView {
         })
     }
 
+    /// Text for the shell as if typed (a path from the file tree, a `cd`).
+    pub fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.send(text.as_bytes(), cx);
+    }
+
     /// New font and colours (Reload config): drawn from the next frame.
     pub fn set_style(&mut self, style: Arc<TermStyle>, cx: &mut Context<Self>) {
         self.style = style;
@@ -278,7 +284,10 @@ impl PaneView {
                 self.cwd = p;
                 cx.emit(PaneEvent::CwdChanged);
             }
-            TermEvent::Prompt(p) => self.prompt = Some(p),
+            TermEvent::Prompt(p) => {
+                self.prompt = Some(p);
+                cx.emit(PaneEvent::PromptChanged);
+            }
             TermEvent::Title(t) => {
                 self.title = (!t.is_empty() && !is_program_path(&t)).then_some(t);
                 cx.emit(PaneEvent::TitleChanged);

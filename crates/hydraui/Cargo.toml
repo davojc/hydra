@@ -21,6 +21,7 @@ gpui-kit-assets.workspace = true
 gpui-component.workspace = true
 futures.workspace = true
 ignore.workspace = true
+notify.workspace = true
 serde.workspace = true
 toml.workspace = true
 

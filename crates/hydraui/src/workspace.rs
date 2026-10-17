@@ -5,7 +5,7 @@ mod sets;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -21,11 +21,16 @@ use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, WindowExt, h_flex, v_flex};
 use hydraui_sets::LoadedSets;
 
+use hydra_platform::process::resolve_program;
+use hydraui_term::PromptState;
+
 use crate::config::UiConfig;
+use crate::file_tree::{cd_command, quote_path};
+use crate::file_tree_view::{FileTreeView, TreeEvent};
 use crate::hydra::{Hydra, PaneRequest, STATUS_TTL, StatusCache, accounts_summary};
 use crate::keys::{
-    ClosePane, FocusDown, FocusLeft, FocusRight, FocusUp, NewTab, NextTab, PreviousTab, SplitDown,
-    SplitRight,
+    ClosePane, FileTree, FocusDown, FocusLeft, FocusRight, FocusUp, NewTab, NextTab, PreviousTab,
+    SplitDown, SplitRight,
 };
 use crate::pane_view::{PaneEvent, PaneView, TermStyle};
 use crate::split::{Axis, Dir, PaneId, Tree};
@@ -54,6 +59,8 @@ pub struct Workspace {
     /// Set groups folded away in the tab strip.
     collapsed: HashSet<String>,
     _set_watch: Task<()>,
+    tree: Option<Entity<FileTreeView>>,
+    tree_sub: Option<Subscription>,
     /// Each split's on-screen bounds at the last paint, by path, for divider drags.
     split_bounds: Rc<RefCell<HashMap<Vec<usize>, Bounds<Pixels>>>>,
     focus: FocusHandle,
@@ -110,6 +117,8 @@ impl Workspace {
             changed_sets: HashSet::new(),
             collapsed: HashSet::new(),
             _set_watch: set_watch,
+            tree: None,
+            tree_sub: None,
             split_bounds: Rc::default(),
             focus: cx.focus_handle(),
             title: String::new(),
@@ -221,6 +230,7 @@ impl Workspace {
                 ws.tabs.focus_pane(id);
                 ws.refresh_status(cx);
             }
+            ws.sync_tree(cx);
             cx.notify();
         });
         self.subs.insert(id, sub);
@@ -372,6 +382,87 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    fn toggle_tree(&mut self, _: &FileTree, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tree.take().is_some() {
+            self.tree_sub = None;
+        } else {
+            let root = self.focused_cwd(cx);
+            let view = cx.new(|cx| FileTreeView::new(root, cx));
+            self.tree_sub = Some(cx.subscribe_in(
+                &view,
+                window,
+                |ws, _, ev: &TreeEvent, window, cx| ws.on_tree_event(ev, window, cx),
+            ));
+            self.tree = Some(view);
+            self.sync_tree(cx);
+        }
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// Roots the tree at the focused pane's folder; `cd` only while it is at its prompt.
+    fn sync_tree(&mut self, cx: &mut Context<Self>) {
+        let (Some(tree), Some(view)) = (self.tree.clone(), self.focused()) else {
+            return;
+        };
+        let (cwd, at_prompt) = {
+            let v = view.read(cx);
+            (v.cwd().clone(), v.prompt() == Some(PromptState::AtPrompt))
+        };
+        tree.update(cx, |t, cx| {
+            t.set_root(cwd, cx);
+            t.set_can_cd(at_prompt, cx);
+        });
+    }
+
+    fn on_tree_event(&mut self, ev: &TreeEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.focused() else {
+            return;
+        };
+        match ev {
+            TreeEvent::Insert(path) => view.update(cx, |v, cx| {
+                let text = format!("{} ", quote_path(v.request.shell, path));
+                v.insert_text(&text, cx);
+            }),
+            TreeEvent::Cd(dir) => view.update(cx, |v, cx| {
+                if v.prompt() == Some(PromptState::AtPrompt) {
+                    let text = cd_command(v.request.shell, dir);
+                    v.insert_text(&text, cx);
+                }
+            }),
+            TreeEvent::Open(path) => self.open_file(path, window, cx),
+        }
+        self.focus_active(window, cx);
+    }
+
+    /// Opens a file in `editor` (a program name or path; `.cmd` launchers such as VS Code's
+    /// `code` work), else with the OS default.
+    fn open_file(&self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.ui.editor.as_deref() else {
+            cx.open_with_system(path);
+            return;
+        };
+        let search = std::env::var_os("PATH").unwrap_or_default();
+        let program = resolve_program(editor, &search, std::env::var_os("PATHEXT").as_deref())
+            .unwrap_or_else(|| PathBuf::from(editor));
+        let script = program
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
+        let mut cmd = if script {
+            let mut c = std::process::Command::new("cmd");
+            c.arg("/c").arg(&program);
+            c
+        } else {
+            std::process::Command::new(&program)
+        };
+        if let Err(e) = cmd.arg(path).spawn() {
+            window.push_notification(
+                Notification::error(format!("can't start {editor}: {e}")).title("Open file"),
+                cx,
+            );
+        }
     }
 
     fn tint(&self, env: &str) -> Hsla {
@@ -682,8 +773,26 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::open_launcher))
+            .on_action(cx.listener(Self::toggle_tree))
             .child(self.render_tab_strip(bar, border, muted, cx))
-            .child(div().flex_1().min_h_0().child(body))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .items_start()
+                    .when_some(self.tree.clone(), |d, tree| {
+                        d.child(
+                            div()
+                                .w(px(260.))
+                                .h_full()
+                                .flex_none()
+                                .border_r_1()
+                                .border_color(border)
+                                .child(tree),
+                        )
+                    })
+                    .child(div().flex_1().min_w_0().h_full().child(body)),
+            )
             .child(self.render_status(border, muted, cx))
             .when(self.drag.is_some(), |d| d.child(self.drag_listener(cx)))
     }

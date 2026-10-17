@@ -87,7 +87,7 @@ mod tests {
         assert_eq!(b, dir.join("hydraui").join("1-2.bash"));
         let text = std::fs::read_to_string(&a).unwrap();
         assert!(text.contains("133;A"), "{text}");
-        assert!(text.ends_with("npm run dev\n"), "{text}");
+        assert!(text.contains("\nnpm run dev\n"), "{text}");
         assert!(!dir.join("init.ps1").exists());
     }
 

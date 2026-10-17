@@ -19,12 +19,12 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let (ui, ui_problem) = config::load(&hydra.paths);
+    let (ui, ui_problems) = config::load(&hydra.paths);
     let (palette, colour_problems) = Palette::from_config(&ui.colors);
     let (keymap, key_problems) = keys::keymap(&ui.keys);
     let problems: Vec<String> = hydra_problem
         .into_iter()
-        .chain(ui_problem)
+        .chain(ui_problems)
         .chain(colour_problems)
         .chain(key_problems)
         .collect();

@@ -1,12 +1,13 @@
 //! `<HYDRA_HOME>/hydraui/config.toml`: hydraui's own settings (spec §3.1). Every key is
-//! optional and unknown keys are errors; a bad file never stops hydraui (the defaults are
-//! used and the problem is shown).
+//! optional. Each setting is checked on its own: a bad or unknown one is reported and keeps
+//! its default, and the rest still apply, so a typo never costs the whole file.
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use hydra_core::paths::HydraPaths;
 use hydra_platform::shell::ShellKind;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
 /// The look of hydraui's own controls (tabs, dialogs). The terminal's colours are `[colors]`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -18,8 +19,7 @@ pub enum ThemeChoice {
 }
 
 /// `[colors]`: `#rrggbb` values over the built-in scheme.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ColorsConfig {
     pub foreground: Option<String>,
     pub background: Option<String>,
@@ -29,8 +29,7 @@ pub struct ColorsConfig {
     pub palette: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UiConfig {
     pub font: String,
     pub font_size: f32,
@@ -65,42 +64,96 @@ pub fn config_file(paths: &HydraPaths) -> PathBuf {
     paths.root().join("hydraui").join("config.toml")
 }
 
-/// Parses config text (dropping a UTF-8 BOM) and checks what serde can't.
-pub fn parse(text: &str) -> Result<UiConfig, String> {
-    let cfg: UiConfig =
-        toml::from_str(text.strip_prefix('\u{feff}').unwrap_or(text)).map_err(|e| e.to_string())?;
-    if cfg.font.trim().is_empty() {
-        return Err("font can't be empty".into());
-    }
-    if !(6.0..=72.0).contains(&cfg.font_size) {
-        return Err(format!(
-            "font_size {} must be between 6 and 72",
-            cfg.font_size
-        ));
-    }
-    if let Some(s) = &cfg.default_shell
-        && ShellKind::parse(s).is_none()
-    {
-        return Err(format!("default_shell {s:?}: use pwsh or bash"));
-    }
-    Ok(cfg)
+fn get<T: DeserializeOwned>(value: toml::Value) -> Result<T, String> {
+    value
+        .try_into()
+        .map_err(|e: toml::de::Error| e.to_string().trim().to_string())
 }
 
-/// The settings, or the defaults plus what was wrong with the file.
-pub fn load(paths: &HydraPaths) -> (UiConfig, Option<String>) {
+/// Parses config text (dropping a UTF-8 BOM): the settings, plus one problem per setting that
+/// was wrong. Text that isn't TOML at all gives the defaults and the parse error.
+pub fn parse(text: &str) -> (UiConfig, Vec<String>) {
+    let mut cfg = UiConfig::default();
+    let mut problems = Vec::new();
+    let table: toml::Table = match toml::from_str(text.strip_prefix('\u{feff}').unwrap_or(text)) {
+        Ok(t) => t,
+        Err(e) => return (cfg, vec![e.to_string()]),
+    };
+    for (key, value) in table {
+        let result = match key.as_str() {
+            "font" => get::<String>(value).and_then(|f| {
+                if f.trim().is_empty() {
+                    return Err("can't be empty".into());
+                }
+                cfg.font = f;
+                Ok(())
+            }),
+            "font_size" => get::<f32>(value).and_then(|s| {
+                if !(6.0..=72.0).contains(&s) {
+                    return Err(format!("{s} must be between 6 and 72"));
+                }
+                cfg.font_size = s;
+                Ok(())
+            }),
+            "theme" => get(value).map(|t| cfg.theme = t),
+            "default_env" => get(value).map(|e| cfg.default_env = Some(e)),
+            "default_shell" => get::<String>(value).and_then(|s| {
+                if ShellKind::parse(&s).is_none() {
+                    return Err(format!("{s:?}: use pwsh or bash"));
+                }
+                cfg.default_shell = Some(s);
+                Ok(())
+            }),
+            "editor" => get(value).map(|e| cfg.editor = Some(e)),
+            "keys" => get(value).map(|k| cfg.keys = k),
+            "colors" => match value {
+                toml::Value::Table(colors) => {
+                    parse_colors(colors, &mut cfg.colors, &mut problems);
+                    Ok(())
+                }
+                _ => Err("must be a table".into()),
+            },
+            _ => Err("unknown setting".into()),
+        };
+        if let Err(e) = result {
+            problems.push(format!("{key}: {e}"));
+        }
+    }
+    (cfg, problems)
+}
+
+fn parse_colors(table: toml::Table, colors: &mut ColorsConfig, problems: &mut Vec<String>) {
+    for (key, value) in table {
+        let result = match key.as_str() {
+            "foreground" => get(value).map(|c| colors.foreground = Some(c)),
+            "background" => get(value).map(|c| colors.background = Some(c)),
+            "cursor" => get(value).map(|c| colors.cursor = Some(c)),
+            "selection" => get(value).map(|c| colors.selection = Some(c)),
+            "palette" => get(value).map(|p| colors.palette = Some(p)),
+            _ => Err("unknown setting".into()),
+        };
+        if let Err(e) = result {
+            problems.push(format!("colors.{key}: {e}"));
+        }
+    }
+}
+
+/// The settings, plus what was wrong with the file, each naming it.
+pub fn load(paths: &HydraPaths) -> (UiConfig, Vec<String>) {
     let path = config_file(paths);
     match std::fs::read_to_string(&path) {
-        Ok(text) => match parse(&text) {
-            Ok(cfg) => (cfg, None),
-            Err(e) => (
-                UiConfig::default(),
-                Some(format!("{}: {e}", path.display())),
-            ),
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (UiConfig::default(), None),
+        Ok(text) => {
+            let (cfg, problems) = parse(&text);
+            let named = problems
+                .into_iter()
+                .map(|p| format!("{}: {p}", path.display()))
+                .collect();
+            (cfg, named)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (UiConfig::default(), Vec::new()),
         Err(e) => (
             UiConfig::default(),
-            Some(format!("can't read {}: {e}", path.display())),
+            vec![format!("can't read {}: {e}", path.display())],
         ),
     }
 }
@@ -109,16 +162,22 @@ pub fn load(paths: &HydraPaths) -> (UiConfig, Option<String>) {
 mod tests {
     use super::*;
 
+    fn clean(text: &str) -> UiConfig {
+        let (cfg, problems) = parse(text);
+        assert!(problems.is_empty(), "{problems:?}");
+        cfg
+    }
+
     #[test]
     fn an_empty_file_is_the_defaults() {
-        assert_eq!(parse("").unwrap(), UiConfig::default());
+        assert_eq!(clean(""), UiConfig::default());
         assert_eq!(UiConfig::default().font, "Cascadia Mono");
         assert_eq!(UiConfig::default().font_size, 14.0);
     }
 
     #[test]
     fn reads_every_setting() {
-        let cfg = parse(
+        let cfg = clean(
             r##"
 font = "JetBrains Mono"
 font_size = 13
@@ -134,8 +193,7 @@ palette = ["#000000", "#111111"]
 [keys]
 split_right = "ctrl-alt-d"
 "##,
-        )
-        .unwrap();
+        );
         assert_eq!(cfg.font, "JetBrains Mono");
         assert_eq!(cfg.font_size, 13.0);
         assert_eq!(cfg.theme, ThemeChoice::Light);
@@ -149,40 +207,57 @@ split_right = "ctrl-alt-d"
 
     #[test]
     fn notepad_bom_and_crlf_are_fine() {
-        assert_eq!(parse("\u{feff}font_size = 12\r\n").unwrap().font_size, 12.0);
+        assert_eq!(clean("\u{feff}font_size = 12\r\n").font_size, 12.0);
     }
 
     #[test]
-    fn mistakes_are_errors_naming_the_problem() {
-        let e = parse("font_size = 14\nfontsize = 12\n").unwrap_err();
-        assert!(e.contains("fontsize") && e.contains("line 2"), "{e}");
-        assert!(
-            parse("font_size = 200")
-                .unwrap_err()
-                .contains("between 6 and 72")
+    fn one_bad_setting_keeps_the_rest() {
+        let (cfg, problems) = parse(
+            "font = \"Fira Code\"\nfontsize = 12\nfont_size = 200\ntheme = \"blue\"\n\
+             default_shell = \"fish\"\ndefault_env = \"work\"\n\
+             [colors]\nforground = \"#000000\"\nbackground = \"#101010\"\n",
         );
-        assert!(
-            parse("default_shell = \"fish\"")
-                .unwrap_err()
-                .contains("fish")
-        );
-        assert!(parse("font = \" \"").unwrap_err().contains("font"));
-        assert!(parse("theme = \"blue\"").is_err());
+        assert_eq!(cfg.font, "Fira Code");
+        assert_eq!(cfg.default_env.as_deref(), Some("work"));
+        assert_eq!(cfg.colors.background.as_deref(), Some("#101010"));
+        assert_eq!(cfg.font_size, 14.0);
+        assert_eq!(cfg.theme, ThemeChoice::Dark);
+        assert_eq!(cfg.default_shell, None);
+        assert_eq!(problems.len(), 5, "{problems:?}");
+        for word in ["fontsize", "between 6 and 72", "theme", "fish", "forground"] {
+            assert!(
+                problems.iter().any(|p| p.contains(word)),
+                "{word}: {problems:?}"
+            );
+        }
+        assert!(parse("font = \" \"").1[0].contains("font"));
     }
 
     #[test]
-    fn load_falls_back_to_the_defaults_and_says_why() {
+    fn a_file_that_isnt_toml_is_the_defaults_and_one_problem() {
+        let (cfg, problems) = parse("font_size = 14\nfont = \"x\n");
+        assert_eq!(cfg, UiConfig::default());
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].contains("line 2"), "{problems:?}");
+    }
+
+    #[test]
+    fn load_names_the_file_in_each_problem() {
         let d = tempfile::tempdir().unwrap();
         let paths = HydraPaths::new(d.path());
-        assert_eq!(load(&paths), (UiConfig::default(), None));
+        assert_eq!(load(&paths), (UiConfig::default(), Vec::new()));
         std::fs::create_dir_all(config_file(&paths).parent().unwrap()).unwrap();
-        std::fs::write(config_file(&paths), "font_size = \"big\"").unwrap();
-        let (cfg, problem) = load(&paths);
-        assert_eq!(cfg, UiConfig::default());
-        let problem = problem.unwrap();
+        std::fs::write(
+            config_file(&paths),
+            "font_size = \"big\"\nfont = \"Fira Code\"\n",
+        )
+        .unwrap();
+        let (cfg, problems) = load(&paths);
+        assert_eq!(cfg.font, "Fira Code");
+        assert_eq!(problems.len(), 1);
         assert!(
-            problem.contains("config.toml") && problem.contains("font_size"),
-            "{problem}"
+            problems[0].contains("config.toml") && problems[0].contains("font_size"),
+            "{problems:?}"
         );
     }
 }

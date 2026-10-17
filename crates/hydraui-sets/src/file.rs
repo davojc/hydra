@@ -47,6 +47,12 @@ pub struct NodeFile {
     pub shell: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// A file pane (spec §7.8): the files it shows, absolute or relative like `cwd`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<String>>,
+    /// Index into `files` of the file tab shown first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active: Option<usize>,
 }
 
 /// Parses a set file, dropping a UTF-8 BOM (Notepad adds one).

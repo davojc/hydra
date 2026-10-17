@@ -15,7 +15,14 @@ hydraui-term = { path = "crates/hydraui-term" }
 hydraui-sets = { path = "crates/hydraui-sets" }
 gpui = { package = "gpui-pre", version = "=0.3.9" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["font-kit", "runtime_shaders"] }
-gpui-component = "=0.7.3"
+gpui-base = "=0.7.3"
+gpui-component = { version = "=0.7.3", features = [
+    "tree-sitter-rust", "tree-sitter-toml", "tree-sitter", "tree-sitter-markdown",
+    "tree-sitter-markdown-inline", "tree-sitter-javascript", "tree-sitter-typescript",
+    "tree-sitter-tsx", "tree-sitter-python", "tree-sitter-bash", "tree-sitter-yaml",
+    "tree-sitter-css", "tree-sitter-html", "tree-sitter-go", "tree-sitter-c",
+    "tree-sitter-cpp", "tree-sitter-csharp", "tree-sitter-make",
+] }
 gpui-kit-assets = "=0.7.3"
 futures = "0.3"
 ignore = "0.4"

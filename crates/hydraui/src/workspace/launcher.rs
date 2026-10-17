@@ -6,12 +6,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{Context, Window, px};
+use gpui::{Context, Window, div, px};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandItem, CommandState};
 use gpui_component::input::{Input, InputState};
 use gpui_component::notification::Notification;
-use gpui_component::{Theme, ThemeMode, WindowExt, h_flex, v_flex};
+use gpui_component::{ActiveTheme, Disableable, Theme, ThemeMode, WindowExt, h_flex, v_flex};
 use hydraui_sets::{list_sets, load_set};
 
 use super::Workspace;
@@ -106,6 +106,7 @@ impl Workspace {
             }
             Action::SetSecret(path) => self.secret_dialog(Some(path), window, cx),
             Action::NewSecret => self.secret_dialog(None, window, cx),
+            Action::NewEnv => self.new_env_dialog(window, cx),
             Action::OpenConfigFolder => {
                 let dir = self.hydra.paths.root().join("hydraui");
                 let _ = std::fs::create_dir_all(&dir);
@@ -184,6 +185,71 @@ impl Workspace {
                         )),
                 )
         });
+    }
+
+    /// Names and creates an environment, then opens a tab in it. The name is checked as it
+    /// is typed; Create stays off until it is free and valid.
+    pub(super) fn new_env_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, like work"));
+        let workspace = cx.entity();
+        let first = Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first.replace(false) {
+                name.update(cx, |s, cx| s.focus(window, cx));
+            }
+            let typed = name.read(cx).value().to_string();
+            let problem = workspace.read(cx).hydra.new_env_problem(&typed);
+            let muted = cx.theme().muted_foreground;
+            let danger = cx.theme().danger;
+            let hint = match &problem {
+                Some(p) if !p.is_empty() => div().text_sm().text_color(danger).child(p.clone()),
+                _ => div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("Lowercase letters, digits and '-'."),
+            };
+            let ws = workspace.clone();
+            dialog
+                .title("New environment")
+                .child(v_flex().gap_2().child(Input::new(&name)).child(hint))
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("create")
+                                .label("Create")
+                                .primary()
+                                .disabled(problem.is_some())
+                                .on_click(move |_, window, cx| {
+                                    let env = typed.trim().to_string();
+                                    ws.update(cx, |ws, cx| ws.create_env(env, window, cx));
+                                }),
+                        ),
+                )
+        });
+    }
+
+    fn create_env(&mut self, env: String, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(e) = self.hydra.create_env(&env) {
+            window.push_notification(Notification::error(e).title("New environment"), cx);
+            return;
+        }
+        window.close_dialog(cx);
+        window.push_notification(
+            Notification::success(format!(
+                "Created {env}. Click its name in the status bar to add accounts."
+            ))
+            .title("New environment"),
+            cx,
+        );
+        let cwd = self.focused_cwd(cx);
+        self.open_tab(env, cwd, window, cx);
     }
 
     /// Reads hydraui's and hydra's config.toml again: font, colours, theme, default

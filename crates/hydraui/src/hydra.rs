@@ -127,6 +127,31 @@ impl Hydra {
         EnvName::parse(env).is_ok_and(|n| self.paths.env_file(&n).is_file())
     }
 
+    /// Why `name` can't be a new environment: not a valid name (empty: nothing typed yet), or
+    /// taken. `None`: it can.
+    pub fn new_env_problem(&self, name: &str) -> Option<String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Some(String::new());
+        }
+        match EnvName::parse(name) {
+            Err(e) => Some(e.to_string()),
+            Ok(n) if self.paths.env_dir(&n).exists() => {
+                Some(format!("environment {n} already exists"))
+            }
+            Ok(_) => None,
+        }
+    }
+
+    /// Creates an environment as `hydra env new` does: env.toml from the template, with the
+    /// next colour.
+    pub fn create_env(&self, name: &str) -> Result<(), String> {
+        let n = EnvName::parse(name.trim()).map_err(|e| e.to_string())?;
+        envs::create(&self.paths, &n)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
     /// The environment for a new Loose tab in `cwd`: the folder's binding, else
     /// `default_env`; `None` means ask (spec §7.6).
     pub fn adhoc_env(&self, cwd: &Path, default_env: Option<&str>) -> Option<String> {
@@ -604,6 +629,35 @@ mod tests {
         let gh = f.hydra.account_choices("gh");
         assert!(!gh.iter().any(|c| matches!(c,
             AddChoice::SignIn(t) | AddChoice::Borrow { tool: t, .. } if t == "github")));
+    }
+
+    #[test]
+    fn a_new_env_is_created_with_its_own_colour() {
+        let f = fx("");
+        assert_eq!(f.hydra.new_env_problem("iov"), None);
+        f.hydra.create_env("iov").unwrap();
+        assert!(f.hydra.env_exists("iov"));
+        let cfg = load_env(&f.hydra.paths, &EnvName::parse("iov").unwrap()).unwrap();
+        assert!(cfg.color.is_some());
+    }
+
+    #[test]
+    fn a_new_env_needs_a_free_valid_name() {
+        let f = fx("");
+        assert_eq!(f.hydra.new_env_problem(""), Some(String::new()));
+        assert!(
+            f.hydra
+                .new_env_problem("Not A Name")
+                .is_some_and(|p| !p.is_empty())
+        );
+        assert!(
+            f.hydra
+                .new_env_problem("work")
+                .is_some_and(|p| p.contains("exists"))
+        );
+        assert!(f.hydra.create_env("work").is_err());
+        assert!(f.hydra.create_env("Not A Name").is_err());
+        assert!(!f.hydra.env_exists("Not A Name"));
     }
 
     #[test]

@@ -4,26 +4,36 @@ use std::path::PathBuf;
 
 use hydra_platform::shell::ShellKind;
 use hydraui_sets::file::{NodeFile, TabFile};
-use hydraui_sets::{Node, SplitDir, TabSpec};
+use hydraui_sets::{FilesSpec, Node, SplitDir, TabSpec};
 
 use crate::hydra::PaneRequest;
 use crate::split::{Axis, PaneId, Tree};
 
-/// The tab's tree, with `next_id` naming each pane, and each pane's request in tree order
-/// (left to right, top to bottom).
-pub fn tab_layout<F: FnMut() -> PaneId>(
-    tab: &TabSpec,
-    next_id: &mut F,
-) -> (Tree, Vec<(PaneId, PaneRequest)>) {
-    let mut panes = Vec::new();
-    let tree = node(&tab.root, next_id, &mut panes);
-    (tree, panes)
+/// A tab's tree, its terminals' requests in tree order (left to right, top to bottom), and
+/// its file pane.
+pub struct TabLayout {
+    pub tree: Tree,
+    pub terminals: Vec<(PaneId, PaneRequest)>,
+    pub files: Option<(PaneId, FilesSpec)>,
+}
+
+/// The tab's layout, with `next_id` naming each pane.
+pub fn tab_layout<F: FnMut() -> PaneId>(tab: &TabSpec, next_id: &mut F) -> TabLayout {
+    let mut terminals = Vec::new();
+    let mut files = None;
+    let tree = node(&tab.root, next_id, &mut terminals, &mut files);
+    TabLayout {
+        tree,
+        terminals,
+        files,
+    }
 }
 
 fn node<F: FnMut() -> PaneId>(
     n: &Node,
     next_id: &mut F,
     panes: &mut Vec<(PaneId, PaneRequest)>,
+    files: &mut Option<(PaneId, FilesSpec)>,
 ) -> Tree {
     match n {
         Node::Pane(p) => {
@@ -38,6 +48,11 @@ fn node<F: FnMut() -> PaneId>(
             panes.push((id, req));
             Tree::Leaf(id)
         }
+        Node::Files(f) => {
+            let id = next_id();
+            *files = Some((id, f.clone()));
+            Tree::Leaf(id)
+        }
         Node::Split {
             dir,
             ratio,
@@ -49,33 +64,40 @@ fn node<F: FnMut() -> PaneId>(
                 SplitDir::Down => Axis::Column,
             },
             ratio: *ratio,
-            first: Box::new(node(first, next_id, panes)),
-            second: Box::new(node(second, next_id, panes)),
+            first: Box::new(node(first, next_id, panes, files)),
+            second: Box::new(node(second, next_id, panes, files)),
         },
     }
 }
 
 /// What a pane needs to come back after a restart.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SavedPane {
-    pub env: String,
-    pub cwd: PathBuf,
-    pub shell: ShellKind,
+pub enum SavedPane {
+    Terminal {
+        env: String,
+        cwd: PathBuf,
+        shell: ShellKind,
+    },
+    Files {
+        files: Vec<PathBuf>,
+        active: usize,
+    },
 }
 
 /// An open tab in the set file's tab format, for session.toml: the reverse of `tab_layout`.
-/// A one-pane tab is written on the tab itself. `None` when a pane can't be described.
+/// A one-pane tab is written on the tab itself. `None` when a pane can't be described, or the
+/// tab is only a file pane (not a valid tab).
 pub fn tab_file(tree: &Tree, pane: &impl Fn(PaneId) -> Option<SavedPane>) -> Option<TabFile> {
     match tree {
-        Tree::Leaf(id) => {
-            let p = pane(*id)?;
-            Some(TabFile {
-                env: Some(p.env),
-                cwd: Some(p.cwd.to_string_lossy().into_owned()),
-                shell: Some(p.shell.as_str().into()),
+        Tree::Leaf(id) => match pane(*id)? {
+            SavedPane::Terminal { env, cwd, shell } => Some(TabFile {
+                env: Some(env),
+                cwd: Some(cwd.to_string_lossy().into_owned()),
+                shell: Some(shell.as_str().into()),
                 ..Default::default()
-            })
-        }
+            }),
+            SavedPane::Files { .. } => None,
+        },
         split => Some(TabFile {
             layout: Some(node_file(split, pane)?),
             ..Default::default()
@@ -85,15 +107,24 @@ pub fn tab_file(tree: &Tree, pane: &impl Fn(PaneId) -> Option<SavedPane>) -> Opt
 
 fn node_file(tree: &Tree, pane: &impl Fn(PaneId) -> Option<SavedPane>) -> Option<NodeFile> {
     match tree {
-        Tree::Leaf(id) => {
-            let p = pane(*id)?;
-            Some(NodeFile {
-                env: Some(p.env),
-                cwd: Some(p.cwd.to_string_lossy().into_owned()),
-                shell: Some(p.shell.as_str().into()),
+        Tree::Leaf(id) => Some(match pane(*id)? {
+            SavedPane::Terminal { env, cwd, shell } => NodeFile {
+                env: Some(env),
+                cwd: Some(cwd.to_string_lossy().into_owned()),
+                shell: Some(shell.as_str().into()),
                 ..Default::default()
-            })
-        }
+            },
+            SavedPane::Files { files, active } => NodeFile {
+                files: Some(
+                    files
+                        .iter()
+                        .map(|f| f.to_string_lossy().into_owned())
+                        .collect(),
+                ),
+                active: (active > 0).then_some(active),
+                ..Default::default()
+            },
+        }),
         Tree::Split {
             axis,
             ratio,
@@ -148,7 +179,8 @@ mod tests {
             title: "infra".into(),
             root: pane(Some("terraform plan"), None),
         };
-        let (tree, panes) = tab_layout(&tab, &mut ids());
+        let l = tab_layout(&tab, &mut ids());
+        let (tree, panes) = (l.tree, l.terminals);
         assert_eq!(tree, Tree::Leaf(10));
         assert_eq!(panes.len(), 1);
         let (id, req) = &panes[0];
@@ -176,7 +208,8 @@ mod tests {
                 }),
             },
         };
-        let (tree, panes) = tab_layout(&tab, &mut ids());
+        let l = tab_layout(&tab, &mut ids());
+        let (tree, panes) = (l.tree, l.terminals);
         assert_eq!(
             tree,
             Tree::Split {
@@ -201,7 +234,7 @@ mod tests {
     }
 
     fn saved(id: PaneId) -> Option<SavedPane> {
-        Some(SavedPane {
+        Some(SavedPane::Terminal {
             env: "work".into(),
             cwd: PathBuf::from(format!("C:/w/{id}")),
             shell: if id == 12 {
@@ -213,11 +246,13 @@ mod tests {
     }
 
     fn node(id: PaneId) -> NodeFile {
-        let p = saved(id).unwrap();
+        let Some(SavedPane::Terminal { env, cwd, shell }) = saved(id) else {
+            unreachable!()
+        };
         NodeFile {
-            env: Some(p.env),
-            cwd: Some(p.cwd.to_string_lossy().into_owned()),
-            shell: Some(p.shell.as_str().into()),
+            env: Some(env),
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            shell: Some(shell.as_str().into()),
             ..Default::default()
         }
     }
@@ -280,9 +315,13 @@ mod tests {
             std::fs::create_dir_all(folder(id)).unwrap();
         }
         let saved_here = |id: PaneId| {
-            saved(id).map(|p| SavedPane {
-                cwd: folder(id),
-                ..p
+            saved(id).map(|p| match p {
+                SavedPane::Terminal { env, shell, .. } => SavedPane::Terminal {
+                    env,
+                    cwd: folder(id),
+                    shell,
+                },
+                other => other,
             })
         };
         let tab = tab_file(&three(), &saved_here).unwrap();
@@ -294,10 +333,76 @@ mod tests {
             default_shell: ShellKind::Pwsh,
         };
         let spec = hydraui_sets::resolve_loose(&ctx, &tab).unwrap();
-        let (tree, panes) = tab_layout(&spec, &mut ids());
+        let l = tab_layout(&spec, &mut ids());
+        let (tree, panes) = (l.tree, l.terminals);
         assert_eq!(tree, three());
         let cwds: Vec<PathBuf> = panes.iter().map(|(_, r)| r.cwd.clone()).collect();
         assert_eq!(cwds, vec![folder(10), folder(11), folder(12)]);
         assert_eq!(panes[2].1.shell, ShellKind::Bash);
+    }
+
+    #[test]
+    fn a_file_pane_saves_as_a_files_node_and_reopens() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = hydra_core::paths::HydraPaths::new(d.path().join(".hydra"));
+        let work = EnvName::parse("work").unwrap();
+        std::fs::create_dir_all(paths.env_dir(&work)).unwrap();
+        std::fs::write(paths.env_file(&work), "").unwrap();
+        let bindings = std::collections::BTreeMap::new();
+        let ctx = hydraui_sets::Context {
+            paths: &paths,
+            user_home: d.path(),
+            bindings: &bindings,
+            default_shell: ShellKind::Pwsh,
+        };
+        let a = d.path().join("a.md");
+        let b = d.path().join("b.rs");
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&b, "b").unwrap();
+        let tree = Tree::Split {
+            axis: Axis::Row,
+            ratio: 0.5,
+            first: Box::new(Tree::Leaf(1)),
+            second: Box::new(Tree::Leaf(2)),
+        };
+        let saved = |id| match id {
+            1 => Some(SavedPane::Terminal {
+                env: "work".into(),
+                cwd: d.path().to_path_buf(),
+                shell: ShellKind::Pwsh,
+            }),
+            2 => Some(SavedPane::Files {
+                files: vec![a.clone(), b.clone()],
+                active: 1,
+            }),
+            _ => None,
+        };
+        let file = tab_file(&tree, &saved).unwrap();
+        let node = file.layout.as_ref().unwrap();
+        let fnode = &node.panes.as_ref().unwrap()[1];
+        assert_eq!(fnode.active, Some(1));
+        assert_eq!(fnode.files.as_ref().unwrap().len(), 2);
+        let spec = hydraui_sets::resolve_loose(&ctx, &file).unwrap();
+        let mut n = 10;
+        let l = tab_layout(&spec, &mut || {
+            n += 1;
+            n
+        });
+        assert_eq!(l.terminals.len(), 1);
+        let (fid, files) = l.files.unwrap();
+        assert_eq!(files.files, vec![a, b]);
+        assert_eq!(files.active, 1);
+        assert_eq!(l.tree.panes(), vec![l.terminals[0].0, fid]);
+    }
+
+    #[test]
+    fn a_tab_that_is_only_a_file_pane_isnt_saved() {
+        let saved = |_| {
+            Some(SavedPane::Files {
+                files: vec![PathBuf::from("C:/x.md")],
+                active: 0,
+            })
+        };
+        assert_eq!(tab_file(&Tree::Leaf(1), &saved), None);
     }
 }

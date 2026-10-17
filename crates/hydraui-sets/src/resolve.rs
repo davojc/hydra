@@ -9,7 +9,7 @@ use hydra_core::paths::{HydraPaths, expand_tilde};
 use hydra_platform::shell::ShellKind;
 
 use crate::file::{self, NodeFile, SetFile, TabFile};
-use crate::spec::{Node, PaneSpec, SetSpec, SplitDir, TabSpec};
+use crate::spec::{FilesSpec, Node, PaneSpec, SetSpec, SplitDir, TabSpec};
 
 /// What resolution needs from outside the set file.
 pub struct Context<'a> {
@@ -198,7 +198,16 @@ impl Resolver<'_> {
                     return None;
                 }
                 let mut count = 0;
-                self.node(&loc, layout, &inh, &mut count)?
+                let root = self.node(&loc, layout, &inh, &mut count)?;
+                if matches!(root, Node::Files(_)) {
+                    self.problem(format!("{loc}: a layout can't be only a file pane"));
+                    return None;
+                }
+                if count_files(&root) > 1 {
+                    self.problem(format!("{loc}: a tab has at most one file pane"));
+                    return None;
+                }
+                root
             }
         };
         let title = t.title.clone().unwrap_or_else(|| default_title(&root));
@@ -212,6 +221,31 @@ impl Resolver<'_> {
         inh: &Inherited,
         count: &mut usize,
     ) -> Option<Node> {
+        if let Some(list) = &n.files {
+            let loc = format!("the file pane of {tab}");
+            if n.split.is_some()
+                || n.panes.is_some()
+                || n.ratio.is_some()
+                || n.env.is_some()
+                || n.cwd.is_some()
+                || n.shell.is_some()
+                || n.command.is_some()
+            {
+                self.problem(format!("{loc}: files can't be combined with other keys"));
+                return None;
+            }
+            // Missing files are dropped (spec §5.1); an empty file pane collapses in its split.
+            // Each file once: Windows paths ignore case and slash direction.
+            let key = |p: &Path| p.to_string_lossy().replace('/', "\\").to_lowercase();
+            let mut seen = std::collections::HashSet::new();
+            let files: Vec<PathBuf> = list
+                .iter()
+                .map(|f| self.cwd(Some(f), &inh.cwd))
+                .filter(|p| p.is_file() && seen.insert(key(p)))
+                .collect();
+            let active = n.active.unwrap_or(0).min(files.len().saturating_sub(1));
+            return Some(Node::Files(FilesSpec { files, active }));
+        }
         let Some(dir) = &n.split else {
             *count += 1;
             let loc = format!("pane {count} of {tab}");
@@ -253,11 +287,19 @@ impl Resolver<'_> {
         // Both sides, so problems in the second are found even when the first has some.
         let first = self.node(tab, &panes[0], inh, count);
         let second = self.node(tab, &panes[1], inh, count);
+        let (first, second) = (first?, second?);
+        let empty = |n: &Node| matches!(n, Node::Files(f) if f.files.is_empty());
+        if empty(&first) {
+            return Some(second);
+        }
+        if empty(&second) {
+            return Some(first);
+        }
         Some(Node::Split {
             dir,
             ratio,
-            first: Box::new(first?),
-            second: Box::new(second?),
+            first: Box::new(first),
+            second: Box::new(second),
         })
     }
 
@@ -330,6 +372,14 @@ impl Resolver<'_> {
 }
 
 /// A tab without a title: its first pane's program, else its folder's name.
+fn count_files(n: &Node) -> usize {
+    match n {
+        Node::Pane(_) => 0,
+        Node::Files(_) => 1,
+        Node::Split { first, second, .. } => count_files(first) + count_files(second),
+    }
+}
+
 fn default_title(root: &Node) -> String {
     let p = root.panes()[0];
     if let Some(word) = p
@@ -640,6 +690,68 @@ layout = { split = "right", command = "x", panes = [ { }, { } ] }
     fn no_sets_folder_means_no_sets() {
         let fx = Fx::new();
         assert!(list_sets(&fx.paths).unwrap().is_empty());
+    }
+
+    const WITH_FILES: &str = "env = \"work\"\ncwd = \"ROOT\"\n\n[[tab]]\ntitle = \"t\"\n\
+        layout = { split = \"right\", panes = [ { }, { files = [FILES], active = 1 } ] }\n";
+
+    fn with_files(fx: &Fx, files: &str) -> Result<SetSpec, SetError> {
+        fx.parse(&WITH_FILES.replace("FILES", files))
+    }
+
+    #[test]
+    fn a_files_node_resolves_relative_paths_and_keeps_active() {
+        let fx = Fx::new();
+        std::fs::write(fx.root.join("a.md"), "a").unwrap();
+        std::fs::write(fx.root.join("b.rs"), "b").unwrap();
+        let spec = with_files(&fx, "\"a.md\", \"b.rs\"").unwrap();
+        let files = spec.tabs[0].root.files().unwrap();
+        assert_eq!(files.files, vec![fx.written("a.md"), fx.written("b.rs")]);
+        assert_eq!(files.active, 1);
+    }
+
+    #[test]
+    fn missing_files_are_dropped_and_an_empty_file_pane_collapses() {
+        let fx = Fx::new();
+        std::fs::write(fx.root.join("a.md"), "a").unwrap();
+        let spec = with_files(&fx, "\"gone.txt\", \"a.md\"").unwrap();
+        let files = spec.tabs[0].root.files().unwrap();
+        assert_eq!(files.files, vec![fx.written("a.md")]);
+        assert_eq!(files.active, 0, "active clamps to the files kept");
+        let spec = with_files(&fx, "\"gone.txt\"").unwrap();
+        assert!(
+            matches!(spec.tabs[0].root, Node::Pane(_)),
+            "the split collapses to the terminal"
+        );
+    }
+
+    #[test]
+    fn a_file_listed_twice_opens_once() {
+        let fx = Fx::new();
+        std::fs::write(fx.root.join("a.md"), "a").unwrap();
+        std::fs::write(fx.root.join("b.md"), "b").unwrap();
+        let spec = with_files(&fx, "\"a.md\", \"A.MD\", \"b.md\"").unwrap();
+        let files = spec.tabs[0].root.files().unwrap();
+        assert_eq!(files.files, vec![fx.written("a.md"), fx.written("b.md")]);
+    }
+
+    #[test]
+    fn a_files_node_must_sit_beside_a_terminal_alone_and_unmixed() {
+        let fx = Fx::new();
+        std::fs::write(fx.root.join("a.md"), "a").unwrap();
+        let err = |text: &str| fx.parse(text).unwrap_err().to_string();
+        let only = "env = \"work\"\ncwd = \"ROOT\"\n[[tab]]\nlayout = { files = [\"a.md\"] }\n";
+        assert!(err(only).contains("only a file pane"), "{}", err(only));
+        let two = "env = \"work\"\ncwd = \"ROOT\"\n[[tab]]\nlayout = { split = \"right\", panes = [ \
+            { files = [\"a.md\"] }, { split = \"down\", panes = [ { }, { files = [\"a.md\"] } ] } ] }\n";
+        assert!(err(two).contains("one file pane"), "{}", err(two));
+        let mixed = "env = \"work\"\ncwd = \"ROOT\"\n[[tab]]\nlayout = { split = \"right\", panes = [ \
+            { }, { files = [\"a.md\"], command = \"x\" } ] }\n";
+        assert!(
+            err(mixed).contains("files can't be combined"),
+            "{}",
+            err(mixed)
+        );
     }
 
     #[test]

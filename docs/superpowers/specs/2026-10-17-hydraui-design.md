@@ -170,6 +170,12 @@ command = "terraform plan"        # single-pane tab: no layout needed
   or `down`, optional `ratio` 0.1–0.9 default 0.5, `panes` with exactly two
   entries) or a **pane** (`env`, `cwd`, `command`, `shell`, all optional).
   Three-way splits are nested splits.
+- A layout node can instead be a **file pane** (§7.8): `files` (a list of
+  paths, absolute or relative like `cwd`) and an optional `active` (index
+  into `files`, default 0), with none of the pane keys. A tab has at most one
+  file pane, and a tab's layout can't be only a file pane. A file that
+  doesn't exist is dropped when the set opens; a file pane left with no files
+  isn't created (its split collapses to the other side).
 - `shell` is `pwsh` or `bash`; default from hydraui `config.toml`, else pwsh.
 - `cwd` accepts `~`. Relative paths resolve against the nearest ancestor `cwd`
   (pane → tab → set); with none, against the user's home.
@@ -216,7 +222,9 @@ modification time at load.
   splits, sets or the tree change, and when the window closes. On start,
   hydraui loads the sets again (startup commands run again), then reopens the
   Loose tabs, the tree and the active tab. An invalid or deleted set, or a
-  Loose tab whose env or folder is gone, is skipped with a toast. Scrollback,
+  Loose tab whose env or folder is gone, is skipped with a toast. A Loose
+  tab's file pane is saved as a `files` node (§5.1) and comes back with its
+  files and active file tab; unsaved edits are not kept. Scrollback,
   running commands, window size and dragged ratios in set tabs are not kept.
 
 ## 6. Terminal core (`hydraui-term`)
@@ -310,9 +318,9 @@ disabled.
   check (✓ ok, ! mismatch, ✗ missing, · info, with the detail, such as an AWS
   ARN or a GitHub login), and Refresh to check again now. Its "Add account…"
   picker turns a tool on in env.toml (as `hydra add`) for the tools that need
-  only a sign-in (claude, github, azure, gcloud, codex), then signs in to it
+  only a sign-in (claude, github, azure, gcloud, codex, gws), then signs in to it
   in a new tab; or borrows a tool another environment has with its own login
-  (`from = "<env>"`). Tools that need values first (git, aws, gws, gemini,
+  (`from = "<env>"`). Tools that need values first (git, aws, gemini,
   kube) are added with `hydra add`.
 
 ### 7.2 Terminal view
@@ -329,8 +337,8 @@ Toggled with `Ctrl+B`. Rooted at the focused pane's last OSC 7 folder (before
 any OSC 7, the pane's start cwd). Folders load lazily; `.gitignore` is
 respected; `notify` keeps it current.
 
-- Click a file: insert its quoted path at the cursor.
-- Ctrl-click a file: open in `editor` from `config.toml`, else the OS default.
+- Click a file: open it in the tab's file pane (§7.8).
+- Ctrl-click a file: insert its quoted path at the terminal's cursor.
 - Double-click a folder: send `cd '<path>'` + Enter, only when the pane is
   `AtPrompt`; otherwise disabled with a tooltip.
 
@@ -341,6 +349,10 @@ respected; `notify` keeps it current.
 - Sets, marked loaded/unloaded/invalid: Enter loads or focuses; a second
   action unloads.
 - Environments: open an ad-hoc tab in that environment.
+- **New environment**: name it (checked as it is typed: a valid name, not
+  taken), create it as `hydra env new` does, and open a tab in it. Also the
+  last entry of the "Open a tab in…" picker, and what that picker opens when
+  there are no environments yet.
 - **Sign in**: pick environment and tool; runs the same sign-in command as
   `hydra auth <tool> <env>` in a new pane in that environment.
 - **Set secret**: pick `<env>/<key>` (from references in `env.toml` that
@@ -384,6 +396,55 @@ required. Each release ships both executables
 (`hydra-x86_64-pc-windows-msvc.exe` and `hydraui-x86_64-pc-windows-msvc.exe`,
 each with a `.sha256`); `scripts/deploy.ps1` builds and installs both. `hydra update`
 updating hydraui too is out of scope.
+
+### 7.8 File pane
+
+A pane that shows files, beside a tab's terminals in the same split tree.
+
+**Opening.** Clicking a file in the tree (§7.3) opens it in the tab's file
+pane. A tab has at most one; when it has none, the terminal (below) is split
+to the right, 50/50, and the file pane takes the right side. A file already
+open switches to its file tab.
+
+**Layout.** The pane has a row of file tabs (name, a dot for unsaved edits,
+×), a header, and the file. Header: a **Raw / Rendered** switch for Markdown
+(`.md`, `.markdown`), and **Open in editor** (`editor` from `config.toml`,
+else the OS default).
+
+- **Raw**: gpui-component's code editor, editable, with syntax highlighting
+  chosen by extension, line numbers and find (`Ctrl+F`). `Ctrl+S` saves.
+- **Rendered**: Markdown, read-only, reflecting unsaved edits. Markdown files
+  open in Rendered, others in Raw. Links open in the browser when clicked;
+  images load only from local files, never from the network; only `http`,
+  `https` and `mailto` links open; nothing runs.
+
+**Reading.** A file over 5 MB, or binary (a NUL byte in the first 8 KB, or not
+valid UTF-8), shows "can't show this file" with Open in editor; so does one
+that can't be read, with the reason. A file's line endings (CRLF or LF) and
+UTF-8 BOM are recorded on load and written back on save: a save changes only
+what was edited. (A file with mixed line endings is saved with its first
+line's ending throughout.) Text pasted with Windows line endings is saved
+with the file's own.
+
+**Saving** is atomic: a temporary file beside the original, then a replace.
+A save that fails (read-only, locked, folder gone) is a toast; the edits stay,
+still unsaved.
+
+**Closing.** Closing a file tab with unsaved edits asks Save / Discard /
+Cancel. Closing the last file tab closes the pane and the terminal gets the
+width back. Closing the pane (`Ctrl+W` while it has the focus, or closing the
+tab) asks once when any file has unsaved edits. Closing a tab's last terminal
+closes the tab, asking first when its file pane has unsaved edits.
+
+**Changes on disk** (`notify`, as the tree): a file with no unsaved edits
+reloads; one with edits shows "changed on disk" with Reload / Keep mine. A
+deleted or renamed file's tab is marked deleted and keeps its edits, so Save
+writes it back.
+
+**Which terminal.** The status bar, git summary, the tree's root, Ctrl-click
+insert, double-click `cd` and Split use the focused pane when it is a
+terminal, else the tab's last focused terminal. Split, close and focus moves
+work on either kind of pane.
 
 ## 8. Errors summary
 

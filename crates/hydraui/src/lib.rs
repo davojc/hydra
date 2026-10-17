@@ -2,6 +2,8 @@
 //! (spec: docs/superpowers/specs/2026-10-17-hydraui-design.md).
 pub mod accounts;
 pub mod config;
+pub mod file_doc;
+pub mod file_pane;
 pub mod file_tree;
 pub mod file_tree_view;
 pub mod frame;
@@ -11,6 +13,7 @@ pub mod input;
 pub mod keys;
 pub mod launcher;
 pub mod layout;
+pub mod open_files;
 pub mod palette;
 pub mod pane_view;
 pub mod split;

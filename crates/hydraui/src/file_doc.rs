@@ -1,0 +1,432 @@
+//! Reading and saving a file for the file pane (spec §7.8): too big or binary can't be shown,
+//! line endings and a BOM come back on save, saves are atomic; and what a change on disk means.
+use std::borrow::Cow;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+pub const MAX_BYTES: u64 = 5 * 1024 * 1024;
+const SNIFF: usize = 8 * 1024;
+const BOM: &[u8] = b"\xEF\xBB\xBF";
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileDoc {
+    /// The text with `\n` line endings and no BOM, as the editor holds it.
+    pub text: String,
+    /// The file used CRLF (judged by its first line ending).
+    pub crlf: bool,
+    pub bom: bool,
+}
+
+pub fn decode(bytes: &[u8]) -> Result<FileDoc, String> {
+    let (bom, body) = match bytes.strip_prefix(BOM) {
+        Some(rest) => (true, rest),
+        None => (false, bytes),
+    };
+    if body[..body.len().min(SNIFF)].contains(&0) {
+        return Err("binary file".into());
+    }
+    let raw = std::str::from_utf8(body).map_err(|_| "binary file".to_string())?;
+    let crlf = raw
+        .find('\n')
+        .is_some_and(|i| i > 0 && raw.as_bytes()[i - 1] == b'\r');
+    Ok(FileDoc {
+        text: raw.replace("\r\n", "\n"),
+        crlf,
+        bom,
+    })
+}
+
+/// `\r\n` and lone `\r` as `\n`: the editor can hold them after a paste from Windows.
+pub fn normalize(text: &str) -> Cow<'_, str> {
+    if text.contains('\r') {
+        Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
+pub fn encode(text: &str, crlf: bool, bom: bool) -> Vec<u8> {
+    let text = normalize(text);
+    let mut out = Vec::with_capacity(text.len() + 3);
+    if bom {
+        out.extend_from_slice(BOM);
+    }
+    if crlf {
+        out.extend_from_slice(text.replace('\n', "\r\n").as_bytes());
+    } else {
+        out.extend_from_slice(text.as_bytes());
+    }
+    out
+}
+
+pub fn load(path: &Path) -> Result<FileDoc, String> {
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if meta.len() > MAX_BYTES {
+        return Err("over 5 MB".into());
+    }
+    decode(&std::fs::read(path).map_err(|e| e.to_string())?)
+}
+
+/// Writes a temporary file beside `path`, then replaces `path` with it; on any failure the
+/// temporary file is removed and `path` is untouched.
+pub fn save(path: &Path, doc: &FileDoc) -> Result<(), String> {
+    let dir = path.parent().ok_or("no folder")?;
+    if std::fs::metadata(path).is_ok_and(|m| m.permissions().readonly()) {
+        return Err(format!("{} is read-only", path.display()));
+    }
+    let name = path.file_name().ok_or("no file name")?.to_string_lossy();
+    let tmp = dir.join(format!(".{name}.hydraui-save"));
+    let result = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&encode(&doc.text, doc.crlf, doc.bom))?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    })();
+    result.map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("can't save {}: {e}", path.display())
+    })
+}
+
+pub fn is_markdown(path: &Path) -> bool {
+    matches!(ext(path).as_deref(), Some("md" | "markdown"))
+}
+
+fn ext(path: &Path) -> Option<String> {
+    path.extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+}
+
+/// The highlighter's language for the file; `"text"` (no highlighting) when unknown.
+pub fn language(path: &Path) -> &'static str {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase());
+    if matches!(name.as_deref(), Some("makefile" | "gnumakefile")) {
+        return "make";
+    }
+    match ext(path).as_deref() {
+        Some("rs") => "rust",
+        Some("toml") => "toml",
+        Some("json" | "jsonc") => "json",
+        Some("md" | "markdown") => "markdown",
+        Some("js" | "mjs" | "cjs" | "jsx") => "javascript",
+        Some("ts" | "mts" | "cts") => "typescript",
+        Some("tsx") => "tsx",
+        Some("py") => "python",
+        Some("sh" | "bash") => "bash",
+        Some("yml" | "yaml") => "yaml",
+        Some("css" | "scss") => "css",
+        Some("html" | "htm") => "html",
+        Some("go") => "go",
+        Some("c" | "h") => "c",
+        Some("cpp" | "cc" | "cxx" | "hpp" | "hh") => "cpp",
+        Some("cs") => "csharp",
+        _ => "text",
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImageUse {
+    Local(PathBuf),
+    Blocked,
+}
+
+/// What Rendered does with an image: a local file (relative to the Markdown file's folder)
+/// loads; anything with a URL scheme, or protocol-relative, is never fetched (spec §7.8).
+pub fn image_use(uri: &str, dir: &Path) -> ImageUse {
+    let u = uri.trim();
+    let has_scheme = u.find(':').is_some_and(|i| {
+        // A drive letter (`C:`) is a path, not a scheme.
+        i > 1
+            && u[..i]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+    });
+    if u.is_empty() || has_scheme || u.starts_with("//") || u.starts_with("\\\\") {
+        return ImageUse::Blocked;
+    }
+    let p = Path::new(u);
+    ImageUse::Local(if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        dir.join(p)
+    })
+}
+
+/// Whether clicking a link in Rendered opens it: web and mail only; nothing runs (spec §7.8).
+pub fn link_opens(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    ["http://", "https://", "mailto:"]
+        .iter()
+        .any(|s| lower.starts_with(s))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DiskChange {
+    Nothing,
+    Reload(FileDoc),
+    /// Changed on disk while there are unsaved edits (or it can't be read now).
+    Changed,
+    Deleted,
+}
+
+/// The disk-state marks on a file tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DiskFlags {
+    /// Changed on disk while there were unsaved edits.
+    pub changed: bool,
+    pub deleted: bool,
+}
+
+/// The marks after a change on disk: a file that exists again isn't deleted, and a reload
+/// clears both.
+pub fn flags_after(f: DiskFlags, change: &DiskChange) -> DiskFlags {
+    match change {
+        DiskChange::Nothing => DiskFlags {
+            deleted: false,
+            ..f
+        },
+        DiskChange::Reload(_) => DiskFlags::default(),
+        DiskChange::Changed => DiskFlags {
+            changed: true,
+            deleted: false,
+        },
+        DiskChange::Deleted => DiskFlags { deleted: true, ..f },
+    }
+}
+
+/// What a change on disk means for an open file: `saved` is what was last loaded or saved,
+/// `now` what is on disk (`None`: gone).
+pub fn on_disk(saved: &FileDoc, dirty: bool, now: Option<Result<FileDoc, String>>) -> DiskChange {
+    match now {
+        None => DiskChange::Deleted,
+        Some(Ok(doc)) if doc == *saved => DiskChange::Nothing,
+        Some(Ok(doc)) if !dirty => DiskChange::Reload(doc),
+        Some(_) => DiskChange::Changed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn crlf_and_bom_are_recorded_and_stripped() {
+        let doc = decode(b"\xEF\xBB\xBFone\r\ntwo\r\n").unwrap();
+        assert_eq!(
+            doc,
+            FileDoc {
+                text: "one\ntwo\n".into(),
+                crlf: true,
+                bom: true
+            }
+        );
+        let doc = decode(b"one\ntwo").unwrap();
+        assert_eq!(
+            doc,
+            FileDoc {
+                text: "one\ntwo".into(),
+                crlf: false,
+                bom: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_crlf_bom_file_round_trips_with_only_the_edit_changed() {
+        let original = b"\xEF\xBB\xBFline 1\r\nline 2\r\nline 3\r\n";
+        let mut doc = decode(original).unwrap();
+        doc.text = doc.text.replace("line 2", "LINE TWO");
+        assert_eq!(
+            encode(&doc.text, doc.crlf, doc.bom),
+            b"\xEF\xBB\xBFline 1\r\nLINE TWO\r\nline 3\r\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn binary_and_invalid_utf8_cant_be_shown() {
+        assert_eq!(decode(b"abc\0def").unwrap_err(), "binary file");
+        assert_eq!(decode(&[0xff, 0xfe, 0x41]).unwrap_err(), "binary file");
+    }
+
+    #[test]
+    fn big_files_cant_be_shown() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("big.txt");
+        let f = std::fs::File::create(&p).unwrap();
+        f.set_len(MAX_BYTES + 1).unwrap();
+        assert!(load(&p).unwrap_err().contains("5 MB"));
+        assert!(load(&d.path().join("missing.txt")).is_err());
+    }
+
+    #[test]
+    fn save_writes_the_endings_back_atomically() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("a.txt");
+        std::fs::write(&p, "old\r\n").unwrap();
+        let doc = FileDoc {
+            text: "new\nline\n".into(),
+            crlf: true,
+            bom: false,
+        };
+        save(&p, &doc).unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"new\r\nline\r\n");
+        let leftovers: Vec<_> = std::fs::read_dir(d.path()).unwrap().collect();
+        assert_eq!(leftovers.len(), 1, "no temp file left");
+    }
+
+    #[test]
+    fn saving_onto_a_read_only_file_fails_and_leaves_it_alone() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("ro.txt");
+        std::fs::write(&p, "keep").unwrap();
+        let mut perms = std::fs::metadata(&p).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&p, perms.clone()).unwrap();
+        let doc = FileDoc {
+            text: "changed".into(),
+            crlf: false,
+            bom: false,
+        };
+        assert!(save(&p, &doc).is_err());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "keep");
+        assert_eq!(
+            std::fs::read_dir(d.path()).unwrap().count(),
+            1,
+            "no temp file left"
+        );
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&p, perms).unwrap();
+    }
+
+    #[test]
+    fn markdown_and_languages_come_from_the_extension() {
+        assert!(is_markdown(Path::new("README.md")));
+        assert!(is_markdown(Path::new("notes.MARKDOWN")));
+        assert!(!is_markdown(Path::new("main.rs")));
+        assert_eq!(language(Path::new("main.rs")), "rust");
+        assert_eq!(language(Path::new("Cargo.toml")), "toml");
+        assert_eq!(language(Path::new("a.ps1")), "text");
+        assert_eq!(language(Path::new("Makefile")), "make");
+        assert_eq!(language(Path::new("x.tsx")), "tsx");
+    }
+
+    fn doc(t: &str) -> FileDoc {
+        FileDoc {
+            text: t.into(),
+            crlf: false,
+            bom: false,
+        }
+    }
+
+    #[test]
+    fn our_own_save_seen_on_disk_does_nothing() {
+        assert_eq!(
+            on_disk(&doc("a"), false, Some(Ok(doc("a")))),
+            DiskChange::Nothing
+        );
+        assert_eq!(
+            on_disk(&doc("a"), true, Some(Ok(doc("a")))),
+            DiskChange::Nothing
+        );
+    }
+
+    #[test]
+    fn a_change_on_disk_reloads_unless_there_are_edits() {
+        assert_eq!(
+            on_disk(&doc("a"), false, Some(Ok(doc("b")))),
+            DiskChange::Reload(doc("b"))
+        );
+        assert_eq!(
+            on_disk(&doc("a"), true, Some(Ok(doc("b")))),
+            DiskChange::Changed
+        );
+        assert_eq!(on_disk(&doc("a"), false, None), DiskChange::Deleted);
+        assert_eq!(
+            on_disk(&doc("a"), true, Some(Err("binary file".into()))),
+            DiskChange::Changed
+        );
+    }
+
+    #[test]
+    fn pasted_windows_line_endings_dont_double_up_on_save() {
+        assert_eq!(normalize("a\r\nb\rc\n"), "a\nb\nc\n");
+        assert_eq!(encode("a\r\nb\n", true, false), b"a\r\nb\r\n".to_vec());
+        assert_eq!(encode("a\r\nb\n", false, false), b"a\nb\n".to_vec());
+    }
+
+    #[test]
+    fn only_local_images_load() {
+        let dir = Path::new("C:/docs");
+        assert_eq!(
+            image_use("img/a.png", dir),
+            ImageUse::Local(dir.join("img/a.png"))
+        );
+        assert_eq!(
+            image_use("C:/pics/b.png", dir),
+            ImageUse::Local(PathBuf::from("C:/pics/b.png"))
+        );
+        for remote in [
+            "https://example.com/a.png",
+            "HTTPS://example.com/a.png",
+            " http://example.com/a.png",
+            "ftp://example.com/a.png",
+            "//example.com/a.png",
+            "data:image/png;base64,AAAA",
+        ] {
+            assert_eq!(image_use(remote, dir), ImageUse::Blocked, "{remote}");
+        }
+    }
+
+    #[test]
+    fn links_open_only_for_web_and_mail() {
+        assert!(link_opens("https://example.com"));
+        assert!(link_opens("HTTP://example.com"));
+        assert!(link_opens("mailto:a@b.c"));
+        assert!(!link_opens("file:///C:/evil.exe"));
+        assert!(!link_opens("ms-settings:"));
+        assert!(!link_opens("C:\\Windows\\notepad.exe"));
+    }
+
+    #[test]
+    fn a_file_back_on_disk_is_no_longer_deleted() {
+        let deleted = DiskFlags {
+            changed: false,
+            deleted: true,
+        };
+        assert_eq!(
+            flags_after(deleted, &DiskChange::Nothing),
+            DiskFlags {
+                changed: false,
+                deleted: false
+            }
+        );
+        assert_eq!(
+            flags_after(deleted, &DiskChange::Changed),
+            DiskFlags {
+                changed: true,
+                deleted: false
+            }
+        );
+        let changed = DiskFlags {
+            changed: true,
+            deleted: false,
+        };
+        assert_eq!(
+            flags_after(changed, &DiskChange::Reload(doc("x"))),
+            DiskFlags::default()
+        );
+        assert_eq!(
+            flags_after(changed, &DiskChange::Deleted),
+            DiskFlags {
+                changed: true,
+                deleted: true
+            }
+        );
+    }
+}

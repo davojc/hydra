@@ -26,6 +26,7 @@ use hydraui_sets::LoadedSets;
 use hydraui_term::PromptState;
 
 use crate::config::UiConfig;
+use crate::file_pane::{FilePane, FilePaneEvent};
 use crate::file_tree::{cd_command, editor_command, quote_path};
 use crate::file_tree_view::{FileTreeView, TreeEvent};
 use crate::git_status;
@@ -34,6 +35,7 @@ use crate::keys::{
     ClosePane, FileTree, FocusDown, FocusLeft, FocusRight, FocusUp, NewTab, NextTab, PreviousTab,
     SplitDown, SplitRight,
 };
+use crate::open_files::{last_terminal_closes_tab, terminal_for};
 use crate::pane_view::{PaneEvent, PaneView, TermStyle};
 use crate::split::{Axis, Dir, PaneId, Tree};
 use crate::tabs::{Closed, TabId, Tabs};
@@ -66,6 +68,12 @@ pub struct Workspace {
     style: Arc<TermStyle>,
     tabs: Tabs,
     panes: HashMap<PaneId, Entity<PaneView>>,
+    /// File panes (spec §7.8), at most one per tab; leaves of the same split trees.
+    files: HashMap<PaneId, Entity<FilePane>>,
+    file_subs: HashMap<PaneId, Subscription>,
+    /// Each tab's last focused terminal, which stands for the tab while its file pane has
+    /// the focus.
+    last_terminal: HashMap<TabId, PaneId>,
     tints: HashMap<String, u32>,
     next_pane: PaneId,
     status: StatusCache,
@@ -151,6 +159,9 @@ impl Workspace {
             style: Arc::new(style),
             tabs: Tabs::default(),
             panes: HashMap::new(),
+            files: HashMap::new(),
+            file_subs: HashMap::new(),
+            last_terminal: HashMap::new(),
             tints: HashMap::new(),
             next_pane: 0,
             status: StatusCache::default(),
@@ -191,8 +202,17 @@ impl Workspace {
         // Each pane's folder as it is when the window closes.
         let ws = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
-            let _ = ws.update(cx, |ws, cx| ws.save_session(window, cx));
-            true
+            ws.update(cx, |ws, cx| {
+                ws.save_session(window, cx);
+                // Unsaved edits: ask first, and close from the dialog (spec §7.8).
+                let all: Vec<PaneId> = ws.files.keys().copied().collect();
+                if ws.unsaved_in(&all, cx).is_empty() {
+                    return true;
+                }
+                ws.confirm_unsaved(all, window, cx, |_, w, _| w.remove_window());
+                false
+            })
+            .unwrap_or(true)
         });
     }
 
@@ -207,15 +227,14 @@ impl Workspace {
     fn pick_env(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let envs = self.hydra.env_names();
         if envs.is_empty() {
-            window.push_notification(
-                Notification::warning(
-                    "No hydra environments yet: create one with `hydra env new <name>`.",
-                )
-                .title("hydraui"),
-                cx,
-            );
+            self.new_env_dialog(window, cx);
             return;
         }
+        // Each environment with its colour, as on its tabs.
+        let swatches: Vec<(String, Hsla)> = envs
+            .iter()
+            .map(|e| (e.clone(), rgb(self.hydra.tint(e)).into()))
+            .collect();
         let state = cx.new(|cx| CommandState::new(window, cx));
         let workspace = cx.entity();
         let first = Cell::new(true);
@@ -226,13 +245,19 @@ impl Workspace {
             let (choices, workspace, cwd) = (envs.clone(), workspace.clone(), cwd.clone());
             dialog.title("Open a tab in…").child(
                 Command::new(&state)
-                    .items(envs.iter().map(|e| CommandItem::new().label(e.clone())))
+                    .items(
+                        swatches
+                            .iter()
+                            .map(|(e, colour)| env_item(e, Some(*colour)))
+                            .chain([env_item("New environment…", None)]),
+                    )
                     .placeholder("Environment")
                     .on_confirm(move |ix, window, cx| {
-                        if let Some(env) = choices.get(ix.row).cloned() {
-                            window.close_dialog(cx);
-                            workspace
-                                .update(cx, |ws, cx| ws.open_tab(env, cwd.clone(), window, cx));
+                        window.close_dialog(cx);
+                        match choices.get(ix.row).cloned() {
+                            Some(env) => workspace
+                                .update(cx, |ws, cx| ws.open_tab(env, cwd.clone(), window, cx)),
+                            None => workspace.update(cx, |ws, cx| ws.new_env_dialog(window, cx)),
                         }
                     }),
             )
@@ -286,6 +311,9 @@ impl Workspace {
         let sub = cx.subscribe_in(&view, window, move |ws, view, ev: &PaneEvent, _, cx| {
             if *ev == PaneEvent::Focused {
                 ws.tabs.focus_pane(id);
+                if let Some(tab) = ws.tabs.tab_of(id) {
+                    ws.last_terminal.insert(tab, id);
+                }
                 ws.refresh_status(cx);
             }
             // The focused pane's repository: on focus, on `cd`, and when a command finishes.
@@ -304,14 +332,29 @@ impl Workspace {
         self.panes.insert(id, view);
     }
 
+    /// The terminal standing for the active tab: the focused pane if it's a terminal, else
+    /// the tab's last focused terminal (spec §7.8).
     fn focused(&self) -> Option<Entity<PaneView>> {
-        self.tabs
-            .active()
-            .and_then(|t| self.panes.get(&t.focused))
-            .cloned()
+        self.tab_terminal(self.tabs.active()?)
+    }
+
+    /// The terminal standing for `tab` (spec §7.8).
+    fn tab_terminal(&self, tab: &crate::tabs::Tab) -> Option<Entity<PaneView>> {
+        let id = terminal_for(
+            tab.focused,
+            self.last_terminal.get(&tab.id).copied(),
+            &tab.tree.panes(),
+            &|p| self.panes.contains_key(&p),
+        )?;
+        self.panes.get(&id).cloned()
     }
 
     fn focus_pane(&self, id: PaneId, window: &mut Window, cx: &mut App) {
+        if let Some(view) = self.files.get(&id) {
+            let handle = view.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+            return;
+        }
         match self.panes.get(&id) {
             Some(view) => {
                 let handle = view.read(cx).focus_handle(cx);
@@ -319,6 +362,159 @@ impl Workspace {
             }
             None => window.focus(&self.focus, cx),
         }
+    }
+
+    fn create_files_pane(
+        &mut self,
+        id: PaneId,
+        files: &[PathBuf],
+        active: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = cx.new(|cx| FilePane::new(files, active, window, cx));
+        let sub = cx.subscribe_in(
+            &view,
+            window,
+            move |ws, _, ev: &FilePaneEvent, window, cx| match ev {
+                FilePaneEvent::Focused => {
+                    ws.tabs.focus_pane(id);
+                    cx.notify();
+                }
+                FilePaneEvent::Empty => ws.remove_files_pane(id, window, cx),
+                FilePaneEvent::OpenInEditor(path) => ws.open_file(path, window, cx),
+            },
+        );
+        self.file_subs.insert(id, sub);
+        self.files.insert(id, view);
+    }
+
+    /// Shows `path` in the active tab's file pane, splitting the tab's terminal to the right
+    /// first when the tab has none (spec §7.8).
+    fn show_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.active() else {
+            return;
+        };
+        let existing = tab
+            .tree
+            .panes()
+            .into_iter()
+            .find(|p| self.files.contains_key(p));
+        let id = match existing {
+            Some(id) => {
+                if let Some(view) = self.files.get(&id).cloned() {
+                    view.update(cx, |f, cx| f.open(path, window, cx));
+                }
+                self.tabs.focus_pane(id);
+                id
+            }
+            None => {
+                let Some(term) = self.focused().map(|v| v.read(cx).id) else {
+                    return;
+                };
+                self.next_pane += 1;
+                let id = self.next_pane;
+                self.create_files_pane(id, &[path], 0, window, cx);
+                self.tabs.split_pane(term, Axis::Row, id);
+                id
+            }
+        };
+        self.focus_pane(id, window, cx);
+        self.save_session(window, cx);
+        cx.notify();
+    }
+
+    fn remove_files_pane(&mut self, id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Closed::Tab(tab) = self.tabs.close_pane(id) {
+            self.tab_gone(tab, window, cx);
+        }
+        self.files.remove(&id);
+        self.file_subs.remove(&id);
+        self.focus_active(window, cx);
+        self.save_session(window, cx);
+        cx.notify();
+    }
+
+    /// The files with unsaved edits among `panes`.
+    fn unsaved_in(&self, panes: &[PaneId], cx: &App) -> Vec<PathBuf> {
+        panes
+            .iter()
+            .filter_map(|p| self.files.get(p))
+            .flat_map(|f| f.read(cx).unsaved())
+            .collect()
+    }
+
+    /// Runs `then` now, or after asking Save all / Discard / Cancel when files among `panes`
+    /// have unsaved edits.
+    fn confirm_unsaved(
+        &mut self,
+        panes: Vec<PaneId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let unsaved = self.unsaved_in(&panes, cx);
+        if unsaved.is_empty() {
+            then(self, window, cx);
+            return;
+        }
+        let names: Vec<String> = unsaved
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            })
+            .collect();
+        let ws = cx.entity();
+        let then = Rc::new(then);
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (save_ws, discard_ws, panes) = (ws.clone(), ws.clone(), panes.clone());
+            let (save_then, discard_then) = (then.clone(), then.clone());
+            dialog
+                .title("Unsaved edits")
+                .child(div().child(format!("Unsaved: {}", names.join(", "))))
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("cancel")
+                                .label("Cancel")
+                                .on_click(|_, w, cx| w.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("discard")
+                                .label("Discard")
+                                .on_click(move |_, w, cx| {
+                                    w.close_dialog(cx);
+                                    discard_ws.update(cx, |ws, cx| discard_then(ws, w, cx));
+                                }),
+                        )
+                        .child(Button::new("save").label("Save all").primary().on_click(
+                            move |_, w, cx| {
+                                w.close_dialog(cx);
+                                save_ws.update(cx, |ws, cx| {
+                                    let mut failed = None;
+                                    for p in &panes {
+                                        if let Some(f) = ws.files.get(p).cloned()
+                                            && let Err(e) = f.update(cx, |f, cx| f.save_all(cx))
+                                        {
+                                            failed = Some(e);
+                                        }
+                                    }
+                                    match failed {
+                                        Some(e) => w.push_notification(
+                                            Notification::error(e).title("Save"),
+                                            cx,
+                                        ),
+                                        None => save_then(ws, w, cx),
+                                    }
+                                });
+                            },
+                        )),
+                )
+        });
     }
 
     /// Focuses now and again on the next frame, after a closing dialog has handed the focus
@@ -353,7 +549,8 @@ impl Workspace {
             PaneRequest::new(v.env(), v.cwd().clone(), v.request.shell)
         };
         let id = self.new_pane(request, window, cx);
-        self.tabs.split_focused(axis, id);
+        let target = from.read(cx).id;
+        self.tabs.split_pane(target, axis, id);
         self.focus_pane(id, window, cx);
         self.save_session(window, cx);
         cx.notify();
@@ -371,12 +568,26 @@ impl Workspace {
         // Dropping the view drops its Pane: the job ends the shell's whole process tree.
         self.panes.remove(&id);
         self.subs.remove(&id);
+        self.files.remove(&id);
+        self.file_subs.remove(&id);
     }
 
     fn close_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.tabs.active().map(|t| t.focused) else {
+        let Some(tab) = self.tabs.active() else {
             return;
         };
+        let (id, tab_id, panes) = (tab.focused, tab.id, tab.tree.panes());
+        if self.files.contains_key(&id) {
+            self.confirm_unsaved(vec![id], window, cx, move |ws, w, cx| {
+                ws.remove_files_pane(id, w, cx)
+            });
+            return;
+        }
+        // A tab's last terminal takes the tab, file pane and all (spec §7.8).
+        if last_terminal_closes_tab(&panes, id, &|p| self.panes.contains_key(&p)) {
+            self.close_tab(tab_id, window, cx);
+            return;
+        }
         if let Closed::Tab(tab) = self.tabs.close_pane(id) {
             self.tab_gone(tab, window, cx);
         }
@@ -386,7 +597,19 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Closes a tab, asking first when its file pane has unsaved edits.
     fn close_tab(&mut self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        let panes = self
+            .tabs
+            .get(tab)
+            .map(|t| t.tree.panes())
+            .unwrap_or_default();
+        self.confirm_unsaved(panes, window, cx, move |ws, w, cx| {
+            ws.close_tab_now(tab, w, cx)
+        });
+    }
+
+    fn close_tab_now(&mut self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) {
         for id in self.tabs.close_tab(tab) {
             self.drop_pane(id);
         }
@@ -531,7 +754,7 @@ impl Workspace {
                     v.insert_text(&text, cx);
                 }
             }),
-            TreeEvent::Open(path) => self.open_file(path, window, cx),
+            TreeEvent::Show(path) => self.show_file(path.clone(), window, cx),
         }
         self.focus_active(window, cx);
     }
@@ -629,6 +852,19 @@ impl Workspace {
     ) -> AnyElement {
         match tree {
             Tree::Leaf(id) => {
+                if let Some(view) = self.files.get(id) {
+                    let edge = if *id == focused {
+                        cx.theme().accent
+                    } else {
+                        transparent_black()
+                    };
+                    return div()
+                        .size_full()
+                        .border_1()
+                        .border_color(edge)
+                        .child(view.clone())
+                        .into_any_element();
+                }
                 let Some(view) = self.panes.get(id) else {
                     return div().into_any_element();
                 };
@@ -768,8 +1004,7 @@ impl Workspace {
                     continue;
                 };
                 let (label, env) = self
-                    .panes
-                    .get(&tab.focused)
+                    .tab_terminal(tab)
                     .map(|v| {
                         let v = v.read(cx);
                         (v.label(), v.env().to_string())
@@ -954,6 +1189,31 @@ impl Render for Workspace {
                 d.child(self.drag_listener(cx))
             })
     }
+}
+
+/// A row of the environment picker: a square in the environment's colour (`+` for the
+/// entry that creates one), then its name, which is also what the search matches.
+fn env_item(label: &str, colour: Option<Hsla>) -> CommandItem {
+    let text = label.to_string();
+    CommandItem::new()
+        .label(label.to_string())
+        .child(move |_, cx| {
+            let mark = div()
+                .size(px(12.))
+                .flex_none()
+                .rounded_sm()
+                .flex()
+                .items_center()
+                .justify_center();
+            let mark = match colour {
+                Some(c) => mark.bg(c),
+                None => mark
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("+"),
+            };
+            h_flex().gap_2().child(mark).child(text.clone())
+        })
 }
 
 #[cfg(test)]

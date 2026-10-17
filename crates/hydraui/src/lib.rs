@@ -4,6 +4,7 @@ pub mod config;
 pub mod file_tree;
 pub mod file_tree_view;
 pub mod frame;
+pub mod git_status;
 pub mod hydra;
 pub mod input;
 pub mod keys;

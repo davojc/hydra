@@ -26,6 +26,7 @@ use hydraui_term::PromptState;
 use crate::config::UiConfig;
 use crate::file_tree::{cd_command, editor_command, quote_path};
 use crate::file_tree_view::{FileTreeView, TreeEvent};
+use crate::git_status;
 use crate::hydra::{Hydra, PaneRequest, STATUS_TTL, StatusCache, accounts_summary};
 use crate::keys::{
     ClosePane, FileTree, FocusDown, FocusLeft, FocusRight, FocusUp, NewTab, NextTab, PreviousTab,
@@ -51,6 +52,13 @@ pub struct Workspace {
     next_pane: PaneId,
     status: StatusCache,
     refreshing: HashSet<String>,
+    /// The focused pane's repository summary, for the folder it was read in; `None` text when
+    /// that folder isn't in a repository.
+    git: Option<(PathBuf, Option<String>)>,
+    /// A `git status` is running; `git_again` asks for another once it finishes.
+    git_busy: bool,
+    git_again: bool,
+    _git_watch: Task<()>,
     drag: Option<Drag>,
     loaded: LoadedSets,
     /// Loaded sets whose file changed since loading.
@@ -86,6 +94,17 @@ impl Workspace {
             }
         });
         // A loaded set's file edited or deleted: offer a reload (spec §5.4).
+        // Picks up edits made outside the terminal (an editor saving, another tool).
+        let git_watch = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(15))
+                    .await;
+                if this.update(cx, |ws, cx| ws.refresh_git(cx)).is_err() {
+                    break;
+                }
+            }
+        });
         let set_watch = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -111,6 +130,10 @@ impl Workspace {
             next_pane: 0,
             status: StatusCache::default(),
             refreshing: HashSet::new(),
+            git: None,
+            git_busy: false,
+            git_again: false,
+            _git_watch: git_watch,
             drag: None,
             loaded: LoadedSets::default(),
             changed_sets: HashSet::new(),
@@ -224,10 +247,19 @@ impl Workspace {
         self.tints.insert(request.env.clone(), tint);
         let (hydra, style) = (self.hydra.clone(), self.style.clone());
         let view = cx.new(|cx| PaneView::new(id, request, hydra, style, window, cx));
-        let sub = cx.subscribe_in(&view, window, move |ws, _, ev: &PaneEvent, _, cx| {
+        let sub = cx.subscribe_in(&view, window, move |ws, view, ev: &PaneEvent, _, cx| {
             if *ev == PaneEvent::Focused {
                 ws.tabs.focus_pane(id);
                 ws.refresh_status(cx);
+            }
+            // The focused pane's repository: on focus, on `cd`, and when a command finishes.
+            let focused = ws.tabs.active().is_some_and(|t| t.focused == id);
+            let back_at_prompt = *ev == PaneEvent::PromptChanged
+                && view.read(cx).prompt() == Some(PromptState::AtPrompt);
+            if focused
+                && (matches!(ev, PaneEvent::Focused | PaneEvent::CwdChanged) || back_at_prompt)
+            {
+                ws.refresh_git(cx);
             }
             ws.sync_tree(cx);
             cx.notify();
@@ -361,6 +393,36 @@ impl Workspace {
     }
 
     /// Checks the focused environment's accounts off the UI thread, at most once a minute.
+    /// Reads the focused pane's repository off the UI thread; one `git status` at a time.
+    fn refresh_git(&mut self, cx: &mut Context<Self>) {
+        if self.git_busy {
+            self.git_again = true;
+            return;
+        }
+        let Some(view) = self.focused() else {
+            return;
+        };
+        let cwd = view.read(cx).cwd().clone();
+        self.git_busy = true;
+        cx.spawn(async move |this, cx| {
+            let dir = cwd.clone();
+            let line = cx
+                .background_spawn(
+                    async move { git_status::read(&dir).map(|s| git_status::summary(&s)) },
+                )
+                .await;
+            let _ = this.update(cx, |ws, cx| {
+                ws.git = Some((cwd, line));
+                ws.git_busy = false;
+                if std::mem::take(&mut ws.git_again) {
+                    ws.refresh_git(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn refresh_status(&mut self, cx: &mut Context<Self>) {
         let Some(env) = self.focused().map(|v| v.read(cx).env().to_string()) else {
             return;
@@ -710,9 +772,15 @@ impl Workspace {
             let v = view.read(cx);
             let env = v.env().to_string();
             let accounts = self.status.get(&env).unwrap_or("…").to_string();
+            // Only a summary read in this pane's current folder; a stale one would mislead.
+            let git = match &self.git {
+                Some((dir, Some(line))) if dir == v.cwd() => Some(line.clone()),
+                _ => None,
+            };
             bar = bar
                 .child(div().text_color(self.tint(&env)).child(env))
                 .child(div().flex_1().truncate().child(accounts))
+                .when_some(git, |b, line| b.child(div().flex_none().child(line)))
                 .child(div().child(v.cwd().display().to_string()));
         }
         bar

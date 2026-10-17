@@ -3,3 +3,11 @@ name = "hydraui-term"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+
+[dependencies]
+hydra-core.workspace = true
+hydra-platform.workspace = true
+portable-pty.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -484,6 +484,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "hydraui-term"
+version = "0.6.0"
+
+[[package]]
 name = "icu_collections"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

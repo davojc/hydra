@@ -11,6 +11,8 @@ path = "src/main.rs"
 [dependencies]
 hydra-core.workspace = true
 hydra-platform.workspace = true
+hydra-providers.workspace = true
+dirs.workspace = true
 hydraui-term.workspace = true
 gpui.workspace = true
 serde.workspace = true

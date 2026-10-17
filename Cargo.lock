@@ -1540,9 +1540,11 @@ dependencies = [
 name = "hydraui"
 version = "0.6.0"
 dependencies = [
+ "dirs",
  "gpui-pre",
  "hydra-core",
  "hydra-platform",
+ "hydra-providers",
  "hydraui-term",
  "serde",
  "tempfile",

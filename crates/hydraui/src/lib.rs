@@ -2,6 +2,7 @@
 //! (spec: docs/superpowers/specs/2026-10-17-hydraui-design.md).
 pub mod config;
 pub mod frame;
+pub mod hydra;
 pub mod input;
 pub mod keys;
 pub mod palette;

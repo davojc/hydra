@@ -16,9 +16,10 @@ use gpui::{
     Hsla, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Subscription,
     Task, Window, canvas, div, px, relative, rgb, transparent_black,
 };
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandItem, CommandState};
 use gpui_component::notification::Notification;
-use gpui_component::{ActiveTheme, WindowExt, h_flex, v_flex};
+use gpui_component::{ActiveTheme, IconName, Selectable, Sizable, WindowExt, h_flex, v_flex};
 use hydraui_sets::LoadedSets;
 
 use hydraui_term::PromptState;
@@ -690,7 +691,19 @@ impl Workspace {
             .gap_1()
             .bg(bg)
             .border_b_1()
-            .border_color(border);
+            .border_color(border)
+            // The file tree, as Ctrl+B; highlighted while it is open.
+            .child(
+                Button::new("toggle-file-tree")
+                    .icon(IconName::Folder)
+                    .ghost()
+                    .small()
+                    .selected(self.tree.is_some())
+                    .tooltip("File tree (Ctrl+B)")
+                    .on_click(
+                        cx.listener(|ws, _, window, cx| ws.toggle_tree(&FileTree, window, cx)),
+                    ),
+            );
         for (set, ids) in self.tabs.groups() {
             strip = match &set {
                 Some(name) => strip.child(self.render_set_header(name, muted, cx)),

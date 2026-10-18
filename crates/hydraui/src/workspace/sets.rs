@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use hydraui_sets::file::{SetFile, TabFile};
 use hydraui_sets::{
-    Context as SetContext, LoadedSet, Session, SetRef, SetSpec, file_modified, load_set,
+    Context as SetContext, LoadedSet, Session, SetRef, SetSpec, file_modified, list_sets, load_set,
     load_set_file, read_layout, read_session, resolve_loose, sets_dir, write_layout, write_session,
     write_set_file,
 };
@@ -22,7 +22,7 @@ use hydraui_term::PromptState;
 use super::{DEFAULT_TREE_WIDTH, Workspace, tree_width_at};
 use crate::keys::FileTree;
 use crate::layout::{SavedPane, TabLayout, tab_file, tab_layout};
-use crate::layout_plan::{open_plan, session_entry};
+use crate::layout_plan::{open_plan, reload_from, session_entry, taken_names};
 use crate::tabs::Tab;
 use crate::tabs::TabId;
 
@@ -206,7 +206,9 @@ impl Workspace {
     }
 
     fn close_set(&mut self, name: &str, reload: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let mut file = None;
         if let Some(set) = self.loaded.remove(name) {
+            file = Some(set.file);
             for tab in set.tabs {
                 for id in self.tabs.close_tab(tab) {
                     self.drop_pane(id);
@@ -215,7 +217,16 @@ impl Workspace {
         }
         self.changed_sets.remove(name);
         self.save_session(window, cx);
-        if !reload || !self.load_set(name, window, cx) {
+        // A group reloads from its own file (spec §5.4); a sets-folder set by name.
+        let reopened = reload
+            && match file.map(|f| reload_from(name, &f, &sets_dir(&self.hydra.paths))) {
+                Some(SetRef::File(path)) => self.open_group_file(&path, window, cx),
+                _ => self.load_set(name, window, cx),
+            };
+        if reopened {
+            self.save_session(window, cx);
+        }
+        if !reopened {
             self.focus_active(window, cx);
         }
         cx.notify();
@@ -417,6 +428,10 @@ impl Workspace {
     ) {
         self.save_dialog(dir, name, window, cx, move |ws, path, window, cx| {
             let result = write_set_file(&path, &ws.group_file_of(&tabs, cx));
+            if result.is_ok() {
+                // Saving a group over its own file isn't a change to offer a reload for.
+                ws.loaded.saved_to(&path);
+            }
             ws.saved("the group", &path, result, window, cx);
         });
     }
@@ -496,7 +511,9 @@ impl Workspace {
             cx.notify();
             return true;
         }
-        match load_set_file(&self.set_context(), path, &self.loaded.names()) {
+        let folder = list_sets(&self.hydra.paths).unwrap_or_default();
+        let taken = taken_names(&self.loaded.names(), &folder);
+        match load_set_file(&self.set_context(), path, &taken) {
             Ok(spec) => {
                 self.open_set(spec, window, cx);
                 true
@@ -538,17 +555,23 @@ impl Workspace {
     ) -> bool {
         let files: Vec<PathBuf> = self.loaded.all().iter().map(|s| s.file.clone()).collect();
         let mut opened: Vec<TabId> = Vec::new();
-        for set in open_plan(&layout.sets, &self.loaded.names(), &files) {
+        let mut any = false;
+        for (set, loaded) in open_plan(&layout.sets, &self.loaded.names(), &files) {
             let tabs = match set {
                 SetRef::Named(name) => {
-                    self.load_set(&name, window, cx);
+                    if !loaded {
+                        any |= self.load_set(&name, window, cx);
+                    }
                     self.loaded.get(&name).map(|s| s.tabs.clone())
                 }
                 SetRef::File(path) => {
-                    self.open_group_file(&path, window, cx);
+                    if !loaded {
+                        any |= self.open_group_file(&path, window, cx);
+                    }
                     self.loaded.by_file(&path).map(|s| s.tabs.clone())
                 }
             };
+            // Tabs of sets open already count too, so the active tab's position lines up.
             opened.extend(tabs.unwrap_or_default());
         }
         for tab in &layout.loose {
@@ -579,8 +602,9 @@ impl Workspace {
                 self.create_files_pane(id, &f.files, f.active, window, cx);
             }
             opened.push(self.tabs.add_tree(None, None, tree, focused));
+            any = true;
         }
-        if opened.is_empty() {
+        if !any {
             return false;
         }
         if layout.tree && self.tree.is_none() {

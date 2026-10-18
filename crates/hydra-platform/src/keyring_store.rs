@@ -124,6 +124,29 @@ impl SecretStore for KeyringStore {
 mod tests {
     use super::*;
 
+    /// Reads a credential just written. Under heavy load (the full workspace test run),
+    /// Windows Credential Manager has occasionally returned "not found" for a credential
+    /// written a moment before; nothing else touches this test's per-process name, so the
+    /// read is retried for up to 2 s rather than assumed instant. A wait is reported, and a
+    /// value that never appears still fails the test.
+    fn read_back(store: &KeyringStore, r: &SecretRef) -> Option<String> {
+        let start = std::time::Instant::now();
+        for attempt in 0.. {
+            let got = store.get(r).unwrap();
+            if got.is_some() || start.elapsed() > std::time::Duration::from_secs(2) {
+                if attempt > 0 && got.is_some() {
+                    eprintln!(
+                        "credential appeared after {attempt} retries ({:?})",
+                        start.elapsed()
+                    );
+                }
+                return got;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        unreachable!()
+    }
+
     #[test]
     fn round_trip_through_credential_manager() {
         let dir = tempfile::tempdir().unwrap();
@@ -134,7 +157,7 @@ mod tests {
 
         assert_eq!(store.get(&r).unwrap(), None);
         store.set(&r, "lin_api_value").unwrap();
-        assert_eq!(store.get(&r).unwrap().as_deref(), Some("lin_api_value"));
+        assert_eq!(read_back(&store, &r).as_deref(), Some("lin_api_value"));
         assert_eq!(store.list(&work).unwrap(), vec!["linear"]);
         let index = std::fs::read_to_string(dir.path().join("secrets.toml")).unwrap();
         assert!(index.contains("linear") && !index.contains("lin_api_value"));

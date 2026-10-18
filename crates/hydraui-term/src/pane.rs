@@ -109,8 +109,6 @@ pub struct Pane {
     wake: Arc<AtomicBool>,
     init: PathBuf,
     job: Option<Job>,
-    /// The shell's process id, to find what it runs (the busy indicator).
-    shell_pid: Option<u32>,
     /// When output last arrived (see `OutputClock`).
     output: Arc<OutputClock>,
     /// Last field: released after everything else is gone.
@@ -165,7 +163,6 @@ impl Pane {
             wake: started.wake,
             init,
             job: Some(started.job),
-            shell_pid: started.shell_pid,
             output: started.output,
             _lock: lock,
         };
@@ -180,14 +177,6 @@ impl Pane {
     /// tab never is); `None` before any.
     pub fn last_output(&self) -> Option<std::time::Instant> {
         self.output.last()
-    }
-
-    /// The exe names of the processes running in this pane (the shell and what it started);
-    /// empty when the pane has no job object.
-    pub fn process_names(&self) -> Vec<String> {
-        self.shell_pid
-            .map(crate::procs::descendant_names)
-            .unwrap_or_default()
     }
 
     /// Sends input (keys, pasted text) to the shell.
@@ -249,7 +238,6 @@ struct Started {
     killer: Box<dyn ChildKiller + Send + Sync>,
     wake: Arc<AtomicBool>,
     job: Job,
-    shell_pid: Option<u32>,
     output: Arc<OutputClock>,
 }
 
@@ -263,7 +251,6 @@ fn start(
     let mut child = pair.slave.spawn_command(cmd).map_err(pty_err)?;
     drop(pair.slave);
     let killer = child.clone_killer();
-    let shell_pid = child.process_id();
     let job = Job::new().and_then(|job| {
         let process = child
             .as_raw_handle()
@@ -331,14 +318,12 @@ fn start(
             killer,
             wake,
             job,
-            shell_pid,
             output,
         },
         rx,
     ))
 }
 
-/// Feeds PTY output to the grid and the OSC scanner until the PTY closes.
 /// The time of the latest output, shared lock-free between the reader thread and the app.
 #[derive(Default)]
 struct OutputClock(std::sync::atomic::AtomicU64);
@@ -364,6 +349,8 @@ impl OutputClock {
     }
 }
 
+/// Feeds PTY output to the grid and the OSC scanner until the PTY closes, noting when each
+/// read arrived.
 fn read_loop(
     mut reader: Box<dyn Read + Send>,
     term: &FairMutex<Term<Listener>>,

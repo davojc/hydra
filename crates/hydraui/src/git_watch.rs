@@ -35,6 +35,14 @@ pub fn relevant(root: &Path, path: &Path, rules: &Gitignore) -> bool {
     }
 }
 
+/// Whether an event's paths call for a `git status`: any relevant change, or an event naming
+/// the root itself, which is how a full change buffer (changes lost) arrives: look again.
+pub fn wants_refresh(root: &Path, paths: &[PathBuf], rules: &Gitignore) -> bool {
+    paths
+        .iter()
+        .any(|p| p.as_path() == root || relevant(root, p, rules))
+}
+
 /// A recursive watch on a repository that sends `()` whenever something relevant changes.
 pub struct GitWatch {
     pub root: PathBuf,
@@ -47,9 +55,12 @@ impl GitWatch {
         let rules = ignore_rules(&root);
         let base = root.clone();
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(event) = res
-                && event.paths.iter().any(|p| relevant(&base, p, &rules))
-            {
+            // An error means changes may have been missed: look again.
+            let look = match &res {
+                Ok(event) => wants_refresh(&base, &event.paths, &rules),
+                Err(_) => true,
+            };
+            if look {
                 let _ = tx.unbounded_send(());
             }
         })
@@ -87,5 +98,25 @@ mod tests {
         assert!(!yes(".git/index.lock"));
         assert!(!yes(".git"), "the folder itself");
         assert!(!relevant(root, Path::new(r"C:\elsewhere\a.rs"), &rules));
+    }
+
+    #[test]
+    fn an_overflow_means_look_again() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        let rules = ignore_rules(root);
+        // A full change buffer comes through as an event naming the watched folder itself.
+        assert!(wants_refresh(root, &[root.to_path_buf()], &rules));
+        assert!(!wants_refresh(
+            root,
+            &[root.join("target").join("x")],
+            &rules
+        ));
+        assert!(wants_refresh(
+            root,
+            &[root.join("target").join("x"), root.join("a.rs")],
+            &rules
+        ));
     }
 }

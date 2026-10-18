@@ -6,7 +6,6 @@ pub mod init;
 pub mod job;
 pub mod osc;
 mod pane;
-pub mod procs;
 
 /// The emulator, re-exported so the app renders with the same version.
 pub use alacritty_terminal;

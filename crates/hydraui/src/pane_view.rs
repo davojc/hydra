@@ -245,19 +245,6 @@ impl PaneView {
         crate::activity::activity(running, self.prompt, last, now)
     }
 
-    /// The exe names of what runs in the terminal (its shell included).
-    pub fn process_names(&self) -> Vec<String> {
-        match &self.slot {
-            Slot::Running(pane) => pane.process_names(),
-            _ => Vec::new(),
-        }
-    }
-
-    /// The title the program set, if any.
-    pub fn title(&self) -> Option<&str> {
-        self.title.as_deref()
-    }
-
     /// The tab label: the title a program set, else the folder's name.
     pub fn label(&self) -> String {
         self.title.clone().unwrap_or_else(|| {

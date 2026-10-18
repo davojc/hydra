@@ -118,6 +118,8 @@ pub struct Workspace {
     _git_pump: Task<()>,
     /// Each terminal's busy state for the tab strip, checked every second.
     activity: HashMap<PaneId, PaneActivity>,
+    /// The working dot's phase, flipped each second.
+    blink: bool,
     _activity_tick: Task<()>,
     /// Whether the status bar's accounts popover is open.
     accounts_open: bool,
@@ -140,10 +142,21 @@ impl Workspace {
         let git_pump = cx.spawn(async move |this, cx| {
             use futures::StreamExt;
             while git_rx.next().await.is_some() {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(300))
-                    .await;
-                while git_rx.try_recv().is_ok() {}
+                // Wait for 300 ms without changes (at most 2 s), so a long burst (a checkout,
+                // a build) costs one `git status` at the end, not one per 300 ms.
+                let start = std::time::Instant::now();
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(300))
+                        .await;
+                    let mut more = false;
+                    while git_rx.try_recv().is_ok() {
+                        more = true;
+                    }
+                    if !more || start.elapsed() >= std::time::Duration::from_secs(2) {
+                        break;
+                    }
+                }
                 if this.update(cx, |ws, cx| ws.refresh_git(cx)).is_err() {
                     break;
                 }
@@ -231,6 +244,7 @@ impl Workspace {
             git_tx,
             _git_pump: git_pump,
             activity: HashMap::new(),
+            blink: true,
             _activity_tick: activity_tick,
             accounts_open: false,
             update: Default::default(),
@@ -1148,10 +1162,8 @@ impl Workspace {
                     .unwrap_or_default();
                 let tint = self.tint(&env);
                 let label = tab.title.clone().unwrap_or(label);
-                let busy = self
-                    .tab_activity(tab)
-                    .map(|a| self.render_busy(id, &a, tint, cx));
-                let tip = busy.as_ref().map(|(_, t)| t.clone());
+                let busy = self.tab_activity(tab);
+                let dot = busy.map(|a| self.render_busy(a, tint, cx));
                 strip = strip.child(
                     h_flex()
                         .id(("tab", id))
@@ -1168,10 +1180,11 @@ impl Workspace {
                         }))
                         .child(div().size(px(8.)).rounded_full().bg(tint))
                         .child(div().text_sm().child(label))
-                        .children(busy.map(|(el, _)| el))
-                        .when_some(tip, |d, tip| {
+                        .children(dot)
+                        .when_some(busy, |d, a| {
                             d.tooltip(move |window, cx| {
-                                gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                                gpui_component::tooltip::Tooltip::new(busy::tooltip_text(a))
+                                    .build(window, cx)
                             })
                         })
                         .context_menu({

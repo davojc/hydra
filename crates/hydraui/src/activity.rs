@@ -1,5 +1,5 @@
-//! What a terminal is doing, for the tab strip: idle at its prompt, working (output lately),
-//! or waiting (running but silent); and whether the program is Claude Code. No UI.
+//! What a terminal is doing, for the tab strip: working (its output changed lately), waiting
+//! (a command running but silent), or idle. Works for any program. No UI.
 use std::time::{Duration, Instant};
 
 use hydraui_term::PromptState;
@@ -21,6 +21,7 @@ pub enum Activity {
 
 /// A terminal's activity: `running` is false once its shell has exited; `prompt` is the last
 /// shell-integration mark (`None` without integration); `last_output` when output last came.
+/// Any recent output is work, whatever is running; a command that has gone quiet is waiting.
 pub fn activity(
     running: bool,
     prompt: Option<PromptState>,
@@ -30,27 +31,15 @@ pub fn activity(
     let recent = last_output.is_some_and(|t| now.saturating_duration_since(t) < QUIET);
     match (running, prompt) {
         (false, _) => Activity::Idle,
-        (true, Some(PromptState::CommandRunning)) if recent => Activity::Working,
+        (true, _) if recent => Activity::Working,
         (true, Some(PromptState::CommandRunning)) => Activity::Waiting,
-        (true, Some(_)) => Activity::Idle,
-        // No shell integration: all we know is whether output is flowing.
-        (true, None) if recent => Activity::Working,
-        (true, None) => Activity::Idle,
+        (true, _) => Activity::Idle,
     }
 }
 
 /// The busiest of a tab's panes.
 pub fn busiest(panes: impl IntoIterator<Item = Activity>) -> Activity {
     panes.into_iter().max().unwrap_or_default()
-}
-
-/// Whether the program is Claude Code: its native `claude.exe` is running, or (npm installs run
-/// under node) its title says so.
-pub fn is_claude(process_names: &[String], title: Option<&str>) -> bool {
-    process_names
-        .iter()
-        .any(|n| n.eq_ignore_ascii_case("claude.exe"))
-        || title.is_some_and(|t| t.to_lowercase().contains("claude"))
 }
 
 #[cfg(test)]
@@ -81,8 +70,24 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_and_an_exited_program_are_idle() {
-        let (out, now) = at(0);
+    fn any_recent_output_is_work_whatever_is_running() {
+        let (out, now) = at(1);
+        for prompt in [
+            Some(PromptState::AtPrompt),
+            Some(PromptState::CommandDone(Some(0))),
+            None,
+        ] {
+            assert_eq!(
+                activity(true, prompt, Some(out), now),
+                Activity::Working,
+                "{prompt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quiet_prompt_and_an_exited_program_are_idle() {
+        let (out, now) = at(5);
         assert_eq!(
             activity(true, Some(PromptState::AtPrompt), Some(out), now),
             Activity::Idle
@@ -97,18 +102,16 @@ mod tests {
             Activity::Idle
         );
         assert_eq!(
+            activity(true, None, Some(out), now),
+            Activity::Idle,
+            "no integration"
+        );
+        let (out, now) = at(0);
+        assert_eq!(
             activity(false, Some(PromptState::CommandRunning), Some(out), now),
             Activity::Idle,
             "exited"
         );
-    }
-
-    #[test]
-    fn without_shell_integration_output_means_working() {
-        let (out, now) = at(1);
-        assert_eq!(activity(true, None, Some(out), now), Activity::Working);
-        let (out, now) = at(10);
-        assert_eq!(activity(true, None, Some(out), now), Activity::Idle);
     }
 
     #[test]
@@ -117,21 +120,5 @@ mod tests {
         assert_eq!(busiest([Idle, Waiting, Idle]), Waiting);
         assert_eq!(busiest([Waiting, Working]), Working);
         assert_eq!(busiest([]), Idle);
-    }
-
-    #[test]
-    fn claude_is_known_by_its_process_or_its_title() {
-        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert!(is_claude(&names(&["pwsh.exe", "claude.exe"]), None));
-        assert!(is_claude(&names(&["pwsh.exe", "CLAUDE.EXE"]), None));
-        assert!(is_claude(
-            &names(&["pwsh.exe", "node.exe"]),
-            Some("✳ Claude Code")
-        ));
-        assert!(!is_claude(
-            &names(&["pwsh.exe", "node.exe"]),
-            Some("npm run dev")
-        ));
-        assert!(!is_claude(&names(&["pwsh.exe"]), None));
     }
 }

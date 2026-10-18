@@ -1,6 +1,8 @@
 //! The start page (spec §7.12): recent layouts with a filter, New window, Open layout file….
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, KeyDownEvent, Subscription, Window, div, px};
+use gpui::{
+    AnyElement, App, Context, Entity, Focusable, KeyDownEvent, Subscription, Window, div, px,
+};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::notification::Notification;
@@ -39,6 +41,21 @@ impl Workspace {
             _sub: sub,
         });
         cx.notify();
+    }
+
+    /// While the page shows and nothing (or only the window itself) has the keyboard, the
+    /// filter takes it: a focus asked for at startup doesn't survive the window's first
+    /// activation.
+    pub(super) fn keep_start_focus(&self, window: &mut Window, cx: &mut App) {
+        let Some(page) = &self.start else { return };
+        let handle = page.input.read(cx).focus_handle(cx);
+        let idle = match window.focused(cx) {
+            None => true,
+            Some(f) => f == self.focus,
+        };
+        if idle {
+            window.focus(&handle, cx);
+        }
     }
 
     fn start_rows(&self, cx: &App) -> Vec<Row> {
@@ -111,6 +128,7 @@ impl Workspace {
         let (muted, accent, border) = (theme.muted_foreground, theme.accent, theme.border);
         let rows = self.start_rows(cx);
         let empty = rows.is_empty();
+        let filtered = !page.input.read(cx).value().is_empty();
         let list = v_flex()
             .gap_1()
             .children(rows.into_iter().enumerate().map(|(i, row)| {
@@ -127,7 +145,14 @@ impl Workspace {
                         ws.open_start_row(chosen.clone(), window, cx)
                     }))
                     .child(div().min_w(px(160.)).child(row.name))
-                    .child(div().flex_1().min_w_0().text_color(muted).child(row.folder))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(muted)
+                            .child(row.folder),
+                    )
                     .child(div().text_sm().text_color(muted).child(if row.elsewhere {
                         "open in another window".to_string()
                     } else {
@@ -135,12 +160,11 @@ impl Workspace {
                     }))
             }))
             .when(empty, |l| {
-                l.child(
-                    div()
-                        .p_3()
-                        .text_color(muted)
-                        .child("No recent layouts. Enter opens a new window."),
-                )
+                l.child(div().p_3().text_color(muted).child(if filtered {
+                    "Nothing matches. Enter opens a new window."
+                } else {
+                    "No recent layouts. Enter opens a new window."
+                }))
             });
         div()
             .size_full()

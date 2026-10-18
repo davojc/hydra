@@ -1,5 +1,5 @@
-//! hydraui's own title bar (spec §7.11): the title, the Update button, and the window
-//! controls gpui-component draws.
+//! hydraui's own title bar (spec §7.11): the layout's name and its menu, the Update button,
+//! and the window controls gpui-component draws.
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -7,6 +7,7 @@ use std::time::Duration;
 use gpui::prelude::*;
 use gpui::{Context, Image, ImageFormat, Window, div, img, px};
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, Disableable, Sizable, TitleBar, WindowExt, h_flex};
 
@@ -175,12 +176,86 @@ impl Workspace {
                     h_flex()
                         .gap_2()
                         .child(img(ICON.clone()).size(px(18.)))
-                        .child(div().text_sm().text_color(muted).child(self.title.clone())),
+                        .children(self.render_layout_name(muted, cx)),
                 )
                 // The title bar's drag area covers its children, and Windows turns a click there
                 // into a window drag before the button sees it: occluding stops the hit test at
                 // the button, so its clicks stay clicks.
                 .children(button.map(|b| div().occlude().child(b))),
         )
+    }
+
+    /// The layout's name with ▾ and its menu: Save layout as…, Open layout file…, Recent,
+    /// Reveal in Explorer (spec §7.11). Muted while untitled; hidden on the start page.
+    fn render_layout_name(&self, muted: gpui::Hsla, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        if self.is_start_page() {
+            return None;
+        }
+        let untitled = self.layout.is_none();
+        let label = match &self.layout {
+            Some(p) => hydraui_sets::layout_name(p),
+            None => "untitled".into(),
+        };
+        let ws = cx.entity().downgrade();
+        let current = self.layout.clone();
+        let others: Vec<std::path::PathBuf> = hydraui_sets::read_recent(&self.hydra.paths)
+            .into_iter()
+            .map(|e| e.path)
+            .filter(|p| {
+                !current
+                    .as_deref()
+                    .is_some_and(|c| hydraui_sets::same_path(c, p))
+            })
+            .collect();
+        let button = Button::new("layout-name")
+            .label(format!("{label} ▾"))
+            .ghost()
+            .xsmall()
+            .when(untitled, |b| {
+                b.text_color(muted)
+                    .tooltip("Not saved: Save layout as… to keep this window")
+            })
+            .dropdown_menu(move |menu, window, cx| {
+                let (save, open) = (ws.clone(), ws.clone());
+                let mut menu = menu
+                    .item(
+                        PopupMenuItem::new("Save layout as…").on_click(move |_, window, cx| {
+                            let _ = save.update(cx, |ws, cx| ws.save_layout_file(window, cx));
+                        }),
+                    )
+                    .item(PopupMenuItem::new("Open layout file…").on_click(
+                        move |_, window, cx| {
+                            let _ = open.update(cx, |ws, cx| ws.open_layout_file(window, cx));
+                        },
+                    ));
+                if !others.is_empty() {
+                    let (ws, others) = (ws.clone(), others.clone());
+                    menu = menu.submenu("Recent", window, cx, move |sub, _, _| {
+                        others.iter().fold(sub, |sub, p| {
+                            let (ws, p) = (ws.clone(), p.clone());
+                            sub.item(PopupMenuItem::new(hydraui_sets::layout_name(&p)).on_click(
+                                move |_, window, cx| {
+                                    let _ = ws.update(cx, |ws, cx| {
+                                        ws.open_layout_path(p.clone(), window, cx)
+                                    });
+                                },
+                            ))
+                        })
+                    });
+                }
+                if let Some(c) = current.clone() {
+                    menu = menu.item(PopupMenuItem::new("Reveal in Explorer").on_click(
+                        move |_, _, _| {
+                            let _ = std::process::Command::new("explorer.exe")
+                                .arg(format!("/select,{}", c.display()))
+                                .spawn();
+                        },
+                    ));
+                }
+                menu
+            });
+        // Occluded so a click opens the menu instead of dragging the window (as the Update
+        // button).
+        Some(div().occlude().child(button))
     }
 }

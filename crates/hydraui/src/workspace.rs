@@ -1317,6 +1317,7 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.split_bounds.borrow_mut().clear();
+        self.keep_start_focus(window, cx);
         let title =
             crate::window_layout::window_title(self.layout.as_deref(), self.is_start_page());
         if title != self.title {

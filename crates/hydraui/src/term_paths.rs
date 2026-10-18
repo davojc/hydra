@@ -35,6 +35,37 @@ pub fn join_wrapped(rows: &[(String, bool)], row: usize, column: usize) -> (Stri
     (text, before + column)
 }
 
+/// The Ctrl-hover underline's cells, kept while the mouse's cell and the text of its line
+/// stay the same: output or a scroll that changes the line works it out again.
+#[derive(Debug, Default)]
+pub struct HoverCache {
+    key: Option<(usize, usize, String)>,
+    spans: Vec<Span>,
+}
+
+impl HoverCache {
+    /// Works out the cells again if `key` (row, column, the line's text; `None` when there's
+    /// nothing to underline) changed; `true` when the underline did.
+    pub fn update(
+        &mut self,
+        key: Option<(usize, usize, String)>,
+        compute: impl FnOnce() -> Vec<Span>,
+    ) -> bool {
+        if key == self.key {
+            return false;
+        }
+        let spans = if key.is_some() { compute() } else { Vec::new() };
+        self.key = key;
+        let changed = spans != self.spans;
+        self.spans = spans;
+        changed
+    }
+
+    pub fn spans(&self) -> &[Span] {
+        &self.spans
+    }
+}
+
 /// The rows a stretch of a joined line (from `join_wrapped` on `row`) covers.
 pub fn wrapped_spans(rows: &[(String, bool)], row: usize, range: Range<usize>) -> Vec<Span> {
     let mut start = row;
@@ -252,6 +283,31 @@ mod tests {
             vec![span(1, 4, 10), span(2, 0, 9)]
         );
         assert_eq!(wrapped_spans(&rows, 0, 2..4), vec![span(0, 2, 4)]);
+    }
+
+    #[test]
+    fn the_hover_is_worked_out_again_only_when_the_cell_or_its_line_changes() {
+        let mut cache = HoverCache::default();
+        let span = |start| {
+            vec![Span {
+                row: 0,
+                start,
+                end: start + 3,
+            }]
+        };
+        let key = |col, text: &str| Some((0, col, text.to_string()));
+        assert!(cache.update(key(1, "abc"), || span(0)), "first look");
+        assert_eq!(cache.spans(), span(0).as_slice());
+        assert!(!cache.update(key(1, "abc"), || panic!("same cell, same text")));
+        assert!(
+            cache.update(key(1, "xyz"), || span(5)),
+            "the output changed under it"
+        );
+        assert_eq!(cache.spans(), span(5).as_slice());
+        assert!(!cache.update(key(1, "xyz"), || unreachable!()));
+        assert!(cache.update(None, || unreachable!()), "Ctrl released");
+        assert!(cache.spans().is_empty());
+        assert!(!cache.update(None, || unreachable!()));
     }
 
     #[test]

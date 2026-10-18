@@ -22,6 +22,8 @@ type Listing = Rc<RefCell<Option<(Vec<PathBuf>, bool)>>>;
 
 /// How many files quick open lists at most, and how many matches it shows.
 const MAX_FILES: usize = 50_000;
+/// How many files search looks through at most.
+const SEARCH_FILES: usize = 200_000;
 const SHOWN: usize = 50;
 
 /// How many lines a search finds at most, and how long typing must pause before it runs.
@@ -147,11 +149,15 @@ impl Workspace {
         let guard = CancelOnDrop(generation.clone());
         // The folder is listed once, when the dialog opens; every search reuses the list.
         let listing: Rc<RefCell<Option<Arc<Vec<PathBuf>>>>> = Rc::default();
+        // Whether the folder held more files than search looks through.
+        let cut_off = Rc::new(Cell::new(false));
+        let shown_cut = cut_off.clone();
         let (listed, from, refound) = (listing.clone(), root.clone(), found.clone());
         cx.spawn_in(window, async move |_, cx| {
-            let (files, _) = cx
-                .background_spawn(async move { list_files(&from, MAX_FILES) })
+            let (files, cut) = cx
+                .background_spawn(async move { list_files(&from, SEARCH_FILES) })
                 .await;
+            cut_off.set(cut);
             *listed.borrow_mut() = Some(Arc::new(files));
             // Search again now that there's something to search.
             refound.borrow_mut().key = None;
@@ -232,11 +238,17 @@ impl Workspace {
                     Some(div().text_sm().text_color(muted).child("Listing files…"))
                 }
                 Some(e) => Some(div().text_sm().text_color(danger).child(e.clone())),
-                None => f.capped.then(|| {
+                None if f.capped => Some(
                     div()
                         .text_sm()
                         .text_color(muted)
-                        .child(format!("Stopped at {MAX_HITS} results"))
+                        .child(format!("Stopped at {MAX_HITS} results")),
+                ),
+                None => shown_cut.get().then(|| {
+                    div()
+                        .text_sm()
+                        .text_color(muted)
+                        .child(format!("Searched the first {SEARCH_FILES} files"))
                 }),
             };
             let items: Vec<CommandItem> = f

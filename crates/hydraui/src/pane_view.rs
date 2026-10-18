@@ -89,11 +89,11 @@ pub struct PaneView {
     origin: Point<Pixels>,
     cursor_cell: Option<(usize, usize)>,
     selecting: bool,
-    /// The mouse's last position over the grid, for the Ctrl-hover underline.
+    /// The mouse's last position over the grid (`None` once it leaves), and whether Ctrl
+    /// was last seen held, for the Ctrl-hover underline.
     mouse: Option<Point<Pixels>>,
-    /// The cell the underline was last worked out for, and the cells it underlines.
-    hover_at: Option<(usize, usize)>,
-    hover: Vec<Span>,
+    ctrl: bool,
+    hover: crate::term_paths::HoverCache,
     /// The "Copied" label shows until then.
     copied_until: Option<std::time::Instant>,
     finder: Option<Finder>,
@@ -208,8 +208,8 @@ impl PaneView {
             origin: Point::default(),
             cursor_cell: None,
             mouse: None,
-            hover_at: None,
-            hover: Vec::new(),
+            ctrl: false,
+            hover: Default::default(),
             selecting: false,
             copied_until: None,
             finder: None,
@@ -361,15 +361,25 @@ impl PaneView {
             return None;
         };
         let mut frame = pane.with_term(|t| build_frame(t, &self.style.palette, focused));
-        underline_cells(&mut frame, &self.hover);
+        underline_cells(&mut frame, self.hover.spans());
         Some(frame)
     }
 
-    /// While Ctrl is held, underlines the link or file path under the mouse: what Ctrl+click
-    /// would open (spec §7.10). Worked out again only when the mouse reaches another cell.
+    /// Ctrl pressed or released, or the mouse moved: the underline follows.
     fn update_hover(&mut self, ctrl: bool, cx: &mut Context<Self>) {
+        self.ctrl = ctrl;
+        if self.refresh_hover() {
+            cx.notify();
+        }
+    }
+
+    /// While Ctrl is held, underlines the link or file path under the mouse: what Ctrl+click
+    /// would open (spec §7.10). Runs at every paint too, so output or a scroll under a still
+    /// mouse moves the underline; it's worked out again only when the cell's line changed.
+    /// `true` when the underline changed.
+    fn refresh_hover(&mut self) -> bool {
         // Smoke tests can't hold a real Ctrl: debug builds take HYDRAUI_TEST_CTRL_HOVER.
-        let ctrl = ctrl
+        let ctrl = self.ctrl
             || (cfg!(debug_assertions) && std::env::var_os("HYDRAUI_TEST_CTRL_HOVER").is_some());
         let cell = if ctrl {
             self.mouse
@@ -378,12 +388,18 @@ impl PaneView {
         } else {
             None
         };
-        if cell == self.hover_at {
-            return;
-        }
-        self.hover_at = cell;
-        let spans = match (cell, &self.slot) {
-            (Some((row, col)), Slot::Running(pane)) => pane.with_term(|t| {
+        let (Some((row, col)), Slot::Running(pane)) = (cell, &self.slot) else {
+            return self.hover.update(None, Vec::new);
+        };
+        let cwd = self.cwd.clone();
+        let hover = &mut self.hover;
+        pane.with_term(|t| {
+            let rows = visible_rows(t);
+            if row >= rows.len() {
+                return hover.update(None, Vec::new);
+            }
+            let (text, at) = crate::term_paths::join_wrapped(&rows, row, col);
+            hover.update(Some((row, col, text.clone())), || {
                 if let Some(url) = link_at(t, row, col) {
                     let same = |c: usize| link_at(t, row, c).as_deref() == Some(url.as_str());
                     let mut start = col;
@@ -396,21 +412,11 @@ impl PaneView {
                     }
                     return vec![Span { row, start, end }];
                 }
-                let rows = visible_rows(t);
-                if row >= rows.len() {
-                    return Vec::new();
-                }
-                let (text, at) = crate::term_paths::join_wrapped(&rows, row, col);
-                crate::term_paths::path_span_at(&text, at, &self.cwd, &|p| p.is_file())
+                crate::term_paths::path_span_at(&text, at, &cwd, &|p| p.is_file())
                     .map(|(_, span)| crate::term_paths::wrapped_spans(&rows, row, span))
                     .unwrap_or_default()
-            }),
-            _ => Vec::new(),
-        };
-        if spans != self.hover {
-            self.hover = spans;
-            cx.notify();
-        }
+            })
+        })
     }
 
     /// The cell under a window position, or `None` off the grid.
@@ -642,9 +648,7 @@ impl PaneView {
     }
 
     fn on_scroll(&mut self, ev: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        // The rows move under the mouse: what's underlined changes.
-        self.hover_at = None;
-        self.update_hover(ev.modifiers.control, cx);
+        self.ctrl = ev.modifiers.control;
         let (Slot::Running(pane), Some((_, ch))) = (&self.slot, self.cell) else {
             return;
         };
@@ -763,6 +767,7 @@ impl PaneView {
                     view.cell = Some(cell);
                     view.origin = bounds.origin;
                     view.resize(size);
+                    view.refresh_hover();
                     let frame = view.frame(focused);
                     view.cursor_cell = frame
                         .as_ref()
@@ -1064,6 +1069,10 @@ impl Render for PaneView {
             .bg(background)
             .track_focus(&self.focus)
             .key_context("Terminal")
+            // On the focused element: modifier changes only reach the focus path.
+            .on_modifiers_changed(cx.listener(|v, ev: &ModifiersChangedEvent, _, cx| {
+                v.update_hover(ev.modifiers.control, cx)
+            }))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_action(cx.listener(Self::copy_text))
             .on_action(cx.listener(Self::paste_text))
@@ -1112,21 +1121,27 @@ impl Render for PaneView {
             })
             .child(
                 div()
+                    .id("term-grid")
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
                     .p_1()
                     .cursor_text()
+                    // The mouse left: nothing under it to underline.
+                    .on_hover(cx.listener(|v, hovered: &bool, _, cx| {
+                        if !*hovered {
+                            v.mouse = None;
+                            let ctrl = v.ctrl;
+                            v.update_hover(ctrl, cx);
+                        }
+                    }))
                     // Only the grid area: clicks in the strips above are theirs.
                     .on_any_mouse_down(cx.listener(Self::on_mouse_down))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up))
                     .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up))
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
-                    .on_modifiers_changed(cx.listener(|v, ev: &ModifiersChangedEvent, _, cx| {
-                        v.update_hover(ev.modifiers.control, cx)
-                    }))
-                    .when(!self.hover.is_empty(), |d| {
+                    .when(!self.hover.spans().is_empty(), |d| {
                         d.cursor(CursorStyle::PointingHand)
                     })
                     .on_scroll_wheel(cx.listener(Self::on_scroll))

@@ -7,13 +7,15 @@ use gpui::prelude::*;
 use gpui::{Anchor, App, Context, Hsla, Window, div, px};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandItem, CommandState};
+use gpui_component::input::{Input, InputState};
 use gpui_component::notification::Notification;
 use gpui_component::popover::Popover;
 use gpui_component::{ActiveTheme, Disableable, Sizable, WindowExt, h_flex, v_flex};
+use hydra_core::envedit::ToolValues;
 use hydra_core::provider::Status;
 
 use super::Workspace;
-use crate::accounts::{AddChoice, rows};
+use crate::accounts::{AddChoice, FormResult, form_fields, form_values, rows};
 
 impl Workspace {
     /// The status bar's environment name, opening the accounts popover.
@@ -105,37 +107,150 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (tool, from) = match &choice {
-            AddChoice::SignIn(tool) => (tool.as_str(), None),
-            AddChoice::Borrow { tool, from } => (tool.as_str(), Some(from.as_str())),
+        let (tool, values) = match &choice {
+            AddChoice::SignIn(tool) => (tool.as_str(), ToolValues::default()),
+            AddChoice::Borrow { tool, from } => (
+                tool.as_str(),
+                ToolValues {
+                    from: Some(from.clone()),
+                    ..Default::default()
+                },
+            ),
+            AddChoice::SetUp(tool) => {
+                self.set_up_form(env, tool.clone(), window, cx);
+                return;
+            }
         };
-        if let Err(e) = self.hydra.add_tool(&env, tool, from) {
+        if let Err(e) = self.hydra.add_tool(&env, tool, &values) {
             window.push_notification(Notification::error(e).title("Add account"), cx);
             return;
         }
-        let reopen = format!("Terminals already open in {env} see it once reopened.");
         match choice {
-            AddChoice::SignIn(tool) => {
-                let cwd = self.focused_cwd(cx);
-                let shell = self.hydra.shell(self.ui.default_shell.as_deref());
-                match self.hydra.sign_in_request(&env, &tool, cwd, shell) {
-                    Ok(request) => self.open_request(request, window, cx),
-                    Err(e) => window.push_notification(Notification::error(e).title("Sign in"), cx),
-                }
+            AddChoice::SignIn(tool) => self.added(&env, &tool, window, cx),
+            AddChoice::Borrow { tool, from } => {
                 window.push_notification(
-                    Notification::info(format!("{tool} is on in {env}. {reopen}"))
-                        .title("Add account"),
+                    Notification::success(format!(
+                        "{tool} in {env} now uses {from}'s login. {}",
+                        reopen(&env)
+                    ))
+                    .title("Add account"),
                     cx,
                 );
+                self.recheck_accounts(&env, cx);
             }
-            AddChoice::Borrow { tool, from } => window.push_notification(
-                Notification::success(format!("{tool} in {env} now uses {from}'s login. {reopen}"))
-                    .title("Add account"),
-                cx,
-            ),
+            AddChoice::SetUp(_) => {}
         }
-        self.recheck_accounts(&env, cx);
     }
+
+    /// After a tool was turned on: its sign-in in a new tab when it has one, and a note.
+    fn added(&mut self, env: &str, tool: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.hydra.sign_ins(env).iter().any(|t| t == tool) {
+            let cwd = self.focused_cwd(cx);
+            let shell = self.hydra.shell(self.ui.default_shell.as_deref());
+            match self.hydra.sign_in_request(env, tool, cwd, shell) {
+                Ok(request) => self.open_request(request, window, cx),
+                Err(e) => window.push_notification(Notification::error(e).title("Sign in"), cx),
+            }
+        }
+        window.push_notification(
+            Notification::info(format!("{tool} is on in {env}. {}", reopen(env)))
+                .title("Add account"),
+            cx,
+        );
+        self.recheck_accounts(env, cx);
+    }
+
+    /// The form for a tool that needs values first (git, aws, gemini, kube). It stays open,
+    /// showing what's wrong, until the values check out.
+    fn set_up_form(
+        &mut self,
+        env: String,
+        tool: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let fields = form_fields(&tool);
+        let inputs: Vec<_> = fields
+            .iter()
+            .map(|f| {
+                let (placeholder, masked) = (f.placeholder, f.masked);
+                cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder(placeholder)
+                        .masked(masked)
+                })
+            })
+            .collect();
+        let problem = cx.new(|_| None::<String>);
+        let workspace = cx.entity();
+        let first = Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first.replace(false)
+                && let Some(i) = inputs.first()
+            {
+                i.update(cx, |s, cx| s.focus(window, cx));
+            }
+            let danger = cx.theme().danger;
+            let mut body = v_flex().gap_2();
+            for (f, input) in fields.iter().zip(&inputs) {
+                body = body
+                    .child(div().text_sm().child(f.label))
+                    .child(Input::new(input));
+            }
+            if let Some(p) = problem.read(cx).clone() {
+                body = body.child(div().text_sm().text_color(danger).child(p));
+            }
+            let (ws, env, tool, inputs, problem, keys) = (
+                workspace.clone(),
+                env.clone(),
+                tool.clone(),
+                inputs.clone(),
+                problem.clone(),
+                fields.iter().map(|f| f.key).collect::<Vec<_>>(),
+            );
+            dialog
+                .title(format!("Set up {tool} in {env}"))
+                .child(body)
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(Button::new("add").label("Add").primary().on_click(
+                            move |_, window, cx| {
+                                let typed: Vec<(&str, String)> = keys
+                                    .iter()
+                                    .zip(&inputs)
+                                    .map(|(k, i)| (*k, i.read(cx).value().to_string()))
+                                    .collect();
+                                let result =
+                                    ws.update(cx, |ws, _| match form_values(&tool, &typed)? {
+                                        FormResult::Values(v) => ws.hydra.add_tool(&env, &tool, &v),
+                                        FormResult::Gemini(key) => ws.hydra.add_gemini(&env, &key),
+                                    });
+                                match result {
+                                    Ok(()) => {
+                                        window.close_dialog(cx);
+                                        ws.update(cx, |ws, cx| ws.added(&env, &tool, window, cx));
+                                    }
+                                    Err(e) => problem.update(cx, |p, cx| {
+                                        *p = Some(e);
+                                        cx.notify();
+                                    }),
+                                }
+                            },
+                        )),
+                )
+        });
+    }
+}
+
+fn reopen(env: &str) -> String {
+    format!("Terminals already open in {env} see it once reopened.")
 }
 
 fn accounts_list(

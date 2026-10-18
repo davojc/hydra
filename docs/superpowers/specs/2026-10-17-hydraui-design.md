@@ -320,8 +320,14 @@ disabled.
   picker turns a tool on in env.toml (as `hydra add`) for the tools that need
   only a sign-in (claude, github, azure, gcloud, codex, gws), then signs in to it
   in a new tab; or borrows a tool another environment has with its own login
-  (`from = "<env>"`). Tools that need values first (git, aws, gemini,
-  kube) are added with `hydra add`.
+  (`from = "<env>"`). Tools that need values first have a form: git (name,
+  email; optional SSH and signing key paths, which must exist), aws
+  (profile; then its sign-in), gemini (the API key, stored as the secret
+  `<env>/gemini` and referenced from env.toml), kube (an optional kubeconfig
+  path; empty gives the environment its own). A form shows what's wrong and
+  stays open; nothing is written until the values check out. aws's private
+  config files, claude's MCP exclusions and github's owner/strict settings
+  stay with `hydra add`. git can't be borrowed, so it isn't offered.
 
 ### 7.2 Terminal view
 

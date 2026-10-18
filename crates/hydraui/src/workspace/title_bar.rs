@@ -65,12 +65,16 @@ impl Workspace {
                         std::env::var_os("PATH").as_deref(),
                         &updater::is_our_hydra,
                     );
-                    updater::install(
+                    let result = updater::install(
                         &hydra_update::latest_url(),
                         &exe,
                         hydra.as_deref(),
                         &hydra_update::running_hydra_pids,
-                    )
+                    );
+                    if let Ok(done) = &result {
+                        updater::record_installed_version(&exe, &done.version);
+                    }
+                    result
                 })
                 .await;
             let _ = this.update_in(cx, |ws, window, cx| {

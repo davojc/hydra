@@ -147,6 +147,56 @@ pub fn clean_old(hydraui_exe: &Path, hydra_exe: Option<&Path>) {
     }
 }
 
+/// hydra-setup's Settings → Apps entry (spec §7.7).
+pub const SETTINGS_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\hydra";
+
+/// Whether `exe` runs from the installed folder (`InstallLocation`), however it's spelled.
+pub fn installed_here(install_location: Option<&str>, exe: &Path) -> bool {
+    let (Some(location), Some(dir)) = (install_location, exe.parent()) else {
+        return false;
+    };
+    let spell = |s: &str| s.replace('/', "\\").trim_end_matches('\\').to_lowercase();
+    spell(location) == spell(&dir.to_string_lossy())
+}
+
+fn reg(args: &[&str]) -> Option<String> {
+    let mut cmd = std::process::Command::new("reg");
+    cmd.args(args)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let out = hydra_platform::process::hide_window(&mut cmd)
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// After an update, sets the version Settings → Apps shows when this copy is the installed one;
+/// does nothing for a portable copy, and ignores failures.
+pub fn record_installed_version(exe: &Path, version: &Version) {
+    let location = reg(&["query", SETTINGS_KEY, "/v", "InstallLocation"]).and_then(|out| {
+        out.lines()
+            .find(|l| l.trim_start().starts_with("InstallLocation"))
+            .and_then(|l| l.split("REG_SZ").nth(1))
+            .map(|v| v.trim().to_string())
+    });
+    if installed_here(location.as_deref(), exe) {
+        let v = version.to_string();
+        let _ = reg(&[
+            "add",
+            SETTINGS_KEY,
+            "/v",
+            "DisplayVersion",
+            "/t",
+            "REG_SZ",
+            "/d",
+            &v,
+            "/f",
+        ]);
+    }
+}
+
 /// Where the title bar's Update button is.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum UpdateState {
@@ -374,6 +424,24 @@ mod tests {
         assert!(!d.path().join("hydraui.old.exe").exists());
         assert!(!d.path().join("hydra.old.exe").exists());
         clean_old(&ui, None); // nothing there: no panic
+    }
+
+    #[test]
+    fn only_the_installed_copy_records_its_version() {
+        let exe = Path::new(r"C:\Users\u\AppData\Local\Programs\hydra\hydraui.exe");
+        assert!(installed_here(
+            Some(r"C:\Users\u\AppData\Local\Programs\hydra\"),
+            exe
+        ));
+        assert!(installed_here(
+            Some(r"c:\users\U\appdata\local\programs\HYDRA"),
+            exe
+        ));
+        assert!(!installed_here(
+            Some(r"C:\Users\u\AppData\Local\Programs\hydra"),
+            Path::new(r"C:\Users\u\Downloads\hydraui.exe")
+        ));
+        assert!(!installed_here(None, exe));
     }
 
     #[test]

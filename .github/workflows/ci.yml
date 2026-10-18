@@ -49,7 +49,7 @@ jobs:
         shell: bash
         env:
           HYDRA_VERSION: ${{ steps.decide.outputs.version }}
-        run: cargo build --release -p hydra-cli -p hydraui
+        run: cargo build --release -p hydra-cli -p hydraui -p hydra-setup
       - name: Package
         if: steps.decide.outputs.release == 'true'
         shell: bash
@@ -64,6 +64,11 @@ jobs:
           cd dist
           sha256sum hydraui-x86_64-pc-windows-msvc.exe | awk '{print tolower($1) "  hydraui-x86_64-pc-windows-msvc.exe"}' > hydraui-x86_64-pc-windows-msvc.exe.sha256
           cat hydraui-x86_64-pc-windows-msvc.exe.sha256
+          cd ..
+          cp target/release/hydra-setup.exe dist/hydra-setup.exe
+          cd dist
+          sha256sum hydra-setup.exe | awk '{print tolower($1) "  hydra-setup.exe"}' > hydra-setup.exe.sha256
+          cat hydra-setup.exe.sha256
       - name: Check the version
         if: steps.decide.outputs.release == 'true'
         shell: bash
@@ -88,6 +93,12 @@ jobs:
             Write-Error "expected hydraui $env:VERSION, got '$got'"
             exit 1
           }
+      - name: Test the installer
+        if: steps.decide.outputs.release == 'true'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.decide.outputs.version }}
+        run: ./scripts/test-setup.ps1 -Setup dist/hydra-setup.exe -From dist -Version $env:VERSION
       - name: Publish the release
         if: steps.decide.outputs.release == 'true'
         shell: bash

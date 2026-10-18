@@ -317,9 +317,11 @@ disabled.
 - Set groups collapse and have a menu: Reload, Unload.
 - Panes form a split tree with draggable dividers; the focused pane has a
   border in its environment's colour.
-- The status bar shows the focused pane's environment, the accounts reported
-  by hydra's whoami logic (cached, refreshed on focus change and every 60 s),
-  and its current folder.
+- The status bar shows the focused pane's environment, its accounts as each
+  tool's name with a green ✓ (OK) or red ✗ (missing or mismatched) from
+  hydra's whoami logic (cached, refreshed on focus change and every 60 s;
+  info-only checks left out; the details are in the accounts popover), and its
+  current folder.
 - Clicking the environment's name opens its accounts: one row per provider
   check (✓ ok, ! mismatch, ✗ missing, · info, with the detail, such as an AWS
   ARN or a GitHub login), and Refresh to check again now. Its "Add account…"

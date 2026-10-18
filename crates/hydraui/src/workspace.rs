@@ -31,7 +31,7 @@ use crate::file_pane::{FilePane, FilePaneEvent};
 use crate::file_tree::{cd_command, editor_command, quote_path};
 use crate::file_tree_view::{FileTreeView, TreeEvent};
 use crate::git_status;
-use crate::hydra::{Borrowing, Hydra, PaneRequest, STATUS_TTL, StatusCache, accounts_summary};
+use crate::hydra::{Borrowing, Hydra, PaneRequest, STATUS_TTL, StatusCache, account_marks};
 use crate::keys::{
     ClosePane, FileTree, FocusDown, FocusLeft, FocusRight, FocusUp, NewTab, NextTab, PreviousTab,
     SplitDown, SplitRight,
@@ -1099,11 +1099,19 @@ impl Workspace {
             let env = view.read(cx).env().to_string();
             let env_name = self.render_env_accounts(env.clone(), self.tint(&env), cx);
             let v = view.read(cx);
-            let accounts = self
-                .status
-                .get(&env)
-                .map(accounts_summary)
-                .unwrap_or_else(|| "…".into());
+            let (ok, bad) = (cx.theme().success, cx.theme().danger);
+            let accounts = match self.status.get(&env).map(account_marks) {
+                None => h_flex().child("…"),
+                Some(marks) => h_flex()
+                    .gap_3()
+                    .children(marks.into_iter().map(|(tool, good)| {
+                        h_flex().gap_1().child(tool).child(
+                            div()
+                                .text_color(if good { ok } else { bad })
+                                .child(if good { "✓" } else { "✗" }),
+                        )
+                    })),
+            };
             // Only a summary read in this pane's current folder; a stale one would mislead.
             let git = match &self.git {
                 Some((dir, Some(line))) if dir == v.cwd() => Some(line.clone()),
@@ -1111,7 +1119,7 @@ impl Workspace {
             };
             bar = bar
                 .child(env_name)
-                .child(div().flex_1().truncate().child(accounts))
+                .child(div().flex_1().min_w_0().overflow_hidden().child(accounts))
                 .when_some(git, |b, line| b.child(div().flex_none().child(line)))
                 .child(div().child(v.cwd().display().to_string()));
         }

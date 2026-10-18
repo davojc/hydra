@@ -30,7 +30,7 @@ use crate::file_pane::{FilePane, FilePaneEvent};
 use crate::file_tree::{cd_command, editor_command, quote_path};
 use crate::file_tree_view::{FileTreeView, TreeEvent};
 use crate::git_status;
-use crate::hydra::{Hydra, PaneRequest, STATUS_TTL, StatusCache, accounts_summary};
+use crate::hydra::{Borrowing, Hydra, PaneRequest, STATUS_TTL, StatusCache, accounts_summary};
 use crate::keys::{
     ClosePane, FileTree, FocusDown, FocusLeft, FocusRight, FocusUp, NewTab, NextTab, PreviousTab,
     SplitDown, SplitRight,
@@ -77,6 +77,8 @@ pub struct Workspace {
     tints: HashMap<String, u32>,
     next_pane: PaneId,
     status: StatusCache,
+    /// Each environment's borrowed logins and possible lenders, read with its accounts.
+    borrowing: HashMap<String, Borrowing>,
     refreshing: HashSet<String>,
     /// The focused pane's repository summary, for the folder it was read in; `None` text when
     /// that folder isn't in a repository.
@@ -165,6 +167,7 @@ impl Workspace {
             tints: HashMap::new(),
             next_pane: 0,
             status: StatusCache::default(),
+            borrowing: HashMap::new(),
             refreshing: HashSet::new(),
             git: None,
             git_busy: false,
@@ -351,8 +354,7 @@ impl Workspace {
 
     fn focus_pane(&self, id: PaneId, window: &mut Window, cx: &mut App) {
         if let Some(view) = self.files.get(&id) {
-            let handle = view.read(cx).focus_handle(cx);
-            window.focus(&handle, cx);
+            view.update(cx, |f, cx| f.focus_content(window, cx));
             return;
         }
         match self.panes.get(&id) {
@@ -381,6 +383,7 @@ impl Workspace {
                     ws.tabs.focus_pane(id);
                     cx.notify();
                 }
+                FilePaneEvent::Changed => ws.save_session(window, cx),
                 FilePaneEvent::Empty => ws.remove_files_pane(id, window, cx),
                 FilePaneEvent::OpenInEditor(path) => ws.open_file(path, window, cx),
             },
@@ -695,9 +698,12 @@ impl Workspace {
         let hydra = self.hydra.clone();
         cx.spawn(async move |this, cx| {
             let e = env.clone();
-            let reports = cx.background_spawn(async move { hydra.whoami(&e) }).await;
+            let (reports, borrowing) = cx
+                .background_spawn(async move { (hydra.whoami(&e), hydra.borrowing(&e)) })
+                .await;
             let _ = this.update(cx, |ws, cx| {
                 ws.refreshing.remove(&env);
+                ws.borrowing.insert(env.clone(), borrowing);
                 ws.status.store(env, reports, Instant::now());
                 cx.notify();
             });

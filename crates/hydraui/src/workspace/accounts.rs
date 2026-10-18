@@ -4,7 +4,7 @@
 use std::cell::Cell;
 
 use gpui::prelude::*;
-use gpui::{Anchor, App, Context, Hsla, Window, div, px};
+use gpui::{Anchor, App, Context, Hsla, SharedString, Window, div, px, rgb};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandItem, CommandState};
 use gpui_component::input::{Input, InputState};
@@ -142,6 +142,58 @@ impl Workspace {
         }
     }
 
+    /// Picks the environment whose login `tool` uses from now on (spec §7.1).
+    fn pick_lender(
+        &mut self,
+        env: String,
+        tool: String,
+        lenders: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.accounts_open = false;
+        cx.notify();
+        let swatches: Vec<(String, Hsla)> = lenders
+            .iter()
+            .map(|e| (e.clone(), rgb(self.hydra.tint(e)).into()))
+            .collect();
+        let state = cx.new(|cx| CommandState::new(window, cx));
+        let workspace = cx.entity();
+        let first = Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first.replace(false) {
+                state.update(cx, |s, cx| s.focus(window, cx));
+            }
+            let (list, workspace, env, tool) = (
+                lenders.clone(),
+                workspace.clone(),
+                env.clone(),
+                tool.clone(),
+            );
+            dialog.title(format!("Use {tool} in {env} from…")).child(
+                Command::new(&state)
+                    .items(swatches.iter().map(|(e, c)| super::env_item(e, Some(*c))))
+                    .placeholder("Environment")
+                    .on_confirm(move |ix, window, cx| {
+                        if let Some(from) = list.get(ix.row).cloned() {
+                            window.close_dialog(cx);
+                            workspace.update(cx, |ws, cx| {
+                                ws.add_account(
+                                    env.clone(),
+                                    AddChoice::Borrow {
+                                        tool: tool.clone(),
+                                        from,
+                                    },
+                                    window,
+                                    cx,
+                                )
+                            });
+                        }
+                    }),
+            )
+        });
+    }
+
     /// After a tool was turned on: its sign-in in a new tab when it has one, and a note.
     fn added(&mut self, env: &str, tool: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.hydra.sign_ins(env).iter().any(|t| t == tool) {
@@ -268,6 +320,7 @@ fn accounts_list(
     let w = ws.read(cx);
     let found = w.status.get(env).map(rows);
     let checking = w.refreshing.contains(env);
+    let borrowing = w.borrowing.get(env).cloned().unwrap_or_default();
     let recheck = (ws.clone(), env.to_string());
     let add = (ws.clone(), env.to_string());
     let header = h_flex()
@@ -318,9 +371,40 @@ fn accounts_list(
                         .w(px(64.))
                         .flex_none()
                         .text_color(muted)
-                        .child(r.provider),
+                        .child(r.provider.clone()),
                 )
                 .child(div().flex_1().min_w_0().child(r.detail))
+                .when_some(borrowing.from.get(&r.provider).cloned(), |row, owner| {
+                    row.child(
+                        div()
+                            .flex_none()
+                            .text_color(muted)
+                            .child(format!("from {owner}")),
+                    )
+                })
+                .when_some(
+                    borrowing.lenders.get(&r.provider).cloned(),
+                    |row, lenders| {
+                        let (ws, env, tool) = (ws.clone(), env.to_string(), r.provider.clone());
+                        row.child(
+                            Button::new(SharedString::from(format!("use-from-{tool}")))
+                                .label("Use from…")
+                                .ghost()
+                                .xsmall()
+                                .on_click(move |_, window, cx| {
+                                    ws.update(cx, |ws, cx| {
+                                        ws.pick_lender(
+                                            env.clone(),
+                                            tool.clone(),
+                                            lenders.clone(),
+                                            window,
+                                            cx,
+                                        )
+                                    });
+                                }),
+                        )
+                    },
+                )
         })),
     };
     let footer = h_flex().justify_end().child(

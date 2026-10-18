@@ -1,6 +1,6 @@
 //! hydraui's link to hydra (spec §3.1, §4, §7.1): environments, `prepare` with guards off,
 //! starting panes, and the identity checks for the status bar. No UI.
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -26,6 +26,14 @@ use hydra_providers::claude::is_session_marker;
 
 use crate::accounts::{AddChoice, add_choices};
 use crate::palette::env_tint;
+
+/// Where an environment's logins come from: the tools it borrows (tool -> owner), and for
+/// each tool, the other environments that could lend it (their own login; git never).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Borrowing {
+    pub from: BTreeMap<String, String>,
+    pub lenders: BTreeMap<String, Vec<String>>,
+}
 
 /// What a pane runs.
 #[derive(Debug, Clone, PartialEq)]
@@ -326,6 +334,34 @@ impl Hydra {
             ..Default::default()
         };
         self.add_tool(env, "gemini", &values)
+    }
+
+    /// Where `env`'s logins come from and who could lend each tool.
+    pub fn borrowing(&self, env: &str) -> Borrowing {
+        let mut out = Borrowing::default();
+        if let Ok(text) = self.env_text(env) {
+            for tool in envedit::tools_in(&text).unwrap_or_default() {
+                if let Some(owner) = declared_owner(&text, tool) {
+                    out.from.insert(tool.to_string(), owner);
+                }
+            }
+        }
+        let mut names = self.env_names();
+        names.sort();
+        for other in names.into_iter().filter(|n| n != env) {
+            let Ok(text) = self.env_text(&other) else {
+                continue;
+            };
+            for tool in envedit::tools_in(&text).unwrap_or_default() {
+                if declared_owner(&text, tool).is_none() && !NOT_BORROWABLE.contains(&tool) {
+                    out.lenders
+                        .entry(tool.to_string())
+                        .or_default()
+                        .push(other.clone());
+                }
+            }
+        }
+        out
     }
 
     /// The accounts that can be added to `env`: sign-ins for the tools it doesn't have, and the
@@ -747,6 +783,75 @@ mod tests {
                 .is_err()
         );
         assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+    }
+
+    fn write_env(f: &Fx, env: &str, text: &str) {
+        let file = f.hydra.paths.env_file(&EnvName::parse(env).unwrap());
+        std::fs::write(file, text).unwrap();
+    }
+
+    #[test]
+    fn borrowing_names_lenders_and_where_logins_come_from() {
+        let f = fx("");
+        write_env(
+            &f,
+            "personal",
+            "[github]\n[git]\nemail = \"p@x\"\n[aws]\nprofile = \"p\"\n",
+        );
+        write_env(
+            &f,
+            "work",
+            "[github]\nfrom = \"gh\"\n[aws]\nprofile = \"w\"\n",
+        );
+        let b = f.hydra.borrowing("work");
+        assert_eq!(b.from.get("github").map(String::as_str), Some("gh"));
+        assert_eq!(b.from.get("aws"), None);
+        assert_eq!(
+            b.lenders.get("github").cloned().unwrap_or_default(),
+            vec!["gh".to_string(), "personal".to_string()]
+        );
+        assert_eq!(
+            b.lenders.get("aws").cloned().unwrap_or_default(),
+            vec!["personal".to_string()]
+        );
+        assert_eq!(b.lenders.get("git"), None, "git can't be borrowed");
+        let p = f.hydra.borrowing("personal");
+        assert_eq!(
+            p.lenders.get("aws").cloned().unwrap_or_default(),
+            vec!["work".to_string()]
+        );
+        assert_eq!(
+            p.lenders.get("github").cloned().unwrap_or_default(),
+            vec!["gh".to_string()],
+            "work borrows github, so it doesn't lend it"
+        );
+    }
+
+    #[test]
+    fn an_own_login_can_switch_to_a_borrowed_one_keeping_github_guards() {
+        let f = fx("");
+        write_env(&f, "personal", "[aws]\nprofile = \"p\"\n");
+        write_env(
+            &f,
+            "work",
+            "[github]\nowners = [\"acme\"]\n[aws]\nprofile = \"w\"\n",
+        );
+        f.hydra.add_tool("work", "github", &from("gh")).unwrap();
+        f.hydra.add_tool("work", "aws", &from("personal")).unwrap();
+        let cfg = work_config(&f);
+        assert_eq!(cfg.borrowed.get("github").map(|e| e.as_str()), Some("gh"));
+        assert_eq!(
+            cfg.borrowed.get("aws").map(|e| e.as_str()),
+            Some("personal")
+        );
+        let text =
+            std::fs::read_to_string(f.hydra.paths.env_file(&EnvName::parse("work").unwrap()))
+                .unwrap();
+        assert!(text.contains("acme"), "github's owners stay: {text}");
+        assert!(
+            !text.contains("\"w\""),
+            "aws's own profile is replaced: {text}"
+        );
     }
 
     #[test]

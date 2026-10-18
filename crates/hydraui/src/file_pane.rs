@@ -11,7 +11,7 @@ use gpui::{
     Subscription, Task, Window, div, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::input::{Editor, EditorState, InputEvent};
+use gpui_component::input::{Editor, EditorState, InputEvent, Position};
 use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -25,6 +25,8 @@ use std::sync::Arc;
 #[derive(Debug, Clone, PartialEq)]
 pub enum FilePaneEvent {
     Focused,
+    /// Files opened, closed or switched: the session is saved.
+    Changed,
     /// The last file tab closed: the pane goes away.
     Empty,
     OpenInEditor(PathBuf),
@@ -81,6 +83,23 @@ fn watcher(tx: UnboundedSender<PathBuf>) -> Option<RecommendedWatcher> {
         }
     })
     .ok()
+}
+
+/// Replaces the editor's text as one edit (undoable), keeping the cursor's line and column.
+fn replace_keeping_place(
+    editor: &Entity<EditorState>,
+    text: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    editor.update(cx, |e, cx| {
+        let pos = e.cursor_position();
+        let len = e.value().len();
+        e.set_selected_range(0..len, cx);
+        e.replace(text.clone(), window, cx);
+        let (line, character) = file_doc::cursor_after_reload(pos.line, pos.character, &text);
+        e.set_cursor_position(Position { line, character }, window, cx);
+    });
 }
 
 fn file_name(p: &Path) -> String {
@@ -184,7 +203,21 @@ impl FilePane {
             }
         };
         self.sync_watches();
+        cx.emit(FilePaneEvent::Changed);
         cx.notify();
+    }
+
+    /// Focuses the active file: its editor in Raw, the pane (for scrolling and copying) in
+    /// Rendered or when a file can't be shown.
+    pub fn focus_content(&self, window: &mut Window, cx: &mut App) {
+        match self.tabs.get(self.active).map(|t| &t.body) {
+            Some(Body::Text {
+                editor,
+                view: View::Raw,
+                ..
+            }) => editor.update(cx, |e, cx| e.focus(window, cx)),
+            _ => window.focus(&self.focus, cx),
+        }
     }
 
     /// The open files and the active one, for the session.
@@ -297,6 +330,7 @@ impl FilePane {
             Some(next) => {
                 self.tabs.remove(i);
                 self.active = next;
+                cx.emit(FilePaneEvent::Changed);
             }
         }
         self.sync_watches();
@@ -336,29 +370,38 @@ impl FilePane {
         t.disk = file_doc::flags_after(t.disk, &change);
         if let DiskChange::Reload(doc) = change {
             let text = doc.text.clone();
-            editor.update(cx, |e, cx| e.set_value(text, window, cx));
             *saved = doc;
+            replace_keeping_place(editor, text, window, cx);
         }
         cx.notify();
     }
 
-    /// Replaces the active file's edits with what is on disk.
+    /// Replaces the active file's edits with what is on disk; says so when it can't.
     fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(t) = self.tabs.get_mut(self.active) else {
             return;
         };
-        if let (Body::Text { editor, saved, .. }, Ok(doc)) = (&mut t.body, file_doc::load(&t.path))
-        {
-            let text = doc.text.clone();
-            editor.update(cx, |e, cx| e.set_value(text, window, cx));
-            *saved = doc;
-            t.dirty = false;
-            t.disk = DiskFlags::default();
+        let Body::Text { editor, saved, .. } = &mut t.body else {
+            return;
+        };
+        match file_doc::load(&t.path) {
+            Ok(doc) => {
+                let text = doc.text.clone();
+                *saved = doc;
+                t.dirty = false;
+                t.disk = DiskFlags::default();
+                replace_keeping_place(editor, text, window, cx);
+            }
+            Err(e) => window.push_notification(
+                Notification::error(format!("can't reload {}: {e}", file_name(&t.path)))
+                    .title("Reload"),
+                cx,
+            ),
         }
         cx.notify();
     }
 
-    fn toggle_view(&mut self, cx: &mut Context<Self>) {
+    fn toggle_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(FileTab {
             body: Body::Text { view, .. },
             ..
@@ -370,6 +413,7 @@ impl FilePane {
                 View::Raw
             };
         }
+        self.focus_content(window, cx);
         cx.notify();
     }
 }
@@ -412,8 +456,10 @@ impl Render for FilePane {
                                 p.close_tab(i, w, cx);
                             })),
                     )
-                    .on_click(cx.listener(move |p, _, _, cx| {
+                    .on_click(cx.listener(move |p, _, w, cx| {
                         p.active = i;
+                        p.focus_content(w, cx);
+                        cx.emit(FilePaneEvent::Changed);
                         cx.notify();
                     })),
             );
@@ -452,7 +498,7 @@ impl Render for FilePane {
                     .label(other)
                     .ghost()
                     .xsmall()
-                    .on_click(cx.listener(|p, _, _, cx| p.toggle_view(cx))),
+                    .on_click(cx.listener(|p, _, w, cx| p.toggle_view(w, cx))),
             );
         }
         let open = path.clone();

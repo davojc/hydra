@@ -328,6 +328,11 @@ disabled.
   stays open; nothing is written until the values check out. aws's private
   config files, claude's MCP exclusions and github's owner/strict settings
   stay with `hydra add`. git can't be borrowed, so it isn't offered.
+- A borrowed login shows "from <env>" on its row. Each row whose tool another
+  environment has with its own login has **Use from…**: pick that
+  environment and the tool borrows its login (`from = "<env>"`, replacing the
+  tool's own settings except github's owner/strict). Switching back to an own
+  login is `hydra remove` + add.
 
 ### 7.2 Terminal view
 
@@ -443,9 +448,13 @@ tab) asks once when any file has unsaved edits. Closing a tab's last terminal
 closes the tab, asking first when its file pane has unsaved edits.
 
 **Changes on disk** (`notify`, as the tree): a file with no unsaved edits
-reloads; one with edits shows "changed on disk" with Reload / Keep mine. A
+reloads, as one undoable edit that keeps the cursor's line and column; one with edits shows "changed on disk" with Reload / Keep mine. A
 deleted or renamed file's tab is marked deleted and keeps its edits, so Save
 writes it back.
+
+Opening a file, choosing a file tab or moving the focus to the pane focuses
+the file: its editor in Raw. Opening, closing and switching file tabs save the
+session at once.
 
 **Which terminal.** The status bar, git summary, the tree's root, Ctrl-click
 insert, double-click `cd` and Split use the focused pane when it is a

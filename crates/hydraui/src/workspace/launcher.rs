@@ -108,6 +108,7 @@ impl Workspace {
             Action::NewSecret => self.secret_dialog(None, window, cx),
             Action::NewEnv => self.new_env_dialog(window, cx),
             Action::OpenFile => self.open_file_finder(window, cx),
+            Action::SearchFiles => self.search_dialog(window, cx),
             Action::OpenLayout => self.open_layout_file(window, cx),
             Action::SaveLayout => self.save_layout_file(window, cx),
             Action::OpenGroupFile => self.open_group_file_dialog(window, cx),

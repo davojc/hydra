@@ -2964,6 +2964,7 @@ dependencies = [
  "hydraui-term",
  "ignore",
  "notify",
+ "regex",
  "serde",
  "tempfile",
  "toml 0.8.23",

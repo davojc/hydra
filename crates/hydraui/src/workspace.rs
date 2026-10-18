@@ -1209,6 +1209,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_launcher))
             .on_action(cx.listener(Self::toggle_tree))
             .on_action(cx.listener(Self::open_file_action))
+            .on_action(cx.listener(Self::search_action))
             .child(self.render_tab_strip(bar, border, muted, cx))
             .child(
                 h_flex()

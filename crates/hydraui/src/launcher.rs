@@ -22,6 +22,8 @@ pub enum Action {
     },
     /// Quick open (spec §7.10).
     OpenFile,
+    /// Search in files (spec §7.10).
+    SearchFiles,
     /// Add a layout file's groups and tabs to the window (spec §7.9).
     OpenLayout,
     /// Save the window to a layout file.
@@ -93,6 +95,7 @@ pub fn entries(
         );
     }
     add("Open file…".into(), Action::OpenFile);
+    add("Search in files…".into(), Action::SearchFiles);
     add("Open layout file…".into(), Action::OpenLayout);
     add("Save layout to file…".into(), Action::SaveLayout);
     add("Open group file…".into(), Action::OpenGroupFile);
@@ -136,6 +139,7 @@ mod tests {
                 "Sign in: github in work",
                 "Set secret: work/linear",
                 "Open file…",
+                "Search in files…",
                 "Open layout file…",
                 "Save layout to file…",
                 "Open group file…",
@@ -162,12 +166,13 @@ mod tests {
         );
         assert_eq!(got[6].action, Action::SetSecret("work/linear".into()));
         assert_eq!(got[7].action, Action::OpenFile);
-        assert_eq!(got[8].action, Action::OpenLayout);
-        assert_eq!(got[9].action, Action::SaveLayout);
-        assert_eq!(got[10].action, Action::OpenGroupFile);
-        assert_eq!(got[11].action, Action::SaveLooseAsGroup);
-        assert_eq!(got[12].action, Action::NewEnv);
-        assert_eq!(got[13].action, Action::NewSecret);
+        assert_eq!(got[8].action, Action::SearchFiles);
+        assert_eq!(got[9].action, Action::OpenLayout);
+        assert_eq!(got[10].action, Action::SaveLayout);
+        assert_eq!(got[11].action, Action::OpenGroupFile);
+        assert_eq!(got[12].action, Action::SaveLooseAsGroup);
+        assert_eq!(got[13].action, Action::NewEnv);
+        assert_eq!(got[14].action, Action::NewSecret);
     }
 
     #[test]
@@ -178,6 +183,7 @@ mod tests {
             labels,
             vec![
                 "Open file…",
+                "Search in files…",
                 "Open layout file…",
                 "Save layout to file…",
                 "Open group file…",
@@ -189,6 +195,7 @@ mod tests {
             ]
         );
         assert_eq!(got[0].action, Action::OpenFile);
-        assert_eq!(got[5].action, Action::NewEnv);
+        assert_eq!(got[1].action, Action::SearchFiles);
+        assert_eq!(got[6].action, Action::NewEnv);
     }
 }

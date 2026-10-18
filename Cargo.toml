@@ -26,6 +26,7 @@ gpui-component = { version = "=0.7.3", features = [
 gpui-kit-assets = "=0.7.3"
 futures = "0.3"
 ignore = "0.4"
+regex = "1"
 notify = "8"
 anstream = "1"
 anstyle = "1"

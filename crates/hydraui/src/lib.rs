@@ -23,6 +23,7 @@ pub mod pane_view;
 pub mod quick_open;
 pub mod search;
 pub mod split;
+pub mod start_page;
 pub mod tabs;
 pub mod term_paths;
 pub mod updater;

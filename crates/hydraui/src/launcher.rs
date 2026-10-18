@@ -28,6 +28,8 @@ pub enum Action {
     OpenLayout,
     /// Save the window to a layout file.
     SaveLayout,
+    /// A new window showing the start page (spec §7.12).
+    StartPage,
     /// Open a group file as a group.
     OpenGroupFile,
     /// Save every Loose tab into one group file.
@@ -102,6 +104,7 @@ pub fn entries(
     add("Search in files…".into(), Action::SearchFiles);
     add("Open layout file…".into(), Action::OpenLayout);
     add("Save layout as…".into(), Action::SaveLayout);
+    add("Start page".into(), Action::StartPage);
     add("Open group file…".into(), Action::OpenGroupFile);
     add("Save Loose tabs as group…".into(), Action::SaveLooseAsGroup);
     add("Delete environment…".into(), Action::DeleteEnv);
@@ -148,6 +151,7 @@ mod tests {
                 "Search in files…",
                 "Open layout file…",
                 "Save layout as…",
+                "Start page",
                 "Open group file…",
                 "Save Loose tabs as group…",
                 "Delete environment…",
@@ -177,12 +181,13 @@ mod tests {
         assert_eq!(got[8].action, Action::SearchFiles);
         assert_eq!(got[9].action, Action::OpenLayout);
         assert_eq!(got[10].action, Action::SaveLayout);
-        assert_eq!(got[11].action, Action::OpenGroupFile);
-        assert_eq!(got[12].action, Action::SaveLooseAsGroup);
-        assert_eq!(got[13].action, Action::DeleteEnv);
-        assert_eq!(got[14].action, Action::SetEnvHome);
-        assert_eq!(got[15].action, Action::NewEnv);
-        assert_eq!(got[16].action, Action::NewSecret);
+        assert_eq!(got[11].action, Action::StartPage);
+        assert_eq!(got[12].action, Action::OpenGroupFile);
+        assert_eq!(got[13].action, Action::SaveLooseAsGroup);
+        assert_eq!(got[14].action, Action::DeleteEnv);
+        assert_eq!(got[15].action, Action::SetEnvHome);
+        assert_eq!(got[16].action, Action::NewEnv);
+        assert_eq!(got[17].action, Action::NewSecret);
     }
 
     #[test]
@@ -196,6 +201,7 @@ mod tests {
                 "Search in files…",
                 "Open layout file…",
                 "Save layout as…",
+                "Start page",
                 "Open group file…",
                 "Save Loose tabs as group…",
                 "Delete environment…",
@@ -208,8 +214,9 @@ mod tests {
         );
         assert_eq!(got[0].action, Action::OpenFile);
         assert_eq!(got[1].action, Action::SearchFiles);
-        assert_eq!(got[6].action, Action::DeleteEnv);
-        assert_eq!(got[7].action, Action::SetEnvHome);
-        assert_eq!(got[8].action, Action::NewEnv);
+        assert_eq!(got[4].action, Action::StartPage);
+        assert_eq!(got[7].action, Action::DeleteEnv);
+        assert_eq!(got[8].action, Action::SetEnvHome);
+        assert_eq!(got[9].action, Action::NewEnv);
     }
 }

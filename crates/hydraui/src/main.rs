@@ -26,6 +26,25 @@ fn main() {
         .chain(colour_problems)
         .chain(key_problems)
         .collect();
+    // A layout file to open (spec §7.12): if another window has it, bring that one forward
+    // and stop here, before touching anything another hydraui uses.
+    let file = std::env::args_os()
+        .nth(1)
+        .map(std::path::PathBuf::from)
+        .map(|p| std::path::absolute(&p).unwrap_or(p));
+    if let Some(f) = &file
+        && hydraui::claim::is_claimed(f)
+    {
+        let running = hydraui::claim::running_dir(&hydra.paths);
+        if let Some(h) = hydraui::claim::holder_window(&running, f) {
+            hydraui::claim::bring_forward(h);
+        }
+        return;
+    }
+    let start = match file {
+        Some(f) => hydraui::workspace::StartWith::File(f),
+        None => hydraui::workspace::StartWith::Page,
+    };
     // Init scripts left by earlier runs (spec §4.5).
     hydraui_term::clear_pane_inits(&hydra.paths);
     // Exes a previous update replaced (spec §7.11).
@@ -69,8 +88,9 @@ fn main() {
                 ..gpui_component::TitleBar::window_options()
             };
             cx.open_window(options, |window, cx| {
-                let workspace =
-                    cx.new(|cx| Workspace::new(Arc::new(hydra), ui, style, problems, window, cx));
+                let workspace = cx.new(|cx| {
+                    Workspace::new(Arc::new(hydra), ui, style, problems, start, window, cx)
+                });
                 cx.new(|cx| Root::new(workspace, window, cx))
             })
             .unwrap_or_else(|e| fatal(&format!("hydraui can't open its window: {e}")));

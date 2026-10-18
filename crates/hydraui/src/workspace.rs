@@ -5,6 +5,7 @@ mod busy;
 mod finder;
 mod launcher;
 mod sets;
+mod start_page;
 mod title_bar;
 
 use std::cell::{Cell, RefCell};
@@ -65,6 +66,14 @@ fn tree_width_at(x: f32, window_width: f32) -> f32 {
 struct Drag {
     path: Vec<usize>,
     axis: Axis,
+}
+
+/// What a new window shows first (spec §7.12).
+pub enum StartWith {
+    /// The start page.
+    Page,
+    /// A layout file given on the command line.
+    File(PathBuf),
 }
 
 pub struct Workspace {
@@ -130,6 +139,8 @@ pub struct Workspace {
     layout: Option<PathBuf>,
     /// This window's hold on `layout`, so no other window writes it.
     claim: Option<crate::claim::Claim>,
+    /// The start page, while it shows (spec §7.12).
+    start: Option<start_page::StartPage>,
 }
 
 impl Workspace {
@@ -138,6 +149,7 @@ impl Workspace {
         ui: UiConfig,
         style: TermStyle,
         problems: Vec<String>,
+        start: StartWith,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -208,7 +220,7 @@ impl Workspace {
         });
         // After the window's Root exists: toasts and dialogs live in it.
         cx.spawn_in(window, async move |this, cx| {
-            let _ = this.update_in(cx, |ws, window, cx| ws.startup(problems, window, cx));
+            let _ = this.update_in(cx, |ws, window, cx| ws.startup(problems, start, window, cx));
         })
         .detach();
         Self {
@@ -255,11 +267,18 @@ impl Workspace {
             _update_checks: None,
             layout: None,
             claim: None,
+            start: None,
         }
     }
 
     /// Shows what was wrong with the settings, then opens the first tab in the home folder.
-    fn startup(&mut self, problems: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+    fn startup(
+        &mut self,
+        problems: Vec<String>,
+        start: StartWith,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.start_update_checks(cx);
         for p in problems {
             window.push_notification(Notification::warning(p).title("hydraui settings"), cx);
@@ -272,8 +291,13 @@ impl Workspace {
                 crate::window_layout::now_secs(),
             );
         }
-        let home = self.hydra.user_home.clone();
-        self.new_tab_in(home, window, cx);
+        // The page first: opening a file leaves it; a file that fails to open leaves the
+        // page and its toast (§7.12 Command line); a file another window took meanwhile
+        // closes this window, as a start page does.
+        self.show_start_page(window, cx);
+        if let StartWith::File(path) = start {
+            self.open_layout_path(path, window, cx);
+        }
         // Each pane's folder as it is when the window closes.
         let ws = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
@@ -1258,7 +1282,7 @@ impl Workspace {
             .border_t_1()
             .border_color(border)
             .text_color(muted);
-        if let Some(view) = self.focused() {
+        if let Some(view) = self.focused().filter(|_| self.start.is_none()) {
             let env = view.read(cx).env().to_string();
             let env_name = self.render_env_accounts(env.clone(), self.tint(&env), cx);
             let v = view.read(cx);
@@ -1308,6 +1332,7 @@ impl Render for Workspace {
             theme.tab_bar,
         );
         let body = match self.tabs.active() {
+            _ if self.start.is_some() => self.render_start_page(cx),
             Some(tab) => self.render_tree(&tab.tree, Vec::new(), tab.focused, border, cx),
             None => div()
                 .size_full()
@@ -1340,7 +1365,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::search_action))
             .on_action(cx.listener(Self::test_dialog))
             .child(self.render_title_bar(cx))
-            .child(self.render_tab_strip(bar, border, muted, cx))
+            .when(self.start.is_none(), |d| {
+                d.child(self.render_tab_strip(bar, border, muted, cx))
+            })
             .child(
                 h_flex()
                     .flex_1()

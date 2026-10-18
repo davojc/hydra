@@ -315,13 +315,16 @@ impl Workspace {
         }
     }
 
-    /// Placeholder until the start page exists.
+    /// The window is showing the start page (spec §7.12).
     pub(super) fn is_start_page(&self) -> bool {
-        false
+        self.start.is_some()
     }
 
-    /// Placeholder until the start page exists; then it hides the page.
-    pub(super) fn leave_start_page(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+    /// Hides the start page, for the tabs about to open.
+    pub(super) fn leave_start_page(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.start = None;
+        cx.notify();
+    }
 
     /// Opens a layout file (spec §7.12): in this window when it has no layout, else in a new
     /// hydraui; a file another window has brings that window forward instead. Returns whether

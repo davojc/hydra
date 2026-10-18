@@ -122,6 +122,9 @@ impl Workspace {
             Action::SearchFiles => self.search_dialog(window, cx),
             Action::OpenLayout => self.open_layout_file(window, cx),
             Action::SaveLayout => self.save_layout_file(window, cx),
+            Action::StartPage => {
+                let _ = crate::window_layout::spawn_hydraui(None);
+            }
             Action::OpenGroupFile => self.open_group_file_dialog(window, cx),
             Action::SaveLooseAsGroup => self.save_loose_as_group(window, cx),
             Action::OpenConfigFolder => {

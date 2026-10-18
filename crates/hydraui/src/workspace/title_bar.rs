@@ -1,5 +1,6 @@
 //! hydraui's own title bar (spec §7.11): the title, the Update button, and the window
 //! controls gpui-component draws.
+use std::path::Path;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
@@ -104,25 +105,39 @@ impl Workspace {
         .detach();
     }
 
-    /// Saves the session, starts the new hydraui and closes this window; unsaved edits are
-    /// asked about first, as when closing.
+    /// Saves the layout (an untitled window first gets a file, so nothing is lost), lets go
+    /// of it, starts the new hydraui with it and closes this window (spec §7.11); unsaved
+    /// edits are asked about first, as when closing.
     pub(super) fn restart(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.save_session(window, cx);
-        let relaunch = |window: &mut Window, cx: &mut gpui::App| match std::env::current_exe()
-            .and_then(|exe| std::process::Command::new(exe).spawn())
-        {
-            Ok(_) => window.remove_window(),
+        if self.layout.is_none() && !self.tabs.is_empty() {
+            let dir = hydraui_sets::layouts_dir(&self.hydra.paths);
+            let path = hydraui_sets::free_path(&dir, "untitled");
+            if !self.save_layout_to(path, window, cx) {
+                return;
+            }
+        }
+        self.autosave(window, cx);
+        let file = self.layout.clone();
+        let all: Vec<_> = self.files.keys().copied().collect();
+        if self.unsaved_in(&all, cx).is_empty() {
+            Self::relaunch(self, file.as_deref(), window, cx);
+        } else {
+            self.confirm_unsaved(all, window, cx, move |ws, w, cx| {
+                Self::relaunch(ws, file.as_deref(), w, cx)
+            });
+        }
+    }
+
+    fn relaunch(&mut self, file: Option<&Path>, window: &mut Window, cx: &mut gpui::App) {
+        // Let go first, or the new hydraui sees the file taken and gives way to this window.
+        self.claim = None;
+        match crate::window_layout::spawn_hydraui(file) {
+            Ok(()) => window.remove_window(),
             Err(e) => window.push_notification(
                 Notification::error(format!("can't start the new hydraui: {e}"))
                     .title("Update hydra"),
                 cx,
             ),
-        };
-        let all: Vec<_> = self.files.keys().copied().collect();
-        if self.unsaved_in(&all, cx).is_empty() {
-            relaunch(window, cx);
-        } else {
-            self.confirm_unsaved(all, window, cx, move |_, w, cx| relaunch(w, cx));
         }
     }
 

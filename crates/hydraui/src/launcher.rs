@@ -101,7 +101,7 @@ pub fn entries(
     add("Open file…".into(), Action::OpenFile);
     add("Search in files…".into(), Action::SearchFiles);
     add("Open layout file…".into(), Action::OpenLayout);
-    add("Save layout to file…".into(), Action::SaveLayout);
+    add("Save layout as…".into(), Action::SaveLayout);
     add("Open group file…".into(), Action::OpenGroupFile);
     add("Save Loose tabs as group…".into(), Action::SaveLooseAsGroup);
     add("Delete environment…".into(), Action::DeleteEnv);
@@ -147,7 +147,7 @@ mod tests {
                 "Open file…",
                 "Search in files…",
                 "Open layout file…",
-                "Save layout to file…",
+                "Save layout as…",
                 "Open group file…",
                 "Save Loose tabs as group…",
                 "Delete environment…",
@@ -195,7 +195,7 @@ mod tests {
                 "Open file…",
                 "Search in files…",
                 "Open layout file…",
-                "Save layout to file…",
+                "Save layout as…",
                 "Open group file…",
                 "Save Loose tabs as group…",
                 "Delete environment…",

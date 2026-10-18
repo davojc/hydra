@@ -13,9 +13,8 @@ use std::path::{Path, PathBuf};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use hydraui_sets::file::{SetFile, TabFile};
 use hydraui_sets::{
-    Context as SetContext, LoadedSet, Session, SetRef, SetSpec, file_modified, list_sets, load_set,
-    load_set_file, read_layout, read_session, resolve_loose, sets_dir, write_layout, write_session,
-    write_set_file,
+    Context as SetContext, LoadedSet, Opened, Session, SetRef, SetSpec, file_modified, list_sets,
+    load_set, load_set_file, resolve_loose, sets_dir, write_layout, write_set_file,
 };
 use hydraui_term::PromptState;
 
@@ -116,7 +115,7 @@ impl Workspace {
         if let Some(focused) = self.tabs.active().map(|t| t.focused) {
             self.focus_soon(focused, window, cx);
         }
-        self.save_session(window, cx);
+        self.autosave(window, cx);
         cx.notify();
     }
 
@@ -216,7 +215,7 @@ impl Workspace {
             }
         }
         self.changed_sets.remove(name);
-        self.save_session(window, cx);
+        self.autosave(window, cx);
         // A group reloads from its own file (spec §5.4); a sets-folder set by name.
         let reopened = reload
             && match file.map(|f| reload_from(name, &f, &sets_dir(&self.hydra.paths))) {
@@ -224,7 +223,7 @@ impl Workspace {
                 _ => self.load_set(name, window, cx),
             };
         if reopened {
-            self.save_session(window, cx);
+            self.autosave(window, cx);
         }
         if !reopened {
             self.focus_active(window, cx);
@@ -236,7 +235,7 @@ impl Workspace {
     pub(super) fn tab_gone(&mut self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(set) = self.loaded.tab_closed(tab) {
             self.changed_sets.remove(&set);
-            self.save_session(window, cx);
+            self.autosave(window, cx);
         }
     }
 
@@ -304,14 +303,158 @@ impl Workspace {
         }
     }
 
-    pub(super) fn save_session(&self, window: &mut Window, cx: &mut App) {
-        let session = self.current_layout(cx);
-        if let Err(e) = write_session(&self.hydra.paths, &session) {
+    /// Writes the window's layout to its file (spec §7.12); an untitled window writes nothing.
+    pub(super) fn autosave(&self, window: &mut Window, cx: &mut App) {
+        let Some(path) = &self.layout else { return };
+        if let Err(e) = write_layout(path, &self.current_layout(cx)) {
             window.push_notification(
-                Notification::warning(format!("can't save what is open: {e}")).title("hydraui"),
+                Notification::warning(format!("can't save the layout to {}: {e}", path.display()))
+                    .title("hydraui"),
                 cx,
             );
         }
+    }
+
+    /// Placeholder until the start page exists.
+    pub(super) fn is_start_page(&self) -> bool {
+        false
+    }
+
+    /// Placeholder until the start page exists; then it hides the page.
+    pub(super) fn leave_start_page(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+
+    /// Opens a layout file (spec §7.12): in this window when it has no layout, else in a new
+    /// hydraui; a file another window has brings that window forward instead. Returns whether
+    /// this window opened it.
+    pub(super) fn open_layout_path(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let path = std::path::absolute(&path).unwrap_or(path);
+        if let Some(mine) = &self.layout {
+            if !hydraui_sets::same_path(mine, &path)
+                && let Err(e) = crate::window_layout::spawn_hydraui(Some(&path))
+            {
+                window.push_notification(
+                    Notification::error(format!("can't start another hydraui: {e}"))
+                        .title("Open layout"),
+                    cx,
+                );
+            }
+            return false;
+        }
+        let running = crate::claim::running_dir(&self.hydra.paths);
+        if crate::claim::is_claimed(&path) {
+            self.elsewhere(crate::claim::holder_window(&running, &path), window);
+            return false;
+        }
+        let paths = self.hydra.paths.clone();
+        let now = crate::window_layout::now_secs();
+        let (layout, backing) = match hydraui_sets::open_layout_file(&path) {
+            Err(e) => {
+                window.push_notification(Notification::error(e).title("Open layout"), cx);
+                return false;
+            }
+            Ok(Opened::Current(l)) => (l, Some(path)),
+            Ok(Opened::Converted { layout, from, to }) => {
+                window.push_notification(
+                    Notification::info(format!("Converted {} → {}", from.display(), to.display()))
+                        .title("Open layout"),
+                    cx,
+                );
+                let _ = hydraui_sets::rename_recent(&paths, &from, &to, now);
+                (layout, Some(to))
+            }
+            Ok(Opened::Untitled { layout, exists }) => {
+                window.push_notification(
+                    Notification::warning(format!(
+                        "{} already exists, so this opens untitled: Save layout as… to keep it",
+                        exists.display()
+                    ))
+                    .title("Open layout"),
+                    cx,
+                );
+                (layout, None)
+            }
+        };
+        if let Some(file) = backing {
+            match crate::claim::take(&running, &file, crate::claim::hwnd_of(window)) {
+                crate::claim::Taken::Mine(c) => {
+                    let _ = hydraui_sets::touch_recent(&paths, &file, now);
+                    self.claim = Some(c);
+                    self.layout = Some(file);
+                }
+                crate::claim::Taken::Elsewhere(holder) => {
+                    self.elsewhere(holder, window);
+                    return false;
+                }
+            }
+        }
+        self.leave_start_page(window, cx);
+        self.open_layout(layout, window, cx);
+        self.autosave(window, cx);
+        cx.notify();
+        true
+    }
+
+    /// Another window has the file: bring it forward; a start page that only existed to open
+    /// it closes.
+    fn elsewhere(&mut self, holder: Option<isize>, window: &mut Window) {
+        if let Some(h) = holder {
+            crate::claim::bring_forward(h);
+        }
+        if self.is_start_page() {
+            window.remove_window();
+        }
+    }
+
+    /// Writes the window to `path` and backs the window with it from then on (Save layout
+    /// as…, spec §7.12). A file another window has is refused; a failed write keeps the old
+    /// file.
+    pub(super) fn save_layout_to(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let path = std::path::absolute(&path).unwrap_or(path);
+        if self
+            .layout
+            .as_deref()
+            .is_some_and(|p| hydraui_sets::same_path(p, &path))
+        {
+            self.autosave(window, cx);
+            return true;
+        }
+        let running = crate::claim::running_dir(&self.hydra.paths);
+        let claim = match crate::claim::take(&running, &path, crate::claim::hwnd_of(window)) {
+            crate::claim::Taken::Mine(c) => c,
+            crate::claim::Taken::Elsewhere(_) => {
+                window.push_notification(
+                    Notification::error(format!(
+                        "{} is open in another hydraui window",
+                        path.display()
+                    ))
+                    .title("Save layout"),
+                    cx,
+                );
+                return false;
+            }
+        };
+        let result = write_layout(&path, &self.current_layout(cx));
+        let ok = result.is_ok();
+        self.saved("the layout", &path, result, window, cx);
+        if !ok {
+            return false; // the new claim drops here; the old file stays
+        }
+        let _ =
+            hydraui_sets::touch_recent(&self.hydra.paths, &path, crate::window_layout::now_secs());
+        self.claim = Some(claim); // the old claim drops: the old file is let go
+        self.layout = Some(path);
+        cx.notify();
+        true
     }
 
     /// Asks where to save (the Save As dialog), then calls `then` with the path. Cancel does
@@ -385,39 +528,36 @@ impl Workspace {
         window.push_notification(note.title("Save"), cx);
     }
 
+    /// Save layout as…: starts in the current file's folder, else the layouts folder.
     pub(super) fn save_layout_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let dir = self.hydra.user_home.clone();
-        self.save_dialog(
-            dir,
-            "layout.hydraui.toml".into(),
-            window,
-            cx,
-            |ws, path, window, cx| {
-                let result = write_layout(&path, &ws.current_layout(cx));
-                ws.saved("the layout", &path, result, window, cx);
-            },
-        );
+        let (dir, name) = match &self.layout {
+            Some(p) => (
+                p.parent().map(Path::to_path_buf).unwrap_or_default(),
+                p.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            ),
+            None => {
+                let dir = hydraui_sets::layouts_dir(&self.hydra.paths);
+                let _ = std::fs::create_dir_all(&dir);
+                (dir, "layout.hydraui".into())
+            }
+        };
+        self.save_dialog(dir, name, window, cx, |ws, path, window, cx| {
+            ws.save_layout_to(path, window, cx);
+        });
     }
 
     pub(super) fn open_layout_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_dialog_path(
-            false,
-            window,
-            cx,
-            |ws, path, window, cx| match read_layout(&path) {
-                Ok(layout) => {
-                    ws.open_layout(layout, window, cx);
-                    ws.save_session(window, cx);
-                }
-                Err(e) => window.push_notification(Notification::error(e).title("Open layout"), cx),
-            },
-        );
+        self.open_dialog_path(false, window, cx, |ws, path, window, cx| {
+            ws.open_layout_path(path, window, cx);
+        });
     }
 
     pub(super) fn open_group_file_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_dialog_path(false, window, cx, |ws, path, window, cx| {
             if ws.open_group_file(&path, window, cx) {
-                ws.save_session(window, cx);
+                ws.autosave(window, cx);
             }
         });
     }
@@ -538,15 +678,6 @@ impl Workspace {
             self.changed_sets = changed;
             cx.notify();
         }
-    }
-
-    /// Reopens what was open at last exit (spec §5.4). Returns whether any tab opened.
-    pub(super) fn restore_session(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let any = self.open_layout(read_session(&self.hydra.paths), window, cx);
-        if any {
-            self.save_session(window, cx);
-        }
-        any
     }
 
     /// Adds a layout to the window (spec §7.9): its sets that aren't loaded yet, its Loose tabs

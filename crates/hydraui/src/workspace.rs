@@ -126,6 +126,10 @@ pub struct Workspace {
     /// The title bar's Update button (spec §7.11).
     update: crate::updater::UpdateState,
     _update_checks: Option<Task<()>>,
+    /// The layout file this window keeps saved (spec §7.12); `None` while untitled.
+    layout: Option<PathBuf>,
+    /// This window's hold on `layout`, so no other window writes it.
+    claim: Option<crate::claim::Claim>,
 }
 
 impl Workspace {
@@ -249,6 +253,8 @@ impl Workspace {
             accounts_open: false,
             update: Default::default(),
             _update_checks: None,
+            layout: None,
+            claim: None,
         }
     }
 
@@ -258,16 +264,21 @@ impl Workspace {
         for p in problems {
             window.push_notification(Notification::warning(p).title("hydraui settings"), cx);
         }
-        // What was open at last exit (spec §5.4); a plain tab when there was nothing.
-        if !self.restore_session(window, cx) {
-            let home = self.hydra.user_home.clone();
-            self.new_tab_in(home, window, cx);
+        // A session from before layouts were files becomes one, once (spec §7.12).
+        if let Some(moved) = hydraui_sets::migrate_session(&self.hydra.paths) {
+            let _ = hydraui_sets::touch_recent(
+                &self.hydra.paths,
+                &moved,
+                crate::window_layout::now_secs(),
+            );
         }
+        let home = self.hydra.user_home.clone();
+        self.new_tab_in(home, window, cx);
         // Each pane's folder as it is when the window closes.
         let ws = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             ws.update(cx, |ws, cx| {
-                ws.save_session(window, cx);
+                ws.autosave(window, cx);
                 // Unsaved edits: ask first, and close from the dialog (spec §7.8).
                 let all: Vec<PaneId> = ws.files.keys().copied().collect();
                 if ws.unsaved_in(&all, cx).is_empty() {
@@ -356,7 +367,7 @@ impl Workspace {
         let id = self.new_pane(request, window, cx);
         self.tabs.add(None, id);
         self.focus_soon(id, window, cx);
-        self.save_session(window, cx);
+        self.autosave(window, cx);
         cx.notify();
     }
 
@@ -463,7 +474,7 @@ impl Workspace {
                     ws.tabs.focus_pane(id);
                     cx.notify();
                 }
-                FilePaneEvent::Changed => ws.save_session(window, cx),
+                FilePaneEvent::Changed => ws.autosave(window, cx),
                 FilePaneEvent::Empty => ws.remove_files_pane(id, window, cx),
                 FilePaneEvent::OpenInEditor(path) => ws.open_file(path, window, cx),
             },
@@ -527,7 +538,7 @@ impl Workspace {
             }
         };
         self.focus_pane(id, window, cx);
-        self.save_session(window, cx);
+        self.autosave(window, cx);
         cx.notify();
     }
 
@@ -538,7 +549,7 @@ impl Workspace {
         self.files.remove(&id);
         self.file_subs.remove(&id);
         self.focus_active(window, cx);
-        self.save_session(window, cx);
+        self.autosave(window, cx);
         cx.notify();
     }
 
@@ -659,7 +670,7 @@ impl Workspace {
         let target = from.read(cx).id;
         self.tabs.split_pane(target, axis, id);
         self.focus_pane(id, window, cx);
-        self.save_session(window, cx);
+        self.autosave(window, cx);
         cx.notify();
     }
 
@@ -700,7 +711,7 @@ impl Workspace {
         }
         self.drop_pane(id);
         self.focus_active(window, cx);
-        self.save_session(window, cx);
+        self.autosave(window, cx);
         cx.notify();
     }
 
@@ -722,7 +733,7 @@ impl Workspace {
         }
         self.tab_gone(tab, window, cx);
         self.focus_active(window, cx);
-        self.save_session(window, cx);
+        self.autosave(window, cx);
         cx.notify();
     }
 
@@ -841,7 +852,7 @@ impl Workspace {
             self.tree = Some(view);
             self.sync_tree(cx);
         }
-        self.save_session(window, cx);
+        self.autosave(window, cx);
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -1282,10 +1293,8 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.split_bounds.borrow_mut().clear();
-        let title = match self.focused() {
-            Some(v) => format!("hydraui - {}", v.read(cx).label()),
-            None => "hydraui".to_string(),
-        };
+        let title =
+            crate::window_layout::window_title(self.layout.as_deref(), self.is_start_page());
         if title != self.title {
             window.set_window_title(&title);
             self.title = title;

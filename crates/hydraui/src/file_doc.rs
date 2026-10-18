@@ -127,6 +127,18 @@ pub fn language(path: &Path) -> &'static str {
     }
 }
 
+/// Where the cursor goes after a reload: the same line and column (in UTF-16 units, as the
+/// editor counts), clamped to the new text; past the end, the end of the last line.
+pub fn cursor_after_reload(line: u32, column: u32, text: &str) -> (u32, u32) {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let width = |l: &str| l.encode_utf16().count() as u32;
+    let last = lines.len() as u32 - 1;
+    if line > last {
+        return (last, width(lines[last as usize]));
+    }
+    (line, column.min(width(lines[line as usize])))
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ImageUse {
     Local(PathBuf),
@@ -428,5 +440,27 @@ mod tests {
                 deleted: true
             }
         );
+    }
+
+    #[test]
+    fn the_cursor_keeps_its_place_after_a_reload() {
+        let text = "one\ntwo\nthree";
+        assert_eq!(cursor_after_reload(1, 2, text), (1, 2));
+        assert_eq!(
+            cursor_after_reload(1, 9, text),
+            (1, 3),
+            "column clamps to the line"
+        );
+        assert_eq!(
+            cursor_after_reload(7, 1, text),
+            (2, 5),
+            "past the end: end of the last line"
+        );
+        assert_eq!(
+            cursor_after_reload(0, 4, "é€x"),
+            (0, 3),
+            "columns count UTF-16 units"
+        );
+        assert_eq!(cursor_after_reload(3, 3, ""), (0, 0));
     }
 }

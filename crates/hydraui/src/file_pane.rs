@@ -648,7 +648,11 @@ impl Render for FilePane {
                 .text_color(muted)
                 .child(format!("Can't show this file: {why}"))
                 .into_any_element(),
-            Body::Diff(Ok(state)) => Diff::new(state).size_full().into_any_element(),
+            // Wrapped, so both sides fit the pane instead of the new side scrolling off.
+            Body::Diff(Ok(state)) => Diff::new(state)
+                .soft_wrap(true)
+                .size_full()
+                .into_any_element(),
             Body::Diff(Err(why)) => v_flex()
                 .size_full()
                 .items_center()

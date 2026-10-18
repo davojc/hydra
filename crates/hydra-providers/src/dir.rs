@@ -88,7 +88,8 @@ pub const GCLOUD: DirProvider = DirProvider {
         "CLOUDSDK_CORE_ACCOUNT",
         "CLOUDSDK_CORE_PROJECT",
     ],
-    login: &["gcloud", "auth", "login"],
+    // Prints the URL to open, then takes the code: opening a browser itself is unreliable.
+    login: &["gcloud", "auth", "login", "--no-launch-browser"],
     whoami: &["gcloud", "config", "get", "account"],
     signed_in_file: Some("credentials.db"),
 };
@@ -154,6 +155,15 @@ mod tests {
     fn login_commands() {
         let f = Fixture::new("[azure]\n");
         assert_eq!(AZURE.auth_command(&f.ctx()).unwrap(), vec!["az", "login"]);
+        // gcloud prints the sign-in URL instead of opening a browser itself.
+        let f = Fixture::new(
+            "[gcloud]
+",
+        );
+        assert_eq!(
+            GCLOUD.auth_command(&f.ctx()).unwrap(),
+            vec!["gcloud", "auth", "login", "--no-launch-browser"]
+        );
     }
 
     #[test]
@@ -164,7 +174,7 @@ mod tests {
         );
         assert_eq!(
             GCLOUD.sign_in_hint(&f.ctx()).as_deref(),
-            Some("not signed in - run gcloud auth login")
+            Some("not signed in - run gcloud auth login --no-launch-browser")
         );
         GCLOUD.materialise(&f.ctx()).unwrap();
         std::fs::write(

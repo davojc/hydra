@@ -108,7 +108,7 @@ Turn tools on with `hydra add <tool> [env]`. Inside a hydra terminal you can lea
 | `git` | Always on, even without `hydra add git`: your global git config is loaded underneath, plus hydra's folder guard (see below). `hydra add git` adds the author, email, SSH key for pushes, optional SSH signing key, and its own Git Credential Manager space for other HTTPS hosts. | `--name`, `--email`, `--ssh-key`, `--signing-key` |
 | `aws` | An AWS profile, optionally with private config and credentials files | `--profile` (required), `--isolate` |
 | `azure` | Its own `az login` | |
-| `gcloud` | Its own `gcloud auth login` and configurations | |
+| `gcloud` | Its own `gcloud auth login --no-launch-browser` (open the printed URL, paste the code back) and configurations | |
 | `gws` | Its own Google Workspace CLI login, or stored credentials | `--credentials-secret <env/key>` |
 | `kube` | Its own kubeconfig | `--kubeconfig <path>` |
 | `codex` | Its own Codex CLI login | |

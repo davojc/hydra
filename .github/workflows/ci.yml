@@ -8,6 +8,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # Dependencies come from the cache; only the workspace's crates rebuild.
+      - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
@@ -39,6 +41,9 @@ jobs:
             echo "version=$next" >> "$GITHUB_OUTPUT"
             echo "release=true" >> "$GITHUB_OUTPUT"
           fi
+      # Only runs that release build anything, so only they restore or save the cache.
+      - uses: Swatinem/rust-cache@v2
+        if: steps.decide.outputs.release == 'true'
       - name: Build
         if: steps.decide.outputs.release == 'true'
         shell: bash

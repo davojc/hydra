@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
+use hydra_core::bindedit;
 use hydra_core::bindings;
 use hydra_core::borrow::{NOT_BORROWABLE, declared_owner};
 use hydra_core::config::{EnvConfig, GlobalConfig, load_env, load_global, parse_env};
@@ -158,6 +159,36 @@ impl Hydra {
         envs::create(&self.paths, &n)
             .map(|_| ())
             .map_err(|e| e.to_string())
+    }
+
+    /// Deletes `env` as `hydra env rm` does (spec §7.4): refused while hydraui or another
+    /// process has its terminals open; saved logins only when `delete_logins`.
+    pub fn delete_env(
+        &self,
+        env: &str,
+        open_in_hydraui: usize,
+        delete_logins: bool,
+    ) -> Result<envs::RemoveReport, String> {
+        if open_in_hydraui > 0 {
+            return Err(format!(
+                "{env} has {open_in_hydraui} terminals open in hydraui: close them first"
+            ));
+        }
+        let name = EnvName::parse(env).map_err(|e| e.to_string())?;
+        envs::remove(&self.paths, &name, self.store.as_ref(), delete_logins)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Makes `dir` `env`'s home (new terminals open there) and binds the folder to it, as
+    /// `hydra env new --home` does. Nothing is written if either edit fails.
+    pub fn set_env_home(&self, env: &str, dir: &Path) -> Result<(), String> {
+        let name = EnvName::parse(env).map_err(|e| e.to_string())?;
+        let text = bindedit::set_home(&self.env_text(env)?, dir)?;
+        let config_file = self.paths.config_file();
+        let config = std::fs::read_to_string(&config_file).unwrap_or_default();
+        let config = bindedit::add_rule(&config, &bindedit::rule_for_dir(dir), env)?;
+        std::fs::write(self.paths.env_file(&name), text).map_err(|e| e.to_string())?;
+        std::fs::write(&config_file, config).map_err(|e| e.to_string())
     }
 
     /// The environment for a new Loose tab in `cwd`: the folder's binding, else
@@ -635,6 +666,48 @@ mod tests {
 
     fn work_config(f: &Fx) -> EnvConfig {
         load_env(&f.hydra.paths, &EnvName::parse("work").unwrap()).unwrap()
+    }
+
+    #[test]
+    fn delete_is_refused_while_hydraui_has_its_terminals_open() {
+        let f = fx("");
+        let err = f.hydra.delete_env("work", 2, false).unwrap_err();
+        assert!(err.contains("2 terminals"), "{err}");
+        assert!(f.hydra.env_exists("work"));
+    }
+
+    #[test]
+    fn delete_removes_the_env_and_its_secrets_keeping_logins_unless_asked() {
+        let f = fx("");
+        f.hydra.set_secret("work/tok", "v").unwrap();
+        let state = f.hydra.paths.state_dir(&EnvName::parse("work").unwrap());
+        std::fs::create_dir_all(&state).unwrap();
+        let report = f.hydra.delete_env("work", 0, false).unwrap();
+        assert!(!f.hydra.env_exists("work"));
+        assert_eq!(report.secrets, vec!["tok".to_string()]);
+        assert!(state.exists(), "saved logins kept");
+        assert!(!report.state_deleted);
+
+        let personal = f
+            .hydra
+            .paths
+            .state_dir(&EnvName::parse("personal").unwrap());
+        std::fs::create_dir_all(&personal).unwrap();
+        let report = f.hydra.delete_env("personal", 0, true).unwrap();
+        assert!(report.state_deleted);
+        assert!(!personal.exists(), "saved logins deleted when asked");
+    }
+
+    #[test]
+    fn setting_home_writes_it_and_binds_the_folder() {
+        let f = fx("");
+        f.hydra.set_env_home("work", &f.free).unwrap();
+        let text =
+            std::fs::read_to_string(f.hydra.paths.env_file(&EnvName::parse("work").unwrap()))
+                .unwrap();
+        assert!(text.contains("home ="), "{text}");
+        let config = std::fs::read_to_string(f.hydra.paths.config_file()).unwrap();
+        assert!(config.contains("\"work\""), "{config}");
     }
 
     #[test]

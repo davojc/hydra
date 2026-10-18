@@ -6,15 +6,16 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{Context, Window, div, px};
+use gpui::{Context, Hsla, Window, div, px, rgb};
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::checkbox::Checkbox;
 use gpui_component::command::{Command, CommandItem, CommandState};
 use gpui_component::input::{Input, InputState};
 use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, Disableable, Theme, ThemeMode, WindowExt, h_flex, v_flex};
 use hydraui_sets::{list_sets, load_set};
 
-use super::Workspace;
+use super::{Workspace, env_item};
 use crate::config::{self, ThemeChoice};
 use crate::hydra::Hydra;
 use crate::keys::Launcher;
@@ -106,6 +107,16 @@ impl Workspace {
             }
             Action::SetSecret(path) => self.secret_dialog(Some(path), window, cx),
             Action::NewSecret => self.secret_dialog(None, window, cx),
+            Action::DeleteEnv => {
+                self.choose_env("Delete which environment?", window, cx, |ws, env, w, cx| {
+                    ws.delete_env_dialog(env, w, cx)
+                })
+            }
+            Action::SetEnvHome => {
+                self.choose_env("Set the home of…", window, cx, |ws, env, w, cx| {
+                    ws.set_env_home(env, w, cx)
+                })
+            }
             Action::NewEnv => self.new_env_dialog(window, cx),
             Action::OpenFile => self.open_file_finder(window, cx),
             Action::SearchFiles => self.search_dialog(window, cx),
@@ -190,6 +201,156 @@ impl Workspace {
                             },
                         )),
                 )
+        });
+    }
+
+    /// Asks which environment (each with its colour, as on its tabs), then calls `then`.
+    fn choose_env(
+        &mut self,
+        title: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let envs = self.hydra.env_names();
+        if envs.is_empty() {
+            window.push_notification(
+                Notification::info("There are no environments yet.").title("Environments"),
+                cx,
+            );
+            return;
+        }
+        let swatches: Vec<(String, Hsla)> = envs
+            .iter()
+            .map(|e| (e.clone(), rgb(self.hydra.tint(e)).into()))
+            .collect();
+        let state = cx.new(|cx| CommandState::new(window, cx));
+        let workspace = cx.entity();
+        let then = Rc::new(then);
+        let first = Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first.replace(false) {
+                state.update(cx, |s, cx| s.focus(window, cx));
+            }
+            let (choices, workspace, then) = (envs.clone(), workspace.clone(), then.clone());
+            dialog.title(title).child(
+                Command::new(&state)
+                    .items(swatches.iter().map(|(e, c)| env_item(e, Some(*c))))
+                    .placeholder("Environment")
+                    .on_confirm(move |ix, window, cx| {
+                        if let Some(env) = choices.get(ix.row).cloned() {
+                            window.close_dialog(cx);
+                            workspace.update(cx, |ws, cx| then(ws, env, window, cx));
+                        }
+                    }),
+            )
+        });
+    }
+
+    /// Deletes `env` after a confirmation, as `hydra env rm` does (spec §7.4); its saved
+    /// logins go too only when ticked. Refused while hydraui has its terminals open.
+    fn delete_env_dialog(&mut self, env: String, window: &mut Window, cx: &mut Context<Self>) {
+        let open = self
+            .panes
+            .values()
+            .filter(|v| v.read(cx).env() == env)
+            .count();
+        if open > 0 {
+            if let Err(e) = self.hydra.delete_env(&env, open, false) {
+                window.push_notification(Notification::error(e).title("Delete environment"), cx);
+            }
+            return;
+        }
+        let logins = Rc::new(Cell::new(false));
+        let workspace = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (ws, env, ticked, flag) =
+                (workspace.clone(), env.clone(), logins.get(), logins.clone());
+            dialog
+                .title("Delete environment")
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(format!("Delete {env}? Its folder and secrets go."))
+                        .child(
+                            Checkbox::new("delete-logins")
+                                .label("Also delete its saved logins")
+                                .checked(ticked)
+                                .on_click(move |on, window, _| {
+                                    flag.set(*on);
+                                    window.refresh();
+                                }),
+                        ),
+                )
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(Button::new("delete").label("Delete").danger().on_click(
+                            move |_, window, cx| {
+                                window.close_dialog(cx);
+                                ws.update(cx, |ws, cx| ws.finish_delete(&env, ticked, window, cx));
+                            },
+                        )),
+                )
+        });
+    }
+
+    fn finish_delete(
+        &mut self,
+        env: &str,
+        logins: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.hydra.delete_env(env, 0, logins) {
+            Ok(report) => {
+                let mut text = format!("Deleted {env}");
+                if !report.secrets.is_empty() {
+                    text.push_str(&format!(" and its secrets: {}", report.secrets.join(", ")));
+                }
+                if report.state_deleted {
+                    text.push_str("; its saved logins too");
+                }
+                if !report.bindings.is_empty() {
+                    text.push_str(&format!(
+                        ". Still bound in config.toml: {}",
+                        report.bindings.join(", ")
+                    ));
+                }
+                window
+                    .push_notification(Notification::success(text).title("Delete environment"), cx);
+                self.reload_config(window, cx);
+            }
+            Err(e) => {
+                window.push_notification(Notification::error(e).title("Delete environment"), cx)
+            }
+        }
+    }
+
+    /// Asks for a folder, then makes it `env`'s home and binds it to `env`.
+    fn set_env_home(&mut self, env: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_dialog_path(true, window, cx, move |ws, dir, window, cx| {
+            match ws.hydra.set_env_home(&env, &dir) {
+                Ok(()) => {
+                    window.push_notification(
+                        Notification::success(format!(
+                            "New {env} terminals open in {}, and the folder is bound to {env}",
+                            dir.display()
+                        ))
+                        .title("Set environment home"),
+                        cx,
+                    );
+                    ws.reload_config(window, cx);
+                }
+                Err(e) => window
+                    .push_notification(Notification::error(e).title("Set environment home"), cx),
+            }
         });
     }
 

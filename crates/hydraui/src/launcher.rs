@@ -32,6 +32,10 @@ pub enum Action {
     OpenGroupFile,
     /// Save every Loose tab into one group file.
     SaveLooseAsGroup,
+    /// Delete an environment, picked in the dialog, as `hydra env rm` does.
+    DeleteEnv,
+    /// Set an environment's home folder, picked in the dialogs.
+    SetEnvHome,
     /// Create an environment, named in the dialog.
     NewEnv,
     /// Store a value for this `env/key`.
@@ -100,6 +104,8 @@ pub fn entries(
     add("Save layout to file…".into(), Action::SaveLayout);
     add("Open group file…".into(), Action::OpenGroupFile);
     add("Save Loose tabs as group…".into(), Action::SaveLooseAsGroup);
+    add("Delete environment…".into(), Action::DeleteEnv);
+    add("Set environment home…".into(), Action::SetEnvHome);
     add("New environment…".into(), Action::NewEnv);
     add("Set secret: other…".into(), Action::NewSecret);
     add("Open config folder".into(), Action::OpenConfigFolder);
@@ -144,6 +150,8 @@ mod tests {
                 "Save layout to file…",
                 "Open group file…",
                 "Save Loose tabs as group…",
+                "Delete environment…",
+                "Set environment home…",
                 "New environment…",
                 "Set secret: other…",
                 "Open config folder",
@@ -171,8 +179,10 @@ mod tests {
         assert_eq!(got[10].action, Action::SaveLayout);
         assert_eq!(got[11].action, Action::OpenGroupFile);
         assert_eq!(got[12].action, Action::SaveLooseAsGroup);
-        assert_eq!(got[13].action, Action::NewEnv);
-        assert_eq!(got[14].action, Action::NewSecret);
+        assert_eq!(got[13].action, Action::DeleteEnv);
+        assert_eq!(got[14].action, Action::SetEnvHome);
+        assert_eq!(got[15].action, Action::NewEnv);
+        assert_eq!(got[16].action, Action::NewSecret);
     }
 
     #[test]
@@ -188,6 +198,8 @@ mod tests {
                 "Save layout to file…",
                 "Open group file…",
                 "Save Loose tabs as group…",
+                "Delete environment…",
+                "Set environment home…",
                 "New environment…",
                 "Set secret: other…",
                 "Open config folder",
@@ -196,6 +208,8 @@ mod tests {
         );
         assert_eq!(got[0].action, Action::OpenFile);
         assert_eq!(got[1].action, Action::SearchFiles);
-        assert_eq!(got[6].action, Action::NewEnv);
+        assert_eq!(got[6].action, Action::DeleteEnv);
+        assert_eq!(got[7].action, Action::SetEnvHome);
+        assert_eq!(got[8].action, Action::NewEnv);
     }
 }

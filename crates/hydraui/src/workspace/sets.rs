@@ -338,10 +338,12 @@ impl Workspace {
         .detach();
     }
 
-    /// Asks which file to open (the Open dialog), then calls `then` with it. Cancel does
-    /// nothing. Debug builds take `HYDRAUI_TEST_OPEN_PATH` instead, for smoke tests.
-    fn open_dialog_path(
+    /// Asks which file (or folder) to open (the Open dialog), then calls `then` with it.
+    /// Cancel does nothing. Debug builds take `HYDRAUI_TEST_OPEN_PATH` instead, for smoke
+    /// tests.
+    pub(super) fn open_dialog_path(
         &mut self,
+        folder: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
         then: impl FnOnce(&mut Self, PathBuf, &mut Window, &mut Context<Self>) + 'static,
@@ -352,8 +354,8 @@ impl Workspace {
             return;
         }
         let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: true,
-            directories: false,
+            files: !folder,
+            directories: folder,
             multiple: false,
             prompt: None,
         });
@@ -398,19 +400,22 @@ impl Workspace {
     }
 
     pub(super) fn open_layout_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_dialog_path(window, cx, |ws, path, window, cx| {
-            match read_layout(&path) {
+        self.open_dialog_path(
+            false,
+            window,
+            cx,
+            |ws, path, window, cx| match read_layout(&path) {
                 Ok(layout) => {
                     ws.open_layout(layout, window, cx);
                     ws.save_session(window, cx);
                 }
                 Err(e) => window.push_notification(Notification::error(e).title("Open layout"), cx),
-            }
-        });
+            },
+        );
     }
 
     pub(super) fn open_group_file_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_dialog_path(window, cx, |ws, path, window, cx| {
+        self.open_dialog_path(false, window, cx, |ws, path, window, cx| {
             if ws.open_group_file(&path, window, cx) {
                 ws.save_session(window, cx);
             }

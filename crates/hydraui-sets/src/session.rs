@@ -1,5 +1,5 @@
-//! `<HYDRA_HOME>/hydraui/session.toml`: what was open at last exit (loaded sets, tabs opened
-//! by hand, the file tree, the tab in front), reopened at start.
+//! `<HYDRA_HOME>/hydraui/session.toml`: what was open at last exit, from before layouts were
+//! files (spec §7.12). Only `migrate_session` reads it now; `Session` is the layout format.
 use std::path::PathBuf;
 
 use hydra_core::paths::HydraPaths;

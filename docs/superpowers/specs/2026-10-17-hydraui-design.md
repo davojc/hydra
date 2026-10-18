@@ -368,6 +368,13 @@ respected; `notify` keeps it current.
 - Ctrl-click a file: insert its quoted path at the terminal's cursor.
 - Double-click a folder: send `cd '<path>'` + Enter, only when the pane is
   `AtPrompt`; otherwise disabled with a tooltip.
+- In a git repository, files show their status from `git status`
+  (`porcelain=v2`, refreshed with the status bar's): **M** modified (yellow),
+  **A** added and **?** untracked (green), **D** deleted (red), ignored files
+  dimmed; a folder holding changes gets a dot. Outside a repository nothing
+  is shown.
+- Right-click a changed file: **Show changes** opens a side-by-side diff of
+  the file against the last commit in the file pane (§7.8).
 
 ### 7.4 Launcher
 
@@ -385,6 +392,17 @@ respected; `notify` keeps it current.
 - **Set secret**: pick `<env>/<key>` (from references in `env.toml` that
   aren't stored yet, or typed), enter the value in a masked input, store via
   hydra's secret store.
+- **Open file…** (Ctrl+Shift+O) and **Search in files…** (Ctrl+Shift+F),
+  §7.10.
+- **Delete environment…**: like `hydra env rm`: refused while the
+  environment has open terminals (hydraui's panes, or hydra's running lock for
+  other processes), naming them; otherwise a confirm listing its folder and
+  secrets, then a separate question whether to delete its saved logins too.
+  Bindings still pointing at it are listed, not removed. A failure partway is
+  reported; what was deleted stays deleted.
+- **Set environment home…**: a folder from the Open dialog becomes the
+  environment's home (new terminals open there) and is bound to it, as
+  `hydra env new --home` does.
 - Open config folder; Reload config.
 
 ### 7.5 Errors
@@ -472,6 +490,17 @@ Opening a file, choosing a file tab or moving the focus to the pane focuses
 the file: its editor in Raw. Opening, closing and switching file tabs save the
 session at once.
 
+**Diff tabs.** Show changes (§7.3) opens a read-only "diff" file tab: the file
+against the last commit (`git diff HEAD -- <file>`; `--no-index` for an
+untracked file) in gpui-component's diff view, side by side, with Open file
+to switch to the file. If git fails the tab shows git's error; a binary file
+shows "binary file changed".
+
+**Opening at a line.** Quick open, search and clickable paths (§7.10) open a
+file at a line and column: the file's tab (a new one or the open one), Raw
+for Markdown, the cursor on that line, scrolled into view. A line past the end
+goes to the last line.
+
 **Which terminal.** The status bar, git summary, the tree's root, Ctrl-click
 insert, double-click `cd` and Split use the focused pane when it is a
 terminal, else the tab's last focused terminal. Split, close and focus moves
@@ -512,6 +541,27 @@ groups or tabs partly fail opens the rest, with a toast per failure; a layout
 file given to "Open group file…", or the reverse, says so. Writes are atomic
 (a temporary file, then a replace); a failed write is a toast and changes
 nothing.
+
+### 7.10 Finding files
+
+All three use the focused terminal's folder (§7.8 "Which terminal"; the
+user's home when there is none) and respect `.gitignore` as the tree does.
+
+- **Clickable paths.** Ctrl+click a path in terminal output to open it at its
+  line (§7.8): `src/main.rs`, `src/main.rs:42`, `src/main.rs:42:7`,
+  `src\main.rs(42,7)` (MSVC / C#), absolute or relative to the terminal's
+  folder. Only existing files count, so other words never become links; the
+  path underlines while hovered with Ctrl held. OSC 8 links keep working as
+  before.
+- **Quick open** (`Ctrl+Shift+O`, rebindable as `open_file`): a picker of the
+  folder's files (at most 50,000, with a note when cut off), fuzzy-matched as
+  typed — consecutive letters, word starts and the file name rank higher, so
+  `wsrs` finds `workspace.rs`. `name:42` opens at line 42.
+- **Search in files** (`Ctrl+Shift+F`, rebindable as `search`): plain text,
+  with case-sensitive and regex toggles; results as `file:line` and the line,
+  opening at that line. It stops at 1,000 results and says so, skips files
+  over 5 MB and binary files (§7.8's rules), and a newer search cancels an
+  older one. An invalid regex shows its error and searches nothing.
 
 ## 8. Errors summary
 

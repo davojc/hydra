@@ -9,12 +9,12 @@ use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context, DispatchPhase,
+    AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font,
-    Hsla, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point, ScrollDelta, ScrollWheelEvent, SharedString, StrikethroughStyle, Subscription,
-    Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, canvas, div, fill, font,
-    outline, point, px, rgb, size,
+    Hsla, KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, SharedString,
+    StrikethroughStyle, Subscription, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle,
+    Window, canvas, div, fill, font, outline, point, px, rgb, size,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -26,7 +26,9 @@ use hydraui_term::alacritty_terminal::term::search::Match;
 use hydraui_term::alacritty_terminal::term::{TermMode, viewport_to_point};
 use hydraui_term::{GridSize, Pane, PromptState, TermEvent};
 
-use crate::frame::{CursorKind, Frame, Style, build_frame, find_next, link_at, visible_rows};
+use crate::frame::{
+    CursorKind, Frame, Span, Style, build_frame, find_next, link_at, underline_cells, visible_rows,
+};
 use crate::hydra::{Hydra, PaneRequest, Started};
 use crate::input::{
     Mods, MouseKind, ReportButton, Wheel, key_bytes, mouse_report, paste_bytes, wheel,
@@ -87,6 +89,11 @@ pub struct PaneView {
     origin: Point<Pixels>,
     cursor_cell: Option<(usize, usize)>,
     selecting: bool,
+    /// The mouse's last position over the grid, for the Ctrl-hover underline.
+    mouse: Option<Point<Pixels>>,
+    /// The cell the underline was last worked out for, and the cells it underlines.
+    hover_at: Option<(usize, usize)>,
+    hover: Vec<Span>,
     /// The "Copied" label shows until then.
     copied_until: Option<std::time::Instant>,
     finder: Option<Finder>,
@@ -200,6 +207,9 @@ impl PaneView {
             cell: None,
             origin: Point::default(),
             cursor_cell: None,
+            mouse: None,
+            hover_at: None,
+            hover: Vec::new(),
             selecting: false,
             copied_until: None,
             finder: None,
@@ -350,7 +360,57 @@ impl PaneView {
         let Slot::Running(pane) = &self.slot else {
             return None;
         };
-        Some(pane.with_term(|t| build_frame(t, &self.style.palette, focused)))
+        let mut frame = pane.with_term(|t| build_frame(t, &self.style.palette, focused));
+        underline_cells(&mut frame, &self.hover);
+        Some(frame)
+    }
+
+    /// While Ctrl is held, underlines the link or file path under the mouse: what Ctrl+click
+    /// would open (spec §7.10). Worked out again only when the mouse reaches another cell.
+    fn update_hover(&mut self, ctrl: bool, cx: &mut Context<Self>) {
+        // Smoke tests can't hold a real Ctrl: debug builds take HYDRAUI_TEST_CTRL_HOVER.
+        let ctrl = ctrl
+            || (cfg!(debug_assertions) && std::env::var_os("HYDRAUI_TEST_CTRL_HOVER").is_some());
+        let cell = if ctrl {
+            self.mouse
+                .and_then(|p| self.hit_at(p))
+                .map(|(row, col, _)| (row, col))
+        } else {
+            None
+        };
+        if cell == self.hover_at {
+            return;
+        }
+        self.hover_at = cell;
+        let spans = match (cell, &self.slot) {
+            (Some((row, col)), Slot::Running(pane)) => pane.with_term(|t| {
+                if let Some(url) = link_at(t, row, col) {
+                    let same = |c: usize| link_at(t, row, c).as_deref() == Some(url.as_str());
+                    let mut start = col;
+                    while start > 0 && same(start - 1) {
+                        start -= 1;
+                    }
+                    let mut end = col + 1;
+                    while same(end) {
+                        end += 1;
+                    }
+                    return vec![Span { row, start, end }];
+                }
+                let rows = visible_rows(t);
+                if row >= rows.len() {
+                    return Vec::new();
+                }
+                let (text, at) = crate::term_paths::join_wrapped(&rows, row, col);
+                crate::term_paths::path_span_at(&text, at, &self.cwd, &|p| p.is_file())
+                    .map(|(_, span)| crate::term_paths::wrapped_spans(&rows, row, span))
+                    .unwrap_or_default()
+            }),
+            _ => Vec::new(),
+        };
+        if spans != self.hover {
+            self.hover = spans;
+            cx.notify();
+        }
     }
 
     /// The cell under a window position, or `None` off the grid.
@@ -568,7 +628,9 @@ impl PaneView {
         }
     }
 
-    fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.mouse = Some(ev.position);
+        self.update_hover(ev.modifiers.control, cx);
         if !self.selecting {
             self.report(
                 ev.pressed_button.and_then(report_button),
@@ -580,6 +642,9 @@ impl PaneView {
     }
 
     fn on_scroll(&mut self, ev: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // The rows move under the mouse: what's underlined changes.
+        self.hover_at = None;
+        self.update_hover(ev.modifiers.control, cx);
         let (Slot::Running(pane), Some((_, ch))) = (&self.slot, self.cell) else {
             return;
         };
@@ -1058,6 +1123,12 @@ impl Render for PaneView {
                     .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up))
                     .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up))
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
+                    .on_modifiers_changed(cx.listener(|v, ev: &ModifiersChangedEvent, _, cx| {
+                        v.update_hover(ev.modifiers.control, cx)
+                    }))
+                    .when(!self.hover.is_empty(), |d| {
+                        d.cursor(CursorStyle::PointingHand)
+                    })
                     .on_scroll_wheel(cx.listener(Self::on_scroll))
                     .relative()
                     .child(body)

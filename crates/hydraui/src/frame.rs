@@ -202,6 +202,46 @@ pub fn build_frame<T: EventListener>(term: &Term<T>, palette: &Palette, focused:
     frame
 }
 
+/// Underlines the cells in `spans` (the link or path under a Ctrl-hover).
+pub fn underline_cells(frame: &mut Frame, spans: &[Span]) {
+    for span in spans {
+        let Some(row) = frame.rows.get_mut(span.row) else {
+            continue;
+        };
+        // One style per character (a cell), then merged back into runs.
+        let mut styles: Vec<(usize, Style)> = Vec::new();
+        let mut chars = row.text.chars();
+        for run in &row.runs {
+            let mut left = run.len;
+            while left > 0 {
+                let Some(c) = chars.next() else { break };
+                styles.push((c.len_utf8(), run.style));
+                left = left.saturating_sub(c.len_utf8());
+            }
+        }
+        for (_, style) in styles
+            .iter_mut()
+            .skip(span.start)
+            .take(span.end.saturating_sub(span.start))
+        {
+            style.underline = true;
+        }
+        let mut runs: Vec<Run> = Vec::new();
+        for (len, style) in styles {
+            match runs.last_mut() {
+                Some(last) if last.style == style => last.len += len,
+                _ => runs.push(Run { len, style }),
+            }
+        }
+        row.runs = runs;
+        for g in &mut row.glyphs {
+            if (span.start..span.end).contains(&g.col) {
+                g.style.underline = true;
+            }
+        }
+    }
+}
+
 /// The OSC 8 link at a visible cell, if any.
 pub fn link_at<T>(term: &Term<T>, row: usize, col: usize) -> Option<String> {
     if row >= term.screen_lines() || col >= term.columns() {
@@ -460,5 +500,48 @@ mod tests {
         let m = find_next(&t, "a.b", None, Direction::Left).unwrap();
         assert_eq!(m.start().column, Column(4));
         assert_eq!(literal("(1+1)"), "\\(1\\+1\\)");
+    }
+
+    #[test]
+    fn underlining_cells_splits_the_runs_around_them() {
+        let plain = Style {
+            fg: 1,
+            bold: false,
+            italic: false,
+            underline: false,
+            strikeout: false,
+        };
+        let mut frame = Frame {
+            rows: vec![Row {
+                text: "abcdef".into(),
+                runs: vec![Run {
+                    len: 6,
+                    style: plain,
+                }],
+                glyphs: Vec::new(),
+                backgrounds: Vec::new(),
+            }],
+            cursor: None,
+            selection: Vec::new(),
+        };
+        underline_cells(
+            &mut frame,
+            &[Span {
+                row: 0,
+                start: 2,
+                end: 4,
+            }],
+        );
+        let lined = Style {
+            underline: true,
+            ..plain
+        };
+        let runs: Vec<(usize, bool)> = frame.rows[0]
+            .runs
+            .iter()
+            .map(|r| (r.len, r.style.underline))
+            .collect();
+        assert_eq!(runs, vec![(2, false), (2, true), (2, false)]);
+        assert_eq!(frame.rows[0].runs[1].style, lined);
     }
 }

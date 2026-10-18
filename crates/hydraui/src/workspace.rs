@@ -4,6 +4,7 @@ mod accounts;
 mod finder;
 mod launcher;
 mod sets;
+mod title_bar;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -111,6 +112,9 @@ pub struct Workspace {
     _timer: Task<()>,
     /// Whether the status bar's accounts popover is open.
     accounts_open: bool,
+    /// The title bar's Update button (spec §7.11).
+    update: crate::updater::UpdateState,
+    _update_checks: Option<Task<()>>,
 }
 
 impl Workspace {
@@ -191,11 +195,14 @@ impl Workspace {
             subs: HashMap::new(),
             _timer: timer,
             accounts_open: false,
+            update: Default::default(),
+            _update_checks: None,
         }
     }
 
     /// Shows what was wrong with the settings, then opens the first tab in the home folder.
     fn startup(&mut self, problems: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_update_checks(cx);
         for p in problems {
             window.push_notification(Notification::warning(p).title("hydraui settings"), cx);
         }
@@ -1244,6 +1251,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_tree))
             .on_action(cx.listener(Self::open_file_action))
             .on_action(cx.listener(Self::search_action))
+            .child(self.render_title_bar(cx))
             .child(self.render_tab_strip(bar, border, muted, cx))
             .child(
                 h_flex()

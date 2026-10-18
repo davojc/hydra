@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{App, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
+use gpui::{App, Bounds, WindowBounds, WindowOptions, px, size};
 use gpui_component::{Root, Theme, ThemeMode};
 use hydraui::config::{self, ThemeChoice};
 use hydraui::hydra::Hydra;
@@ -28,6 +28,11 @@ fn main() {
         .collect();
     // Init scripts left by earlier runs (spec §4.5).
     hydraui_term::clear_pane_inits(&hydra.paths);
+    // Exes a previous update replaced (spec §7.11).
+    if let Ok(exe) = std::env::current_exe() {
+        let hydra = hydraui::updater::find_hydra(&exe, std::env::var_os("PATH").as_deref());
+        hydraui::updater::clean_old(&exe, hydra.as_deref());
+    }
     gpui_platform::application()
         .with_assets(gpui_kit_assets::Assets)
         .run(move |cx: &mut App| {
@@ -54,12 +59,9 @@ fn main() {
             let bounds = Bounds::centered(None, size(px(1200.), px(760.)), cx);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("hydraui".into()),
-                    ..Default::default()
-                }),
                 window_min_size: Some(size(px(480.), px(320.))),
-                ..Default::default()
+                // hydraui draws its own title bar (spec §7.11).
+                ..gpui_component::TitleBar::window_options()
             };
             cx.open_window(options, |window, cx| {
                 let workspace =

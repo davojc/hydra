@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use sha2::{Digest, Sha256};
 
+#[cfg(any(test, feature = "fake"))]
+pub mod fake;
 pub mod release;
 
 use release::{Release, WindowsBuild};

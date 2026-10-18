@@ -2962,6 +2962,7 @@ dependencies = [
 name = "hydraui"
 version = "0.6.0"
 dependencies = [
+ "anyhow",
  "dirs 6.0.0",
  "futures",
  "gpui-base",
@@ -2972,11 +2973,13 @@ dependencies = [
  "hydra-core",
  "hydra-platform",
  "hydra-providers",
+ "hydra-update",
  "hydraui-sets",
  "hydraui-term",
  "ignore",
  "notify",
  "regex",
+ "semver",
  "serde",
  "tempfile",
  "toml 0.8.23",

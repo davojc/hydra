@@ -22,4 +22,6 @@ pub mod search;
 pub mod split;
 pub mod tabs;
 pub mod term_paths;
+pub mod updater;
+pub mod version;
 pub mod workspace;

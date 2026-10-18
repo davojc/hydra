@@ -12,6 +12,7 @@ path = "src/main.rs"
 hydra-core.workspace = true
 hydra-platform.workspace = true
 hydra-providers.workspace = true
+hydra-update.workspace = true
 dirs.workspace = true
 hydraui-term.workspace = true
 hydraui-sets.workspace = true
@@ -27,8 +28,11 @@ notify.workspace = true
 windows-sys.workspace = true
 serde.workspace = true
 toml.workspace = true
+semver.workspace = true
+anyhow.workspace = true
 
 [dev-dependencies]
+hydra-update = { workspace = true, features = ["fake"] }
 tempfile.workspace = true
 
 [build-dependencies]

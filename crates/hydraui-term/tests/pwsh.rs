@@ -138,6 +138,24 @@ fn a_flood_of_output_sends_one_wakeup_until_the_app_renders() {
 }
 
 #[test]
+fn output_time_is_kept_without_rendering() {
+    // A background tab is never drawn, so the Wakeup events stop after the first; the busy
+    // indicator needs the time of the latest output anyway.
+    let fx = Fx::new();
+    let Some((pane, _rx)) = fx.spawn(
+        PWSH,
+        Some("1..4 | % { Start-Sleep -Milliseconds 700; \"tick $_\" }"),
+    ) else {
+        return;
+    };
+    wait_text(&pane, "tick 1");
+    let first = pane.last_output().expect("output seen");
+    wait_text(&pane, "tick 3");
+    let later = pane.last_output().unwrap();
+    assert!(later > first, "{first:?} → {later:?}");
+}
+
+#[test]
 fn dropping_a_busy_pane_ends_the_whole_tree_promptly() {
     let fx = Fx::new();
     let pid_file = fx.dir.path().join("pid.txt");

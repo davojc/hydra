@@ -208,6 +208,8 @@ pub fn read(dir: &Path) -> Option<GitStatus> {
     let text = git(
         dir,
         &[
+            // Status may refresh the index otherwise, which the repository watch would see.
+            "--no-optional-locks",
             "-c",
             "core.quotePath=false",
             "status",

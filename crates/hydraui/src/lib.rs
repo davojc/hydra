@@ -1,6 +1,7 @@
 //! hydraui: a desktop terminal for hydra environments
 //! (spec: docs/superpowers/specs/2026-10-17-hydraui-design.md).
 pub mod accounts;
+pub mod activity;
 pub mod config;
 pub mod file_doc;
 pub mod file_pane;
@@ -8,6 +9,7 @@ pub mod file_tree;
 pub mod file_tree_view;
 pub mod frame;
 pub mod git_status;
+pub mod git_watch;
 pub mod hydra;
 pub mod input;
 pub mod keys;

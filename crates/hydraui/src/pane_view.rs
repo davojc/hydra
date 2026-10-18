@@ -235,6 +235,29 @@ impl PaneView {
         self.prompt
     }
 
+    /// What the terminal is doing now, for the tab strip.
+    pub fn activity(&self, now: std::time::Instant) -> crate::activity::Activity {
+        // The pane's own clock: a hidden pane gets no Wakeups after the first.
+        let (running, last) = match &self.slot {
+            Slot::Running(pane) => (true, pane.last_output()),
+            _ => (false, None),
+        };
+        crate::activity::activity(running, self.prompt, last, now)
+    }
+
+    /// The exe names of what runs in the terminal (its shell included).
+    pub fn process_names(&self) -> Vec<String> {
+        match &self.slot {
+            Slot::Running(pane) => pane.process_names(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The title the program set, if any.
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
     /// The tab label: the title a program set, else the folder's name.
     pub fn label(&self) -> String {
         self.title.clone().unwrap_or_else(|| {

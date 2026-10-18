@@ -1,6 +1,7 @@
 //! The window's content (spec §7.1, §7.5, §7.6): the tab strip, the active tab's split panes
 //! with draggable dividers, the status bar, and the commands bound to keys.
 mod accounts;
+mod busy;
 mod finder;
 mod launcher;
 mod sets;
@@ -42,6 +43,7 @@ use crate::open_files::{last_terminal_closes_tab, terminal_for};
 use crate::pane_view::{PaneEvent, PaneView, TermStyle};
 use crate::split::{Axis, Dir, PaneId, Tree};
 use crate::tabs::{Closed, TabId, Tabs};
+use busy::PaneActivity;
 
 /// A divider being dragged: the split's path in the active tab's tree.
 /// The file tree's width: it starts at the default, can't be dragged narrower than the
@@ -110,6 +112,13 @@ pub struct Workspace {
     title: String,
     subs: HashMap<PaneId, Subscription>,
     _timer: Task<()>,
+    /// The focused terminal's repository, watched so git marks follow changes at once.
+    git_watch: Option<crate::git_watch::GitWatch>,
+    git_tx: futures::channel::mpsc::UnboundedSender<()>,
+    _git_pump: Task<()>,
+    /// Each terminal's busy state for the tab strip, checked every second.
+    activity: HashMap<PaneId, PaneActivity>,
+    _activity_tick: Task<()>,
     /// Whether the status bar's accounts popover is open.
     accounts_open: bool,
     /// The title bar's Update button (spec §7.11).
@@ -126,6 +135,30 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // Repository changes: wait for a burst to settle, then one `git status`.
+        let (git_tx, mut git_rx) = futures::channel::mpsc::unbounded::<()>();
+        let git_pump = cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            while git_rx.next().await.is_some() {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(300))
+                    .await;
+                while git_rx.try_recv().is_ok() {}
+                if this.update(cx, |ws, cx| ws.refresh_git(cx)).is_err() {
+                    break;
+                }
+            }
+        });
+        let activity_tick = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                if this.update(cx, |ws, cx| ws.tick_activity(cx)).is_err() {
+                    break;
+                }
+            }
+        });
         let timer = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(STATUS_TTL).await;
@@ -194,6 +227,11 @@ impl Workspace {
             title: String::new(),
             subs: HashMap::new(),
             _timer: timer,
+            git_watch: None,
+            git_tx,
+            _git_pump: git_pump,
+            activity: HashMap::new(),
+            _activity_tick: activity_tick,
             accounts_open: false,
             update: Default::default(),
             _update_checks: None,
@@ -734,6 +772,12 @@ impl Workspace {
                         .unwrap_or_default();
                     tree.update(cx, |t, cx| t.set_git(root, files, renamed, cx));
                 }
+                // Watch this repository (and only it) for changes.
+                let root = status.as_ref().and_then(|s| s.root.clone());
+                if ws.git_watch.as_ref().map(|w| &w.root) != root.as_ref() {
+                    ws.git_watch =
+                        root.and_then(|r| crate::git_watch::GitWatch::new(r, ws.git_tx.clone()));
+                }
                 let line = status.as_ref().map(git_status::summary);
                 ws.git = Some((cwd, line));
                 ws.git_busy = false;
@@ -1104,6 +1148,10 @@ impl Workspace {
                     .unwrap_or_default();
                 let tint = self.tint(&env);
                 let label = tab.title.clone().unwrap_or(label);
+                let busy = self
+                    .tab_activity(tab)
+                    .map(|a| self.render_busy(id, &a, tint, cx));
+                let tip = busy.as_ref().map(|(_, t)| t.clone());
                 strip = strip.child(
                     h_flex()
                         .id(("tab", id))
@@ -1120,6 +1168,12 @@ impl Workspace {
                         }))
                         .child(div().size(px(8.)).rounded_full().bg(tint))
                         .child(div().text_sm().child(label))
+                        .children(busy.map(|(el, _)| el))
+                        .when_some(tip, |d, tip| {
+                            d.tooltip(move |window, cx| {
+                                gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                            })
+                        })
                         .context_menu({
                             let ws = cx.entity();
                             move |menu, _, _| {

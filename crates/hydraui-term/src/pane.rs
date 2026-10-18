@@ -109,6 +109,10 @@ pub struct Pane {
     wake: Arc<AtomicBool>,
     init: PathBuf,
     job: Option<Job>,
+    /// The shell's process id, to find what it runs (the busy indicator).
+    shell_pid: Option<u32>,
+    /// When output last arrived (see `OutputClock`).
+    output: Arc<OutputClock>,
     /// Last field: released after everything else is gone.
     _lock: ShellLock,
 }
@@ -161,6 +165,8 @@ impl Pane {
             wake: started.wake,
             init,
             job: Some(started.job),
+            shell_pid: started.shell_pid,
+            output: started.output,
             _lock: lock,
         };
         Ok((pane, events))
@@ -168,6 +174,20 @@ impl Pane {
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// When output last arrived, whether or not the pane has been drawn since (a background
+    /// tab never is); `None` before any.
+    pub fn last_output(&self) -> Option<std::time::Instant> {
+        self.output.last()
+    }
+
+    /// The exe names of the processes running in this pane (the shell and what it started);
+    /// empty when the pane has no job object.
+    pub fn process_names(&self) -> Vec<String> {
+        self.shell_pid
+            .map(crate::procs::descendant_names)
+            .unwrap_or_default()
     }
 
     /// Sends input (keys, pasted text) to the shell.
@@ -229,6 +249,8 @@ struct Started {
     killer: Box<dyn ChildKiller + Send + Sync>,
     wake: Arc<AtomicBool>,
     job: Job,
+    shell_pid: Option<u32>,
+    output: Arc<OutputClock>,
 }
 
 /// Opens the ConPTY, starts `cmd` in it inside a new job, and starts the reader and waiter
@@ -241,6 +263,7 @@ fn start(
     let mut child = pair.slave.spawn_command(cmd).map_err(pty_err)?;
     drop(pair.slave);
     let killer = child.clone_killer();
+    let shell_pid = child.process_id();
     let job = Job::new().and_then(|job| {
         let process = child
             .as_raw_handle()
@@ -285,11 +308,12 @@ fn start(
         listener,
     )));
     let wake = Arc::new(AtomicBool::new(false));
+    let output = Arc::new(OutputClock::default());
     {
-        let (term, wake, tx) = (term.clone(), wake.clone(), tx.clone());
+        let (term, wake, tx, clock) = (term.clone(), wake.clone(), tx.clone(), output.clone());
         std::thread::Builder::new()
             .name("hydraui-pty-read".into())
-            .spawn(move || read_loop(reader, &term, &wake, &tx))
+            .spawn(move || read_loop(reader, &term, &wake, &tx, &clock))
             .map_err(io("start the reader thread"))?;
     }
     std::thread::Builder::new()
@@ -307,17 +331,45 @@ fn start(
             killer,
             wake,
             job,
+            shell_pid,
+            output,
         },
         rx,
     ))
 }
 
 /// Feeds PTY output to the grid and the OSC scanner until the PTY closes.
+/// The time of the latest output, shared lock-free between the reader thread and the app.
+#[derive(Default)]
+struct OutputClock(std::sync::atomic::AtomicU64);
+
+/// A fixed point to measure output times from.
+fn epoch() -> std::time::Instant {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(std::time::Instant::now)
+}
+
+impl OutputClock {
+    fn tick(&self) {
+        // +1 so 0 can mean "none yet".
+        let ms = epoch().elapsed().as_millis() as u64 + 1;
+        self.0.store(ms, Ordering::Release);
+    }
+
+    fn last(&self) -> Option<std::time::Instant> {
+        match self.0.load(Ordering::Acquire) {
+            0 => None,
+            ms => Some(epoch() + std::time::Duration::from_millis(ms - 1)),
+        }
+    }
+}
+
 fn read_loop(
     mut reader: Box<dyn Read + Send>,
     term: &FairMutex<Term<Listener>>,
     wake: &AtomicBool,
     tx: &Sender<TermEvent>,
+    clock: &OutputClock,
 ) {
     let mut parser: Processor = Processor::new();
     let mut osc = OscScanner::default();
@@ -329,6 +381,7 @@ fn read_loop(
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => return,
         };
+        clock.tick();
         let found = osc.feed(&buf[..n]);
         parser.advance(&mut *term.lock(), &buf[..n]);
         for o in found {

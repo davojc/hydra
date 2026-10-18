@@ -19,6 +19,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandItem, CommandState};
+use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, IconName, Selectable, Sizable, WindowExt, h_flex, v_flex};
 use hydraui_sets::LoadedSets;
@@ -1034,6 +1035,27 @@ impl Workspace {
                         }))
                         .child(div().size(px(8.)).rounded_full().bg(tint))
                         .child(div().text_sm().child(label))
+                        .context_menu({
+                            let ws = cx.entity();
+                            move |menu, _, _| {
+                                let (save_ws, close_ws) = (ws.clone(), ws.clone());
+                                menu.item(PopupMenuItem::new("Save tab as group…").on_click(
+                                    move |_, window, cx| {
+                                        save_ws.update(cx, |ws, cx| {
+                                            ws.save_tab_as_group(id, window, cx)
+                                        });
+                                    },
+                                ))
+                                .item(
+                                    PopupMenuItem::new("Close tab").on_click(
+                                        move |_, window, cx| {
+                                            close_ws
+                                                .update(cx, |ws, cx| ws.close_tab(id, window, cx));
+                                        },
+                                    ),
+                                )
+                            }
+                        })
                         .child(
                             div()
                                 .id(("close", id))

@@ -10,10 +10,12 @@ use gpui_component::notification::Notification;
 use gpui_component::{Sizable, WindowExt, h_flex, v_flex};
 use std::path::{Path, PathBuf};
 
+use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use hydraui_sets::file::{SetFile, TabFile};
 use hydraui_sets::{
     Context as SetContext, LoadedSet, Session, SetRef, SetSpec, file_modified, load_set,
-    load_set_file, read_session, resolve_loose, sets_dir, write_session,
+    load_set_file, read_layout, read_session, resolve_loose, sets_dir, write_layout, write_session,
+    write_set_file,
 };
 use hydraui_term::PromptState;
 
@@ -280,7 +282,6 @@ impl Workspace {
     }
 
     /// These tabs as a group file (a set file; every pane carries its own env and folder).
-    #[allow(dead_code)] // used from Task 4 of the layout-files plan
     pub(super) fn group_file_of(&self, tabs: &[TabId], cx: &App) -> SetFile {
         SetFile {
             tabs: tabs
@@ -300,6 +301,181 @@ impl Workspace {
                 cx,
             );
         }
+    }
+
+    /// Asks where to save (the Save As dialog), then calls `then` with the path. Cancel does
+    /// nothing. Debug builds take `HYDRAUI_TEST_SAVE_PATH` instead, for smoke tests.
+    fn save_dialog(
+        &mut self,
+        dir: PathBuf,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, PathBuf, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        #[cfg(debug_assertions)]
+        if let Some(p) = std::env::var_os("HYDRAUI_TEST_SAVE_PATH") {
+            then(self, PathBuf::from(p), window, cx);
+            return;
+        }
+        let rx = cx.prompt_for_new_path(&dir, Some(&name));
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(path))) = rx.await {
+                let _ = this.update_in(cx, |ws, window, cx| then(ws, path, window, cx));
+            }
+        })
+        .detach();
+    }
+
+    /// Asks which file to open (the Open dialog), then calls `then` with it. Cancel does
+    /// nothing. Debug builds take `HYDRAUI_TEST_OPEN_PATH` instead, for smoke tests.
+    fn open_dialog_path(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, PathBuf, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        #[cfg(debug_assertions)]
+        if let Some(p) = std::env::var_os("HYDRAUI_TEST_OPEN_PATH") {
+            then(self, PathBuf::from(p), window, cx);
+            return;
+        }
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await
+                && let Some(path) = paths.into_iter().next()
+            {
+                let _ = this.update_in(cx, |ws, window, cx| then(ws, path, window, cx));
+            }
+        })
+        .detach();
+    }
+
+    /// Says how a save went.
+    fn saved(
+        &self,
+        what: &str,
+        path: &Path,
+        result: std::io::Result<()>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let note = match result {
+            Ok(()) => Notification::success(format!("Saved {what} to {}", path.display())),
+            Err(e) => Notification::error(format!("can't save {}: {e}", path.display())),
+        };
+        window.push_notification(note.title("Save"), cx);
+    }
+
+    pub(super) fn save_layout_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dir = self.hydra.user_home.clone();
+        self.save_dialog(
+            dir,
+            "layout.hydraui.toml".into(),
+            window,
+            cx,
+            |ws, path, window, cx| {
+                let result = write_layout(&path, &ws.current_layout(cx));
+                ws.saved("the layout", &path, result, window, cx);
+            },
+        );
+    }
+
+    pub(super) fn open_layout_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_dialog_path(window, cx, |ws, path, window, cx| {
+            match read_layout(&path) {
+                Ok(layout) => {
+                    ws.open_layout(layout, window, cx);
+                    ws.save_session(window, cx);
+                }
+                Err(e) => window.push_notification(Notification::error(e).title("Open layout"), cx),
+            }
+        });
+    }
+
+    pub(super) fn open_group_file_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_dialog_path(window, cx, |ws, path, window, cx| {
+            if ws.open_group_file(&path, window, cx) {
+                ws.save_session(window, cx);
+            }
+        });
+    }
+
+    /// Writes `tabs` to a group file chosen in the Save As dialog, starting at `dir/name`.
+    fn save_tabs_as_group(
+        &mut self,
+        tabs: Vec<TabId>,
+        dir: PathBuf,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.save_dialog(dir, name, window, cx, move |ws, path, window, cx| {
+            let result = write_set_file(&path, &ws.group_file_of(&tabs, cx));
+            ws.saved("the group", &path, result, window, cx);
+        });
+    }
+
+    pub(super) fn save_loose_as_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let loose: Vec<TabId> = self
+            .tabs
+            .iter()
+            .filter(|t| t.set.is_none())
+            .map(|t| t.id)
+            .collect();
+        if loose.is_empty() {
+            window.push_notification(
+                Notification::info("No Loose tabs to save.").title("Save"),
+                cx,
+            );
+            return;
+        }
+        let dir = self.hydra.user_home.clone();
+        self.save_tabs_as_group(loose, dir, "group.toml".into(), window, cx);
+    }
+
+    /// Right-click a tab: Save tab as group… (spec §7.9).
+    pub(super) fn save_tab_as_group(
+        &mut self,
+        tab: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = self
+            .tabs
+            .get(tab)
+            .and_then(|t| {
+                t.title
+                    .clone()
+                    .or_else(|| self.tab_terminal(t).map(|v| v.read(cx).label()))
+            })
+            .unwrap_or_else(|| "tab".into());
+        let dir = self.hydra.user_home.clone();
+        self.save_tabs_as_group(vec![tab], dir, format!("{name}.toml"), window, cx);
+    }
+
+    /// Right-click a group header: Save group…, starting on the group's own file.
+    fn save_group(&mut self, set: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(s) = self.loaded.get(set) else {
+            return;
+        };
+        let dir = s
+            .file
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.hydra.user_home.clone());
+        let name = s
+            .file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| format!("{set}.toml"));
+        let tabs = s.tabs.clone();
+        self.save_tabs_as_group(tabs, dir, name, window, cx);
     }
 
     /// Opens a group file as a set (spec §5.4), or focuses it when it is open already. Says
@@ -439,9 +615,27 @@ impl Workspace {
         let changed_name = set.to_string();
         let reload_name = set.to_string();
         let unload_name = set.to_string();
+        let ws = cx.entity();
+        let menu_set = set.to_string();
         h_flex()
+            .id(id("header"))
             .gap_1()
             .px_1()
+            .context_menu(move |menu, _, _| {
+                let (save_ws, unload_ws) = (ws.clone(), ws.clone());
+                let (save_set, unload_set) = (menu_set.clone(), menu_set.clone());
+                menu.item(
+                    PopupMenuItem::new("Save group…").on_click(move |_, window, cx| {
+                        save_ws.update(cx, |ws, cx| ws.save_group(&save_set, window, cx));
+                    }),
+                )
+                .item(
+                    PopupMenuItem::new("Unload group").on_click(move |_, window, cx| {
+                        unload_ws
+                            .update(cx, |ws, cx| ws.unload_set(&unload_set, false, window, cx));
+                    }),
+                )
+            })
             .child(
                 div()
                     .id(id("set"))

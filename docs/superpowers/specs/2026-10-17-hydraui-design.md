@@ -85,7 +85,9 @@ hydra ignores this folder.
 ~/.hydra/hydraui/
   config.toml      UI settings: font, theme, default env, [keys], editor
   sets/<name>.toml set definitions, hand-edited
-  session.toml     what was open at last exit (written by hydraui)
+  layouts/         saved layouts (*.hydraui), Save As's default folder (§7.12)
+  recent.toml      recent layouts, shared by every hydraui window
+  running/         <pid>.toml: each running window's layout and handle
 ```
 
 hydraui reads, but does not edit, `config.toml` `[bindings]`, `envs/` and
@@ -552,7 +554,7 @@ writes it back.
 
 Opening a file, choosing a file tab or moving the focus to the pane focuses
 the file: its editor in Raw. Opening, closing and switching file tabs save the
-session at once.
+layout at once (in a window backed by a file, §7.12).
 
 **Diff tabs.** Show changes (§7.3) opens a read-only "diff" file tab: the file
 against the last commit (`git diff HEAD -- <file>`; `--no-index` for an

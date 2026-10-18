@@ -526,18 +526,14 @@ fn collect_refs(value: &toml::Value, out: &mut BTreeSet<SecretRef>) {
     }
 }
 
-/// The status bar's accounts: `github: davojc · claude: me@x.com`, skipping info-only rows
-/// and marking problems with `(!)`.
-pub fn accounts_summary(reports: &[IdentityReport]) -> String {
+/// The status bar's accounts: each tool and whether it is OK (a green tick, else a red
+/// cross), skipping info-only rows. The details are in the accounts popover (spec §7.1).
+pub fn account_marks(reports: &[IdentityReport]) -> Vec<(String, bool)> {
     reports
         .iter()
         .filter(|r| r.status != Status::Info)
-        .map(|r| {
-            let mark = if r.status == Status::Ok { "" } else { " (!)" };
-            format!("{}: {}{mark}", r.provider, r.detail)
-        })
-        .collect::<Vec<_>>()
-        .join(" · ")
+        .map(|r| (r.provider.clone(), r.status == Status::Ok))
+        .collect()
 }
 
 /// How long an environment's accounts stay on the status bar before they are checked again
@@ -1054,7 +1050,7 @@ email = \"p@example.com\"
     }
 
     #[test]
-    fn accounts_summary_skips_info_rows() {
+    fn the_bar_shows_each_tool_and_whether_it_is_ok() {
         let r = |provider: &str, status, detail: &str| IdentityReport {
             provider: provider.into(),
             status,
@@ -1064,10 +1060,15 @@ email = \"p@example.com\"
             r("github", Status::Ok, "davojc"),
             r("env", Status::Info, "3 variables"),
             r("claude", Status::Missing, "not signed in"),
+            r("git", Status::Mismatch, "uses a, expected b"),
         ];
         assert_eq!(
-            accounts_summary(&rows),
-            "github: davojc · claude: not signed in (!)"
+            account_marks(&rows),
+            vec![
+                ("github".to_string(), true),
+                ("claude".to_string(), false),
+                ("git".to_string(), false),
+            ]
         );
     }
 

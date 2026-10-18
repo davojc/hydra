@@ -13,6 +13,9 @@ use super::Workspace;
 use crate::keys::OpenFile;
 use crate::quick_open::{list_files, score, split_line};
 
+/// The folder's files once listed, and whether the list was cut off.
+type Listing = Rc<RefCell<Option<(Vec<PathBuf>, bool)>>>;
+
 /// How many files quick open lists at most, and how many matches it shows.
 const MAX_FILES: usize = 50_000;
 const SHOWN: usize = 50;
@@ -32,7 +35,7 @@ impl Workspace {
     pub(super) fn open_file_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let root = self.focused_cwd(cx);
         let state = cx.new(|cx| CommandState::new(window, cx));
-        let files: Rc<RefCell<Option<(Vec<PathBuf>, bool)>>> = Rc::new(RefCell::new(None));
+        let files: Listing = Rc::new(RefCell::new(None));
         let (listed, from) = (files.clone(), root.clone());
         cx.spawn_in(window, async move |_, cx| {
             let found = cx
@@ -61,7 +64,7 @@ impl Workspace {
                             .iter()
                             .filter_map(|p| score(name, &p.to_string_lossy()).map(|s| (s, p)))
                             .collect();
-                        scored.sort_by(|a, b| b.0.cmp(&a.0));
+                        scored.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
                         r.1 = scored
                             .into_iter()
                             .take(SHOWN)

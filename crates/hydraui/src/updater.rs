@@ -36,15 +36,45 @@ pub fn check(url: &str) -> anyhow::Result<Option<Version>> {
     check_against(url, VERSION)
 }
 
-/// The hydra.exe to update alongside hydraui: next to it, else the first on `path_var`.
-pub fn find_hydra(hydraui_exe: &Path, path_var: Option<&OsStr>) -> Option<PathBuf> {
-    let beside = hydraui_exe.parent()?.join("hydra.exe");
-    if beside.is_file() {
-        return Some(beside);
-    }
-    std::env::split_paths(path_var?)
-        .map(|dir| dir.join("hydra.exe"))
-        .find(|p| p.is_file())
+/// The hydra.exe to update alongside hydraui: next to it, else the first on `path_var`;
+/// only one `is_ours` accepts, so another program called hydra.exe is left alone.
+pub fn find_hydra(
+    hydraui_exe: &Path,
+    path_var: Option<&OsStr>,
+    is_ours: &dyn Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let beside = hydraui_exe.parent().map(|d| d.join("hydra.exe"));
+    let on_path: Vec<PathBuf> = path_var
+        .map(|p| {
+            std::env::split_paths(p)
+                .map(|dir| dir.join("hydra.exe"))
+                .collect()
+        })
+        .unwrap_or_default();
+    beside
+        .into_iter()
+        .chain(on_path)
+        .find(|p| p.is_file() && is_ours(p))
+}
+
+/// Whether `hydra --version` printed this hydra's version line (`hydra 0.6.3`).
+pub fn is_hydra_version(stdout: &str) -> bool {
+    stdout
+        .trim()
+        .strip_prefix("hydra ")
+        .is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+}
+
+/// Whether `exe` is this hydra: it answers `--version` with hydra's line. Runs it without a
+/// console window.
+pub fn is_our_hydra(exe: &Path) -> bool {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    hydra_platform::process::hide_window(&mut cmd)
+        .output()
+        .is_ok_and(|o| o.status.success() && is_hydra_version(&String::from_utf8_lossy(&o.stdout)))
 }
 
 /// What an install did.
@@ -194,11 +224,55 @@ mod tests {
         std::fs::write(&ui, "").unwrap();
         std::fs::write(tools.join("hydra.exe"), "").unwrap();
         let path = std::env::join_paths([d.path().join("nowhere"), tools.clone()]).unwrap();
-        assert_eq!(find_hydra(&ui, Some(&path)), Some(tools.join("hydra.exe")));
+        assert_eq!(
+            find_hydra(&ui, Some(&path), &|_| true),
+            Some(tools.join("hydra.exe"))
+        );
         std::fs::write(app.join("hydra.exe"), "").unwrap();
-        assert_eq!(find_hydra(&ui, Some(&path)), Some(app.join("hydra.exe")));
+        assert_eq!(
+            find_hydra(&ui, Some(&path), &|_| true),
+            Some(app.join("hydra.exe"))
+        );
         std::fs::remove_file(app.join("hydra.exe")).unwrap();
-        assert_eq!(find_hydra(&ui, None), None);
+        assert_eq!(find_hydra(&ui, None, &|_| true), None);
+    }
+
+    #[test]
+    fn a_hydra_exe_that_isnt_hydra_is_left_alone() {
+        let d = tempfile::tempdir().unwrap();
+        let (app, other, ours) = (
+            d.path().join("app"),
+            d.path().join("other"),
+            d.path().join("ours"),
+        );
+        for dir in [&app, &other, &ours] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let ui = app.join("hydraui.exe");
+        std::fs::write(&ui, "").unwrap();
+        // Some other program called hydra.exe comes first on PATH.
+        std::fs::write(other.join("hydra.exe"), "").unwrap();
+        std::fs::write(ours.join("hydra.exe"), "").unwrap();
+        let path = std::env::join_paths([other.clone(), ours.clone()]).unwrap();
+        let is_ours = |p: &Path| p.starts_with(&ours);
+        assert_eq!(
+            find_hydra(&ui, Some(&path), &is_ours),
+            Some(ours.join("hydra.exe"))
+        );
+        let only_other = std::env::join_paths([other.clone()]).unwrap();
+        assert_eq!(find_hydra(&ui, Some(&only_other), &is_ours), None);
+    }
+
+    #[test]
+    fn hydras_version_line_is_recognised() {
+        assert!(is_hydra_version(
+            "hydra 0.6.3
+"
+        ));
+        assert!(is_hydra_version("hydra 0.6.0-dev"));
+        assert!(!is_hydra_version("Hydra v9.5 (c) 2023 by van Hauser/THC"));
+        assert!(!is_hydra_version(""));
+        assert!(!is_hydra_version("hydra"));
     }
 
     #[test]

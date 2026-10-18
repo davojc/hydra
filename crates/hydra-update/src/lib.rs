@@ -3,6 +3,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Context;
 use sha2::{Digest, Sha256};
@@ -26,8 +27,21 @@ pub fn latest_url() -> String {
     )
 }
 
+/// How long a connection may go without sending anything before it is given up: a stalled
+/// network fails instead of hanging.
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn get(url: &str, user_agent: &str) -> anyhow::Result<ureq::Response> {
-    match ureq::get(url)
+    get_within(url, user_agent, READ_TIMEOUT)
+}
+
+fn get_within(url: &str, user_agent: &str, read: Duration) -> anyhow::Result<ureq::Response> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(30))
+        .timeout_read(read)
+        .build();
+    match agent
+        .get(url)
         .set("User-Agent", user_agent)
         .set("Accept", "application/vnd.github+json")
         .call()
@@ -40,8 +54,13 @@ fn get(url: &str, user_agent: &str) -> anyhow::Result<ureq::Response> {
 
 /// The latest release's info.
 pub fn fetch_latest(url: &str, user_agent: &str) -> anyhow::Result<Release> {
+    fetch_latest_within(url, user_agent, READ_TIMEOUT)
+}
+
+/// `fetch_latest`, giving up when the server says nothing for `read`.
+pub fn fetch_latest_within(url: &str, user_agent: &str, read: Duration) -> anyhow::Result<Release> {
     Release::parse(
-        &get(url, user_agent)?
+        &get_within(url, user_agent, read)?
             .into_string()
             .context("can't read GitHub's answer")?,
     )
@@ -161,8 +180,11 @@ pub fn replace_all(swaps: &[Swap]) -> anyhow::Result<()> {
 /// listed.
 #[cfg(windows)]
 pub fn running_hydra_pids() -> Result<Vec<u32>, String> {
+    use std::os::windows::process::CommandExt;
+    // CREATE_NO_WINDOW: from a GUI app such as hydraui, a console would flash up.
     let out = std::process::Command::new("tasklist")
         .args(["/FO", "CSV", "/NH"])
+        .creation_flags(0x0800_0000)
         .output()
         .map_err(|e| format!("tasklist didn't run: {e}"))?;
     if !out.status.success() {
@@ -239,6 +261,25 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&second.target).unwrap(), "old cli");
         assert!(!first.new.exists() && !first.old.exists());
         assert!(format!("{err:#}").contains("nothing changed"), "{err:#}");
+    }
+
+    #[test]
+    fn a_server_that_stops_answering_times_out() {
+        // Accepts the connection, then never says anything: a stalled network.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/x", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let held: Vec<_> = listener.incoming().flatten().collect();
+            drop(held);
+        });
+        let started = std::time::Instant::now();
+        let err = fetch_latest_within(&url, "t", std::time::Duration::from_millis(300))
+            .err()
+            .expect("a stalled server is an error");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "{err:#}"
+        );
     }
 
     #[test]

@@ -30,7 +30,11 @@ fn main() {
     hydraui_term::clear_pane_inits(&hydra.paths);
     // Exes a previous update replaced (spec §7.11).
     if let Ok(exe) = std::env::current_exe() {
-        let hydra = hydraui::updater::find_hydra(&exe, std::env::var_os("PATH").as_deref());
+        let hydra = hydraui::updater::find_hydra(
+            &exe,
+            std::env::var_os("PATH").as_deref(),
+            &hydraui::updater::is_our_hydra,
+        );
         hydraui::updater::clean_old(&exe, hydra.as_deref());
     }
     gpui_platform::application()

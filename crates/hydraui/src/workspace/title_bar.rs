@@ -60,7 +60,11 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    let hydra = updater::find_hydra(&exe, std::env::var_os("PATH").as_deref());
+                    let hydra = updater::find_hydra(
+                        &exe,
+                        std::env::var_os("PATH").as_deref(),
+                        &updater::is_our_hydra,
+                    );
                     updater::install(
                         &hydra_update::latest_url(),
                         &exe,

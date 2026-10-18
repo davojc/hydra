@@ -87,7 +87,7 @@ hydra ignores this folder.
   sets/<name>.toml set definitions, hand-edited
   layouts/         saved layouts (*.hydraui), Save As's default folder (§7.12)
   recent.toml      recent layouts, shared by every hydraui window
-  running/         <pid>.toml: each running window's layout and handle
+  running/         <pid>-<id>.toml: each running window's layout and handle
 ```
 
 hydraui reads, but does not edit, `config.toml` `[bindings]`, `envs/` and
@@ -727,8 +727,8 @@ unreadable file counts as empty. Paths are compared case-insensitively with
 a named mutex, `Local\hydraui-layout-<hex sha256 of the full path, lowercase,
 \ separators>`, held while the window has the file and released when it lets
 go or exits (Windows releases it if hydraui crashes). It also writes
-`~/.hydra/hydraui/running/<pid>.toml` (the layout path and the window
-handle), removed on exit; entries whose process is gone are ignored and
+`~/.hydra/hydraui/running/<pid>-<id>.toml` (the layout path and the window
+handle; one per claim), removed when it lets go; entries whose process is gone are ignored and
 deleted. Opening a file another window has claimed brings that window to the
 front (from its running entry) and opens nothing; a start-page window or a
 process started only to open that file then closes itself. **Save layout

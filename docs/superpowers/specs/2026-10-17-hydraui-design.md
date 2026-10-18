@@ -449,36 +449,54 @@ release job checks that both exes carry the release's version: `hydra
 must equal it. `hydra update` still updates `hydra.exe` only; hydraui's
 Update button updates both (§7.11).
 
-**Installer.** Each release also ships `hydra-setup-x86_64.exe` (Inno Setup,
-with its `.sha256`), which installs both apps for the current user, with no
-admin prompt:
+**Installer.** Each release also ships `hydra-setup.exe` (with its `.sha256`),
+a small Rust program in the workspace (`crates/hydra-setup`, built by cargo like
+the rest, no third-party installer tool). It installs both apps for the
+current user, with no admin prompt:
 
-- Into `%LOCALAPPDATA%\Programs\hydra` as `hydraui.exe` and `hydra.exe`. The
-  folder is the user's, so `hydra update` and the Update button keep working,
-  and the Update button always finds `hydra.exe` beside hydraui.
-- A Start menu entry for hydraui; a desktop shortcut only if ticked; "Launch
-  hydraui" at the end (not when silent).
-- The folder is added to the user's `PATH` (`HKCU\Environment`) once: an
-  entry already there (any case, with or without a trailing `\`) isn't added
-  again. If another `hydra.exe` is on `PATH`, a message names its folder and
-  leaves it alone (nothing is shown when silent).
-- `hydra init` runs, hidden, when `~/.hydra/config.toml` (or under
-  `HYDRA_HOME`) doesn't exist yet.
-- Running it again upgrades in place; hydraui and hydra are closed first if
-  they're running.
-- Uninstalling (Settings → Apps) removes both exes, left-over `*.old.exe` and
-  `*.new.exe`, the shortcuts and its `PATH` entry, and nothing else: `~/.hydra`
+- **Dialog.** A native Windows task dialog: "Install hydra <version>", what
+  goes where, a "Create a desktop shortcut" tick box, Install / Cancel; then a
+  progress bar while it downloads; then "Installed" with a ticked "Launch
+  hydraui" (or the reason it failed, with nothing left half-done).
+- **Download.** It fetches that release's `hydraui-x86_64-pc-windows-msvc.exe`
+  and `hydra-x86_64-pc-windows-msvc.exe` (by its own version's tag, not
+  "latest") and checks each against its `.sha256`, with `hydra-update`'s code.
+  `--from <folder>` installs from local copies of those files and their
+  `.sha256` instead (offline, and CI before the release exists). A `-dev`
+  build only installs `--from`.
+- **Where.** `%LOCALAPPDATA%\Programs\hydra` as `hydraui.exe` and `hydra.exe`,
+  plus `hydra-setup.exe` itself as the uninstaller. The folder is the user's,
+  so `hydra update` and the Update button keep working, and the Update button
+  always finds `hydra.exe` beside hydraui. Exes that are running (an upgrade
+  while hydraui is open) are replaced as the updaters replace them: renamed
+  aside, cleaned up at their next start.
+- **Start menu and shortcuts.** A Start menu entry for hydraui; a desktop
+  shortcut only if ticked.
+- **PATH.** The folder is added to the user's `PATH` (`HKCU\Environment`) once:
+  an entry already there (any case, with or without a trailing `\`) isn't
+  added again; Windows is told the environment changed. If another
+  `hydra.exe` is on `PATH`, the last page names its folder and leaves it alone.
+- **`hydra init`** runs, hidden, when `config.toml` doesn't exist yet under
+  `HYDRA_HOME` (else `~/.hydra`).
+- **Settings → Apps.** An entry `hydra` under
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\hydra` (version,
+  publisher, icon, size, install location, uninstall commands). Running a newer
+  `hydra-setup.exe` upgrades in place.
+- **Uninstall** (Settings → Apps, or `hydra-setup.exe --uninstall`): asks
+  first; removes both exes, left-over `*.old.exe` and `*.new.exe`, the
+  shortcuts, its `PATH` entry and its Settings entry, then itself; `~/.hydra`
   stays.
-- After an in-app update, hydraui sets the installed version shown in
-  Settings → Apps (`DisplayVersion` under the installer's uninstall key) when
-  it is running from the installed folder.
+- **Silent.** `--silent` installs (and with `--uninstall`, uninstalls) with no
+  dialog; `--dir <folder>` installs elsewhere (tests).
+- After an in-app update, hydraui sets `DisplayVersion` in that Settings entry
+  when it is running from the installed folder.
 
-The release job builds the installer with the release's version from the two
-exes it just built, then tests it before publishing: a silent install into a
-temporary folder (both exes there, `hydra --version` prints the version, the
-folder is on the user's `PATH`), then a silent uninstall (the folder and the
-`PATH` entry are gone). The portable exes stay in every release; the updaters
-use them.
+The release job builds `hydra-setup.exe` with the release's version, then
+tests it before publishing: a silent install `--from dist` into a temporary
+folder (twice, as an upgrade), checking the files, `hydra --version`, the
+`PATH` entry (once) and the Settings entry, then a silent uninstall checking
+they're all gone and other `PATH` entries are untouched. The portable exes
+stay in every release; the updaters use them.
 
 ### 7.8 File pane
 

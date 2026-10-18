@@ -58,6 +58,8 @@ together, so the shared on-disk format can't drift).
 ```
 crates/
   hydra-core, hydra-platform, hydra-providers, hydra-cli   existing
+  hydra-update/   release check, download, checksum, exe swap; shared by
+                  `hydra update` and hydraui's Update button (§7.11)
   hydraui-term/   PTY, alacritty_terminal, OSC 7/133 parsing; no UI
   hydraui-sets/   set model, inheritance, validation, loaded-set state; no UI
   hydraui/        GPUI app, bin `hydraui.exe`
@@ -301,6 +303,8 @@ disabled.
 
 ```
 ┌───────────────────────────────────────────────────────────┐
+│ ⑂ hydraui - api            [Update hydra 0.7.0]  _  □  ✕  │  title bar (§7.11)
+├───────────────────────────────────────────────────────────┤
 │ [client-a ▾] api● infra●  │ [personal ▾] blog●  │ Loose: +│  tab strip, grouped by set
 ├────────────┬──────────────────────────────────────────────┤
 │ file tree  │  pane (claude)        │ pane (npm run dev)   │
@@ -439,8 +443,11 @@ focused pane's environment and current folder.
 version info like `hydra.exe`. It runs on its own; `hydra.exe` is not
 required. Each release ships both executables
 (`hydra-x86_64-pc-windows-msvc.exe` and `hydraui-x86_64-pc-windows-msvc.exe`,
-each with a `.sha256`); `scripts/deploy.ps1` builds and installs both. `hydra update`
-updating hydraui too is out of scope.
+each with a `.sha256`); `scripts/deploy.ps1` builds and installs both. The
+release job checks that both exes carry the release's version: `hydra
+--version` prints it, and `hydraui.exe`'s ProductVersion (file properties)
+must equal it. `hydra update` still updates `hydra.exe` only; hydraui's
+Update button updates both (§7.11).
 
 ### 7.8 File pane
 
@@ -562,6 +569,52 @@ user's home when there is none) and respect `.gitignore` as the tree does.
   opening at that line. It stops at 1,000 results and says so, skips files
   over 5 MB and binary files (§7.8's rules), and a newer search cancels an
   older one. An invalid regex shows its error and searches nothing.
+
+### 7.11 Title bar and updates
+
+hydraui draws its own title bar (gpui-component's `TitleBar`): a slim row
+above the tab strip, in the theme's colours, with the icon and the window
+title on the left (`hydraui - <tab>`, as the system title was) and minimise,
+maximise/restore and close on the right. Dragging its empty part moves the
+window and double-clicking maximises, as a system title bar does.
+
+**Version.** hydraui knows its version as hydra does: `HYDRA_VERSION` at
+compile time in release builds, else `<Cargo version>-dev`.
+
+**Checking.** At start and then every 6 hours, off the UI thread, hydraui
+asks GitHub for the latest release (the same request as `hydra update`,
+honouring `HYDRA_UPDATE_API`). When it is newer than the running version, the
+title bar shows **Update hydra <version>** just left of the window controls.
+A `-dev` build never shows it. No network, or an answer it can't read, shows
+nothing and says nothing.
+
+**Updating.** Clicking the button:
+
+1. Refuses, with a toast naming the processes, while any `hydra.exe` (or a
+   left-over `hydra.old.exe`) runs, as `hydra update` does. hydraui's
+   terminals run shells, not hydra, so they don't count.
+2. Downloads `hydraui-x86_64-pc-windows-msvc.exe` and, when a `hydra.exe` is
+   found, `hydra-x86_64-pc-windows-msvc.exe`, and checks each against its
+   `.sha256`. `hydra.exe` is the one next to `hydraui.exe`, else the first on
+   `PATH`; with none, only hydraui is updated and the toast says so.
+3. Swaps each exe as `hydra update` does: the current one is renamed
+   `<name>.old.exe` (Windows allows renaming a running exe) and the new one
+   takes its name. Everything is downloaded and checked before anything is
+   renamed; if a rename fails, what was already swapped is put back, so
+   nothing is left half-updated.
+4. Turns the button into **Restart to finish** and toasts "Updated to
+   <version>". Restart saves the session (§7.9's last-layout), starts the new
+   `hydraui.exe` and closes this window: tabs come back, but what ran in their
+   terminals stops, which is why it is never automatic. The button says
+   "Updating…" while it works; a failure (no network, a checksum that doesn't
+   match, a file in use) is a toast with the reason, and the button stays.
+
+At start, hydraui deletes a left-over `hydraui.old.exe` next to it (and
+`hydra.old.exe` next to the `hydra.exe` it found), ignoring failures — the
+old exe may still be running for a moment.
+
+The release check, download, checksum and swap live in `hydra-update`, used by
+both `hydra update` (whose behaviour and output don't change) and hydraui.
 
 ## 8. Errors summary
 

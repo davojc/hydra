@@ -63,11 +63,23 @@ pub enum Opened {
     Untitled { layout: Session, exists: PathBuf },
 }
 
-/// Reads a layout file, converting an older one to `.hydraui` beside it.
+/// Reads a layout file, converting an older one to `.hydraui` beside it. Only `.toml` files
+/// are older layouts, and only when they hold something: any other file, or one that parses
+/// as an empty layout (an empty file, say), is not a layout and is left alone.
 pub fn open_layout_file(path: &Path) -> Result<Opened, String> {
-    let layout = read_layout(path)?;
+    let not_layout = || format!("{} isn't a layout file (*.{LAYOUT_EXT})", path.display());
     if is_current(path) {
-        return Ok(Opened::Current(layout));
+        return Ok(Opened::Current(read_layout(path)?));
+    }
+    let toml = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("toml"));
+    if !toml {
+        return Err(not_layout());
+    }
+    let layout = read_layout(path)?;
+    if layout == Session::default() {
+        return Err(not_layout());
     }
     let to = converted_path(path);
     if to.exists() {
@@ -194,6 +206,25 @@ mod tests {
             std::fs::read_to_string(&new).unwrap(),
             "sets = [\"other\"]\n"
         );
+    }
+
+    #[test]
+    fn only_toml_layouts_are_converted_and_empty_ones_never() {
+        let d = tempfile::tempdir().unwrap();
+        // Files that parse as an empty layout, picked by mistake: never touched.
+        for name in ["notes.txt", "__init__.py", "a.hydraui.bak", "empty.toml"] {
+            let p = d.path().join(name);
+            std::fs::write(&p, "").unwrap();
+            let err = open_layout_file(&p).unwrap_err();
+            assert!(err.contains(name), "{name}: {err}");
+            assert!(p.exists(), "{name} kept");
+            assert!(!converted_path(&p).exists(), "{name}: nothing written");
+        }
+        // A real layout under another extension isn't a layout file either.
+        let p = d.path().join("client-a.bak");
+        write_layout(&p, &a_layout()).unwrap();
+        assert!(open_layout_file(&p).is_err());
+        assert!(p.exists());
     }
 
     #[test]

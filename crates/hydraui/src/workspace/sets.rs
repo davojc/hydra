@@ -304,9 +304,15 @@ impl Workspace {
     }
 
     /// Writes the window's layout to its file (spec §7.12); an untitled window writes nothing.
+    /// Not while a layout is opening: the file already holds it, and a half-open window would
+    /// write over it. Entries that didn't open are kept in what is written.
     pub(super) fn autosave(&self, window: &mut Window, cx: &mut App) {
         let Some(path) = &self.layout else { return };
-        if let Err(e) = write_layout(path, &self.current_layout(cx)) {
+        if self.opening {
+            return;
+        }
+        let layout = crate::window_layout::with_unopened(self.current_layout(cx), &self.unopened);
+        if let Err(e) = write_layout(path, &layout) {
             window.push_notification(
                 Notification::warning(format!("can't save the layout to {}: {e}", path.display()))
                     .title("hydraui"),
@@ -326,9 +332,9 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Opens a layout file (spec §7.12): in this window when it has no layout, else in a new
-    /// hydraui; a file another window has brings that window forward instead. Returns whether
-    /// this window opened it.
+    /// Opens a layout file (spec §7.12): in this window when it is untitled with no tabs, else
+    /// in a new hydraui (layouts are never merged); a file another window has brings that
+    /// window forward instead. Returns whether this window opened it.
     pub(super) fn open_layout_path(
         &mut self,
         path: PathBuf,
@@ -336,10 +342,12 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> bool {
         let path = std::path::absolute(&path).unwrap_or(path);
-        if let Some(mine) = &self.layout {
-            if !hydraui_sets::same_path(mine, &path)
-                && let Err(e) = crate::window_layout::spawn_hydraui(Some(&path))
-            {
+        if !crate::window_layout::opens_here(self.layout.is_some(), !self.tabs.is_empty()) {
+            let mine = self
+                .layout
+                .as_deref()
+                .is_some_and(|m| hydraui_sets::same_path(m, &path));
+            if !mine && let Err(e) = crate::window_layout::spawn_hydraui(Some(&path)) {
                 window.push_notification(
                     Notification::error(format!("can't start another hydraui: {e}"))
                         .title("Open layout"),
@@ -396,8 +404,31 @@ impl Workspace {
             }
         }
         self.leave_start_page(window, cx);
-        self.open_layout(layout, window, cx);
-        self.autosave(window, cx);
+        self.unopened = Session::default();
+        self.opening = true;
+        let any = self.open_layout(layout.clone(), window, cx);
+        self.opening = false;
+        // Nothing opened (a missing folder, a renamed environment): let the file go untouched
+        // rather than keep an empty window that would save over it.
+        if let Some(file) = self.layout.clone()
+            && crate::window_layout::let_go_after_open(any, &layout)
+        {
+            self.claim = None;
+            self.layout = None;
+            self.unopened = Session::default();
+            window.push_notification(
+                Notification::warning(format!(
+                    "Nothing in {} could be opened; the file is unchanged",
+                    file.display()
+                ))
+                .title("Open layout"),
+                cx,
+            );
+            if self.tabs.is_empty() {
+                self.show_start_page(window, cx);
+            }
+            return false;
+        }
         cx.notify();
         true
     }
@@ -446,7 +477,8 @@ impl Workspace {
                 return false;
             }
         };
-        let result = write_layout(&path, &self.current_layout(cx));
+        let layout = crate::window_layout::with_unopened(self.current_layout(cx), &self.unopened);
+        let result = write_layout(&path, &layout);
         let ok = result.is_ok();
         self.saved("the layout", &path, result, window, cx);
         if !ok {
@@ -696,16 +728,26 @@ impl Workspace {
         let mut opened: Vec<TabId> = Vec::new();
         let mut any = false;
         for (set, loaded) in open_plan(&layout.sets, &self.loaded.names(), &files) {
+            // A set that fails to open stays in the window's layout (`unopened`), so the file
+            // keeps it for when it opens again.
             let tabs = match set {
                 SetRef::Named(name) => {
                     if !loaded {
-                        any |= self.load_set(&name, window, cx);
+                        let ok = self.load_set(&name, window, cx);
+                        if !ok {
+                            self.unopened.sets.push(name.clone());
+                        }
+                        any |= ok;
                     }
                     self.loaded.get(&name).map(|s| s.tabs.clone())
                 }
                 SetRef::File(path) => {
                     if !loaded {
-                        any |= self.open_group_file(&path, window, cx);
+                        let ok = self.open_group_file(&path, window, cx);
+                        if !ok {
+                            self.unopened.sets.push(path.display().to_string());
+                        }
+                        any |= ok;
                     }
                     self.loaded.by_file(&path).map(|s| s.tabs.clone())
                 }
@@ -721,6 +763,7 @@ impl Workspace {
                         Notification::warning(problems.join("\n")).title("Can't reopen a tab"),
                         cx,
                     );
+                    self.unopened.loose.push(tab.clone());
                     continue;
                 }
             };

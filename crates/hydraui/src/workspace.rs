@@ -139,6 +139,10 @@ pub struct Workspace {
     layout: Option<PathBuf>,
     /// This window's hold on `layout`, so no other window writes it.
     claim: Option<crate::claim::Claim>,
+    /// The layout's sets and Loose tabs that didn't open, kept in what autosave writes.
+    unopened: hydraui_sets::Session,
+    /// A layout is opening: autosave waits (the file already holds it).
+    opening: bool,
     /// The start page, while it shows (spec §7.12).
     start: Option<start_page::StartPage>,
 }
@@ -267,6 +271,8 @@ impl Workspace {
             _update_checks: None,
             layout: None,
             claim: None,
+            unopened: Default::default(),
+            opening: false,
             start: None,
         }
     }

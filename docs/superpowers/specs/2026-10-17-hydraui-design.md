@@ -586,9 +586,9 @@ tabs don't change. Cancelling a dialog does nothing.
 - A **layout file** (`*.hydraui`, TOML inside) is the window (§5.4): the
   open sets (by name or path), the Loose tabs, the file tree, the active tab.
   A window is backed by at most one, and keeps it saved (§7.12). Opening one
-  in an untitled window fills that window and backs it; in a window that
-  already has a layout, it opens in a new hydraui window. Layouts are no
-  longer merged into a window.
+  in an untitled window with no tabs (the start page, say) fills that window
+  and backs it; in any other window it opens in a new hydraui window.
+  Layouts are no longer merged into a window.
 
 Where:
 
@@ -694,7 +694,11 @@ hydraui windows never write the same file, and nothing is written behind the
 user's back except the window's own layout.
 
 **Saving.** A backed window writes its layout (atomically, §7.9) whenever
-tabs, splits, sets or the tree change, and when it closes. An untitled window
+tabs, splits, sets or the tree change, and when it closes; not while the
+layout is opening. Sets and Loose tabs of the layout that didn't open (a
+missing folder, a renamed environment) stay in what is written. If nothing
+in a layout opens, the window lets the file go untouched (a toast says so)
+and shows the start page again. An untitled window
 writes nothing; closing it loses its layout, with no prompt (the title bar
 says so, §7.11). **Save layout as…** writes the window to a new file (the
 dialog starts in `~/.hydra/hydraui/layouts/`, created on first use, or in the
@@ -740,8 +744,10 @@ it.
 file that isn't a valid layout opens the start page with a toast naming the
 file and the problem.
 
-**Old files.** Opening a `*.hydraui.toml` layout (Open dialog, recent list,
-command line) converts it: its contents are written to `<name>.hydraui`
+**Old files.** Opening a `.toml` layout such as `*.hydraui.toml` (Open
+dialog, recent list, command line) converts it; any other file that isn't
+`.hydraui`, and a `.toml` file that holds no layout (an empty one), is "not a
+layout file" and is left alone. Conversion: its contents are written to `<name>.hydraui`
 beside it, the old file is deleted, the window is backed by the new file, the
 recent entry is updated, and a toast says "Converted <old> → <new>". If
 `<name>.hydraui` already exists, nothing is written or deleted: the old file

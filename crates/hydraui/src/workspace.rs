@@ -225,7 +225,23 @@ impl Workspace {
                 false
             })
             .unwrap_or(true)
-        });
+        }); // Smoke tests and screenshots can't press Ctrl+Shift: debug builds open a dialog by
+        // name (open_file, search, launcher) from HYDRAUI_TEST_DIALOG.
+        #[cfg(debug_assertions)]
+        if let Some(name) = std::env::var_os("HYDRAUI_TEST_DIALOG") {
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                let _ = this.update_in(cx, |ws, window, cx| match name.to_str() {
+                    Some("open_file") => ws.open_file_finder(window, cx),
+                    Some("search") => ws.search_dialog(window, cx),
+                    Some("launcher") => ws.open_launcher(&crate::keys::Launcher, window, cx),
+                    _ => {}
+                });
+            })
+            .detach();
+        }
     }
 
     /// A Loose tab in `cwd`: the folder's environment, else `default_env`, else ask.

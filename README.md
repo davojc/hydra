@@ -25,7 +25,9 @@ Typical uses:
 
 ## Install
 
-Download `hydra-x86_64-pc-windows-msvc.exe` from the [latest release](https://github.com/davojc/hydra/releases/latest). Rename it to `hydra.exe` and put it in a folder on your `PATH`. Then:
+**Installer (recommended):** download [`hydra-setup.exe`](https://github.com/davojc/hydra/releases/latest/download/hydra-setup.exe) and run it. It installs hydraui and hydra for you alone, with no admin prompt, into `%LOCALAPPDATA%\Programs\hydra`: hydraui in the Start menu, hydra on your `PATH`, and `hydra init` done. Uninstall from Settings → Apps; `~/.hydra` stays. `hydra-setup.exe --silent` installs with no dialog.
+
+**Portable:** download `hydraui-x86_64-pc-windows-msvc.exe` and/or `hydra-x86_64-pc-windows-msvc.exe` from the [latest release](https://github.com/davojc/hydra/releases/latest) (each has a `.sha256`). Rename them to `hydraui.exe` / `hydra.exe`; put `hydra.exe` in a folder on your `PATH`, then:
 
 ```powershell
 hydra init        # creates ~/.hydra

@@ -57,7 +57,8 @@
         <span class="chip personal">personal</span>
         <span class="chip client">client</span>
       </div>
-      <p><a class="download" href="https://github.com/davojc/hydra/releases/latest/download/hydra-x86_64-pc-windows-msvc.exe" download>Download hydra <span class="dl-version"></span><small>Windows x64</small></a></p>
+      <p><a class="download" href="https://github.com/davojc/hydra/releases/latest/download/hydra-setup.exe" download>Download the installer <span class="dl-version"></span><small>hydra + hydraui</small></a></p>
+      <p class="portable">Portable: <a href="https://github.com/davojc/hydra/releases/latest/download/hydraui-x86_64-pc-windows-msvc.exe" download>hydraui.exe</a> · <a href="https://github.com/davojc/hydra/releases/latest/download/hydra-x86_64-pc-windows-msvc.exe" download>hydra.exe</a></p>
       <p class="links"><a href="https://github.com/davojc/hydra">Source on GitHub</a> · <a href="https://github.com/davojc/hydra/releases/latest">Latest release</a></p>
     </header>
 
@@ -84,8 +85,9 @@ my-username</pre>
 
     <section id="install">
       <h2>Install and update</h2>
-      <p><a class="download" href="https://github.com/davojc/hydra/releases/latest/download/hydra-x86_64-pc-windows-msvc.exe" download>Download hydra <span class="dl-version"></span><small>Windows x64</small></a></p>
-      <p>This downloads <code>hydra-x86_64-pc-windows-msvc.exe</code> from the <a href="https://github.com/davojc/hydra/releases/latest">latest release</a>, which also has its <code>.sha256</code> checksum. Rename it to <code>hydra.exe</code> and put it in a folder on your <code>PATH</code>. Then create hydra's home folder:</p>
+      <p><a class="download" href="https://github.com/davojc/hydra/releases/latest/download/hydra-setup.exe" download>Download the installer <span class="dl-version"></span><small>hydra + hydraui</small></a></p>
+      <p class="portable">Portable: <a href="https://github.com/davojc/hydra/releases/latest/download/hydraui-x86_64-pc-windows-msvc.exe" download>hydraui.exe</a> · <a href="https://github.com/davojc/hydra/releases/latest/download/hydra-x86_64-pc-windows-msvc.exe" download>hydra.exe</a></p>
+      <p>The installer puts <code>hydra.exe</code> (and hydraui) in <code>%LOCALAPPDATA%\Programs\hydra</code>, adds it to your <code>PATH</code> and runs <code>hydra init</code>: open a new terminal and <code>hydra</code> is there. For the portable <code>hydra-x86_64-pc-windows-msvc.exe</code> instead (it has a <code>.sha256</code> beside it in the <a href="https://github.com/davojc/hydra/releases/latest">latest release</a>), rename it to <code>hydra.exe</code>, put it in a folder on your <code>PATH</code>, then create hydra's home folder:</p>
       <div class="term">
         <div class="term-bar"><span class="tab plain">PowerShell</span><button class="copy" type="button" data-copy="hydra init">Copy</button></div>
 <pre><span class="p">PS&gt;</span> hydra init

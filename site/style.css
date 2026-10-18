@@ -186,3 +186,5 @@ figure.shot.narrow img { max-width: min(100%, 640px); }
 figure.shot figcaption { font-size: 13.5px; color: var(--muted); margin-top: 8px; max-width: 66ch; }
 
 kbd { font-family: var(--font-mono); font-size: 0.82em; background: var(--surface); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
+.portable { margin: 0 0 14px; font-size: 15px; color: var(--muted); }
+.portable a { font-weight: 500; }

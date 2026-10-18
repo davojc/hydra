@@ -54,7 +54,8 @@
       <span class="status">App guide · Windows 11</span>
       <h1>hydraui, the desktop app.</h1>
       <p class="lede">hydraui is a terminal app built around hydra's <strong>environments</strong>. Every tab runs in one, coloured to match, with that environment's logins already in place. Around the terminals it adds what you reach for while working: a file tree that shows git changes, a pane for reading and editing files, quick open and search, and each environment's accounts in the status bar.</p>
-      <p><a class="download" href="https://github.com/davojc/hydra/releases/latest/download/hydraui-x86_64-pc-windows-msvc.exe" download>Download hydraui <span class="dl-version"></span><small>Windows x64</small></a></p>
+      <p><a class="download" href="https://github.com/davojc/hydra/releases/latest/download/hydra-setup.exe" download>Download the installer <span class="dl-version"></span><small>hydra + hydraui</small></a></p>
+      <p class="portable">Portable: <a href="https://github.com/davojc/hydra/releases/latest/download/hydraui-x86_64-pc-windows-msvc.exe" download>hydraui.exe</a> · <a href="https://github.com/davojc/hydra/releases/latest/download/hydra-x86_64-pc-windows-msvc.exe" download>hydra.exe</a></p>
     </header>
 
     <figure class="shot">
@@ -64,7 +65,7 @@
 
     <section id="start">
       <h2>Install and first start</h2>
-      <p>Download <code>hydraui-x86_64-pc-windows-msvc.exe</code> from the <a href="https://github.com/davojc/hydra/releases/latest">latest release</a>, rename it <code>hydraui.exe</code> and run it. It needs no installer and doesn't need <code>hydra.exe</code>: it reads and writes the same <code>~/.hydra</code> folder, so environments made with either show up in both.</p>
+      <p>Run the <a href="https://github.com/davojc/hydra/releases/latest/download/hydra-setup.exe">installer</a>: it installs hydraui and hydra for you alone, with no admin prompt, puts hydraui in the Start menu and hydra on your <code>PATH</code>. Prefer a single file? The portable <code>hydraui-x86_64-pc-windows-msvc.exe</code> from the <a href="https://github.com/davojc/hydra/releases/latest">latest release</a> runs from anywhere and doesn't need <code>hydra.exe</code>. Either way hydraui reads and writes the same <code>~/.hydra</code> folder as the CLI, so environments made with either show up in both.</p>
       <p>The first time, hydraui opens a tab in your home folder. With no environments yet, it asks you to name one and creates it, as <code>hydra env new</code> does. From then on it reopens what you had open when you last closed it: the tabs, their folders and splits, the file tree and the files in each file pane.</p>
       <p>A new tab (<kbd>Ctrl+T</kbd>, or <strong>+</strong> in the tab strip) opens in the focused terminal's folder. Its environment is the one bound to that folder, else <code>default_env</code> from the <a href="#settings">settings</a>, else you pick one:</p>
       <figure class="shot narrow">

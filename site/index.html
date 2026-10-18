@@ -95,14 +95,14 @@ work-user</pre>
 
   <section id="install">
     <h2>Install</h2>
-    <p>Both are single Windows executables from the <a href="https://github.com/davojc/hydra/releases/latest">latest release</a>, each with a <code>.sha256</code> checksum beside it.</p>
     <div class="dl-row">
-      <a class="download" href="https://github.com/davojc/hydra/releases/latest/download/hydraui-x86_64-pc-windows-msvc.exe" download>Download hydraui <span class="dl-version"></span><small>the app</small></a>
-      <a class="download alt" href="https://github.com/davojc/hydra/releases/latest/download/hydra-x86_64-pc-windows-msvc.exe" download>Download hydra <span class="dl-version"></span><small>the command line</small></a>
+      <a class="download" href="https://github.com/davojc/hydra/releases/latest/download/hydra-setup.exe" download>Download the installer <span class="dl-version"></span><small>hydra + hydraui</small></a>
     </div>
+    <p class="portable">Portable: <a href="https://github.com/davojc/hydra/releases/latest/download/hydraui-x86_64-pc-windows-msvc.exe" download>hydraui.exe</a> · <a href="https://github.com/davojc/hydra/releases/latest/download/hydra-x86_64-pc-windows-msvc.exe" download>hydra.exe</a></p>
     <ul>
-      <li><strong>hydraui:</strong> rename it <code>hydraui.exe</code> and run it; it needs nothing else. When a new release is out, its title bar shows <strong>Update hydra</strong>, which updates hydraui and hydra together.</li>
-      <li><strong>hydra:</strong> rename it <code>hydra.exe</code>, put it on your <code>PATH</code> and run <code>hydra init</code>. <code>hydra update</code> fetches new releases.</li>
+      <li><strong>The installer</strong> puts both apps in <code>%LOCALAPPDATA%\Programs\hydra</code> for you alone, with no admin prompt: hydraui in the Start menu, hydra on your <code>PATH</code>, and <code>hydra init</code> done. Uninstall it from Settings → Apps; your environments in <code>~/.hydra</code> stay.</li>
+      <li><strong>Portable:</strong> single files from the <a href="https://github.com/davojc/hydra/releases/latest">latest release</a>, each with a <code>.sha256</code> beside it. Rename to <code>hydraui.exe</code> / <code>hydra.exe</code> and run from anywhere; put <code>hydra.exe</code> on your <code>PATH</code> and run <code>hydra init</code> yourself.</li>
+      <li><strong>Updates:</strong> hydraui's title bar shows <strong>Update hydra</strong> when a release is out and updates both; <code>hydra update</code> does the same from the command line.</li>
     </ul>
     <p>To build from source, install Rust from <a href="https://rustup.rs">rustup.rs</a>, clone <a href="https://github.com/davojc/hydra">github.com/davojc/hydra</a> and run <code>cargo build --release</code>.</p>
   </section>

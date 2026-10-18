@@ -2947,6 +2947,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hydra-setup"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "hydra-update",
+ "tempfile",
+ "windows 0.61.3",
+]
+
+[[package]]
 name = "hydra-update"
 version = "0.6.0"
 dependencies = [

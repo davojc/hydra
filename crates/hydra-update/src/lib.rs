@@ -68,7 +68,22 @@ pub fn fetch_latest_within(url: &str, user_agent: &str, read: Duration) -> anyho
 
 /// Downloads the exe to `new` and checks it against the release's .sha256 file.
 pub fn download_verified(build: &WindowsBuild, new: &Path, user_agent: &str) -> anyhow::Result<()> {
-    let mut body = get(&build.exe_url, user_agent)?.into_reader();
+    download_verified_with(build, new, user_agent, &|_, _| {})
+}
+
+/// `download_verified`, calling `progress(bytes so far, total if known)` as it goes.
+pub fn download_verified_with(
+    build: &WindowsBuild,
+    new: &Path,
+    user_agent: &str,
+    progress: &dyn Fn(u64, Option<u64>),
+) -> anyhow::Result<()> {
+    let resp = get(&build.exe_url, user_agent)?;
+    let total = resp
+        .header("Content-Length")
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    let mut body = resp.into_reader();
+    let mut done = 0u64;
     let mut file =
         fs::File::create(new).with_context(|| format!("can't write {}", new.display()))?;
     let mut hasher = Sha256::new();
@@ -83,6 +98,8 @@ pub fn download_verified(build: &WindowsBuild, new: &Path, user_agent: &str) -> 
         hasher.update(&buf[..n]);
         file.write_all(&buf[..n])
             .with_context(|| format!("can't write {}", new.display()))?;
+        done += n as u64;
+        progress(done, total);
     }
     file.sync_all()
         .with_context(|| format!("can't write {}", new.display()))?;
@@ -99,6 +116,44 @@ pub fn download_verified(build: &WindowsBuild, new: &Path, user_agent: &str) -> 
         .map(|b| format!("{b:02x}"))
         .collect();
     if actual != expected {
+        anyhow::bail!("checksum mismatch - nothing changed");
+    }
+    Ok(())
+}
+
+/// The file's SHA-256, as lowercase hex.
+pub fn sha256_file(path: &Path) -> anyhow::Result<String> {
+    let mut file =
+        fs::File::open(path).with_context(|| format!("can't read {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .with_context(|| format!("can't read {}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+/// Copies `<src_dir>/<asset>` to `new` after checking it against `<src_dir>/<asset>.sha256`
+/// (installing from local files: offline, or before the release exists).
+pub fn copy_verified(src_dir: &Path, asset: &str, new: &Path) -> anyhow::Result<()> {
+    let src = src_dir.join(asset);
+    let sums = fs::read_to_string(src_dir.join(format!("{asset}.sha256")))
+        .with_context(|| format!("can't read {asset}.sha256 in {}", src_dir.display()))?;
+    let expected =
+        release::parse_checksum(&sums).context("the release's checksum file can't be read")?;
+    fs::copy(&src, new).with_context(|| format!("can't copy {}", src.display()))?;
+    if sha256_file(new)? != expected {
+        let _ = fs::remove_file(new);
         anyhow::bail!("checksum mismatch - nothing changed");
     }
     Ok(())
@@ -279,6 +334,45 @@ mod tests {
         assert!(
             started.elapsed() < std::time::Duration::from_secs(10),
             "{err:#}"
+        );
+    }
+
+    #[test]
+    fn local_files_are_checked_against_their_checksum() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.exe"), b"bytes").unwrap();
+        let sum = sha256_file(&d.path().join("a.exe")).unwrap();
+        std::fs::write(d.path().join("a.exe.sha256"), format!("{sum}  a.exe\n")).unwrap();
+        let out = d.path().join("out.new.exe");
+        copy_verified(d.path(), "a.exe", &out).unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"bytes");
+        std::fs::write(
+            d.path().join("a.exe.sha256"),
+            format!("{}  a.exe\n", "0".repeat(64)),
+        )
+        .unwrap();
+        let err = copy_verified(d.path(), "a.exe", &out).unwrap_err();
+        assert!(format!("{err:#}").contains("checksum mismatch"), "{err:#}");
+        assert!(!out.exists(), "a bad copy is removed");
+    }
+
+    #[test]
+    fn downloads_report_their_progress() {
+        let body = vec![7u8; 200_000];
+        let gh = fake::FakeGitHub::serve("v1.0.0", &[("a.exe", &body)]);
+        let rel = fetch_latest(&gh.latest_url(), "t").unwrap();
+        let build = rel.windows_build("a.exe").unwrap();
+        let d = tempfile::tempdir().unwrap();
+        let seen = std::cell::RefCell::new(Vec::new());
+        download_verified_with(&build, &d.path().join("a.new.exe"), "t", &|n, total| {
+            seen.borrow_mut().push((n, total))
+        })
+        .unwrap();
+        let seen = seen.into_inner();
+        assert_eq!(seen.last(), Some(&(200_000, Some(200_000))));
+        assert!(
+            seen.windows(2).all(|w| w[0].0 <= w[1].0),
+            "never goes backwards"
         );
     }
 

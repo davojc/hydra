@@ -312,26 +312,34 @@ impl Workspace {
         self.tints.insert(request.env.clone(), tint);
         let (hydra, style) = (self.hydra.clone(), self.style.clone());
         let view = cx.new(|cx| PaneView::new(id, request, hydra, style, window, cx));
-        let sub = cx.subscribe_in(&view, window, move |ws, view, ev: &PaneEvent, _, cx| {
-            if *ev == PaneEvent::Focused {
-                ws.tabs.focus_pane(id);
-                if let Some(tab) = ws.tabs.tab_of(id) {
-                    ws.last_terminal.insert(tab, id);
+        let sub = cx.subscribe_in(
+            &view,
+            window,
+            move |ws, view, ev: &PaneEvent, window, cx| {
+                if let PaneEvent::OpenPath(path, line, column) = ev {
+                    ws.show_file_at(path.clone(), *line, *column, window, cx);
+                    return;
                 }
-                ws.refresh_status(cx);
-            }
-            // The focused pane's repository: on focus, on `cd`, and when a command finishes.
-            let focused = ws.tabs.active().is_some_and(|t| t.focused == id);
-            let back_at_prompt = *ev == PaneEvent::PromptChanged
-                && view.read(cx).prompt() == Some(PromptState::AtPrompt);
-            if focused
-                && (matches!(ev, PaneEvent::Focused | PaneEvent::CwdChanged) || back_at_prompt)
-            {
-                ws.refresh_git(cx);
-            }
-            ws.sync_tree(cx);
-            cx.notify();
-        });
+                if *ev == PaneEvent::Focused {
+                    ws.tabs.focus_pane(id);
+                    if let Some(tab) = ws.tabs.tab_of(id) {
+                        ws.last_terminal.insert(tab, id);
+                    }
+                    ws.refresh_status(cx);
+                }
+                // The focused pane's repository: on focus, on `cd`, and when a command finishes.
+                let focused = ws.tabs.active().is_some_and(|t| t.focused == id);
+                let back_at_prompt = *ev == PaneEvent::PromptChanged
+                    && view.read(cx).prompt() == Some(PromptState::AtPrompt);
+                if focused
+                    && (matches!(ev, PaneEvent::Focused | PaneEvent::CwdChanged) || back_at_prompt)
+                {
+                    ws.refresh_git(cx);
+                }
+                ws.sync_tree(cx);
+                cx.notify();
+            },
+        );
         self.subs.insert(id, sub);
         self.panes.insert(id, view);
     }

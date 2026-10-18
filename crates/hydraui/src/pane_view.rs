@@ -26,7 +26,7 @@ use hydraui_term::alacritty_terminal::term::search::Match;
 use hydraui_term::alacritty_terminal::term::{TermMode, viewport_to_point};
 use hydraui_term::{GridSize, Pane, PromptState, TermEvent};
 
-use crate::frame::{CursorKind, Frame, Style, build_frame, find_next, link_at};
+use crate::frame::{CursorKind, Frame, Style, build_frame, find_next, link_at, row_text};
 use crate::hydra::{Hydra, PaneRequest, Started};
 use crate::input::{
     Mods, MouseKind, ReportButton, Wheel, key_bytes, mouse_report, paste_bytes, wheel,
@@ -50,6 +50,8 @@ pub enum PaneEvent {
     PromptChanged,
     TitleChanged,
     Exited,
+    /// Ctrl+click on a path in the output: open it at a 1-based line and column (spec §7.10).
+    OpenPath(PathBuf, usize, usize),
 }
 
 enum Slot {
@@ -431,6 +433,11 @@ impl PaneView {
         if ev.button == MouseButton::Left && ev.modifiers.control {
             if let Some(url) = pane.with_term(|t| link_at(t, row, col)) {
                 cx.open_url(&url);
+            } else if let Some(hit) = pane.with_term(|t| {
+                crate::term_paths::path_at(&row_text(t, row), col, &self.cwd, &|p| p.is_file())
+            }) {
+                // A path in the output: open it at its line (spec §7.10).
+                cx.emit(PaneEvent::OpenPath(hit.path, hit.line, hit.column));
             }
             return;
         }

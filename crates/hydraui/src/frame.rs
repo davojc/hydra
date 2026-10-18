@@ -211,6 +211,17 @@ pub fn link_at<T>(term: &Term<T>, row: usize, col: usize) -> Option<String> {
     term.grid()[point].hyperlink().map(|h| h.uri().to_string())
 }
 
+/// The text of a visible row, for finding paths under the mouse.
+pub fn row_text<T>(term: &Term<T>, row: usize) -> String {
+    if row >= term.screen_lines() {
+        return String::new();
+    }
+    let offset = term.grid().display_offset();
+    (0..term.columns())
+        .map(|col| term.grid()[viewport_to_point(offset, Point::new(row, Column(col)))].c)
+        .collect()
+}
+
 /// `query` as a pattern that matches it literally: people type text, not regexes.
 pub fn literal(query: &str) -> String {
     let mut out = String::with_capacity(query.len());

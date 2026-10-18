@@ -19,4 +19,5 @@ pub mod palette;
 pub mod pane_view;
 pub mod split;
 pub mod tabs;
+pub mod term_paths;
 pub mod workspace;

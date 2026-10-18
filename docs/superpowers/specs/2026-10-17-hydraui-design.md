@@ -221,19 +221,21 @@ modification time at load.
   when a set of that name is already loaded.
 - If a loaded set's file changes, its group header shows "changed — reload?".
   Reload is unload + load. Running panes are never changed in place.
-- `session.toml` records what was open: the loaded sets in order (sets from
-  the sets folder by name, sets opened from group files by path); the Loose
-  tabs in the set file's tab format (layout, ratios, and each pane's env,
-  shell and current folder); whether the file tree was open and its width;
-  and the active tab's position in the strip. It is written when tabs,
-  splits, sets or the tree change, and when the window closes. On start,
-  hydraui loads the sets again (startup commands run again), then reopens the
-  Loose tabs, the tree and the active tab. An invalid or deleted set or
-  group file, or a Loose tab whose env or folder is gone, is skipped with a
-  toast. Session files without group paths still load. A Loose
-  tab's file pane is saved as a `files` node (§5.1) and comes back with its
-  files and active file tab; unsaved edits are not kept. Scrollback,
+- A **layout** records what is open in a window: the loaded sets in order
+  (sets from the sets folder by name, sets opened from group files by path);
+  the Loose tabs in the set file's tab format (layout, ratios, and each pane's
+  env, shell and current folder); whether the file tree was open and its
+  width; and the active tab's position in the strip. A window backed by a
+  layout file (§7.12) writes it when tabs, splits, sets or the tree change,
+  and when the window closes. Opening a layout loads its sets (startup
+  commands run again), then the Loose tabs, the tree and the active tab. An
+  invalid or deleted set or group file, or a Loose tab whose env or folder is
+  gone, is skipped with a toast. Layouts without group paths still load. A
+  Loose tab's file pane is saved as a `files` node (§5.1) and comes back with
+  its files and active file tab; unsaved edits are not kept. Scrollback,
   running commands, window size and dragged ratios in set tabs are not kept.
+  (Before §7.12 this was one `session.toml`, written and reopened
+  automatically; it is converted once, §7.12.)
 
 ## 6. Terminal core (`hydraui-term`)
 
@@ -303,7 +305,7 @@ disabled.
 
 ```
 ┌───────────────────────────────────────────────────────────┐
-│ ⑂ hydraui - api            [Update hydra 0.7.0]  _  □  ✕  │  title bar (§7.11)
+│ ⑂ client-a ▾               [Update hydra 0.7.0]  _  □  ✕  │  title bar (§7.11)
 ├───────────────────────────────────────────────────────────┤
 │ [client-a ▾] api● infra●  │ [personal ▾] blog●  │ Loose: +│  tab strip, grouped by set
 ├────────────┬──────────────────────────────────────────────┤
@@ -472,6 +474,12 @@ current user, with no admin prompt:
   aside, cleaned up at their next start.
 - **Start menu and shortcuts.** A Start menu entry for hydraui; a desktop
   shortcut only if ticked.
+- **Layout files.** `.hydraui` files (§7.12) open in hydraui: the ProgID
+  `hydraui.layout` under `HKCU\Software\Classes` (open command
+  `"<folder>\hydraui.exe" "%1"`, hydraui's icon, "hydraui layout") and
+  `.hydraui` pointing at it; Explorer is told associations changed. Uninstall
+  removes both, but leaves `.hydraui` alone if it no longer points at
+  `hydraui.layout`. The portable exe registers nothing.
 - **PATH.** The folder is added to the user's `PATH` (`HKCU\Environment`) once:
   an entry already there (any case, with or without a trailing `\`) isn't
   added again; Windows is told the environment changed. If another
@@ -484,8 +492,8 @@ current user, with no admin prompt:
   `hydra-setup.exe` upgrades in place.
 - **Uninstall** (Settings → Apps, or `hydra-setup.exe --uninstall`): asks
   first; removes both exes, left-over `*.old.exe` and `*.new.exe`, the
-  shortcuts, its `PATH` entry and its Settings entry, then itself; `~/.hydra`
-  stays.
+  shortcuts, its `PATH` entry, the `.hydraui` association and its Settings
+  entry, then itself; `~/.hydra` stays.
 - **Silent.** `--silent` installs (and with `--uninstall`, uninstalls) with no
   dialog; `--dir <folder>` installs elsewhere (tests).
 - After an in-app update, hydraui sets `DisplayVersion` in that Settings entry
@@ -573,17 +581,18 @@ tabs don't change. Cancelling a dialog does nothing.
   and tab titles. Opening one opens its tabs as a set (§5.4), under a group
   header named after the file. Group files saved into the sets folder are
   ordinary sets and appear in the launcher's set list.
-- A **layout file** (`*.hydraui.toml`) is the window, in `session.toml`'s
-  format (§5.4): the open sets (by name or path), the Loose tabs, the file
-  tree, the active tab. Opening one adds to the window: its sets that aren't
-  loaded already (by path, or by name for the sets folder), its Loose tabs
-  and their file panes, the tree if it was open, and its active tab.
+- A **layout file** (`*.hydraui`, TOML inside) is the window (§5.4): the
+  open sets (by name or path), the Loose tabs, the file tree, the active tab.
+  A window is backed by at most one, and keeps it saved (§7.12). Opening one
+  in an untitled window fills that window and backs it; in a window that
+  already has a layout, it opens in a new hydraui window. Layouts are no
+  longer merged into a window.
 
 Where:
 
-- Launcher: **Save layout to file…**, **Open layout file…**, **Open group
+- Launcher: **Save layout as…**, **Open layout file…**, **Open group
   file…**, **Save Loose tabs as group…** (every Loose tab into one group
-  file).
+  file). The title bar's layout menu has the layout entries too (§7.11).
 - Right-click a tab: **Save tab as group…**, **Close tab**.
 - Right-click a group header: **Save group…** (its tabs as they are now,
   with the Save As dialog starting on the group's own file), **Unload group**.
@@ -622,10 +631,19 @@ user's home when there is none) and respect `.gitignore` as the tree does.
 ### 7.11 Title bar and updates
 
 hydraui draws its own title bar (gpui-component's `TitleBar`): a slim row
-above the tab strip, in the theme's colours, with the icon and the window
-title on the left (`hydraui - <tab>`, as the system title was) and minimise,
-maximise/restore and close on the right. Dragging its empty part moves the
-window and double-clicking maximises, as a system title bar does.
+above the tab strip, in the theme's colours, with the icon and the layout's
+name on the left and minimise, maximise/restore and close on the right.
+Dragging its empty part moves the window and double-clicking maximises, as a
+system title bar does.
+
+**Layout name.** The window title (taskbar, Alt+Tab) is `hydraui - <layout>`,
+the layout file's name without `.hydraui`, or `hydraui - untitled`; the
+current tab is no longer in it. The title bar shows the name with a ▾; an
+untitled window's name is muted, with the tooltip "Not saved: Save layout as…
+to keep this window". Clicking the name opens a menu: **Save layout as…**,
+**Open layout file…**, **Recent ▸** (the recent layouts, §7.12), and
+**Reveal in Explorer** (saved layouts only). On the start page the title
+reads `hydraui` and the name is hidden.
 
 **Version.** hydraui knows its version as hydra does: `HYDRA_VERSION` at
 compile time in release builds, else `<Cargo version>-dev`.
@@ -652,8 +670,10 @@ nothing and says nothing.
    renamed; if a rename fails, what was already swapped is put back, so
    nothing is left half-updated.
 4. Turns the button into **Restart to finish** and toasts "Updated to
-   <version>". Restart saves the session (§7.9's last-layout), starts the new
-   `hydraui.exe` and closes this window: tabs come back, but what ran in their
+   <version>". Restart saves the layout (§7.12), starts the new
+   `hydraui.exe` with the layout file (an untitled window is first saved as
+   `~/.hydra/hydraui/layouts/untitled-<n>.hydraui`, the lowest free `n`, so
+   nothing is lost) and closes this window: tabs come back, but what ran in their
    terminals stops, which is why it is never automatic. The button says
    "Updating…" while it works; a failure (no network, a checksum that doesn't
    match, a file in use) is a toast with the reason, and the button stays.
@@ -664,6 +684,70 @@ old exe may still be running for a moment.
 
 The release check, download, checksum and swap live in `hydra-update`, used by
 both `hydra update` (whose behaviour and output don't change) and hydraui.
+
+### 7.12 Layouts and the start page
+
+Each window is either **untitled** or backed by one layout file (§7.9). Two
+hydraui windows never write the same file, and nothing is written behind the
+user's back except the window's own layout.
+
+**Saving.** A backed window writes its layout (atomically, §7.9) whenever
+tabs, splits, sets or the tree change, and when it closes. An untitled window
+writes nothing; closing it loses its layout, with no prompt (the title bar
+says so, §7.11). **Save layout as…** writes the window to a new file (the
+dialog starts in `~/.hydra/hydraui/layouts/`, created on first use, or in the
+current file's folder), backs the window with it from then on, and lets go
+of the old file. A failed write is a toast; the window keeps its old file.
+
+**Start page.** Starting hydraui with no file shows a start page in place of
+the tab strip and panes (title bar and status bar stay; the status bar is
+empty):
+
+- **Recent layouts**, newest first: each row the name, its folder (with `~`),
+  and when it was last opened ("2 h ago"). A row whose layout another hydraui
+  has open says "open in another window".
+- **New window**: one plain terminal in the home folder, untitled (today's
+  start without a session).
+- **Open layout file…**: the Open dialog.
+- A filter box has focus: typing narrows the rows by name or folder; ↑/↓ move;
+  Enter opens the selected row (with no rows, Enter is New window); Esc
+  clears the filter. The page also opens from the launcher's **Start page**.
+- Choosing a row whose file is missing removes it from the list with a toast.
+
+**Recent list.** `~/.hydra/hydraui/recent.toml`: up to 12 entries (path,
+last opened), newest first, shared by every hydraui. Opening or saving a
+layout moves it to the top. Each change reads the file afresh, changes it and
+replaces it atomically, so two windows don't lose each other's entries; an
+unreadable file counts as empty. Paths are compared case-insensitively with
+`/` and `\` alike.
+
+**One window per file.** A window that opens or saves a layout claims it with
+a named mutex, `Local\hydraui-layout-<hex sha256 of the full path, lowercase,
+\ separators>`, held while the window has the file and released when it lets
+go or exits (Windows releases it if hydraui crashes). It also writes
+`~/.hydra/hydraui/running/<pid>.toml` (the layout path and the window
+handle), removed on exit; entries whose process is gone are ignored and
+deleted. Opening a file another window has claimed brings that window to the
+front (from its running entry) and opens nothing; a start-page window or a
+process started only to open that file then closes itself. **Save layout
+as…** onto a file another window has claimed is refused with a toast naming
+it.
+
+**Command line.** `hydraui.exe <file>` opens that layout in a new window
+(the start page is skipped), or brings forward the window that has it. A
+file that isn't a valid layout opens the start page with a toast naming the
+file and the problem.
+
+**Old files.** Opening a `*.hydraui.toml` layout (Open dialog, recent list,
+command line) converts it: its contents are written to `<name>.hydraui`
+beside it, the old file is deleted, the window is backed by the new file, the
+recent entry is updated, and a toast says "Converted <old> → <new>". If
+`<name>.hydraui` already exists, nothing is written or deleted: the old file
+opens untitled with a toast saying why. The first start of a hydraui with
+§7.12 converts `~/.hydra/hydraui/session.toml` the same way into
+`~/.hydra/hydraui/layouts/last-session.hydraui` (with a free name if that's
+taken), puts it at the top of the recent list and deletes `session.toml`; an
+empty or unreadable session is just deleted.
 
 ## 8. Errors summary
 

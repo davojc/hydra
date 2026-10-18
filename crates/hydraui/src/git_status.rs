@@ -1,6 +1,19 @@
 //! The git repository a pane is in, for the status bar: branch, how it stands against its
-//! upstream (as of the last fetch: no network), and how many files changed.
-use std::path::Path;
+//! upstream (as of the last fetch: no network), and how many files changed; and each changed
+//! file, for the file tree (spec §7.3).
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+/// How a file stands in git.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    Modified,
+    Added,
+    Untracked,
+    Deleted,
+    Renamed,
+    Ignored,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GitStatus {
@@ -17,6 +30,24 @@ pub struct GitStatus {
     pub untracked: u32,
     /// Files with unresolved merge conflicts.
     pub conflicts: u32,
+    /// Each changed file (relative to the repository's root); an untracked or ignored folder
+    /// is one entry.
+    pub files: BTreeMap<PathBuf, Change>,
+    /// The repository's root folder.
+    pub root: Option<PathBuf>,
+}
+
+/// A tracked file's change from its `XY` letters.
+fn change_from(xy: &str) -> Change {
+    if xy.contains('R') {
+        Change::Renamed
+    } else if xy.contains('D') {
+        Change::Deleted
+    } else if xy.starts_with('A') {
+        Change::Added
+    } else {
+        Change::Modified
+    }
 }
 
 /// Reads `git status --porcelain=v2 --branch` output.
@@ -49,10 +80,28 @@ pub fn parse(text: &str) -> GitStatus {
             if xy.get(1).is_some_and(|c| *c != '.') {
                 s.modified += 1;
             }
+            // "1 XY sub mH mI mW hH hI path" / "2 XY sub mH mI mW hH hI Xscore path\torig".
+            let path = if line.starts_with("1 ") {
+                line.splitn(9, ' ').nth(8)
+            } else {
+                line.splitn(10, ' ')
+                    .nth(9)
+                    .map(|p| p.split('\t').next().unwrap_or(p))
+            };
+            if let Some(path) = path {
+                s.files
+                    .insert(PathBuf::from(path), change_from(&line[2..4]));
+            }
         } else if line.starts_with("u ") {
             s.conflicts += 1;
-        } else if line.starts_with("? ") {
+            if let Some(path) = line.splitn(11, ' ').nth(10) {
+                s.files.insert(PathBuf::from(path), Change::Modified);
+            }
+        } else if let Some(path) = line.strip_prefix("? ") {
             s.untracked += 1;
+            s.files.insert(PathBuf::from(path), Change::Untracked);
+        } else if let Some(path) = line.strip_prefix("! ") {
+            s.files.insert(PathBuf::from(path), Change::Ignored);
         }
     }
     if s.branch.is_none() && !oid.is_empty() && oid != "(initial)" {
@@ -92,13 +141,32 @@ pub fn summary(s: &GitStatus) -> String {
     }
 }
 
-/// The repository `dir` is in, or `None` when it isn't in one (or git isn't installed). Runs
-/// git without a console window; call it off the UI thread.
-pub fn read(dir: &Path) -> Option<GitStatus> {
+/// Whether something under `folder` changed (ignored files don't count).
+pub fn folder_changed(files: &BTreeMap<PathBuf, Change>, folder: &Path) -> bool {
+    files
+        .iter()
+        .any(|(p, c)| *c != Change::Ignored && p.starts_with(folder) && p != folder)
+}
+
+/// How `path` (relative to the repository's root) stands: its own entry, or that of the
+/// untracked or ignored folder it is in.
+pub fn change_of(files: &BTreeMap<PathBuf, Change>, path: &Path) -> Option<Change> {
+    if let Some(c) = files.get(path) {
+        return Some(*c);
+    }
+    path.ancestors()
+        .skip(1)
+        .filter_map(|a| files.get(a))
+        .find(|c| matches!(c, Change::Untracked | Change::Ignored))
+        .copied()
+}
+
+/// Runs git in `dir` without a console window; its output when it succeeds.
+fn git(dir: &Path, args: &[&str]) -> Option<String> {
     let mut cmd = std::process::Command::new("git");
     cmd.arg("-C")
         .arg(dir)
-        .args(["status", "--porcelain=v2", "--branch"])
+        .args(args)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     let out = hydra_platform::process::hide_window(&mut cmd)
@@ -106,7 +174,48 @@ pub fn read(dir: &Path) -> Option<GitStatus> {
         .ok()?;
     out.status
         .success()
-        .then(|| parse(&String::from_utf8_lossy(&out.stdout)))
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The repository `dir` is in, or `None` when it isn't in one (or git isn't installed). Runs
+/// git without a console window; call it off the UI thread.
+pub fn read(dir: &Path) -> Option<GitStatus> {
+    let text = git(
+        dir,
+        &[
+            "-c",
+            "core.quotePath=false",
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "--ignored",
+        ],
+    )?;
+    let mut s = parse(&text);
+    s.root = git(dir, &["rev-parse", "--show-toplevel"]).map(|r| PathBuf::from(r.trim()));
+    Some(s)
+}
+
+/// `git diff HEAD -- <file>` (untracked: `--no-index` against an empty file), without a
+/// console window; call it off the UI thread.
+pub fn diff_patch(repo_dir: &Path, file: &Path, untracked: bool) -> Result<String, String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C").arg(repo_dir).arg("diff").arg("--no-color");
+    if untracked {
+        cmd.args(["--no-index", "--", "NUL"]).arg(file);
+    } else {
+        cmd.args(["HEAD", "--"]).arg(file);
+    }
+    let out = hydra_platform::process::hide_window(&mut cmd)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| e.to_string())?;
+    // `--no-index` exits 1 when the files differ: that's a diff, not a failure.
+    if out.status.success() || (untracked && out.status.code() == Some(1)) {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
 }
 
 #[cfg(test)]
@@ -139,6 +248,8 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc both.rs\n\
                 modified: 2,
                 untracked: 2,
                 conflicts: 1,
+                files: s.files.clone(),
+                root: None,
             }
         );
         assert_eq!(summary(&s), "⎇ main ↑2 ↓1 · +3 ~2 ?2 !1");
@@ -171,6 +282,118 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc both.rs\n\
     }
 
     #[test]
+    fn files_get_their_change() {
+        let text = "# branch.head main\n\
+            1 .M N... 100644 100644 100644 a a src/a.rs\n\
+            1 A. N... 000000 100644 100644 0 b src/new.rs\n\
+            1 .D N... 100644 100644 000000 c c gone.rs\n\
+            ? notes.txt\n\
+            ! target/x\n";
+        let s = parse(text);
+        assert_eq!(s.files.get(Path::new("src/a.rs")), Some(&Change::Modified));
+        assert_eq!(s.files.get(Path::new("src/new.rs")), Some(&Change::Added));
+        assert_eq!(s.files.get(Path::new("gone.rs")), Some(&Change::Deleted));
+        assert_eq!(
+            s.files.get(Path::new("notes.txt")),
+            Some(&Change::Untracked)
+        );
+        assert_eq!(s.files.get(Path::new("target/x")), Some(&Change::Ignored));
+    }
+
+    #[test]
+    fn renames_mark_the_new_path() {
+        let s = parse("2 R. N... 100644 100644 100644 a a R100 src/new.rs\tsrc/old.rs\n");
+        assert_eq!(s.files.get(Path::new("src/new.rs")), Some(&Change::Renamed));
+        assert!(!s.files.contains_key(Path::new("src/old.rs")));
+    }
+
+    #[test]
+    fn paths_with_spaces_are_kept_whole() {
+        let s = parse("1 .M N... 100644 100644 100644 a a my notes/a b.md\n");
+        assert_eq!(
+            s.files.get(Path::new("my notes/a b.md")),
+            Some(&Change::Modified)
+        );
+    }
+
+    #[test]
+    fn a_folder_holding_changes_is_marked() {
+        let s = parse("1 .M N... 100644 100644 100644 a a src/ui/a.rs\n! target/x\n");
+        assert!(folder_changed(&s.files, Path::new("src")));
+        assert!(folder_changed(&s.files, Path::new("src/ui")));
+        assert!(!folder_changed(&s.files, Path::new("docs")));
+        assert!(
+            !folder_changed(&s.files, Path::new("target")),
+            "ignored isn't a change"
+        );
+    }
+
+    #[test]
+    fn files_in_an_untracked_or_ignored_folder_take_its_change() {
+        let s = parse("1 .M N... 100644 100644 100644 a a src/a.rs\n? tmp/\n! target/\n");
+        assert_eq!(
+            change_of(&s.files, Path::new("src/a.rs")),
+            Some(Change::Modified)
+        );
+        assert_eq!(
+            change_of(&s.files, Path::new("tmp/x/y.txt")),
+            Some(Change::Untracked)
+        );
+        assert_eq!(
+            change_of(&s.files, Path::new("target")),
+            Some(Change::Ignored)
+        );
+        assert_eq!(
+            change_of(&s.files, Path::new("target/debug/a")),
+            Some(Change::Ignored)
+        );
+        assert_eq!(change_of(&s.files, Path::new("src/b.rs")), None);
+        assert_eq!(
+            change_of(&s.files, Path::new("src")),
+            None,
+            "a modified file doesn't spread up"
+        );
+    }
+
+    #[test]
+    fn diffs_of_a_changed_and_an_untracked_file() {
+        let d = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(d.path())
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if !git(&["init", "-q"]) {
+            eprintln!("skipped: git isn't installed");
+            return;
+        }
+        std::fs::write(d.path().join("a.txt"), "one\n").unwrap();
+        assert!(git(&["add", "a.txt"]));
+        assert!(git(&["commit", "-q", "-m", "x"]));
+        std::fs::write(d.path().join("a.txt"), "two\n").unwrap();
+        std::fs::write(d.path().join("new.txt"), "fresh\n").unwrap();
+        let changed = diff_patch(d.path(), Path::new("a.txt"), false).unwrap();
+        assert!(
+            changed.contains("-one") && changed.contains("+two"),
+            "{changed}"
+        );
+        let added = diff_patch(d.path(), Path::new("new.txt"), true).unwrap();
+        assert!(added.contains("+fresh"), "{added}");
+    }
+
+    #[test]
     fn a_real_repository_is_read_and_a_plain_folder_is_not() {
         let d = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
@@ -191,7 +414,14 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc both.rs\n\
         assert!(s.branch.is_some(), "{s:?}");
         assert_eq!(s.untracked, 1);
         assert!(git(&["add", "a.txt"]));
-        assert_eq!(read(d.path()).unwrap().staged, 1);
+        let staged = read(d.path()).unwrap();
+        assert_eq!(staged.staged, 1);
+        assert_eq!(staged.files.get(Path::new("a.txt")), Some(&Change::Added));
+        let root = staged.root.expect("the repository's root");
+        assert_eq!(
+            std::fs::canonicalize(root).unwrap(),
+            std::fs::canonicalize(d.path()).unwrap()
+        );
         let plain = tempfile::tempdir().unwrap();
         assert_eq!(read(plain.path()), None);
     }

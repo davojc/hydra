@@ -11,6 +11,7 @@ use gpui::{
     Subscription, Task, Window, div, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::diff::{Diff, DiffFile, DiffMode, DiffState};
 use gpui_component::input::{Editor, EditorState, InputEvent, Position};
 use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
@@ -47,6 +48,8 @@ enum Body {
         _sub: Subscription,
     },
     CantShow(String),
+    /// How the file differs from git's last commit (spec §7.3), or why it can't be shown.
+    Diff(Result<Entity<DiffState>, String>),
 }
 
 struct FileTab {
@@ -100,6 +103,16 @@ fn replace_keeping_place(
         let (line, character) = file_doc::cursor_after_reload(pos.line, pos.character, &text);
         e.set_cursor_position(Position { line, character }, window, cx);
     });
+}
+
+/// The tabs' paths for finding a file's own tab: a diff tab's is left empty.
+fn file_paths(tabs: &[FileTab]) -> Vec<PathBuf> {
+    tabs.iter()
+        .map(|t| match t.body {
+            Body::Diff(_) => PathBuf::new(),
+            _ => t.path.clone(),
+        })
+        .collect()
 }
 
 fn file_name(p: &Path) -> String {
@@ -194,7 +207,7 @@ impl FilePane {
 
     /// Shows `path`: its file tab if it's open, else a new one.
     pub fn open(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let paths: Vec<PathBuf> = self.tabs.iter().map(|t| t.path.clone()).collect();
+        let paths = file_paths(&self.tabs);
         self.active = match find(&paths, &path) {
             Some(i) => i,
             None => {
@@ -233,6 +246,49 @@ impl FilePane {
         cx.notify();
     }
 
+    /// Shows how `path` differs from git's last commit, side by side, in a tab of its own; an
+    /// earlier diff of the file is replaced.
+    pub fn open_diff(
+        &mut self,
+        path: PathBuf,
+        patch: Result<String, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let parsed = patch.and_then(|p| DiffFile::parse(&p).map_err(|e| e.to_string()));
+        let body = match parsed {
+            Ok(files) if files.is_empty() => Err("no changes".to_string()),
+            Ok(files) if files.iter().all(DiffFile::is_binary) => {
+                Err("a binary file changed".to_string())
+            }
+            Ok(files) => Ok(cx.new(|cx| DiffState::new(files, cx).with_mode(DiffMode::Split))),
+            Err(e) => Err(e),
+        };
+        let tab = FileTab {
+            path: path.clone(),
+            body: Body::Diff(body),
+            dirty: false,
+            disk: DiskFlags::default(),
+        };
+        let earlier = self
+            .tabs
+            .iter()
+            .position(|t| matches!(t.body, Body::Diff(_)) && t.path == path);
+        self.active = match earlier {
+            Some(i) => {
+                self.tabs[i] = tab;
+                i
+            }
+            None => {
+                self.tabs.push(tab);
+                self.tabs.len() - 1
+            }
+        };
+        self.focus_content(window, cx);
+        cx.emit(FilePaneEvent::Changed);
+        cx.notify();
+    }
+
     /// Focuses the active file: its editor in Raw, the pane (for scrolling and copying) in
     /// Rendered or when a file can't be shown.
     pub fn focus_content(&self, window: &mut Window, cx: &mut App) {
@@ -246,12 +302,18 @@ impl FilePane {
         }
     }
 
-    /// The open files and the active one, for the session.
+    /// The open files and the active one, for the session; diff tabs aren't kept.
     pub fn saved(&self) -> (Vec<PathBuf>, usize) {
-        (
-            self.tabs.iter().map(|t| t.path.clone()).collect(),
-            self.active,
-        )
+        let is_file = |t: &&FileTab| !matches!(t.body, Body::Diff(_));
+        let files: Vec<PathBuf> = self
+            .tabs
+            .iter()
+            .filter(is_file)
+            .map(|t| t.path.clone())
+            .collect();
+        let before = self.tabs.iter().take(self.active).filter(is_file).count();
+        let active = before.min(files.len().saturating_sub(1));
+        (files, active)
     }
 
     /// The files with unsaved edits.
@@ -383,7 +445,7 @@ impl FilePane {
 
     fn disk_changed(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
         // The event spells the path as it is on disk; ours may differ in case or slashes.
-        let paths: Vec<PathBuf> = self.tabs.iter().map(|t| t.path.clone()).collect();
+        let paths = file_paths(&self.tabs);
         let Some(i) = find(&paths, path) else {
             return;
         };
@@ -462,7 +524,10 @@ impl Render for FilePane {
             .border_b_1()
             .border_color(border);
         for (i, t) in self.tabs.iter().enumerate() {
-            let label = format!("{}{}", file_name(&t.path), if t.dirty { " ●" } else { "" });
+            let label = match t.body {
+                Body::Diff(_) => format!("{} (diff)", file_name(&t.path)),
+                _ => format!("{}{}", file_name(&t.path), if t.dirty { " ●" } else { "" }),
+            };
             strip = strip.child(
                 h_flex()
                     .id(("file-tab", i))
@@ -581,6 +646,14 @@ impl Render for FilePane {
                 .justify_center()
                 .text_color(muted)
                 .child(format!("Can't show this file: {why}"))
+                .into_any_element(),
+            Body::Diff(Ok(state)) => Diff::new(state).size_full().into_any_element(),
+            Body::Diff(Err(why)) => v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .text_color(muted)
+                .child(format!("Can't show the changes: {why}"))
                 .into_any_element(),
             Body::Text {
                 editor,

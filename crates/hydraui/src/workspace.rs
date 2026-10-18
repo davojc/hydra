@@ -705,12 +705,18 @@ impl Workspace {
         self.git_busy = true;
         cx.spawn(async move |this, cx| {
             let dir = cwd.clone();
-            let line = cx
-                .background_spawn(
-                    async move { git_status::read(&dir).map(|s| git_status::summary(&s)) },
-                )
+            let status = cx
+                .background_spawn(async move { git_status::read(&dir) })
                 .await;
             let _ = this.update(cx, |ws, cx| {
+                if let Some(tree) = ws.tree.clone() {
+                    let (root, files) = status
+                        .as_ref()
+                        .map(|s| (s.root.clone(), s.files.clone()))
+                        .unwrap_or_default();
+                    tree.update(cx, |t, cx| t.set_git(root, files, cx));
+                }
+                let line = status.as_ref().map(git_status::summary);
                 ws.git = Some((cwd, line));
                 ws.git_busy = false;
                 if std::mem::take(&mut ws.git_again) {
@@ -795,8 +801,37 @@ impl Workspace {
                 }
             }),
             TreeEvent::Show(path) => self.show_file(path.clone(), window, cx),
+            TreeEvent::ShowChanges(path) => self.show_changes(path.clone(), window, cx),
         }
         self.focus_active(window, cx);
+    }
+
+    /// Diffs a file against git's last commit off the UI thread, then shows it beside the file
+    /// in the tab's file pane (spec §7.3).
+    fn show_changes(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((root, rel, untracked)) =
+            self.tree.as_ref().and_then(|t| t.read(cx).git_place(&path))
+        else {
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let patch = cx
+                .background_spawn(async move { git_status::diff_patch(&root, &rel, untracked) })
+                .await;
+            let _ = this.update_in(cx, |ws, window, cx| {
+                ws.show_file(path.clone(), window, cx);
+                let pane = ws.tabs.active().and_then(|tab| {
+                    tab.tree
+                        .panes()
+                        .into_iter()
+                        .find_map(|p| ws.files.get(&p).cloned())
+                });
+                if let Some(pane) = pane {
+                    pane.update(cx, |f, cx| f.open_diff(path, patch, window, cx));
+                }
+            });
+        })
+        .detach();
     }
 
     /// Opens a file in `editor` (a program name or path; `.cmd` launchers such as VS Code's

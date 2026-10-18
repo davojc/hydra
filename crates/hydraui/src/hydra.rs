@@ -8,12 +8,12 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use hydra_core::bindings;
-use hydra_core::borrow::declared_owner;
+use hydra_core::borrow::{NOT_BORROWABLE, declared_owner};
 use hydra_core::config::{EnvConfig, GlobalConfig, load_env, load_global, parse_env};
 use hydra_core::envedit::{self, ToolValues};
 use hydra_core::envs;
 use hydra_core::name::EnvName;
-use hydra_core::paths::HydraPaths;
+use hydra_core::paths::{HydraPaths, expand_tilde};
 use hydra_core::provider::{Ctx, IdentityReport, Provider, Status, Warnings};
 use hydra_core::resolve::{ENV_VARS_MARKER, LaunchEnv, PrepareError, PrepareOptions, prepare};
 use hydra_core::secret::{SecretRef, SecretStore};
@@ -294,19 +294,38 @@ impl Hydra {
         Ok(text.strip_prefix('\u{feff}').unwrap_or(&text).to_string())
     }
 
-    /// Turns `tool` on for `env`, as `hydra add` does: with its own login, or `from` another
-    /// environment's. The edited env.toml is checked first; nothing is written if it fails.
-    pub fn add_tool(&self, env: &str, tool: &str, from: Option<&str>) -> Result<(), String> {
+    /// Turns `tool` on for `env` with `values`, as `hydra add` does (`from` borrows another
+    /// environment's login). Key and kubeconfig paths must exist; the edited env.toml is
+    /// checked first; nothing is written if either fails.
+    pub fn add_tool(&self, env: &str, tool: &str, values: &ToolValues) -> Result<(), String> {
         let text = self.env_text(env)?;
-        let values = ToolValues {
-            from: from.map(str::to_string),
-            ..Default::default()
-        };
-        let (new_text, _) = envedit::add_tool(&text, tool, &values)?;
+        for path in [&values.ssh_key, &values.signing_key, &values.kube_config]
+            .into_iter()
+            .flatten()
+        {
+            if !expand_tilde(path, &self.user_home).is_file() {
+                return Err(format!("{path} doesn't exist"));
+            }
+        }
+        let (new_text, _) = envedit::add_tool(&text, tool, values)?;
         let name = EnvName::parse(env).map_err(|e| e.to_string())?;
         parse_env(&self.paths, &name, &new_text).map_err(|e| e.to_string())?;
         let file = self.paths.env_file(&name);
         std::fs::write(&file, new_text).map_err(|e| format!("can't write {}: {e}", file.display()))
+    }
+
+    /// Gemini for `env`: the key stored as the secret `<env>/gemini`, and env.toml pointing
+    /// at it. Nothing is written when the key can't be stored.
+    pub fn add_gemini(&self, env: &str, api_key: &str) -> Result<(), String> {
+        self.env_text(env)?;
+        let path = format!("{env}/gemini");
+        self.set_secret(&path, api_key.trim())?;
+        let r = SecretRef::parse_path(&path).map_err(|e| e.to_string())?;
+        let values = ToolValues {
+            api_key: Some(r.to_value()),
+            ..Default::default()
+        };
+        self.add_tool(env, "gemini", &values)
     }
 
     /// The accounts that can be added to `env`: sign-ins for the tools it doesn't have, and the
@@ -331,7 +350,10 @@ impl Hydra {
                 let t = self.env_text(&n).ok()?;
                 let owned = tools(&t)
                     .into_iter()
-                    .filter(|tool| declared_owner(&t, tool).is_none())
+                    .filter(|tool| {
+                        declared_owner(&t, tool).is_none()
+                            && !NOT_BORROWABLE.contains(&tool.as_str())
+                    })
                     .collect();
                 Some((n, owned))
             })
@@ -572,10 +594,110 @@ mod tests {
 
     const BOUND: &str = "[bindings]\n\"BOUND/**\" = \"personal\"\n";
 
+    fn from(env: &str) -> ToolValues {
+        ToolValues {
+            from: Some(env.into()),
+            ..Default::default()
+        }
+    }
+
+    fn work_config(f: &Fx) -> EnvConfig {
+        load_env(&f.hydra.paths, &EnvName::parse("work").unwrap()).unwrap()
+    }
+
+    #[test]
+    fn git_is_set_up_with_an_identity_and_optional_keys() {
+        let f = fx("");
+        let values = ToolValues {
+            name: Some("Dee".into()),
+            email: Some("dee@example.com".into()),
+            ..Default::default()
+        };
+        f.hydra.add_tool("work", "git", &values).unwrap();
+        let git = work_config(&f).git.unwrap();
+        assert_eq!(git.email.as_deref(), Some("dee@example.com"));
+        assert_eq!(git.ssh_key, None);
+
+        let key = f.free.join("id_test");
+        std::fs::write(&key, "k").unwrap();
+        let f2 = fx("");
+        let with_key = ToolValues {
+            ssh_key: Some(key.to_string_lossy().into_owned()),
+            ..values
+        };
+        f2.hydra.add_tool("work", "git", &with_key).unwrap();
+        assert!(work_config(&f2).git.unwrap().ssh_key.is_some());
+    }
+
+    #[test]
+    fn a_missing_key_file_writes_nothing() {
+        let f = fx("");
+        let file = f.hydra.paths.env_file(&EnvName::parse("work").unwrap());
+        let before = std::fs::read_to_string(&file).unwrap();
+        let values = ToolValues {
+            name: Some("Dee".into()),
+            email: Some("dee@example.com".into()),
+            ssh_key: Some(f.free.join("no_such_key").to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let err = f.hydra.add_tool("work", "git", &values).unwrap_err();
+        assert!(err.contains("no_such_key"), "{err}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+    }
+
+    #[test]
+    fn aws_is_set_up_with_a_profile_ready_to_sign_in() {
+        let f = fx("");
+        let values = ToolValues {
+            profile: Some("dev".into()),
+            ..Default::default()
+        };
+        f.hydra.add_tool("work", "aws", &values).unwrap();
+        assert_eq!(work_config(&f).aws.unwrap().profile, "dev");
+        assert!(f.hydra.sign_ins("work").contains(&"aws".to_string()));
+    }
+
+    #[test]
+    fn kube_is_set_up_with_or_without_a_kubeconfig() {
+        let f = fx("");
+        f.hydra
+            .add_tool("work", "kube", &ToolValues::default())
+            .unwrap();
+        assert_eq!(work_config(&f).kube.unwrap().config, None);
+        let cfg = f.free.join("kubeconfig");
+        std::fs::write(&cfg, "").unwrap();
+        let f2 = fx("");
+        let values = ToolValues {
+            kube_config: Some(cfg.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        f2.hydra.add_tool("work", "kube", &values).unwrap();
+        assert!(work_config(&f2).kube.unwrap().config.is_some());
+    }
+
+    #[test]
+    fn gemini_stores_the_key_as_a_secret_and_refers_to_it() {
+        let f = fx("");
+        f.hydra.add_gemini("work", "AIza-test-key").unwrap();
+        let file = f.hydra.paths.env_file(&EnvName::parse("work").unwrap());
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("secret:work/gemini"), "{text}");
+        assert!(
+            !text.contains("AIza-test-key"),
+            "the key never goes in the file"
+        );
+        // A pane needs its secrets: this one starts now.
+        let req = PaneRequest::new("work", f.free.clone(), ShellKind::Pwsh);
+        assert!(f.hydra.prepare(&req).is_ok());
+        assert!(f.hydra.add_gemini("personal", "  ").is_err());
+    }
+
     #[test]
     fn adding_a_tool_turns_it_on_ready_to_sign_in() {
         let f = fx("");
-        f.hydra.add_tool("work", "github", None).unwrap();
+        f.hydra
+            .add_tool("work", "github", &ToolValues::default())
+            .unwrap();
         assert_eq!(f.hydra.sign_ins("work"), vec!["github"]);
     }
 
@@ -583,7 +705,9 @@ mod tests {
     fn every_sign_in_tool_can_be_added_and_signed_in() {
         let f = fx("");
         for tool in crate::accounts::SIGN_IN_TOOLS {
-            f.hydra.add_tool("work", tool, None).unwrap();
+            f.hydra
+                .add_tool("work", tool, &ToolValues::default())
+                .unwrap();
             assert!(
                 f.hydra.sign_ins("work").contains(&tool.to_string()),
                 "{tool}"
@@ -594,7 +718,7 @@ mod tests {
     #[test]
     fn a_tool_can_be_borrowed_from_an_env_that_has_it() {
         let f = fx("");
-        f.hydra.add_tool("work", "github", Some("gh")).unwrap();
+        f.hydra.add_tool("work", "github", &from("gh")).unwrap();
         let text =
             std::fs::read_to_string(f.hydra.paths.env_file(&EnvName::parse("work").unwrap()))
                 .unwrap();
@@ -609,12 +733,40 @@ mod tests {
         // personal has no github to lend.
         assert!(
             f.hydra
-                .add_tool("work", "github", Some("personal"))
+                .add_tool("work", "github", &from("personal"))
                 .is_err()
         );
-        assert!(f.hydra.add_tool("work", "nope", None).is_err());
-        assert!(f.hydra.add_tool("nobody", "github", None).is_err());
+        assert!(
+            f.hydra
+                .add_tool("work", "nope", &ToolValues::default())
+                .is_err()
+        );
+        assert!(
+            f.hydra
+                .add_tool("nobody", "github", &ToolValues::default())
+                .is_err()
+        );
         assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+    }
+
+    #[test]
+    fn tools_that_cant_be_borrowed_arent_offered() {
+        let f = fx("");
+        let personal = f.hydra.paths.env_file(&EnvName::parse("personal").unwrap());
+        std::fs::write(
+            &personal,
+            "[git]
+email = \"p@example.com\"
+",
+        )
+        .unwrap();
+        let work = f.hydra.account_choices("work");
+        assert!(
+            !work
+                .iter()
+                .any(|c| matches!(c, AddChoice::Borrow { tool, .. } if tool == "git")),
+            "{work:?}"
+        );
     }
 
     #[test]

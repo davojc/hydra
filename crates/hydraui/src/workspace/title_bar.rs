@@ -158,7 +158,10 @@ impl Workspace {
                         .child(img(ICON.clone()).size(px(18.)))
                         .child(div().text_sm().text_color(muted).child(self.title.clone())),
                 )
-                .children(button),
+                // The title bar's drag area covers its children, and Windows turns a click there
+                // into a window drag before the button sees it: occluding stops the hit test at
+                // the button, so its clicks stay clicks.
+                .children(button.map(|b| div().occlude().child(b))),
         )
     }
 }

@@ -350,6 +350,14 @@ OSC 8 hyperlinks (Ctrl-click opens), mouse reporting, bracketed paste, find in
 scrollback. Font, size and colour scheme come from `config.toml`, with a
 built-in default theme.
 
+- Finishing a selection (drag, double- or triple-click) copies it to the
+  clipboard, with a "Copied" label in the pane's corner for a moment; an empty
+  selection copies nothing. Ctrl+C copies too.
+- Scrolled up into the history, a round ↓ button shows at the pane's bottom
+  right; clicking it jumps to the latest output, and it goes once at the
+  bottom. New output doesn't move a view that is scrolled up.
+- Opening the accounts popover (§7.1) checks the accounts again, as Refresh.
+
 ### 7.3 File tree
 
 Toggled with `Ctrl+B`. Rooted at the focused pane's last OSC 7 folder (before

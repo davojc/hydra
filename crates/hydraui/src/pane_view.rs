@@ -85,6 +85,8 @@ pub struct PaneView {
     origin: Point<Pixels>,
     cursor_cell: Option<(usize, usize)>,
     selecting: bool,
+    /// The "Copied" label shows until then.
+    copied_until: Option<std::time::Instant>,
     finder: Option<Finder>,
     /// Bumped on every start, so events from an older shell are ignored.
     generation: u64,
@@ -152,6 +154,19 @@ fn is_program_path(title: &str) -> bool {
     title.to_ascii_lowercase().ends_with(".exe")
 }
 
+/// What finishing a selection copies: its text, unless there is none.
+fn copy_on_select(text: Option<String>) -> Option<String> {
+    text.filter(|t| !t.is_empty())
+}
+
+/// The jump-to-bottom arrow shows while the view is scrolled up into the history.
+fn shows_jump_to_bottom(display_offset: usize) -> bool {
+    display_offset > 0
+}
+
+/// How long the "Copied" label shows after a selection is copied.
+const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
+
 fn grid_point(display_offset: usize, row: usize, col: usize) -> GridPoint {
     viewport_to_point(display_offset, GridPoint::new(row, Column(col)))
 }
@@ -184,6 +199,7 @@ impl PaneView {
             origin: Point::default(),
             cursor_cell: None,
             selecting: false,
+            copied_until: None,
             finder: None,
             generation: 0,
             _tasks: Vec::new(),
@@ -475,11 +491,36 @@ impl PaneView {
     fn end_drag(&mut self, cx: &mut Context<Self>) {
         self.selecting = false;
         if let Slot::Running(pane) = &self.slot {
-            pane.with_term(|t| {
+            let text = pane.with_term(|t| {
                 if t.selection.as_ref().is_some_and(|s| s.is_empty()) {
                     t.selection = None;
                 }
+                t.selection_to_string()
             });
+            // A finished selection is copied, with a moment's "Copied" to say so.
+            if let Some(text) = copy_on_select(text) {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                self.copied_until = Some(std::time::Instant::now() + COPIED_FOR);
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(COPIED_FOR).await;
+                    let _ = this.update(cx, |v, cx| {
+                        if v.copied_until
+                            .is_some_and(|t| t <= std::time::Instant::now())
+                        {
+                            v.copied_until = None;
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
+        }
+        cx.notify();
+    }
+
+    fn jump_to_bottom(&mut self, cx: &mut Context<Self>) {
+        if let Slot::Running(pane) = &self.slot {
+            pane.with_term(|t| t.scroll_display(Scroll::Bottom));
         }
         cx.notify();
     }
@@ -911,6 +952,12 @@ impl Render for PaneView {
             theme.border,
         );
         let background = color(self.style.palette.background);
+        let scrolled_up = match &self.slot {
+            Slot::Running(pane) => {
+                shows_jump_to_bottom(pane.with_term(|t| t.grid().display_offset()))
+            }
+            _ => false,
+        };
         let body = match &self.slot {
             Slot::Running(_) => self.grid(cx).into_any_element(),
             Slot::Starting => message(format!("starting {}…", self.request.env), muted),
@@ -999,7 +1046,45 @@ impl Render for PaneView {
                     .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up))
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
                     .on_scroll_wheel(cx.listener(Self::on_scroll))
-                    .child(body),
+                    .relative()
+                    .child(body)
+                    .when(self.copied_until.is_some(), |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top_2()
+                                .right_3()
+                                .px_2()
+                                .py_0p5()
+                                .rounded_md()
+                                .text_sm()
+                                .bg(cx.theme().secondary)
+                                .text_color(cx.theme().secondary_foreground)
+                                .child("Copied"),
+                        )
+                    })
+                    .when(scrolled_up, |d| {
+                        d.child(
+                            div()
+                                .id("jump-to-bottom")
+                                .absolute()
+                                .bottom_3()
+                                .right_3()
+                                .size(px(32.))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .bg(cx.theme().secondary)
+                                .text_color(cx.theme().secondary_foreground)
+                                .hover(|d| d.bg(cx.theme().secondary_hover))
+                                .child("↓")
+                                // Its own click, not the start of a selection underneath.
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(cx.listener(|v, _, _, cx| v.jump_to_bottom(cx))),
+                        )
+                    }),
             )
     }
 }
@@ -1007,6 +1092,23 @@ impl Render for PaneView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finishing_a_selection_copies_only_real_text() {
+        assert_eq!(
+            copy_on_select(Some("ls -la".into())),
+            Some("ls -la".to_string())
+        );
+        assert_eq!(copy_on_select(Some(String::new())), None);
+        assert_eq!(copy_on_select(None), None);
+    }
+
+    #[test]
+    fn the_jump_to_bottom_arrow_shows_only_when_scrolled_up() {
+        assert!(!shows_jump_to_bottom(0));
+        assert!(shows_jump_to_bottom(1));
+        assert!(shows_jump_to_bottom(500));
+    }
 
     #[test]
     fn a_programs_exe_path_isnt_a_title() {

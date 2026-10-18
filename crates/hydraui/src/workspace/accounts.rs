@@ -43,7 +43,10 @@ impl Workspace {
                     ws.accounts_open = *open;
                     cx.notify();
                     if *open {
-                        ws.refresh_status(cx);
+                        // Opening the popover checks again now (as Refresh does).
+                        if let Some(env) = ws.focused().map(|v| v.read(cx).env().to_string()) {
+                            ws.recheck_accounts(&env, cx);
+                        }
                     } else {
                         ws.focus_active(window, cx);
                     }

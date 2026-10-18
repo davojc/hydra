@@ -49,6 +49,7 @@ fn main() {
             cx.bind_keys(keys::bindings(&keymap));
             cx.bind_keys(keys::terminal_bindings());
             cx.bind_keys(keys::file_pane_bindings());
+            cx.bind_keys(keys::test_bindings());
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();

@@ -36,7 +36,7 @@ use crate::git_status;
 use crate::hydra::{Borrowing, Hydra, PaneRequest, STATUS_TTL, StatusCache, account_marks};
 use crate::keys::{
     ClosePane, FileTree, FocusDown, FocusLeft, FocusRight, FocusUp, NewTab, NextTab, PreviousTab,
-    SplitDown, SplitRight,
+    SplitDown, SplitRight, TestDialog,
 };
 use crate::open_files::{last_terminal_closes_tab, terminal_for};
 use crate::pane_view::{PaneEvent, PaneView, TermStyle};
@@ -225,22 +225,17 @@ impl Workspace {
                 false
             })
             .unwrap_or(true)
-        }); // Smoke tests and screenshots can't press Ctrl+Shift: debug builds open a dialog by
-        // name (open_file, search, launcher) from HYDRAUI_TEST_DIALOG.
-        #[cfg(debug_assertions)]
-        if let Some(name) = std::env::var_os("HYDRAUI_TEST_DIALOG") {
-            cx.spawn_in(window, async move |this, cx| {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(1))
-                    .await;
-                let _ = this.update_in(cx, |ws, window, cx| match name.to_str() {
-                    Some("open_file") => ws.open_file_finder(window, cx),
-                    Some("search") => ws.search_dialog(window, cx),
-                    Some("launcher") => ws.open_launcher(&crate::keys::Launcher, window, cx),
-                    _ => {}
-                });
-            })
-            .detach();
+        });
+    }
+
+    /// Smoke tests and screenshots can't press Ctrl+Shift: in debug builds F12 opens the dialog
+    /// named by HYDRAUI_TEST_DIALOG (open_file, search, launcher).
+    fn test_dialog(&mut self, _: &TestDialog, window: &mut Window, cx: &mut Context<Self>) {
+        match std::env::var("HYDRAUI_TEST_DIALOG").as_deref() {
+            Ok("open_file") => self.open_file_finder(window, cx),
+            Ok("search") => self.search_dialog(window, cx),
+            Ok("launcher") => self.open_launcher(&crate::keys::Launcher, window, cx),
+            _ => {}
         }
     }
 
@@ -1267,6 +1262,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_tree))
             .on_action(cx.listener(Self::open_file_action))
             .on_action(cx.listener(Self::search_action))
+            .on_action(cx.listener(Self::test_dialog))
             .child(self.render_title_bar(cx))
             .child(self.render_tab_strip(bar, border, muted, cx))
             .child(

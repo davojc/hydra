@@ -26,9 +26,19 @@ gpui::actions!(
         SearchFiles,
         TerminalTab,
         TerminalBackTab,
-        SaveFile
+        SaveFile,
+        TestDialog
     ]
 );
+
+/// F12 opens HYDRAUI_TEST_DIALOG's dialog, for smoke tests; bound only in debug builds.
+pub fn test_bindings() -> Vec<KeyBinding> {
+    if cfg!(debug_assertions) {
+        vec![KeyBinding::new("f12", TestDialog, None)]
+    } else {
+        Vec::new()
+    }
+}
 
 /// Ctrl+S in a file pane (spec §7.8).
 pub fn file_pane_bindings() -> Vec<KeyBinding> {

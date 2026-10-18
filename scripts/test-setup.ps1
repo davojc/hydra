@@ -3,7 +3,8 @@
 # Used by the release job before publishing; runnable locally. Restores the user PATH it found
 # exactly (the raw registry value and its type, so %VARIABLES% stay unexpanded) and points
 # HYDRA_HOME at a temporary folder, so ~/.hydra is never touched. It refuses to run where hydra
-# is installed: the Settings entry and Start menu shortcut it checks are the real ones.
+# is installed: the Settings entry, Start menu shortcut and .hydraui association it checks are
+# the real ones.
 param(
     [Parameter(Mandatory)] [string]$Setup,
     [Parameter(Mandatory)] [string]$From,
@@ -29,8 +30,10 @@ $Setup = (Resolve-Path $Setup).Path
 $From = (Resolve-Path $From).Path
 $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\hydra'
 $lnk = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\hydraui.lnk'
-if ((Test-Path $key) -or (Test-Path $lnk)) {
-    Write-Host "hydra is installed on this machine (Settings entry or Start menu shortcut); this test would overwrite and then delete them. Run it on a machine without hydra installed, such as CI." -ForegroundColor Red
+$extKey = 'HKCU:\Software\Classes\.hydraui'
+$progKey = 'HKCU:\Software\Classes\hydraui.layout'
+if ((Test-Path $key) -or (Test-Path $lnk) -or (Test-Path $progKey)) {
+    Write-Host "hydra is installed on this machine (Settings entry, Start menu shortcut or .hydraui association); this test would overwrite and then delete them. Run it on a machine without hydra installed, such as CI." -ForegroundColor Red
     exit 2
 }
 $saved = UserPath
@@ -57,6 +60,9 @@ try {
     Check ($null -ne $k -and $k.DisplayVersion -eq $Version) "Settings entry has version $Version"
     Check ($null -ne $k -and (Same $k.InstallLocation $dir)) 'Settings entry points at the install folder'
     Check (Test-Path $lnk) 'Start menu shortcut made'
+    Check ((Get-Item $extKey -ErrorAction SilentlyContinue).GetValue('') -eq 'hydraui.layout') '.hydraui points at hydraui.layout'
+    $open = (Get-Item "$progKey\shell\open\command" -ErrorAction SilentlyContinue).GetValue('')
+    Check ($open -eq ('"' + (Join-Path $dir 'hydraui.exe') + '" "%1"')) ".hydraui opens in the installed hydraui (got '$open')"
     Check (Test-Path (Join-Path $env:HYDRA_HOME 'config.toml')) 'hydra init made config.toml'
 
     $u = Start-Process -FilePath (Join-Path $dir 'hydra-setup.exe') -ArgumentList '--uninstall', '--silent' -Wait -PassThru
@@ -69,6 +75,7 @@ try {
     Check (@(Entries (UserPath) | Where-Object { $_ -eq $neighbour }).Count -eq 1) 'other PATH entries untouched'
     Check (-not (Test-Path $key)) 'Settings entry removed'
     Check (-not (Test-Path $lnk)) 'Start menu shortcut removed'
+    Check (-not (Test-Path $extKey) -and -not (Test-Path $progKey)) '.hydraui association removed'
     Check (Test-Path (Join-Path $env:HYDRA_HOME 'config.toml')) 'hydra home kept'
 } finally {
     SetUserPath $saved $savedKind

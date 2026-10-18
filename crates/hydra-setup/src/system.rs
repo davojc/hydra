@@ -6,6 +6,11 @@ use std::path::{Path, PathBuf};
 /// The installer's Settings → Apps entry, under `HKCU`.
 pub const SETTINGS_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\hydra";
 
+/// `.hydraui` layout files (spec §7.7): the ProgID and the extension, under `HKCU`.
+pub const LAYOUT_PROGID: &str = "hydraui.layout";
+pub const LAYOUT_PROGID_KEY: &str = r"Software\Classes\hydraui.layout";
+pub const LAYOUT_EXT_KEY: &str = r"Software\Classes\.hydraui";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsEntry {
     pub version: String,
@@ -27,12 +32,18 @@ pub trait System {
     fn create_shortcut(&self, lnk: &Path, target: &Path) -> anyhow::Result<()>;
     /// Runs `exe` with no window and waits; an error when it fails.
     fn run_hidden(&self, exe: &Path, args: &[&str]) -> anyhow::Result<()>;
+    /// `.hydraui` files open in `exe` (spec §7.7).
+    fn register_layout_files(&self, exe: &Path) -> anyhow::Result<()>;
+    /// Undoes `register_layout_files`, leaving `.hydraui` alone if something else took it.
+    fn unregister_layout_files(&self);
 }
 
 /// An in-memory System for tests: it records what it's asked to do. Shortcuts also write an
 /// empty file, so checks on the folder see them.
 #[derive(Default)]
 pub struct Fake {
+    /// The hydraui `.hydraui` files open in, while registered.
+    pub layout_files: RefCell<Option<PathBuf>>,
     pub path: RefCell<Option<String>>,
     pub entry: RefCell<Option<SettingsEntry>>,
     pub shortcuts: RefCell<Vec<(PathBuf, PathBuf)>>,
@@ -87,6 +98,15 @@ impl System for Fake {
             args.iter().map(|a| a.to_string()).collect(),
         ));
         Ok(())
+    }
+
+    fn register_layout_files(&self, exe: &Path) -> anyhow::Result<()> {
+        *self.layout_files.borrow_mut() = Some(exe.to_path_buf());
+        Ok(())
+    }
+
+    fn unregister_layout_files(&self) {
+        *self.layout_files.borrow_mut() = None;
     }
 }
 
@@ -260,6 +280,13 @@ mod win {
         let _ = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(sub)) };
     }
 
+    /// Tells Explorer file associations changed, so icons and Open follow at once.
+    pub fn associations_changed() {
+        use windows::Win32::UI::Shell::{SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify};
+        // SAFETY: no item pointers with SHCNE_ASSOCCHANGED.
+        unsafe { SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None) };
+    }
+
     pub fn broadcast_environment() {
         let name: Vec<u16> = "Environment".encode_utf16().chain(Some(0)).collect();
         unsafe {
@@ -368,5 +395,35 @@ impl System for Real {
             .status()?;
         anyhow::ensure!(status.success(), "{} exited with {status}", exe.display());
         Ok(())
+    }
+
+    fn register_layout_files(&self, exe: &Path) -> anyhow::Result<()> {
+        let exe = exe.display();
+        let prog = LAYOUT_PROGID_KEY;
+        win::set_string(prog, "", "hydraui layout", false)?;
+        win::set_string(
+            &format!(r"{prog}\DefaultIcon"),
+            "",
+            &format!("\"{exe}\",0"),
+            false,
+        )?;
+        win::set_string(
+            &format!(r"{prog}\shell\open\command"),
+            "",
+            &format!("\"{exe}\" \"%1\""),
+            false,
+        )?;
+        win::set_string(LAYOUT_EXT_KEY, "", LAYOUT_PROGID, false)?;
+        win::associations_changed();
+        Ok(())
+    }
+
+    fn unregister_layout_files(&self) {
+        // Leave .hydraui alone if something else has taken it over since.
+        if win::get_string(LAYOUT_EXT_KEY, "").as_deref() == Some(LAYOUT_PROGID) {
+            win::delete_tree(LAYOUT_EXT_KEY);
+        }
+        win::delete_tree(LAYOUT_PROGID_KEY);
+        win::associations_changed();
     }
 }

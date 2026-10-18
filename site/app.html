@@ -66,7 +66,7 @@
     <section id="start">
       <h2>Install and first start</h2>
       <p>Run the <a href="https://github.com/davojc/hydra/releases/latest/download/hydra-setup.exe">installer</a>: it installs hydraui and hydra for you alone, with no admin prompt, puts hydraui in the Start menu and hydra on your <code>PATH</code>. Prefer a single file? The portable <code>hydraui-x86_64-pc-windows-msvc.exe</code> from the <a href="https://github.com/davojc/hydra/releases/latest">latest release</a> runs from anywhere and doesn't need <code>hydra.exe</code>. Either way hydraui reads and writes the same <code>~/.hydra</code> folder as the CLI, so environments made with either show up in both.</p>
-      <p>The first time, hydraui opens a tab in your home folder. With no environments yet, it asks you to name one and creates it, as <code>hydra env new</code> does. From then on it reopens what you had open when you last closed it: the tabs, their folders and splits, the file tree and the files in each file pane.</p>
+      <p>The first time, hydraui opens a tab in your home folder. With no environments yet, it asks you to name one and creates it, as <code>hydra env new</code> does. From then on hydraui starts on a page of your recent <a href="#layouts">layouts</a>: pick one, or <strong>New window</strong> for a plain terminal. A window saved as a layout keeps its file up to date as you work (the tabs, their folders and splits, the file tree and the files in each file pane); an untitled window isn't kept when you close it.</p>
       <p>A new tab (<kbd>Ctrl+T</kbd>, or <strong>+</strong> in the tab strip) opens in the focused terminal's folder. Its environment is the one bound to that folder, else <code>default_env</code> from the <a href="#settings">settings</a>, else you pick one:</p>
       <figure class="shot narrow">
         <img src="img/hydraui-picker.png" width="598" height="325" alt="The Open a tab in… picker listing the client, personal and work environments with their colours, and New environment…" loading="lazy">
@@ -207,9 +207,9 @@
       <p>You don't have to write sets by hand: save what's open instead.</p>
       <ul>
         <li><strong>Group file:</strong> tabs in the set format, with their splits, folders, environments, startup commands and file panes. Right-click a tab (<strong>Save tab as group…</strong>) or a group header (<strong>Save group…</strong>), or save every Loose tab from the launcher. Save it into the sets folder and it becomes a set.</li>
-        <li><strong>Layout file</strong> (<code>*.hydraui.toml</code>): the whole window, meaning its open sets, Loose tabs and file tree. <strong>Open layout file…</strong> adds it to what's already open.</li>
+        <li><strong>Layout file</strong> (<code>*.hydraui</code>): the whole window, meaning its open sets, Loose tabs and file tree. Each window has one layout, named in its title bar; the name's ▾ menu has <strong>Save layout as…</strong>, <strong>Open layout file…</strong>, <strong>Recent</strong> and <strong>Reveal in Explorer</strong>. Once saved, the window keeps the file up to date. Opening a layout in a window that already has one opens a new window; opening one that's already open brings its window forward, so two windows never write the same file. With the installer, double-clicking a <code>.hydraui</code> file opens it. Older <code>*.hydraui.toml</code> files are converted when you open them.</li>
       </ul>
-      <p>Saving is a snapshot: the open tabs don't change. Scrollback and running programs aren't saved.</p>
+      <p>A group file is a snapshot: the open tabs don't change. Scrollback and running programs aren't saved in either kind of file.</p>
     </section>
 
     <section id="keys">
@@ -263,7 +263,7 @@
       <ol>
         <li>Clicking it downloads <code>hydraui.exe</code> and, if it finds your <code>hydra.exe</code> (next to hydraui, or on your <code>PATH</code>), that too, and checks both against the release's SHA-256 checksums. It won't update while a <code>hydra</code> command is running.</li>
         <li>Nothing is replaced until everything has downloaded and checked out; if replacing one fails, the other is put back.</li>
-        <li>The button becomes <strong>Restart to finish</strong>. Restarting reopens your tabs, but stops what's running in them, so it's always your call.</li>
+        <li>The button becomes <strong>Restart to finish</strong>. Restarting reopens your layout (an untitled window is saved first), but stops what's running in it, so it's always your call.</li>
       </ol>
       <p>Builds you compile yourself never offer updates.</p>
     </section>

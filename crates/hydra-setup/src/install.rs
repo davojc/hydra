@@ -177,6 +177,8 @@ pub fn install(plan: &Plan, sys: &dyn System, progress: &dyn Fn(Step)) -> anyhow
             &dir.join("hydraui.exe"),
         )?;
     }
+    sys.register_layout_files(&dir.join("hydraui.exe"))
+        .context("can't register .hydraui files")?;
     let dir_text = dir.display().to_string();
     if let Some(path) = paths::add_entry(current_path.as_deref().unwrap_or(""), &dir_text) {
         sys.set_user_path(Some(&path))?;
@@ -264,6 +266,7 @@ pub fn uninstall(
     }
     let _ = fs::remove_file(start_menu.join("hydraui.lnk"));
     let _ = fs::remove_file(desktop_dir.join("hydraui.lnk"));
+    sys.unregister_layout_files();
     let dir_text = dir.display().to_string();
     if let Some(path) = current_path
         && paths::has_entry(&path, &dir_text)
@@ -356,6 +359,11 @@ mod tests {
                 dir.join("hydraui.exe")
             )]
         );
+        assert_eq!(
+            sys.layout_files.borrow().clone(),
+            Some(dir.join("hydraui.exe")),
+            ".hydraui opens in the installed hydraui"
+        );
         let entry = sys.entry.borrow().clone().unwrap();
         assert_eq!(entry.version, "0.7.0");
         assert_eq!(&entry.install_location, dir);
@@ -409,6 +417,11 @@ mod tests {
         assert!(files.is_empty(), "{files:?}");
         assert_eq!(*sys.path.borrow(), None);
         assert_eq!(*sys.entry.borrow(), None);
+        assert_eq!(
+            sys.layout_files.borrow().clone(),
+            None,
+            "no association registered"
+        );
         assert!(sys.shortcuts.borrow().is_empty());
     }
 
@@ -462,6 +475,11 @@ mod tests {
             "PATH untouched"
         );
         assert_eq!(*sys.entry.borrow(), None);
+        assert_eq!(
+            sys.layout_files.borrow().clone(),
+            None,
+            "no association registered"
+        );
         assert!(sys.shortcuts.borrow().is_empty());
         assert!(
             !e.plan.dir.join("hydraui.exe").exists(),
@@ -553,6 +571,11 @@ mod tests {
         assert!(!e.plan.desktop_dir.join("hydraui.lnk").exists());
         assert_eq!(sys.path.borrow().as_deref(), Some(r"C:\other"));
         assert_eq!(*sys.entry.borrow(), None);
+        assert_eq!(
+            sys.layout_files.borrow().clone(),
+            None,
+            "the association is removed"
+        );
         // A PATH that held only our folder is deleted, not left as "".
         let only = Fake::default();
         install(&e.plan, &only, &|_| {}).unwrap();

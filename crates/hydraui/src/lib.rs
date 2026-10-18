@@ -13,6 +13,7 @@ pub mod input;
 pub mod keys;
 pub mod launcher;
 pub mod layout;
+pub mod layout_plan;
 pub mod open_files;
 pub mod palette;
 pub mod pane_view;

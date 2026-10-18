@@ -121,6 +121,11 @@ fn place_all(swaps: &[Swap]) -> anyhow::Result<()> {
 /// fetched and checked.
 pub fn install(plan: &Plan, sys: &dyn System, progress: &dyn Fn(Step)) -> anyhow::Result<Report> {
     let dir = &plan.dir;
+    // Read first: a PATH that can't be read must stop the install before anything changes,
+    // never be taken for an empty one and overwritten.
+    let current_path = sys
+        .user_path()
+        .context("can't read your PATH - nothing changed")?;
     fs::create_dir_all(dir).with_context(|| format!("can't create {}", dir.display()))?;
     let mut swaps = Vec::new();
     for (asset, name) in EXES {
@@ -173,7 +178,7 @@ pub fn install(plan: &Plan, sys: &dyn System, progress: &dyn Fn(Step)) -> anyhow
         )?;
     }
     let dir_text = dir.display().to_string();
-    if let Some(path) = paths::add_entry(&sys.user_path().unwrap_or_default(), &dir_text) {
+    if let Some(path) = paths::add_entry(current_path.as_deref().unwrap_or(""), &dir_text) {
         sys.set_user_path(Some(&path))?;
         sys.environment_changed();
     }
@@ -200,6 +205,32 @@ pub fn install(plan: &Plan, sys: &dyn System, progress: &dyn Fn(Step)) -> anyhow
     Ok(report)
 }
 
+/// The folder an uninstall may empty: `--dir` when given, else this exe's folder, but only when
+/// it's the installed one (the Settings entry's `InstallLocation`). A copy run from anywhere
+/// else (Downloads) must not delete files next to it.
+pub fn uninstall_target(
+    dir: Option<&Path>,
+    exe_dir: &Path,
+    entry: Option<&SettingsEntry>,
+) -> Result<PathBuf, String> {
+    if let Some(d) = dir {
+        return Ok(d.to_path_buf());
+    }
+    match entry {
+        Some(e) if same_dir(&e.install_location, exe_dir) => Ok(exe_dir.to_path_buf()),
+        Some(e) => Err(format!(
+            "This hydra-setup.exe isn't the installed one: hydra is installed in {}. Uninstall it from Settings → Apps.",
+            e.install_location.display()
+        )),
+        None => Err("hydra doesn't look installed (it has no entry in Settings → Apps), so nothing was removed.".into()),
+    }
+}
+
+/// Whether `exe` is running (a running exe can't be opened for writing).
+fn in_use(exe: &Path) -> bool {
+    exe.exists() && fs::OpenOptions::new().write(true).open(exe).is_err()
+}
+
 /// Removes what `install` added, except `hydra-setup.exe` itself (the running uninstaller
 /// deletes it as it exits) and `~/.hydra`.
 pub fn uninstall(
@@ -208,6 +239,18 @@ pub fn uninstall(
     desktop_dir: &Path,
     sys: &dyn System,
 ) -> anyhow::Result<()> {
+    let running: Vec<&str> = ["hydraui.exe", "hydra.exe"]
+        .into_iter()
+        .filter(|n| in_use(&dir.join(n)))
+        .collect();
+    anyhow::ensure!(
+        running.is_empty(),
+        "{} is running - close it and try again. Nothing was removed.",
+        running.join(" and ")
+    );
+    let current_path = sys
+        .user_path()
+        .context("can't read your PATH - nothing was removed")?;
     for name in ["hydraui.exe", "hydra.exe"] {
         let _ = fs::remove_file(dir.join(name));
     }
@@ -222,14 +265,20 @@ pub fn uninstall(
     let _ = fs::remove_file(start_menu.join("hydraui.lnk"));
     let _ = fs::remove_file(desktop_dir.join("hydraui.lnk"));
     let dir_text = dir.display().to_string();
-    if let Some(path) = sys.user_path()
+    if let Some(path) = current_path
         && paths::has_entry(&path, &dir_text)
     {
         let rest = paths::remove_entry(&path, &dir_text);
         sys.set_user_path((!rest.is_empty()).then_some(rest.as_str()))?;
         sys.environment_changed();
     }
-    sys.remove_settings_entry();
+    // Only this folder's entry: another install's stays.
+    if sys
+        .settings_entry()
+        .is_some_and(|e| same_dir(&e.install_location, dir))
+    {
+        sys.remove_settings_entry();
+    }
     Ok(())
 }
 
@@ -397,6 +446,87 @@ mod tests {
         e.plan.search_path = None;
         let report = install(&e.plan, &Fake::default(), &|_| {}).unwrap();
         assert_eq!(report.other_hydra, None);
+    }
+
+    #[test]
+    fn an_unreadable_path_stops_the_install() {
+        let e = env();
+        let sys = Fake::default();
+        *sys.path.borrow_mut() = Some(r"C:\mine".into());
+        sys.path_error.set(true);
+        let err = install(&e.plan, &sys, &|_| {}).unwrap_err();
+        assert!(format!("{err:#}").contains("PATH"), "{err:#}");
+        assert_eq!(
+            sys.path.borrow().as_deref(),
+            Some(r"C:\mine"),
+            "PATH untouched"
+        );
+        assert_eq!(*sys.entry.borrow(), None);
+        assert!(sys.shortcuts.borrow().is_empty());
+        assert!(
+            !e.plan.dir.join("hydraui.exe").exists(),
+            "nothing installed"
+        );
+    }
+
+    #[test]
+    fn the_uninstaller_works_only_from_the_installed_folder() {
+        let installed = Path::new(r"C:\Users\u\AppData\Local\Programs\hydra");
+        let entry = SettingsEntry {
+            version: "0.7.0".into(),
+            install_location: installed.to_path_buf(),
+            size_kb: 1,
+        };
+        assert_eq!(
+            uninstall_target(None, installed, Some(&entry)).unwrap(),
+            installed
+        );
+        let downloads = Path::new(r"C:\Users\u\Downloads");
+        let err = uninstall_target(None, downloads, Some(&entry)).unwrap_err();
+        assert!(err.contains(r"Programs\hydra"), "{err}");
+        assert!(
+            uninstall_target(None, downloads, None).is_err(),
+            "not installed at all"
+        );
+        assert_eq!(
+            uninstall_target(Some(downloads), installed, Some(&entry)).unwrap(),
+            downloads,
+            "--dir says which folder"
+        );
+    }
+
+    #[test]
+    fn uninstall_keeps_another_installs_settings_entry() {
+        let e = env();
+        let sys = Fake::default();
+        install(&e.plan, &sys, &|_| {}).unwrap();
+        let elsewhere = e._d.path().join("elsewhere");
+        sys.entry.borrow_mut().as_mut().unwrap().install_location = elsewhere;
+        uninstall(&e.plan.dir, &e.plan.start_menu, &e.plan.desktop_dir, &sys).unwrap();
+        assert!(
+            sys.entry.borrow().is_some(),
+            "another install's entry is left alone"
+        );
+    }
+
+    #[test]
+    fn uninstall_refuses_while_hydraui_runs() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let e = env();
+        let sys = Fake::default();
+        install(&e.plan, &sys, &|_| {}).unwrap();
+        // A running exe can't be opened for writing: hold it exclusively to stand in for that.
+        let _running = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(e.plan.dir.join("hydraui.exe"))
+            .unwrap();
+        let err =
+            uninstall(&e.plan.dir, &e.plan.start_menu, &e.plan.desktop_dir, &sys).unwrap_err();
+        assert!(format!("{err:#}").contains("hydraui"), "{err:#}");
+        assert!(e.plan.dir.join("hydra.exe").exists(), "nothing removed");
+        assert!(sys.entry.borrow().is_some());
+        assert!(sys.path.borrow().is_some());
     }
 
     #[test]

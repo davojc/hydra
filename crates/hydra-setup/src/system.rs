@@ -14,7 +14,9 @@ pub struct SettingsEntry {
 }
 
 pub trait System {
-    fn user_path(&self) -> Option<String>;
+    /// The user PATH; `None` when there is none, an error when it can't be read (so a failed
+    /// read is never mistaken for an empty PATH and overwritten).
+    fn user_path(&self) -> anyhow::Result<Option<String>>;
     /// `None` deletes the value.
     fn set_user_path(&self, value: Option<&str>) -> anyhow::Result<()>;
     /// Tells running programs (Explorer, new terminals) the environment changed.
@@ -36,11 +38,14 @@ pub struct Fake {
     pub shortcuts: RefCell<Vec<(PathBuf, PathBuf)>>,
     pub runs: RefCell<Vec<(PathBuf, Vec<String>)>>,
     pub changed: Cell<u32>,
+    /// Makes reading the PATH fail, as an unreadable registry value would.
+    pub path_error: Cell<bool>,
 }
 
 impl System for Fake {
-    fn user_path(&self) -> Option<String> {
-        self.path.borrow().clone()
+    fn user_path(&self) -> anyhow::Result<Option<String>> {
+        anyhow::ensure!(!self.path_error.get(), "can't read the PATH");
+        Ok(self.path.borrow().clone())
     }
 
     fn set_user_path(&self, value: Option<&str>) -> anyhow::Result<()> {
@@ -104,6 +109,55 @@ mod win {
         HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
     };
     use windows::core::HSTRING;
+
+    /// A string value: `Ok(None)` when it doesn't exist, an error when it can't be read.
+    pub fn read_string(sub: &str, name: &str) -> anyhow::Result<Option<String>> {
+        use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA};
+        let (hsub, hname) = (HSTRING::from(sub), HSTRING::from(name));
+        let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND;
+        // The value can grow between asking its size and reading it: try again then.
+        for _ in 0..5 {
+            let mut size = 0u32;
+            let first = unsafe {
+                RegGetValueW(
+                    HKEY_CURRENT_USER,
+                    &hsub,
+                    &hname,
+                    flags,
+                    None,
+                    None,
+                    Some(&mut size),
+                )
+            };
+            if first == ERROR_FILE_NOT_FOUND {
+                return Ok(None);
+            }
+            first
+                .ok()
+                .with_context(|| format!("can't read HKCU\\{sub}\\{name}"))?;
+            let mut buf = vec![0u16; (size as usize).div_ceil(2) + 1];
+            let mut size = (buf.len() * 2) as u32;
+            let read = unsafe {
+                RegGetValueW(
+                    HKEY_CURRENT_USER,
+                    &hsub,
+                    &hname,
+                    flags,
+                    None,
+                    Some(buf.as_mut_ptr() as *mut c_void),
+                    Some(&mut size),
+                )
+            };
+            if read == ERROR_MORE_DATA {
+                continue;
+            }
+            read.ok()
+                .with_context(|| format!("can't read HKCU\\{sub}\\{name}"))?;
+            let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+            return Ok(Some(String::from_utf16_lossy(&buf[..len])));
+        }
+        anyhow::bail!("can't read HKCU\\{sub}\\{name}: it keeps changing")
+    }
 
     pub fn get_string(sub: &str, name: &str) -> Option<String> {
         let (sub, name) = (HSTRING::from(sub), HSTRING::from(name));
@@ -247,8 +301,8 @@ mod win {
 
 #[cfg(windows)]
 impl System for Real {
-    fn user_path(&self) -> Option<String> {
-        win::get_string("Environment", "Path")
+    fn user_path(&self) -> anyhow::Result<Option<String>> {
+        win::read_string("Environment", "Path")
     }
 
     fn set_user_path(&self, value: Option<&str>) -> anyhow::Result<()> {

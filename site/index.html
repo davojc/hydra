@@ -102,7 +102,7 @@ work-user</pre>
     <ul>
       <li><strong>The installer</strong> puts both apps in <code>%LOCALAPPDATA%\Programs\hydra</code> for you alone, with no admin prompt: hydraui in the Start menu, hydra on your <code>PATH</code>, and <code>hydra init</code> done. Uninstall it from Settings → Apps; your environments in <code>~/.hydra</code> stay.</li>
       <li><strong>Portable:</strong> single files from the <a href="https://github.com/davojc/hydra/releases/latest">latest release</a>, each with a <code>.sha256</code> beside it. Rename to <code>hydraui.exe</code> / <code>hydra.exe</code> and run from anywhere; put <code>hydra.exe</code> on your <code>PATH</code> and run <code>hydra init</code> yourself.</li>
-      <li><strong>Updates:</strong> hydraui's title bar shows <strong>Update hydra</strong> when a release is out and updates both; <code>hydra update</code> does the same from the command line.</li>
+      <li><strong>Updates:</strong> hydraui's title bar shows <strong>Update hydra</strong> when a release is out and updates both apps; <code>hydra update</code> updates <code>hydra.exe</code> on its own from the command line.</li>
     </ul>
     <p>To build from source, install Rust from <a href="https://rustup.rs">rustup.rs</a>, clone <a href="https://github.com/davojc/hydra">github.com/davojc/hydra</a> and run <code>cargo build --release</code>.</p>
   </section>

@@ -95,10 +95,23 @@ fn install_dir(a: &args::Args) -> PathBuf {
 }
 
 fn uninstall(a: &args::Args) -> i32 {
+    use hydra_setup::system::System;
+    let dir = match install::uninstall_target(
+        a.dir.as_deref(),
+        &install_dir(&args::Args::default()),
+        Real.settings_entry().as_ref(),
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            if !a.silent {
+                dialog::failed("hydra wasn't removed", &e);
+            }
+            return 1;
+        }
+    };
     if !a.silent && !dialog::confirm_uninstall() {
         return 1;
     }
-    let dir = install_dir(a);
     let plan = install::default_plan(VERSION, Source::From(PathBuf::new()), false);
     let result = install::uninstall(&dir, &plan.start_menu, &plan.desktop_dir, &Real);
     if let Err(e) = &result {

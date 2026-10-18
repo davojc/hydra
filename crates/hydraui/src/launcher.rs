@@ -20,6 +20,8 @@ pub enum Action {
         env: String,
         tool: String,
     },
+    /// Quick open (spec §7.10).
+    OpenFile,
     /// Add a layout file's groups and tabs to the window (spec §7.9).
     OpenLayout,
     /// Save the window to a layout file.
@@ -90,6 +92,7 @@ pub fn entries(
             Action::SetSecret(path.clone()),
         );
     }
+    add("Open file…".into(), Action::OpenFile);
     add("Open layout file…".into(), Action::OpenLayout);
     add("Save layout to file…".into(), Action::SaveLayout);
     add("Open group file…".into(), Action::OpenGroupFile);
@@ -132,6 +135,7 @@ mod tests {
                 "New tab: work",
                 "Sign in: github in work",
                 "Set secret: work/linear",
+                "Open file…",
                 "Open layout file…",
                 "Save layout to file…",
                 "Open group file…",
@@ -157,12 +161,13 @@ mod tests {
             }
         );
         assert_eq!(got[6].action, Action::SetSecret("work/linear".into()));
-        assert_eq!(got[7].action, Action::OpenLayout);
-        assert_eq!(got[8].action, Action::SaveLayout);
-        assert_eq!(got[9].action, Action::OpenGroupFile);
-        assert_eq!(got[10].action, Action::SaveLooseAsGroup);
-        assert_eq!(got[11].action, Action::NewEnv);
-        assert_eq!(got[12].action, Action::NewSecret);
+        assert_eq!(got[7].action, Action::OpenFile);
+        assert_eq!(got[8].action, Action::OpenLayout);
+        assert_eq!(got[9].action, Action::SaveLayout);
+        assert_eq!(got[10].action, Action::OpenGroupFile);
+        assert_eq!(got[11].action, Action::SaveLooseAsGroup);
+        assert_eq!(got[12].action, Action::NewEnv);
+        assert_eq!(got[13].action, Action::NewSecret);
     }
 
     #[test]
@@ -172,6 +177,7 @@ mod tests {
         assert_eq!(
             labels,
             vec![
+                "Open file…",
                 "Open layout file…",
                 "Save layout to file…",
                 "Open group file…",
@@ -182,6 +188,7 @@ mod tests {
                 "Reload config"
             ]
         );
-        assert_eq!(got[4].action, Action::NewEnv);
+        assert_eq!(got[0].action, Action::OpenFile);
+        assert_eq!(got[5].action, Action::NewEnv);
     }
 }

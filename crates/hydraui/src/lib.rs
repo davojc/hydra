@@ -17,6 +17,7 @@ pub mod layout_plan;
 pub mod open_files;
 pub mod palette;
 pub mod pane_view;
+pub mod quick_open;
 pub mod split;
 pub mod tabs;
 pub mod term_paths;

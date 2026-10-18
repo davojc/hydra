@@ -22,6 +22,7 @@ gpui::actions!(
         Find,
         Launcher,
         FileTree,
+        OpenFile,
         TerminalTab,
         TerminalBackTab,
         SaveFile
@@ -59,10 +60,11 @@ pub enum Command {
     Find,
     Launcher,
     FileTree,
+    OpenFile,
 }
 
 impl Command {
-    pub const ALL: [Command; 15] = [
+    pub const ALL: [Command; 16] = [
         Command::NewTab,
         Command::ClosePane,
         Command::SplitRight,
@@ -78,6 +80,7 @@ impl Command {
         Command::Find,
         Command::Launcher,
         Command::FileTree,
+        Command::OpenFile,
     ];
 
     /// The name under `[keys]` in config.toml.
@@ -98,6 +101,7 @@ impl Command {
             Command::Find => "find",
             Command::Launcher => "launcher",
             Command::FileTree => "file_tree",
+            Command::OpenFile => "open_file",
         }
     }
 
@@ -119,6 +123,7 @@ impl Command {
             Command::Find => "ctrl-f",
             Command::Launcher => "ctrl-shift-p",
             Command::FileTree => "ctrl-b",
+            Command::OpenFile => "ctrl-shift-o",
         }
     }
 
@@ -139,6 +144,7 @@ impl Command {
             Command::Find => Box::new(Find),
             Command::Launcher => Box::new(Launcher),
             Command::FileTree => Box::new(FileTree),
+            Command::OpenFile => Box::new(OpenFile),
         }
     }
 }

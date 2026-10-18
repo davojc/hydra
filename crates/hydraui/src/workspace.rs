@@ -1,6 +1,7 @@
 //! The window's content (spec §7.1, §7.5, §7.6): the tab strip, the active tab's split panes
 //! with draggable dividers, the status bar, and the commands bound to keys.
 mod accounts;
+mod finder;
 mod launcher;
 mod sets;
 
@@ -1207,6 +1208,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::open_launcher))
             .on_action(cx.listener(Self::toggle_tree))
+            .on_action(cx.listener(Self::open_file_action))
             .child(self.render_tab_strip(bar, border, muted, cx))
             .child(
                 h_flex()

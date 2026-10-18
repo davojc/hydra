@@ -1,11 +1,14 @@
 //! The set file as written: every field optional, checked later by `resolve`.
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetFile {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
     #[serde(default, rename = "tab")]
     pub tabs: Vec<TabFile>,

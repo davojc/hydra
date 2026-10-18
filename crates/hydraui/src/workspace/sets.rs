@@ -98,6 +98,7 @@ impl Workspace {
         }
         self.loaded.insert(LoadedSet {
             name: spec.name.clone(),
+            file: spec.file.clone(),
             tabs: tabs.clone(),
             modified: file_modified(&spec.file),
         });
@@ -261,7 +262,7 @@ impl Workspace {
 
     /// Notes the sets whose file changed or went away since they were loaded.
     pub(super) fn check_sets(&mut self, cx: &mut Context<Self>) {
-        let changed: HashSet<String> = self.loaded.changed(&self.hydra.paths).into_iter().collect();
+        let changed: HashSet<String> = self.loaded.changed().into_iter().collect();
         if changed != self.changed_sets {
             self.changed_sets = changed;
             cx.notify();

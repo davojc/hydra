@@ -1,11 +1,8 @@
-//! Pure logic for `hydra update`: reading GitHub's release JSON, comparing versions,
+//! Pure logic for updating: reading GitHub's release JSON, comparing versions,
 //! checksum files and process lists. No network or file system here.
 
 use anyhow::Context;
 use semver::Version;
-
-/// The release asset `hydra update` installs.
-pub const EXE_ASSET: &str = "hydra-x86_64-pc-windows-msvc.exe";
 
 pub struct Release {
     pub tag: String,
@@ -53,19 +50,20 @@ impl Release {
         Version::parse(s).with_context(|| format!("release tag {} isn't a version", self.tag))
     }
 
-    pub fn windows_build(&self) -> anyhow::Result<WindowsBuild> {
+    /// Download URLs of `asset` and its `.sha256` file.
+    pub fn windows_build(&self, asset: &str) -> anyhow::Result<WindowsBuild> {
         let url = |name: &str| {
             self.assets
                 .iter()
                 .find(|a| a.name == name)
                 .map(|a| a.url.clone())
         };
-        match (url(EXE_ASSET), url(&format!("{EXE_ASSET}.sha256"))) {
+        match (url(asset), url(&format!("{asset}.sha256"))) {
             (Some(exe_url), Some(sha256_url)) => Ok(WindowsBuild {
                 exe_url,
                 sha256_url,
             }),
-            _ => anyhow::bail!("release {} has no Windows build", self.tag),
+            _ => anyhow::bail!("release {} has no {asset}", self.tag),
         }
     }
 }
@@ -142,6 +140,7 @@ pub fn hydra_pids_from_pgrep(code: Option<i32>, stdout: &str) -> Result<Vec<u32>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::HYDRA_ASSET as EXE_ASSET;
 
     const SHA: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
 
@@ -190,7 +189,7 @@ mod tests {
         .unwrap();
         assert_eq!(r.tag, "v0.4.10");
         assert_eq!(r.version().unwrap(), v("0.4.10"));
-        let b = r.windows_build().unwrap();
+        let b = r.windows_build(EXE_ASSET).unwrap();
         assert_eq!(
             (b.exe_url.as_str(), b.sha256_url.as_str()),
             ("https://e/exe", "https://e/sha")
@@ -203,10 +202,13 @@ mod tests {
             r#"{{"tag_name":"v0.4.1","assets":[{{"name":"{EXE_ASSET}","browser_download_url":"u"}}]}}"#
         ))
         .unwrap();
-        let err = r.windows_build().err().unwrap().to_string();
-        assert_eq!(err, "release v0.4.1 has no Windows build");
+        let err = r.windows_build(EXE_ASSET).err().unwrap().to_string();
+        assert_eq!(
+            err,
+            "release v0.4.1 has no hydra-x86_64-pc-windows-msvc.exe"
+        );
         let r = Release::parse(r#"{"tag_name":"v0.4.1"}"#).unwrap();
-        assert!(r.windows_build().is_err());
+        assert!(r.windows_build(EXE_ASSET).is_err());
     }
 
     #[test]

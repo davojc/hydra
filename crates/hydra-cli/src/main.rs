@@ -2,7 +2,6 @@ mod app;
 mod cli;
 mod commands;
 mod prompt;
-mod release;
 mod style;
 
 use clap::Parser;

@@ -2898,6 +2898,7 @@ dependencies = [
  "hydra-core",
  "hydra-platform",
  "hydra-providers",
+ "hydra-update",
  "predicates",
  "rpassword",
  "semver",
@@ -2905,7 +2906,6 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "toml 0.8.23",
- "ureq",
  "winresource",
 ]
 
@@ -2944,6 +2944,18 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "hydra-update"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "semver",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "ureq",
 ]
 
 [[package]]

@@ -13,6 +13,7 @@ hydra-platform = { path = "crates/hydra-platform" }
 hydra-providers = { path = "crates/hydra-providers" }
 hydraui-term = { path = "crates/hydraui-term" }
 hydraui-sets = { path = "crates/hydraui-sets" }
+hydra-update = { path = "crates/hydra-update" }
 gpui = { package = "gpui-pre", version = "=0.3.9" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["font-kit", "runtime_shaders"] }
 gpui-base = "=0.7.3"

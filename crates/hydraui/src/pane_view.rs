@@ -26,7 +26,7 @@ use hydraui_term::alacritty_terminal::term::search::Match;
 use hydraui_term::alacritty_terminal::term::{TermMode, viewport_to_point};
 use hydraui_term::{GridSize, Pane, PromptState, TermEvent};
 
-use crate::frame::{CursorKind, Frame, Style, build_frame, find_next, link_at, row_text};
+use crate::frame::{CursorKind, Frame, Style, build_frame, find_next, link_at, visible_rows};
 use crate::hydra::{Hydra, PaneRequest, Started};
 use crate::input::{
     Mods, MouseKind, ReportButton, Wheel, key_bytes, mouse_report, paste_bytes, wheel,
@@ -434,7 +434,13 @@ impl PaneView {
             if let Some(url) = pane.with_term(|t| link_at(t, row, col)) {
                 cx.open_url(&url);
             } else if let Some(hit) = pane.with_term(|t| {
-                crate::term_paths::path_at(&row_text(t, row), col, &self.cwd, &|p| p.is_file())
+                // A long path may have wrapped onto the next row: read the whole line.
+                let rows = visible_rows(t);
+                if row >= rows.len() {
+                    return None;
+                }
+                let (text, at) = crate::term_paths::join_wrapped(&rows, row, col);
+                crate::term_paths::path_at(&text, at, &self.cwd, &|p| p.is_file())
             }) {
                 // A path in the output: open it at its line (spec §7.10).
                 cx.emit(PaneEvent::OpenPath(hit.path, hit.line, hit.column));

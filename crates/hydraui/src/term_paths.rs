@@ -13,6 +13,25 @@ pub struct PathHit {
 /// Characters that end a word in terminal output.
 const WORD_BREAK: &[char] = &[' ', '\t', '"', '\'', '`', '<', '>', '|', '[', ']', '{', '}'];
 
+/// The whole line a visible row belongs to, when output wrapped over several rows, and
+/// `column` within it. Each row says whether it carries on into the next.
+pub fn join_wrapped(rows: &[(String, bool)], row: usize, column: usize) -> (String, usize) {
+    let mut start = row;
+    while start > 0 && rows[start - 1].1 {
+        start -= 1;
+    }
+    let mut end = row;
+    while end + 1 < rows.len() && rows[end].1 {
+        end += 1;
+    }
+    let before: usize = rows[start..row]
+        .iter()
+        .map(|(t, _)| t.chars().count())
+        .sum();
+    let text = rows[start..=end].iter().map(|(t, _)| t.as_str()).collect();
+    (text, before + column)
+}
+
 /// The path under `column` of `text`, with `:L`, `:L:C` or `(L,C)` after it, when it names a
 /// file that exists (relative paths against `cwd`).
 pub fn path_at(
@@ -64,22 +83,28 @@ fn split_position(word: &str) -> (&str, usize, usize) {
             return (&word[..open], line, column);
         }
     }
-    match number_suffix(word) {
-        Some((rest, last)) => match number_suffix(rest) {
-            Some((path, line)) => (path, line, last),
-            None => (rest, last, 0),
-        },
-        None => (word, 0, 0),
+    // The first `:L` (then `:C`) that ends the word or is followed by another `:`, as in
+    // grep's `path:12:text`; a drive letter's colon (`C:`) isn't one.
+    for (i, _) in word.match_indices(':').filter(|(i, _)| *i > 1) {
+        let rest = &word[i + 1..];
+        let (line, after) = leading_number(rest);
+        let Some(line) = line else { continue };
+        if !(after.is_empty() || after.starts_with(':')) {
+            continue;
+        }
+        let column = after
+            .strip_prefix(':')
+            .and_then(|a| leading_number(a).0)
+            .unwrap_or(0);
+        return (&word[..i], line, column);
     }
+    (word, 0, 0)
 }
 
-/// `x:N` → `(x, N)`; a drive letter's colon (`C:`) isn't one.
-fn number_suffix(s: &str) -> Option<(&str, usize)> {
-    let (rest, n) = s.rsplit_once(':')?;
-    if rest.len() <= 1 {
-        return None;
-    }
-    n.parse().ok().map(|n| (rest, n))
+/// The digits `s` starts with, as a number, and what follows them.
+fn leading_number(s: &str) -> (Option<usize>, &str) {
+    let n = s.bytes().take_while(u8::is_ascii_digit).count();
+    (s[..n].parse().ok(), &s[n..])
 }
 
 #[cfg(test)]
@@ -126,6 +151,36 @@ mod tests {
         assert_eq!(at("\"src/a.rs:12\",", 3), hit("C:/w/src/a.rs", 12, 0));
         assert_eq!(at("(src/a.rs:12)", 3), hit("C:/w/src/a.rs", 12, 0));
         assert_eq!(at("see src/a.rs.", 6), hit("C:/w/src/a.rs", 0, 0));
+    }
+
+    #[test]
+    fn grep_output_with_the_line_glued_on() {
+        let ex = exists_in(&["src/a.rs"]);
+        let at = |t: &str, c| path_at(t, c, Path::new(CWD), &ex);
+        assert_eq!(
+            at("src/a.rs:12:fn main() {", 3),
+            hit("C:/w/src/a.rs", 12, 0)
+        );
+        assert_eq!(at("src/a.rs:12:5:error: x", 3), hit("C:/w/src/a.rs", 12, 5));
+        assert_eq!(at("src/a.rs:12:5", 3), hit("C:/w/src/a.rs", 12, 5));
+    }
+
+    #[test]
+    fn a_path_wrapped_over_rows_is_joined() {
+        let rows = vec![
+            ("$ ls".to_string(), false),
+            ("see C:/w/s".to_string(), true),
+            ("rc/a.rs:3 ".to_string(), false),
+        ];
+        assert_eq!(
+            join_wrapped(&rows, 2, 1),
+            ("see C:/w/src/a.rs:3 ".to_string(), 11)
+        );
+        assert_eq!(
+            join_wrapped(&rows, 1, 6),
+            ("see C:/w/src/a.rs:3 ".to_string(), 6)
+        );
+        assert_eq!(join_wrapped(&rows, 0, 2), ("$ ls".to_string(), 2));
     }
 
     #[test]

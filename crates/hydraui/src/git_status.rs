@@ -1,7 +1,7 @@
 //! The git repository a pane is in, for the status bar: branch, how it stands against its
 //! upstream (as of the last fetch: no network), and how many files changed; and each changed
 //! file, for the file tree (spec §7.3).
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// How a file stands in git.
@@ -141,11 +141,15 @@ pub fn summary(s: &GitStatus) -> String {
     }
 }
 
-/// Whether something under `folder` changed (ignored files don't count).
-pub fn folder_changed(files: &BTreeMap<PathBuf, Change>, folder: &Path) -> bool {
+/// The folders that hold changes (ignored files don't count), relative to the root.
+pub fn changed_folders(files: &BTreeMap<PathBuf, Change>) -> BTreeSet<PathBuf> {
     files
         .iter()
-        .any(|(p, c)| *c != Change::Ignored && p.starts_with(folder) && p != folder)
+        .filter(|(_, c)| **c != Change::Ignored)
+        .flat_map(|(p, _)| p.ancestors().skip(1))
+        .filter(|a| !a.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .collect()
 }
 
 /// How `path` (relative to the repository's root) stands: its own entry, or that of the
@@ -319,13 +323,19 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc both.rs\n\
     #[test]
     fn a_folder_holding_changes_is_marked() {
         let s = parse("1 .M N... 100644 100644 100644 a a src/ui/a.rs\n! target/x\n");
-        assert!(folder_changed(&s.files, Path::new("src")));
-        assert!(folder_changed(&s.files, Path::new("src/ui")));
-        assert!(!folder_changed(&s.files, Path::new("docs")));
+        let changed = changed_folders(&s.files);
+        assert!(changed.contains(Path::new("src")));
+        assert!(changed.contains(Path::new("src/ui")));
+        assert!(!changed.contains(Path::new("docs")));
         assert!(
-            !folder_changed(&s.files, Path::new("target")),
+            !changed.contains(Path::new("src/ui/a.rs")),
+            "a file isn't a folder"
+        );
+        assert!(
+            !changed.contains(Path::new("target")),
             "ignored isn't a change"
         );
+        assert!(!changed.contains(Path::new("")));
     }
 
     #[test]

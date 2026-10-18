@@ -180,12 +180,17 @@ impl Hydra {
     }
 
     /// Makes `dir` `env`'s home (new terminals open there) and binds the folder to it, as
-    /// `hydra env new --home` does. Nothing is written if either edit fails.
+    /// `hydra env new --home` does. Nothing is written if either edit is refused, and a
+    /// config.toml that can't be read is left alone rather than replaced.
     pub fn set_env_home(&self, env: &str, dir: &Path) -> Result<(), String> {
         let name = EnvName::parse(env).map_err(|e| e.to_string())?;
         let text = bindedit::set_home(&self.env_text(env)?, dir)?;
         let config_file = self.paths.config_file();
-        let config = std::fs::read_to_string(&config_file).unwrap_or_default();
+        let config = match std::fs::read_to_string(&config_file) {
+            Ok(t) => t.strip_prefix('\u{feff}').unwrap_or(&t).to_string(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(format!("can't read {}: {e}", config_file.display())),
+        };
         let config = bindedit::add_rule(&config, &bindedit::rule_for_dir(dir), env)?;
         std::fs::write(self.paths.env_file(&name), text).map_err(|e| e.to_string())?;
         std::fs::write(&config_file, config).map_err(|e| e.to_string())
@@ -696,6 +701,34 @@ mod tests {
         let report = f.hydra.delete_env("personal", 0, true).unwrap();
         assert!(report.state_deleted);
         assert!(!personal.exists(), "saved logins deleted when asked");
+    }
+
+    #[test]
+    fn setting_home_leaves_a_config_it_cant_read_alone() {
+        let f = fx("");
+        let bad = b"default_env = \"caf\xe9\"\n";
+        std::fs::write(f.hydra.paths.config_file(), bad).unwrap();
+        assert!(f.hydra.set_env_home("work", &f.free).is_err());
+        assert_eq!(std::fs::read(f.hydra.paths.config_file()).unwrap(), bad);
+        let env = std::fs::read_to_string(f.hydra.paths.env_file(&EnvName::parse("work").unwrap()))
+            .unwrap();
+        assert!(!env.contains("home ="), "nothing written: {env}");
+    }
+
+    #[test]
+    fn setting_home_keeps_a_config_saved_with_a_byte_order_mark() {
+        let f = fx("");
+        std::fs::write(
+            f.hydra.paths.config_file(),
+            "\u{feff}default_shell = \"pwsh\"\n",
+        )
+        .unwrap();
+        f.hydra.set_env_home("work", &f.free).unwrap();
+        let config = std::fs::read_to_string(f.hydra.paths.config_file()).unwrap();
+        assert!(
+            config.contains("default_shell") && config.contains("\"work\""),
+            "{config}"
+        );
     }
 
     #[test]

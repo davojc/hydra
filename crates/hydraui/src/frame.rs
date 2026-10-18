@@ -211,14 +211,18 @@ pub fn link_at<T>(term: &Term<T>, row: usize, col: usize) -> Option<String> {
     term.grid()[point].hyperlink().map(|h| h.uri().to_string())
 }
 
-/// The text of a visible row, for finding paths under the mouse.
-pub fn row_text<T>(term: &Term<T>, row: usize) -> String {
-    if row >= term.screen_lines() {
-        return String::new();
-    }
+/// Each visible row's text, and whether it wrapped onto the next, for finding paths under
+/// the mouse.
+pub fn visible_rows<T>(term: &Term<T>) -> Vec<(String, bool)> {
     let offset = term.grid().display_offset();
-    (0..term.columns())
-        .map(|col| term.grid()[viewport_to_point(offset, Point::new(row, Column(col)))].c)
+    let cols = term.columns();
+    (0..term.screen_lines())
+        .map(|row| {
+            let cell = |col| &term.grid()[viewport_to_point(offset, Point::new(row, Column(col)))];
+            let text = (0..cols).map(|col| cell(col).c).collect();
+            let wraps = cols > 0 && cell(cols - 1).flags.contains(Flags::WRAPLINE);
+            (text, wraps)
+        })
         .collect()
 }
 

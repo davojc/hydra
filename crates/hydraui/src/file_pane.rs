@@ -105,14 +105,16 @@ fn replace_keeping_place(
     });
 }
 
-/// The tabs' paths for finding a file's own tab: a diff tab's is left empty.
-fn file_paths(tabs: &[FileTab]) -> Vec<PathBuf> {
-    tabs.iter()
+/// The file's own tab (not a diff of it), however the path is spelled.
+fn file_tab(tabs: &[FileTab], path: &Path) -> Option<usize> {
+    let paths: Vec<PathBuf> = tabs
+        .iter()
         .map(|t| match t.body {
             Body::Diff(_) => PathBuf::new(),
             _ => t.path.clone(),
         })
-        .collect()
+        .collect();
+    find(&paths, path)
 }
 
 fn file_name(p: &Path) -> String {
@@ -197,7 +199,8 @@ impl FilePane {
 
     /// Recomputes a file's unsaved state after an edit.
     fn edited(&mut self, path: &Path, cx: &mut Context<Self>) {
-        if let Some(t) = self.tabs.iter_mut().find(|t| t.path == path)
+        if let Some(i) = file_tab(&self.tabs, path)
+            && let t = &mut self.tabs[i]
             && let Body::Text { editor, saved, .. } = &t.body
         {
             t.dirty = file_doc::normalize(editor.read(cx).value().as_ref()) != saved.text;
@@ -207,8 +210,7 @@ impl FilePane {
 
     /// Shows `path`: its file tab if it's open, else a new one.
     pub fn open(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let paths = file_paths(&self.tabs);
-        self.active = match find(&paths, &path) {
+        self.active = match file_tab(&self.tabs, &path) {
             Some(i) => i,
             None => {
                 self.push(path, window, cx);
@@ -445,8 +447,7 @@ impl FilePane {
 
     fn disk_changed(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
         // The event spells the path as it is on disk; ours may differ in case or slashes.
-        let paths = file_paths(&self.tabs);
-        let Some(i) = find(&paths, path) else {
+        let Some(i) = file_tab(&self.tabs, path) else {
             return;
         };
         let t = &mut self.tabs[i];
@@ -702,5 +703,29 @@ impl Render for FilePane {
         root.child(header)
             .children(banner)
             .child(div().flex_1().min_h_0().child(body))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tab(path: &str, body: Body) -> FileTab {
+        FileTab {
+            path: PathBuf::from(path),
+            body,
+            dirty: false,
+            disk: DiskFlags::default(),
+        }
+    }
+
+    #[test]
+    fn a_files_own_tab_is_found_past_its_diff_tab() {
+        let tabs = vec![
+            tab("C:/w/a.rs", Body::Diff(Err("x".into()))),
+            tab("C:/w/a.rs", Body::CantShow("y".into())),
+        ];
+        assert_eq!(file_tab(&tabs, Path::new("C:/w/a.rs")), Some(1));
+        assert_eq!(file_tab(&tabs[..1], Path::new("C:/w/a.rs")), None);
     }
 }

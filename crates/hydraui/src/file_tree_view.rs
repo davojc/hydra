@@ -15,7 +15,7 @@ use gpui_component::{ActiveTheme, h_flex, v_flex};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::file_tree::{FileTree, Row};
-use crate::git_status::{Change, change_of, folder_changed};
+use crate::git_status::{Change, change_of, changed_folders};
 
 /// What a click asks the workspace to do with the focused pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +47,8 @@ pub struct FileTreeView {
     watched: BTreeSet<PathBuf>,
     /// The repository's root and its changed files, from the status bar's last read.
     git: Option<(PathBuf, BTreeMap<PathBuf, Change>)>,
+    /// The folders holding those changes, worked out once per read.
+    changed: BTreeSet<PathBuf>,
     _pump: Task<()>,
 }
 
@@ -69,6 +71,7 @@ fn rel_to(root: &Path, path: &Path) -> Option<PathBuf> {
 /// A row's git mark and colour: a file's change letter, or a dot on a folder holding changes.
 fn git_mark(
     git: &Option<(PathBuf, BTreeMap<PathBuf, Change>)>,
+    changed: &BTreeSet<PathBuf>,
     path: &Path,
     is_dir: bool,
 ) -> Option<(&'static str, Change)> {
@@ -87,7 +90,7 @@ fn git_mark(
             },
             c,
         )),
-        _ if is_dir && folder_changed(files, rel) => Some(("•", Change::Modified)),
+        _ if is_dir && changed.contains(rel) => Some(("•", Change::Modified)),
         _ => None,
     }
 }
@@ -139,6 +142,7 @@ impl FileTreeView {
             watcher: watcher(tx),
             watched: BTreeSet::new(),
             git: None,
+            changed: BTreeSet::new(),
             _pump: pump,
         };
         view.sync_watches();
@@ -162,6 +166,10 @@ impl FileTreeView {
     ) {
         let git = root.map(|r| (r, files));
         if self.git != git {
+            self.changed = git
+                .as_ref()
+                .map(|(_, f)| changed_folders(f))
+                .unwrap_or_default();
             self.git = git;
             cx.notify();
         }
@@ -250,7 +258,12 @@ impl Render for FileTreeView {
                                     "Double-click cd works when the shell is at its prompt".into()
                                 };
                                 let indent = px(8. + 12. * row.depth as f32);
-                                let mark = git_mark(&self.git, &row.entry.path, row.entry.is_dir);
+                                let mark = git_mark(
+                                    &self.git,
+                                    &self.changed,
+                                    &row.entry.path,
+                                    row.entry.is_dir,
+                                );
                                 let color = mark.map(|(_, c)| change_color(c, cx));
                                 let changed_file = !row.entry.is_dir
                                     && mark.is_some_and(|(_, c)| c != Change::Ignored);

@@ -1,7 +1,8 @@
 """Draws hydra's icon: three heads (environment colours) rising from one neck on a dark tile.
 
 Run from the repo root:  python assets/make_icon.py
-Writes assets/hydra.ico (16-256 px), assets/hydra.png (512 px) and site/favicon.png (64 px).
+Writes assets/hydra.ico (16-256 px), assets/hydra.png (512 px), assets/hydra-64.png (hydraui's
+title bar) and site/favicon.png (64 px).
 """
 from PIL import Image, ImageDraw
 
@@ -60,4 +61,5 @@ if __name__ == "__main__":
     frames = [draw(s) for s in sizes]
     frames[-1].save("assets/hydra.ico", sizes=[(s, s) for s in sizes], append_images=frames[:-1])
     draw(512).save("assets/hydra.png")
+    draw(64).save("assets/hydra-64.png")
     draw(64).save("site/favicon.png")

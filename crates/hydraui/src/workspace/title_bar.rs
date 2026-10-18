@@ -1,15 +1,24 @@
 //! hydraui's own title bar (spec §7.11): the title, the Update button, and the window
 //! controls gpui-component draws.
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use gpui::prelude::*;
-use gpui::{Context, Window, div};
+use gpui::{Context, Image, ImageFormat, Window, div, img, px};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, Disableable, Sizable, TitleBar, WindowExt, h_flex};
 
 use super::Workspace;
 use crate::updater::{self, UpdateState};
+
+/// hydra's icon, drawn small (assets/make_icon.py).
+static ICON: LazyLock<Arc<Image>> = LazyLock::new(|| {
+    Arc::new(Image::from_bytes(
+        ImageFormat::Png,
+        include_bytes!("../../../../assets/hydra-64.png").to_vec(),
+    ))
+});
 
 /// How often to ask GitHub again.
 const EVERY: Duration = Duration::from_secs(6 * 60 * 60);
@@ -139,7 +148,12 @@ impl Workspace {
                 .w_full()
                 .pr_2()
                 .justify_between()
-                .child(div().text_sm().text_color(muted).child(self.title.clone()))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(img(ICON.clone()).size(px(18.)))
+                        .child(div().text_sm().text_color(muted).child(self.title.clone())),
+                )
                 .children(button),
         )
     }

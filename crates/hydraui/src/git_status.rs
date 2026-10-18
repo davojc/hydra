@@ -35,6 +35,19 @@ pub struct GitStatus {
     pub files: BTreeMap<PathBuf, Change>,
     /// The repository's root folder.
     pub root: Option<PathBuf>,
+    /// Each renamed file's old path.
+    pub renamed_from: BTreeMap<PathBuf, PathBuf>,
+}
+
+/// What a file's diff compares it with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Base {
+    /// The last commit.
+    Head,
+    /// Nothing: the whole file is new.
+    Nothing,
+    /// The last commit's version under its old name.
+    Renamed(PathBuf),
 }
 
 /// A tracked file's change from its `XY` letters.
@@ -81,13 +94,21 @@ pub fn parse(text: &str) -> GitStatus {
                 s.modified += 1;
             }
             // "1 XY sub mH mI mW hH hI path" / "2 XY sub mH mI mW hH hI Xscore path\torig".
-            let path = if line.starts_with("1 ") {
-                line.splitn(9, ' ').nth(8)
+            let (path, orig) = if line.starts_with("1 ") {
+                (line.splitn(9, ' ').nth(8), None)
             } else {
-                line.splitn(10, ' ')
-                    .nth(9)
-                    .map(|p| p.split('\t').next().unwrap_or(p))
+                match line.splitn(10, ' ').nth(9) {
+                    Some(p) => match p.split_once('\t') {
+                        Some((new, old)) => (Some(new), Some(old)),
+                        None => (Some(p), None),
+                    },
+                    None => (None, None),
+                }
             };
+            if let (Some(path), Some(orig)) = (path, orig) {
+                s.renamed_from
+                    .insert(PathBuf::from(path), PathBuf::from(orig));
+            }
             if let Some(path) = path {
                 s.files
                     .insert(PathBuf::from(path), change_from(&line[2..4]));
@@ -200,15 +221,28 @@ pub fn read(dir: &Path) -> Option<GitStatus> {
     Some(s)
 }
 
-/// `git diff HEAD -- <file>` (untracked: `--no-index` against an empty file), without a
-/// console window; call it off the UI thread.
-pub fn diff_patch(repo_dir: &Path, file: &Path, untracked: bool) -> Result<String, String> {
+/// `file`'s diff against `base` (with no commits yet, against nothing), without a console
+/// window; call it off the UI thread.
+pub fn diff_patch(repo_dir: &Path, file: &Path, base: &Base) -> Result<String, String> {
+    let base = match base {
+        Base::Head if git(repo_dir, &["rev-parse", "--verify", "-q", "HEAD"]).is_none() => {
+            &Base::Nothing
+        }
+        b => b,
+    };
+    let untracked = *base == Base::Nothing;
     let mut cmd = std::process::Command::new("git");
     cmd.arg("-C").arg(repo_dir).arg("diff").arg("--no-color");
-    if untracked {
-        cmd.args(["--no-index", "--", "NUL"]).arg(file);
-    } else {
-        cmd.args(["HEAD", "--"]).arg(file);
+    match base {
+        Base::Nothing => {
+            cmd.args(["--no-index", "--", "NUL"]).arg(file);
+        }
+        Base::Head => {
+            cmd.args(["HEAD", "--"]).arg(file);
+        }
+        Base::Renamed(old) => {
+            cmd.args(["-M", "HEAD", "--"]).arg(old).arg(file);
+        }
     }
     let out = hydra_platform::process::hide_window(&mut cmd)
         .stdin(std::process::Stdio::null())
@@ -254,6 +288,7 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc both.rs\n\
                 conflicts: 1,
                 files: s.files.clone(),
                 root: None,
+                renamed_from: s.renamed_from.clone(),
             }
         );
         assert_eq!(summary(&s), "⎇ main ↑2 ↓1 · +3 ~2 ?2 !1");
@@ -308,6 +343,10 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc both.rs\n\
     fn renames_mark_the_new_path() {
         let s = parse("2 R. N... 100644 100644 100644 a a R100 src/new.rs\tsrc/old.rs\n");
         assert_eq!(s.files.get(Path::new("src/new.rs")), Some(&Change::Renamed));
+        assert_eq!(
+            s.renamed_from.get(Path::new("src/new.rs")),
+            Some(&PathBuf::from("src/old.rs"))
+        );
         assert!(!s.files.contains_key(Path::new("src/old.rs")));
     }
 
@@ -394,13 +433,73 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc both.rs\n\
         assert!(git(&["commit", "-q", "-m", "x"]));
         std::fs::write(d.path().join("a.txt"), "two\n").unwrap();
         std::fs::write(d.path().join("new.txt"), "fresh\n").unwrap();
-        let changed = diff_patch(d.path(), Path::new("a.txt"), false).unwrap();
+        let changed = diff_patch(d.path(), Path::new("a.txt"), &Base::Head).unwrap();
         assert!(
             changed.contains("-one") && changed.contains("+two"),
             "{changed}"
         );
-        let added = diff_patch(d.path(), Path::new("new.txt"), true).unwrap();
+        let added = diff_patch(d.path(), Path::new("new.txt"), &Base::Nothing).unwrap();
         assert!(added.contains("+fresh"), "{added}");
+    }
+
+    /// A temp repo and a git runner that leaves the user's config alone; `None` without git.
+    fn repo() -> Option<(tempfile::TempDir, impl Fn(&[&str]) -> bool)> {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().to_path_buf();
+        let git = move |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        git(&["init", "-q"]).then_some((d, git))
+    }
+
+    #[test]
+    fn a_renamed_file_diffs_against_its_old_name() {
+        let Some((d, git)) = repo() else { return };
+        let body: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(d.path().join("old.txt"), &body).unwrap();
+        assert!(git(&["add", "."]) && git(&["commit", "-q", "-m", "x"]));
+        assert!(git(&["mv", "old.txt", "new.txt"]));
+        std::fs::write(d.path().join("new.txt"), body.replace("line 5\n", "five\n")).unwrap();
+        let s = read(d.path()).unwrap();
+        let from = s.renamed_from.get(Path::new("new.txt")).cloned();
+        assert_eq!(from, Some(PathBuf::from("old.txt")), "{s:?}");
+        let patch = diff_patch(
+            d.path(),
+            Path::new("new.txt"),
+            &Base::Renamed(from.unwrap()),
+        )
+        .unwrap();
+        assert!(
+            patch.contains("-line 5") && patch.contains("+five"),
+            "{patch}"
+        );
+        assert!(
+            !patch.contains("+line 1\n"),
+            "not the whole file as new: {patch}"
+        );
+    }
+
+    #[test]
+    fn a_repository_with_no_commits_shows_the_file_as_new() {
+        let Some((d, git)) = repo() else { return };
+        std::fs::write(d.path().join("a.txt"), "first\n").unwrap();
+        assert!(git(&["add", "a.txt"]));
+        let patch = diff_patch(d.path(), Path::new("a.txt"), &Base::Head).unwrap();
+        assert!(patch.contains("+first"), "{patch}");
     }
 
     #[test]

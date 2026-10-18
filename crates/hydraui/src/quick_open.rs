@@ -32,6 +32,11 @@ pub fn score(query: &str, path: &str) -> Option<i32> {
     Some(score * 100 - p.len() as i32)
 }
 
+/// A listed path as quick open matches and shows it: with `/`, as people type it.
+pub fn shown(p: &Path) -> String {
+    p.to_string_lossy().replace('\\', "/")
+}
+
 /// `name:42` → (`name`, 42); otherwise (`query`, 0).
 pub fn split_line(query: &str) -> (&str, usize) {
     match query.rsplit_once(':') {
@@ -86,6 +91,13 @@ mod tests {
         let starts = score("fp", "file_pane.rs").unwrap();
         let middle = score("fp", "xfxp.rs").unwrap();
         assert!(starts > middle);
+    }
+
+    #[test]
+    fn paths_are_matched_and_shown_with_forward_slashes() {
+        let p = Path::new(r"src\ui\main.rs");
+        assert_eq!(shown(p), "src/ui/main.rs");
+        assert!(score("src/main", &shown(p)).is_some());
     }
 
     #[test]

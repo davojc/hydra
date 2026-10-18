@@ -161,6 +161,19 @@ impl Hydra {
             .map_err(|e| e.to_string())
     }
 
+    /// `env`'s folder under hydra's home, for the delete confirmation.
+    pub fn env_folder(&self, env: &str) -> Option<PathBuf> {
+        EnvName::parse(env).ok().map(|n| self.paths.env_dir(&n))
+    }
+
+    /// The names of `env`'s stored secrets, for the delete confirmation.
+    pub fn env_secrets(&self, env: &str) -> Vec<String> {
+        EnvName::parse(env)
+            .ok()
+            .and_then(|n| self.store.list(&n).ok())
+            .unwrap_or_default()
+    }
+
     /// Deletes `env` as `hydra env rm` does (spec §7.4): refused while hydraui or another
     /// process has its terminals open; saved logins only when `delete_logins`.
     pub fn delete_env(
@@ -671,6 +684,17 @@ mod tests {
 
     fn work_config(f: &Fx) -> EnvConfig {
         load_env(&f.hydra.paths, &EnvName::parse("work").unwrap()).unwrap()
+    }
+
+    #[test]
+    fn an_envs_secrets_are_listed_for_the_delete_confirm() {
+        let f = fx("");
+        f.hydra.set_secret("work/tok", "v").unwrap();
+        f.hydra.set_secret("work/gh", "v").unwrap();
+        let mut got = f.hydra.env_secrets("work");
+        got.sort();
+        assert_eq!(got, vec!["gh".to_string(), "tok".to_string()]);
+        assert!(f.hydra.env_secrets("personal").is_empty());
     }
 
     #[test]

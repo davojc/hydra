@@ -710,11 +710,11 @@ impl Workspace {
                 .await;
             let _ = this.update(cx, |ws, cx| {
                 if let Some(tree) = ws.tree.clone() {
-                    let (root, files) = status
+                    let (root, files, renamed) = status
                         .as_ref()
-                        .map(|s| (s.root.clone(), s.files.clone()))
+                        .map(|s| (s.root.clone(), s.files.clone(), s.renamed_from.clone()))
                         .unwrap_or_default();
-                    tree.update(cx, |t, cx| t.set_git(root, files, cx));
+                    tree.update(cx, |t, cx| t.set_git(root, files, renamed, cx));
                 }
                 let line = status.as_ref().map(git_status::summary);
                 ws.git = Some((cwd, line));
@@ -809,14 +809,13 @@ impl Workspace {
     /// Diffs a file against git's last commit off the UI thread, then shows it beside the file
     /// in the tab's file pane (spec §7.3).
     fn show_changes(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((root, rel, untracked)) =
-            self.tree.as_ref().and_then(|t| t.read(cx).git_place(&path))
+        let Some((root, rel, base)) = self.tree.as_ref().and_then(|t| t.read(cx).git_place(&path))
         else {
             return;
         };
         cx.spawn_in(window, async move |this, cx| {
             let patch = cx
-                .background_spawn(async move { git_status::diff_patch(&root, &rel, untracked) })
+                .background_spawn(async move { git_status::diff_patch(&root, &rel, &base) })
                 .await;
             let _ = this.update_in(cx, |ws, window, cx| {
                 ws.show_file(path.clone(), window, cx);

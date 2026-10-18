@@ -3,6 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::prelude::*;
@@ -13,7 +14,7 @@ use gpui_component::{ActiveTheme, Selectable, Sizable, WindowExt, h_flex, v_flex
 
 use super::Workspace;
 use crate::keys::{OpenFile, SearchFiles};
-use crate::quick_open::{list_files, score, split_line};
+use crate::quick_open::{list_files, score, shown, split_line};
 use crate::search::{Generation, Hit, Query, search};
 
 /// The folder's files once listed, and whether the list was cut off.
@@ -87,7 +88,7 @@ impl Workspace {
                     if r.0.as_deref() != Some(query.as_str()) {
                         let mut scored: Vec<(i32, &PathBuf)> = list
                             .iter()
-                            .filter_map(|p| score(name, &p.to_string_lossy()).map(|s| (s, p)))
+                            .filter_map(|p| score(name, &shown(p)).map(|s| (s, p)))
                             .collect();
                         scored.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
                         r.1 = scored
@@ -109,11 +110,7 @@ impl Workspace {
                     .child(
                         Command::new(&state)
                             .filterable(false)
-                            .items(
-                                matches
-                                    .iter()
-                                    .map(|p| CommandItem::new().label(p.display().to_string())),
-                            )
+                            .items(matches.iter().map(|p| CommandItem::new().label(shown(p))))
                             .placeholder("File name, or name:line")
                             .on_confirm(move |ix, window, cx| {
                                 if let Some(rel) = chosen.get(ix.row) {
@@ -148,6 +145,19 @@ impl Workspace {
         let found: Rc<RefCell<Found>> = Rc::default();
         let generation = Generation::default();
         let guard = CancelOnDrop(generation.clone());
+        // The folder is listed once, when the dialog opens; every search reuses the list.
+        let listing: Rc<RefCell<Option<Arc<Vec<PathBuf>>>>> = Rc::default();
+        let (listed, from, refound) = (listing.clone(), root.clone(), found.clone());
+        cx.spawn_in(window, async move |_, cx| {
+            let (files, _) = cx
+                .background_spawn(async move { list_files(&from, MAX_FILES) })
+                .await;
+            *listed.borrow_mut() = Some(Arc::new(files));
+            // Search again now that there's something to search.
+            refound.borrow_mut().key = None;
+            let _ = cx.update(|window, _| window.refresh());
+        })
+        .detach();
         let workspace = cx.entity();
         let first = Cell::new(true);
         window.open_dialog(cx, move |dialog, window, cx| {
@@ -155,13 +165,16 @@ impl Workspace {
             if first.replace(false) {
                 state.update(cx, |s, cx| s.focus(window, cx));
             }
+            let files = listing.borrow().clone();
             let query = Query {
                 text: state.read(cx).query(cx).to_string(),
                 regex: regex.get(),
                 case: case.get(),
             };
             let key = (query.text.clone(), query.regex, query.case);
-            if found.borrow().key.as_ref() != Some(&key) {
+            if let Some(files) = files.clone()
+                && found.borrow().key.as_ref() != Some(&key)
+            {
                 found.borrow_mut().key = Some(key);
                 let current = generation.next();
                 if query.text.is_empty() {
@@ -185,7 +198,9 @@ impl Workspace {
                             let still = g.clone();
                             let result = cx
                                 .background_spawn(async move {
-                                    search(&root, &query, MAX_HITS, &|| !still.is_current(current))
+                                    search(&root, &files, &query, MAX_HITS, &|| {
+                                        !still.is_current(current)
+                                    })
                                 })
                                 .await;
                             if !g.is_current(current) {
@@ -213,6 +228,9 @@ impl Workspace {
             let (muted, danger) = (cx.theme().muted_foreground, cx.theme().danger);
             let f = found.borrow();
             let note = match &f.error {
+                _ if files.is_none() => {
+                    Some(div().text_sm().text_color(muted).child("Listing files…"))
+                }
                 Some(e) => Some(div().text_sm().text_color(danger).child(e.clone())),
                 None => f.capped.then(|| {
                     div()

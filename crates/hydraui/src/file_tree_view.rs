@@ -15,7 +15,7 @@ use gpui_component::{ActiveTheme, h_flex, v_flex};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::file_tree::{FileTree, Row};
-use crate::git_status::{Change, change_of, changed_folders};
+use crate::git_status::{Base, Change, change_of, changed_folders};
 
 /// What a click asks the workspace to do with the focused pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +49,8 @@ pub struct FileTreeView {
     git: Option<(PathBuf, BTreeMap<PathBuf, Change>)>,
     /// The folders holding those changes, worked out once per read.
     changed: BTreeSet<PathBuf>,
+    /// Each renamed file's old path, for its diff.
+    renamed_from: BTreeMap<PathBuf, PathBuf>,
     _pump: Task<()>,
 }
 
@@ -143,6 +145,7 @@ impl FileTreeView {
             watched: BTreeSet::new(),
             git: None,
             changed: BTreeSet::new(),
+            renamed_from: BTreeMap::new(),
             _pump: pump,
         };
         view.sync_watches();
@@ -162,8 +165,10 @@ impl FileTreeView {
         &mut self,
         root: Option<PathBuf>,
         files: BTreeMap<PathBuf, Change>,
+        renamed_from: BTreeMap<PathBuf, PathBuf>,
         cx: &mut Context<Self>,
     ) {
+        self.renamed_from = renamed_from;
         let git = root.map(|r| (r, files));
         if self.git != git {
             self.changed = git
@@ -175,13 +180,17 @@ impl FileTreeView {
         }
     }
 
-    /// For a diff of `path`: the repository's root, the path relative to it, and whether git
-    /// doesn't track it yet.
-    pub fn git_place(&self, path: &Path) -> Option<(PathBuf, PathBuf, bool)> {
+    /// For a diff of `path`: the repository's root, the path relative to it, and what to
+    /// compare it with.
+    pub fn git_place(&self, path: &Path) -> Option<(PathBuf, PathBuf, Base)> {
         let (root, files) = self.git.as_ref()?;
         let rel = rel_to(root, path)?;
-        let untracked = change_of(files, &rel) == Some(Change::Untracked);
-        Some((root.clone(), rel, untracked))
+        let base = match (change_of(files, &rel), self.renamed_from.get(&rel)) {
+            (Some(Change::Untracked), _) => Base::Nothing,
+            (_, Some(old)) => Base::Renamed(old.clone()),
+            _ => Base::Head,
+        };
+        Some((root.clone(), rel, base))
     }
 
     /// Double-click `cd` works only while the focused pane is at its prompt (spec §7.3).

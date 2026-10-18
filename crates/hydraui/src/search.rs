@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::file_doc;
+#[cfg(test)]
 use crate::quick_open::list_files;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,22 +37,22 @@ pub fn matcher(q: &Query) -> Result<regex::Regex, String> {
         .map_err(|e| e.to_string())
 }
 
-/// The lines under `root` that match, at most `cap` (`true` when cut off); binary and
-/// too-large files are skipped, and a cancelled search returns nothing.
+/// The lines in `files` (relative to `root`) that match, at most `cap` (`true` when cut
+/// off); binary and too-large files are skipped, and a cancelled search returns nothing.
 pub fn search(
     root: &Path,
+    files: &[PathBuf],
     q: &Query,
     cap: usize,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(Vec<Hit>, bool), String> {
     let re = matcher(q)?;
     let mut hits = Vec::new();
-    let (files, _) = list_files(root, 200_000);
     for rel in files {
         if cancelled() {
             return Ok((Vec::new(), false));
         }
-        let path = root.join(&rel);
+        let path = root.join(rel);
         if std::fs::metadata(&path).is_ok_and(|m| m.len() > file_doc::MAX_BYTES) {
             continue;
         }
@@ -103,6 +104,24 @@ mod tests {
         d
     }
 
+    fn files(d: &tempfile::TempDir) -> Vec<PathBuf> {
+        list_files(d.path(), 100).0
+    }
+
+    #[test]
+    fn only_the_listed_files_are_searched() {
+        let d = tree();
+        let (hits, _) = search(
+            d.path(),
+            &[PathBuf::from("b.bin")],
+            &q("main", false, false),
+            100,
+            &|| false,
+        )
+        .unwrap();
+        assert!(hits.is_empty(), "a.rs wasn't listed");
+    }
+
     fn q(text: &str, regex: bool, case: bool) -> Query {
         Query {
             text: text.into(),
@@ -114,10 +133,16 @@ mod tests {
     #[test]
     fn plain_text_ignores_case_unless_asked() {
         let d = tree();
-        let (hits, _) = search(d.path(), &q("main", false, false), 100, &|| false).unwrap();
+        let (hits, _) = search(d.path(), &files(&d), &q("main", false, false), 100, &|| {
+            false
+        })
+        .unwrap();
         assert_eq!(hits.len(), 2, "both lines, binary file skipped");
         assert_eq!((hits[0].line, hits[0].column), (1, 4));
-        let (hits, _) = search(d.path(), &q("Main", false, true), 100, &|| false).unwrap();
+        let (hits, _) = search(d.path(), &files(&d), &q("Main", false, true), 100, &|| {
+            false
+        })
+        .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].text, "let Main = 1;");
     }
@@ -125,17 +150,26 @@ mod tests {
     #[test]
     fn regex_and_its_errors() {
         let d = tree();
-        let (hits, _) = search(d.path(), &q(r"fn \w+\(", true, false), 100, &|| false).unwrap();
+        let (hits, _) = search(
+            d.path(),
+            &files(&d),
+            &q(r"fn \w+\(", true, false),
+            100,
+            &|| false,
+        )
+        .unwrap();
         assert_eq!(hits.len(), 1);
-        assert!(search(d.path(), &q("(", true, false), 100, &|| false).is_err());
-        let (hits, _) = search(d.path(), &q("(", false, false), 100, &|| false).unwrap();
+        assert!(search(d.path(), &files(&d), &q("(", true, false), 100, &|| false).is_err());
+        let (hits, _) =
+            search(d.path(), &files(&d), &q("(", false, false), 100, &|| false).unwrap();
         assert_eq!(hits.len(), 1, "plain text: '(' is literal");
     }
 
     #[test]
     fn results_stop_at_the_cap() {
         let d = tree();
-        let (hits, capped) = search(d.path(), &q("main", false, false), 1, &|| false).unwrap();
+        let (hits, capped) =
+            search(d.path(), &files(&d), &q("main", false, false), 1, &|| false).unwrap();
         assert_eq!(hits.len(), 1);
         assert!(capped);
     }
@@ -148,7 +182,10 @@ mod tests {
         assert!(!g.is_current(first));
         assert!(g.is_current(second));
         let d = tree();
-        let (hits, _) = search(d.path(), &q("main", false, false), 100, &|| true).unwrap();
+        let (hits, _) = search(d.path(), &files(&d), &q("main", false, false), 100, &|| {
+            true
+        })
+        .unwrap();
         assert!(hits.is_empty(), "a cancelled search stops");
     }
 }

@@ -261,9 +261,23 @@ impl Workspace {
             }
             return;
         }
+        // Say exactly what goes (spec §7.4).
+        let folder = self
+            .hydra
+            .env_folder(&env)
+            .map(|f| f.display().to_string())
+            .unwrap_or_default();
+        let mut secrets = self.hydra.env_secrets(&env);
+        secrets.sort();
+        let secrets = if secrets.is_empty() {
+            "Secrets: none".to_string()
+        } else {
+            format!("Secrets: {}", secrets.join(", "))
+        };
         let logins = Rc::new(Cell::new(false));
         let workspace = cx.entity();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let muted = cx.theme().muted_foreground;
             let (ws, env, ticked, flag) =
                 (workspace.clone(), env.clone(), logins.get(), logins.clone());
             dialog
@@ -271,7 +285,15 @@ impl Workspace {
                 .child(
                     v_flex()
                         .gap_2()
-                        .child(format!("Delete {env}? Its folder and secrets go."))
+                        .child(format!("Delete {env}? These go:"))
+                        .child(
+                            v_flex()
+                                .pl_2()
+                                .text_sm()
+                                .text_color(muted)
+                                .child(format!("Folder: {folder}"))
+                                .child(secrets.clone()),
+                        )
                         .child(
                             Checkbox::new("delete-logins")
                                 .label("Also delete its saved logins")

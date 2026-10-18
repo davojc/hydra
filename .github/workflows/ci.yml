@@ -71,6 +71,18 @@ jobs:
             echo "expected 'hydra $VERSION', got '$got'" >&2
             exit 1
           fi
+      - name: Check hydraui's version
+        if: steps.decide.outputs.release == 'true'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.decide.outputs.version }}
+        run: |
+          $got = (Get-Item dist/hydraui-x86_64-pc-windows-msvc.exe).VersionInfo.ProductVersion
+          Write-Host "hydraui $got"
+          if ($got -ne $env:VERSION) {
+            Write-Error "expected hydraui $env:VERSION, got '$got'"
+            exit 1
+          }
       - name: Publish the release
         if: steps.decide.outputs.release == 'true'
         shell: bash

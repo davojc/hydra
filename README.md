@@ -31,7 +31,7 @@ Download `hydra-x86_64-pc-windows-msvc.exe` from the [latest release](https://gi
 hydra init        # creates ~/.hydra
 ```
 
-**Updating:** `hydra update` installs the latest release after checking its SHA-256 checksum. `hydra update --check` only reports. It won't update while another hydra terminal is open.
+**Updating:** `hydra update` installs the latest release after checking its SHA-256 checksum. `hydra update --check` only reports. It won't update while another hydra terminal is open. hydraui shows **Update hydra <version>** in its title bar when a release is out; it updates both `hydraui.exe` and `hydra.exe` the same way, then offers a restart.
 
 **From source:** install Rust from <https://rustup.rs>, then `git clone https://github.com/davojc/hydra.git` and `cargo build --release`. Local builds report a `-dev` version (e.g. `0.5.0-dev`), so `hydra update` replaces them with the real release. `scripts\deploy.ps1` builds and installs to `E:\Tools`, or another folder with `-Target`.
 

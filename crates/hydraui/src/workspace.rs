@@ -396,6 +396,19 @@ impl Workspace {
     /// Shows `path` in the active tab's file pane, splitting the tab's terminal to the right
     /// first when the tab has none (spec §7.8).
     fn show_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_file_at(path, 0, 0, window, cx);
+    }
+
+    /// `show_file` at a 1-based line and column (0: just open it), for quick open, search and
+    /// clickable paths (spec §7.8, §7.10).
+    fn show_file_at(
+        &mut self,
+        path: PathBuf,
+        line: usize,
+        column: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(tab) = self.tabs.active() else {
             return;
         };
@@ -407,7 +420,13 @@ impl Workspace {
         let id = match existing {
             Some(id) => {
                 if let Some(view) = self.files.get(&id).cloned() {
-                    view.update(cx, |f, cx| f.open(path, window, cx));
+                    view.update(cx, |f, cx| {
+                        if line > 0 {
+                            f.open_at(path, line, column, window, cx)
+                        } else {
+                            f.open(path, window, cx)
+                        }
+                    });
                 }
                 self.tabs.focus_pane(id);
                 id
@@ -418,7 +437,12 @@ impl Workspace {
                 };
                 self.next_pane += 1;
                 let id = self.next_pane;
-                self.create_files_pane(id, &[path], 0, window, cx);
+                self.create_files_pane(id, std::slice::from_ref(&path), 0, window, cx);
+                if line > 0
+                    && let Some(view) = self.files.get(&id).cloned()
+                {
+                    view.update(cx, |f, cx| f.open_at(path, line, column, window, cx));
+                }
                 self.tabs.split_pane(term, Axis::Row, id);
                 id
             }

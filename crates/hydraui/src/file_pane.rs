@@ -207,6 +207,32 @@ impl FilePane {
         cx.notify();
     }
 
+    /// Shows `path` with the cursor at a 1-based line and column, scrolled into view (spec
+    /// §7.8). Markdown switches to Raw, where a line means something.
+    pub fn open_at(
+        &mut self,
+        path: PathBuf,
+        line: usize,
+        column: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open(path, window, cx);
+        if let Some(FileTab {
+            body: Body::Text { editor, view, .. },
+            ..
+        }) = self.tabs.get_mut(self.active)
+        {
+            *view = View::Raw;
+            editor.update(cx, |e, cx| {
+                let (line, character) = file_doc::position_for(line, column, e.value().as_ref());
+                e.set_cursor_position(Position { line, character }, window, cx);
+            });
+        }
+        self.focus_content(window, cx);
+        cx.notify();
+    }
+
     /// Focuses the active file: its editor in Raw, the pane (for scrolling and copying) in
     /// Rendered or when a file can't be shown.
     pub fn focus_content(&self, window: &mut Window, cx: &mut App) {

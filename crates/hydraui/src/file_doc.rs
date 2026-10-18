@@ -139,6 +139,16 @@ pub fn cursor_after_reload(line: u32, column: u32, text: &str) -> (u32, u32) {
     (line, column.min(width(lines[line as usize])))
 }
 
+/// The editor position for a 1-based line and column (as tools print them), clamped to the
+/// text; 0 counts as 1.
+pub fn position_for(line: usize, column: usize, text: &str) -> (u32, u32) {
+    cursor_after_reload(
+        line.saturating_sub(1) as u32,
+        column.saturating_sub(1) as u32,
+        text,
+    )
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ImageUse {
     Local(PathBuf),
@@ -462,5 +472,18 @@ mod tests {
             "columns count UTF-16 units"
         );
         assert_eq!(cursor_after_reload(3, 3, ""), (0, 0));
+    }
+
+    #[test]
+    fn a_line_and_column_become_an_editor_position() {
+        assert_eq!(position_for(1, 1, "one\ntwo"), (0, 0));
+        assert_eq!(position_for(2, 3, "one\ntwo"), (1, 2));
+        assert_eq!(position_for(0, 0, "one"), (0, 0), "0 means the start");
+    }
+
+    #[test]
+    fn a_line_past_the_end_goes_to_the_last_line() {
+        assert_eq!(position_for(99, 1, "one\ntwo"), (1, 3));
+        assert_eq!(position_for(2, 99, "one\ntwo"), (1, 3));
     }
 }

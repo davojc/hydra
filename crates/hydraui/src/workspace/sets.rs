@@ -8,15 +8,22 @@ use gpui::{App, Context, Hsla, SharedString, Window, div};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::notification::Notification;
 use gpui_component::{Sizable, WindowExt, h_flex, v_flex};
+use std::path::{Path, PathBuf};
+
+use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
+use hydraui_sets::file::{SetFile, TabFile};
 use hydraui_sets::{
-    Context as SetContext, LoadedSet, Session, SetSpec, file_modified, load_set, read_session,
-    resolve_loose, write_session,
+    Context as SetContext, LoadedSet, Session, SetRef, SetSpec, file_modified, list_sets, load_set,
+    load_set_file, read_layout, read_session, resolve_loose, sets_dir, write_layout, write_session,
+    write_set_file,
 };
 use hydraui_term::PromptState;
 
 use super::{DEFAULT_TREE_WIDTH, Workspace, tree_width_at};
 use crate::keys::FileTree;
 use crate::layout::{SavedPane, TabLayout, tab_file, tab_layout};
+use crate::layout_plan::{open_plan, reload_from, session_entry, taken_names};
+use crate::tabs::Tab;
 use crate::tabs::TabId;
 
 /// What to ask before unloading `set` when some of its panes are running a command (OSC 133);
@@ -98,6 +105,7 @@ impl Workspace {
         }
         self.loaded.insert(LoadedSet {
             name: spec.name.clone(),
+            file: spec.file.clone(),
             tabs: tabs.clone(),
             modified: file_modified(&spec.file),
         });
@@ -198,7 +206,9 @@ impl Workspace {
     }
 
     fn close_set(&mut self, name: &str, reload: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let mut file = None;
         if let Some(set) = self.loaded.remove(name) {
+            file = Some(set.file);
             for tab in set.tabs {
                 for id in self.tabs.close_tab(tab) {
                     self.drop_pane(id);
@@ -207,7 +217,16 @@ impl Workspace {
         }
         self.changed_sets.remove(name);
         self.save_session(window, cx);
-        if !reload || !self.load_set(name, window, cx) {
+        // A group reloads from its own file (spec §5.4); a sets-folder set by name.
+        let reopened = reload
+            && match file.map(|f| reload_from(name, &f, &sets_dir(&self.hydra.paths))) {
+                Some(SetRef::File(path)) => self.open_group_file(&path, window, cx),
+                _ => self.load_set(name, window, cx),
+            };
+        if reopened {
+            self.save_session(window, cx);
+        }
+        if !reopened {
             self.focus_active(window, cx);
         }
         cx.notify();
@@ -221,7 +240,10 @@ impl Workspace {
         }
     }
 
-    pub(super) fn save_session(&self, window: &mut Window, cx: &mut App) {
+    /// A tab as the set file's tab format: each pane's env, current folder and shell, file
+    /// panes, the tab's title, and (set tabs only) startup commands (spec §7.9).
+    pub(super) fn snapshot_tab(&self, tab: &Tab, cx: &App) -> Option<TabFile> {
+        let set_tab = tab.set.is_some();
         let pane = |id| {
             if let Some(f) = self.files.get(&id) {
                 let (files, active) = f.read(cx).saved();
@@ -233,24 +255,57 @@ impl Workspace {
                     env: v.env().to_string(),
                     cwd: v.cwd().clone(),
                     shell: v.request.shell,
+                    // A Loose tab's command is a sign-in's: not worth running again.
+                    command: if set_tab {
+                        v.request.command.clone()
+                    } else {
+                        None
+                    },
                 }
             })
         };
+        tab_file(&tab.tree, tab.title.as_deref(), &pane)
+    }
+
+    /// The window as a layout (session.toml's format, spec §5.4).
+    pub(super) fn current_layout(&self, cx: &App) -> Session {
+        let dir = sets_dir(&self.hydra.paths);
         let loose = self
             .tabs
             .iter()
             .filter(|t| t.set.is_none())
-            .filter_map(|t| tab_file(&t.tree, &pane))
+            .filter_map(|t| self.snapshot_tab(t, cx))
             .collect();
         let active = self.tabs.active_id();
-        let session = Session {
-            sets: self.loaded.names(),
+        Session {
+            sets: self
+                .loaded
+                .all()
+                .iter()
+                .map(|s| session_entry(&s.name, &s.file, &dir))
+                .collect(),
             active: self.tabs.iter().position(|t| Some(t.id) == active),
             tree: self.tree.is_some(),
             tree_width: (self.tree.is_some() && self.tree_width != DEFAULT_TREE_WIDTH)
                 .then_some(self.tree_width),
             loose,
-        };
+        }
+    }
+
+    /// These tabs as a group file (a set file; every pane carries its own env and folder).
+    pub(super) fn group_file_of(&self, tabs: &[TabId], cx: &App) -> SetFile {
+        SetFile {
+            tabs: tabs
+                .iter()
+                .filter_map(|t| self.tabs.get(*t))
+                .filter_map(|t| self.snapshot_tab(t, cx))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    pub(super) fn save_session(&self, window: &mut Window, cx: &mut App) {
+        let session = self.current_layout(cx);
         if let Err(e) = write_session(&self.hydra.paths, &session) {
             window.push_notification(
                 Notification::warning(format!("can't save what is open: {e}")).title("hydraui"),
@@ -259,34 +314,272 @@ impl Workspace {
         }
     }
 
+    /// Asks where to save (the Save As dialog), then calls `then` with the path. Cancel does
+    /// nothing. Debug builds take `HYDRAUI_TEST_SAVE_PATH` instead, for smoke tests.
+    fn save_dialog(
+        &mut self,
+        dir: PathBuf,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, PathBuf, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        #[cfg(debug_assertions)]
+        if let Some(p) = std::env::var_os("HYDRAUI_TEST_SAVE_PATH") {
+            then(self, PathBuf::from(p), window, cx);
+            return;
+        }
+        let rx = cx.prompt_for_new_path(&dir, Some(&name));
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(path))) = rx.await {
+                let _ = this.update_in(cx, |ws, window, cx| then(ws, path, window, cx));
+            }
+        })
+        .detach();
+    }
+
+    /// Asks which file to open (the Open dialog), then calls `then` with it. Cancel does
+    /// nothing. Debug builds take `HYDRAUI_TEST_OPEN_PATH` instead, for smoke tests.
+    fn open_dialog_path(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, PathBuf, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        #[cfg(debug_assertions)]
+        if let Some(p) = std::env::var_os("HYDRAUI_TEST_OPEN_PATH") {
+            then(self, PathBuf::from(p), window, cx);
+            return;
+        }
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await
+                && let Some(path) = paths.into_iter().next()
+            {
+                let _ = this.update_in(cx, |ws, window, cx| then(ws, path, window, cx));
+            }
+        })
+        .detach();
+    }
+
+    /// Says how a save went.
+    fn saved(
+        &self,
+        what: &str,
+        path: &Path,
+        result: std::io::Result<()>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let note = match result {
+            Ok(()) => Notification::success(format!("Saved {what} to {}", path.display())),
+            Err(e) => Notification::error(format!("can't save {}: {e}", path.display())),
+        };
+        window.push_notification(note.title("Save"), cx);
+    }
+
+    pub(super) fn save_layout_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dir = self.hydra.user_home.clone();
+        self.save_dialog(
+            dir,
+            "layout.hydraui.toml".into(),
+            window,
+            cx,
+            |ws, path, window, cx| {
+                let result = write_layout(&path, &ws.current_layout(cx));
+                ws.saved("the layout", &path, result, window, cx);
+            },
+        );
+    }
+
+    pub(super) fn open_layout_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_dialog_path(window, cx, |ws, path, window, cx| {
+            match read_layout(&path) {
+                Ok(layout) => {
+                    ws.open_layout(layout, window, cx);
+                    ws.save_session(window, cx);
+                }
+                Err(e) => window.push_notification(Notification::error(e).title("Open layout"), cx),
+            }
+        });
+    }
+
+    pub(super) fn open_group_file_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_dialog_path(window, cx, |ws, path, window, cx| {
+            if ws.open_group_file(&path, window, cx) {
+                ws.save_session(window, cx);
+            }
+        });
+    }
+
+    /// Writes `tabs` to a group file chosen in the Save As dialog, starting at `dir/name`.
+    fn save_tabs_as_group(
+        &mut self,
+        tabs: Vec<TabId>,
+        dir: PathBuf,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.save_dialog(dir, name, window, cx, move |ws, path, window, cx| {
+            let result = write_set_file(&path, &ws.group_file_of(&tabs, cx));
+            if result.is_ok() {
+                // Saving a group over its own file isn't a change to offer a reload for.
+                ws.loaded.saved_to(&path);
+            }
+            ws.saved("the group", &path, result, window, cx);
+        });
+    }
+
+    pub(super) fn save_loose_as_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let loose: Vec<TabId> = self
+            .tabs
+            .iter()
+            .filter(|t| t.set.is_none())
+            .map(|t| t.id)
+            .collect();
+        if loose.is_empty() {
+            window.push_notification(
+                Notification::info("No Loose tabs to save.").title("Save"),
+                cx,
+            );
+            return;
+        }
+        let dir = self.hydra.user_home.clone();
+        self.save_tabs_as_group(loose, dir, "group.toml".into(), window, cx);
+    }
+
+    /// Right-click a tab: Save tab as group… (spec §7.9).
+    pub(super) fn save_tab_as_group(
+        &mut self,
+        tab: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = self
+            .tabs
+            .get(tab)
+            .and_then(|t| {
+                t.title
+                    .clone()
+                    .or_else(|| self.tab_terminal(t).map(|v| v.read(cx).label()))
+            })
+            .unwrap_or_else(|| "tab".into());
+        let dir = self.hydra.user_home.clone();
+        self.save_tabs_as_group(vec![tab], dir, format!("{name}.toml"), window, cx);
+    }
+
+    /// Right-click a group header: Save group…, starting on the group's own file.
+    fn save_group(&mut self, set: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(s) = self.loaded.get(set) else {
+            return;
+        };
+        let dir = s
+            .file
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.hydra.user_home.clone());
+        let name = s
+            .file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| format!("{set}.toml"));
+        let tabs = s.tabs.clone();
+        self.save_tabs_as_group(tabs, dir, name, window, cx);
+    }
+
+    /// Opens a group file as a set (spec §5.4), or focuses it when it is open already. Says
+    /// what's wrong when it can't. Returns whether the group is open now.
+    pub(super) fn open_group_file(
+        &mut self,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some(first) = self
+            .loaded
+            .by_file(path)
+            .and_then(|s| s.tabs.first().copied())
+        {
+            self.tabs.activate(first);
+            self.focus_active(window, cx);
+            cx.notify();
+            return true;
+        }
+        let folder = list_sets(&self.hydra.paths).unwrap_or_default();
+        let taken = taken_names(&self.loaded.names(), &folder);
+        match load_set_file(&self.set_context(), path, &taken) {
+            Ok(spec) => {
+                self.open_set(spec, window, cx);
+                true
+            }
+            Err(e) => {
+                window
+                    .push_notification(Notification::error(e.to_string()).title("Open group"), cx);
+                false
+            }
+        }
+    }
+
     /// Notes the sets whose file changed or went away since they were loaded.
     pub(super) fn check_sets(&mut self, cx: &mut Context<Self>) {
-        let changed: HashSet<String> = self.loaded.changed(&self.hydra.paths).into_iter().collect();
+        let changed: HashSet<String> = self.loaded.changed().into_iter().collect();
         if changed != self.changed_sets {
             self.changed_sets = changed;
             cx.notify();
         }
     }
 
-    /// Reopens what was open at last exit: the sets, then the Loose tabs, then the file tree
-    /// and the active tab. A set or tab that fails is skipped with a toast (and so dropped
-    /// from the session). Returns whether any tab opened.
+    /// Reopens what was open at last exit (spec §5.4). Returns whether any tab opened.
     pub(super) fn restore_session(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let session = read_session(&self.hydra.paths);
-        let mut any = false;
-        for name in &session.sets {
-            any |= self.load_set(name, window, cx);
+        let any = self.open_layout(read_session(&self.hydra.paths), window, cx);
+        if any {
+            self.save_session(window, cx);
         }
-        for tab in &session.loose {
+        any
+    }
+
+    /// Adds a layout to the window (spec §7.9): its sets that aren't loaded yet, its Loose tabs
+    /// and their file panes, the tree if it was open, and its active tab. A set or tab that
+    /// fails is skipped with a toast. Returns whether any tab opened.
+    pub(super) fn open_layout(
+        &mut self,
+        layout: Session,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let files: Vec<PathBuf> = self.loaded.all().iter().map(|s| s.file.clone()).collect();
+        let mut opened: Vec<TabId> = Vec::new();
+        let mut any = false;
+        for (set, loaded) in open_plan(&layout.sets, &self.loaded.names(), &files) {
+            let tabs = match set {
+                SetRef::Named(name) => {
+                    if !loaded {
+                        any |= self.load_set(&name, window, cx);
+                    }
+                    self.loaded.get(&name).map(|s| s.tabs.clone())
+                }
+                SetRef::File(path) => {
+                    if !loaded {
+                        any |= self.open_group_file(&path, window, cx);
+                    }
+                    self.loaded.by_file(&path).map(|s| s.tabs.clone())
+                }
+            };
+            // Tabs of sets open already count too, so the active tab's position lines up.
+            opened.extend(tabs.unwrap_or_default());
+        }
+        for tab in &layout.loose {
             let spec = match resolve_loose(&self.set_context(), tab) {
                 Ok(spec) => spec,
                 Err(problems) => {
                     window.push_notification(
-                        Notification::warning(problems.join(
-                            "
-",
-                        ))
-                        .title("Can't reopen a tab"),
+                        Notification::warning(problems.join("\n")).title("Can't reopen a tab"),
                         cx,
                     );
                     continue;
@@ -308,29 +601,25 @@ impl Workspace {
             if let Some((id, f)) = files {
                 self.create_files_pane(id, &f.files, f.active, window, cx);
             }
-            self.tabs.add_tree(None, None, tree, focused);
+            opened.push(self.tabs.add_tree(None, None, tree, focused));
             any = true;
         }
         if !any {
             return false;
         }
-        if session.tree && self.tree.is_none() {
+        if layout.tree && self.tree.is_none() {
             let width = f32::from(window.viewport_size().width);
-            self.tree_width =
-                tree_width_at(session.tree_width.unwrap_or(DEFAULT_TREE_WIDTH), width);
+            self.tree_width = tree_width_at(layout.tree_width.unwrap_or(DEFAULT_TREE_WIDTH), width);
             self.toggle_tree(&FileTree, window, cx);
         }
-        let saved = session
-            .active
-            .and_then(|i| self.tabs.iter().nth(i).map(|t| t.id));
-        if let Some(id) = saved {
+        // The layout's active tab, by its place among the tabs it opened.
+        if let Some(id) = layout.active.and_then(|i| opened.get(i).copied()) {
             self.tabs.activate(id);
         }
         // After the sets' own focus requests, so the active tab keeps the keyboard.
         if let Some(focused) = self.tabs.active().map(|t| t.focused) {
             self.focus_soon(focused, window, cx);
         }
-        self.save_session(window, cx);
         cx.notify();
         true
     }
@@ -350,9 +639,27 @@ impl Workspace {
         let changed_name = set.to_string();
         let reload_name = set.to_string();
         let unload_name = set.to_string();
+        let ws = cx.entity();
+        let menu_set = set.to_string();
         h_flex()
+            .id(id("header"))
             .gap_1()
             .px_1()
+            .context_menu(move |menu, _, _| {
+                let (save_ws, unload_ws) = (ws.clone(), ws.clone());
+                let (save_set, unload_set) = (menu_set.clone(), menu_set.clone());
+                menu.item(
+                    PopupMenuItem::new("Save group…").on_click(move |_, window, cx| {
+                        save_ws.update(cx, |ws, cx| ws.save_group(&save_set, window, cx));
+                    }),
+                )
+                .item(
+                    PopupMenuItem::new("Unload group").on_click(move |_, window, cx| {
+                        unload_ws
+                            .update(cx, |ws, cx| ws.unload_set(&unload_set, false, window, cx));
+                    }),
+                )
+            })
             .child(
                 div()
                     .id(id("set"))

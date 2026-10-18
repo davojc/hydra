@@ -77,6 +77,8 @@ pub enum SavedPane {
         env: String,
         cwd: PathBuf,
         shell: ShellKind,
+        /// The startup command (set tabs have one; Loose tabs don't).
+        command: Option<String>,
     },
     Files {
         files: Vec<PathBuf>,
@@ -87,18 +89,31 @@ pub enum SavedPane {
 /// An open tab in the set file's tab format, for session.toml: the reverse of `tab_layout`.
 /// A one-pane tab is written on the tab itself. `None` when a pane can't be described, or the
 /// tab is only a file pane (not a valid tab).
-pub fn tab_file(tree: &Tree, pane: &impl Fn(PaneId) -> Option<SavedPane>) -> Option<TabFile> {
+pub fn tab_file(
+    tree: &Tree,
+    title: Option<&str>,
+    pane: &impl Fn(PaneId) -> Option<SavedPane>,
+) -> Option<TabFile> {
+    let title = title.map(str::to_string);
     match tree {
         Tree::Leaf(id) => match pane(*id)? {
-            SavedPane::Terminal { env, cwd, shell } => Some(TabFile {
+            SavedPane::Terminal {
+                env,
+                cwd,
+                shell,
+                command,
+            } => Some(TabFile {
+                title,
                 env: Some(env),
                 cwd: Some(cwd.to_string_lossy().into_owned()),
                 shell: Some(shell.as_str().into()),
+                command,
                 ..Default::default()
             }),
             SavedPane::Files { .. } => None,
         },
         split => Some(TabFile {
+            title,
             layout: Some(node_file(split, pane)?),
             ..Default::default()
         }),
@@ -108,10 +123,16 @@ pub fn tab_file(tree: &Tree, pane: &impl Fn(PaneId) -> Option<SavedPane>) -> Opt
 fn node_file(tree: &Tree, pane: &impl Fn(PaneId) -> Option<SavedPane>) -> Option<NodeFile> {
     match tree {
         Tree::Leaf(id) => Some(match pane(*id)? {
-            SavedPane::Terminal { env, cwd, shell } => NodeFile {
+            SavedPane::Terminal {
+                env,
+                cwd,
+                shell,
+                command,
+            } => NodeFile {
                 env: Some(env),
                 cwd: Some(cwd.to_string_lossy().into_owned()),
                 shell: Some(shell.as_str().into()),
+                command,
                 ..Default::default()
             },
             SavedPane::Files { files, active } => NodeFile {
@@ -242,11 +263,15 @@ mod tests {
             } else {
                 ShellKind::Pwsh
             },
+            command: None,
         })
     }
 
     fn node(id: PaneId) -> NodeFile {
-        let Some(SavedPane::Terminal { env, cwd, shell }) = saved(id) else {
+        let Some(SavedPane::Terminal {
+            env, cwd, shell, ..
+        }) = saved(id)
+        else {
             unreachable!()
         };
         NodeFile {
@@ -273,7 +298,7 @@ mod tests {
 
     #[test]
     fn an_open_tab_saves_in_the_set_tab_format() {
-        let tab = tab_file(&three(), &saved).unwrap();
+        let tab = tab_file(&three(), None, &saved).unwrap();
         assert_eq!(
             tab.layout,
             Some(NodeFile {
@@ -296,11 +321,11 @@ mod tests {
 
     #[test]
     fn a_one_pane_tab_saves_on_the_tab_itself() {
-        let tab = tab_file(&Tree::Leaf(10), &saved).unwrap();
+        let tab = tab_file(&Tree::Leaf(10), None, &saved).unwrap();
         assert_eq!(tab.layout, None);
         assert_eq!(tab.env.as_deref(), Some("work"));
         assert_eq!(tab.shell.as_deref(), Some("pwsh"));
-        assert_eq!(tab_file(&Tree::Leaf(10), &|_| None), None);
+        assert_eq!(tab_file(&Tree::Leaf(10), None, &|_| None), None);
     }
 
     #[test]
@@ -320,11 +345,12 @@ mod tests {
                     env,
                     cwd: folder(id),
                     shell,
+                    command: None,
                 },
                 other => other,
             })
         };
-        let tab = tab_file(&three(), &saved_here).unwrap();
+        let tab = tab_file(&three(), None, &saved_here).unwrap();
         let bindings = std::collections::BTreeMap::new();
         let ctx = hydraui_sets::Context {
             paths: &paths,
@@ -370,6 +396,7 @@ mod tests {
                 env: "work".into(),
                 cwd: d.path().to_path_buf(),
                 shell: ShellKind::Pwsh,
+                command: None,
             }),
             2 => Some(SavedPane::Files {
                 files: vec![a.clone(), b.clone()],
@@ -377,7 +404,7 @@ mod tests {
             }),
             _ => None,
         };
-        let file = tab_file(&tree, &saved).unwrap();
+        let file = tab_file(&tree, None, &saved).unwrap();
         let node = file.layout.as_ref().unwrap();
         let fnode = &node.panes.as_ref().unwrap()[1];
         assert_eq!(fnode.active, Some(1));
@@ -403,6 +430,32 @@ mod tests {
                 active: 0,
             })
         };
-        assert_eq!(tab_file(&Tree::Leaf(1), &saved), None);
+        assert_eq!(tab_file(&Tree::Leaf(1), None, &saved), None);
+    }
+
+    #[test]
+    fn set_tabs_keep_their_title_and_command() {
+        let pane = |id| {
+            Some(SavedPane::Terminal {
+                env: "work".into(),
+                cwd: PathBuf::from(format!("C:/w/{id}")),
+                shell: ShellKind::Pwsh,
+                command: (id == 2).then(|| "npm run dev".to_string()),
+            })
+        };
+        let single = tab_file(&Tree::Leaf(2), Some("api"), &pane).unwrap();
+        assert_eq!(single.title.as_deref(), Some("api"));
+        assert_eq!(single.command.as_deref(), Some("npm run dev"));
+        let split = Tree::Split {
+            axis: Axis::Row,
+            ratio: 0.5,
+            first: Box::new(Tree::Leaf(1)),
+            second: Box::new(Tree::Leaf(2)),
+        };
+        let tab = tab_file(&split, Some("web"), &pane).unwrap();
+        assert_eq!(tab.title.as_deref(), Some("web"));
+        let panes = tab.layout.unwrap().panes.unwrap();
+        assert_eq!(panes[0].command, None);
+        assert_eq!(panes[1].command.as_deref(), Some("npm run dev"));
     }
 }

@@ -1,10 +1,6 @@
 //! Which sets are open, and which tabs each one opened.
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-
-use hydra_core::paths::HydraPaths;
-
-use crate::set_file;
 
 /// The app's id for a tab.
 pub type TabId = u64;
@@ -12,6 +8,8 @@ pub type TabId = u64;
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedSet {
     pub name: String,
+    /// The file it was loaded from: in the sets folder, or a group file anywhere.
+    pub file: PathBuf,
     pub tabs: Vec<TabId>,
     /// The set file's modification time when it was loaded.
     pub modified: Option<SystemTime>,
@@ -65,15 +63,38 @@ impl LoadedSets {
         Some(name)
     }
 
+    /// The loaded set that came from `path`, if any (Windows paths: case and slashes don't
+    /// matter).
+    pub fn by_file(&self, path: &Path) -> Option<&LoadedSet> {
+        let key = |p: &Path| p.to_string_lossy().replace('/', "\\").to_lowercase();
+        let k = key(path);
+        self.sets.iter().find(|s| key(&s.file) == k)
+    }
+
+    /// hydraui wrote the file at `path` itself (Save group…): not a change to offer a reload
+    /// for.
+    pub fn saved_to(&mut self, path: &Path) {
+        let key = |p: &Path| p.to_string_lossy().replace('/', "\\").to_lowercase();
+        let k = key(path);
+        if let Some(s) = self.sets.iter_mut().find(|s| key(&s.file) == k) {
+            s.modified = file_modified(path);
+        }
+    }
+
+    /// Every loaded set, in load order.
+    pub fn all(&self) -> &[LoadedSet] {
+        &self.sets
+    }
+
     pub fn names(&self) -> Vec<String> {
         self.sets.iter().map(|s| s.name.clone()).collect()
     }
 
     /// Loaded sets whose file was edited or deleted since loading.
-    pub fn changed(&self, paths: &HydraPaths) -> Vec<String> {
+    pub fn changed(&self) -> Vec<String> {
         self.sets
             .iter()
-            .filter(|s| file_modified(&set_file(paths, &s.name)) != s.modified)
+            .filter(|s| file_modified(&s.file) != s.modified)
             .map(|s| s.name.clone())
             .collect()
     }
@@ -82,11 +103,14 @@ impl LoadedSets {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::set_file;
+    use hydra_core::paths::HydraPaths;
     use std::time::UNIX_EPOCH;
 
     fn set(name: &str, tabs: &[TabId]) -> LoadedSet {
         LoadedSet {
             name: name.into(),
+            file: PathBuf::from(format!("C:/s/{name}.toml")),
             tabs: tabs.to_vec(),
             modified: None,
         }
@@ -140,18 +164,52 @@ mod tests {
             std::fs::write(set_file(&paths, n), "").unwrap();
         }
         let mut l = LoadedSets::default();
+        let on_disk = |n: &str| LoadedSet {
+            file: set_file(&paths, n),
+            ..set(n, &[])
+        };
         l.insert(LoadedSet {
             modified: file_modified(&set_file(&paths, "same")),
-            ..set("same", &[1])
+            tabs: vec![1],
+            ..on_disk("same")
         });
         l.insert(LoadedSet {
             modified: Some(UNIX_EPOCH),
-            ..set("edited", &[2])
+            tabs: vec![2],
+            ..on_disk("edited")
         });
         l.insert(LoadedSet {
             modified: Some(UNIX_EPOCH),
-            ..set("gone", &[3])
+            tabs: vec![3],
+            ..on_disk("gone")
         });
-        assert_eq!(l.changed(&paths), vec!["edited", "gone"]);
+        assert_eq!(l.changed(), vec!["edited", "gone"]);
+    }
+
+    #[test]
+    fn a_set_is_found_by_its_file() {
+        let mut l = LoadedSets::default();
+        l.insert(set("a", &[1]));
+        assert_eq!(
+            l.by_file(Path::new("C:/s/a.toml")).map(|s| s.name.as_str()),
+            Some("a")
+        );
+        assert!(l.by_file(Path::new("C:/s/b.toml")).is_none());
+    }
+
+    #[test]
+    fn saving_onto_a_sets_file_isnt_a_change() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("g.toml");
+        std::fs::write(&file, "").unwrap();
+        let mut l = LoadedSets::default();
+        l.insert(LoadedSet {
+            file: file.clone(),
+            modified: Some(UNIX_EPOCH),
+            ..set("g", &[1])
+        });
+        assert_eq!(l.changed(), vec!["g"]);
+        l.saved_to(&file);
+        assert!(l.changed().is_empty());
     }
 }

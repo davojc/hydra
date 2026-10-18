@@ -213,16 +213,22 @@ modification time at load.
   running (OSC 133 state), a confirm dialog lists them first.
 - Closing a set's last tab by hand unloads it.
 - A tab can't move between sets; ad-hoc tabs belong to the "Loose" group.
+- A set can also be opened from a group file anywhere (§7.9). It is then
+  known by its file's path; its name (the group header) comes from the file
+  name, made valid (lowercase; other characters become `-`), with `-2`, `-3`…
+  when a set of that name is already loaded.
 - If a loaded set's file changes, its group header shows "changed — reload?".
   Reload is unload + load. Running panes are never changed in place.
-- `session.toml` records what was open: the loaded sets in order; the Loose
+- `session.toml` records what was open: the loaded sets in order (sets from
+  the sets folder by name, sets opened from group files by path); the Loose
   tabs in the set file's tab format (layout, ratios, and each pane's env,
   shell and current folder); whether the file tree was open and its width;
   and the active tab's position in the strip. It is written when tabs,
   splits, sets or the tree change, and when the window closes. On start,
   hydraui loads the sets again (startup commands run again), then reopens the
-  Loose tabs, the tree and the active tab. An invalid or deleted set, or a
-  Loose tab whose env or folder is gone, is skipped with a toast. A Loose
+  Loose tabs, the tree and the active tab. An invalid or deleted set or
+  group file, or a Loose tab whose env or folder is gone, is skipped with a
+  toast. Session files without group paths still load. A Loose
   tab's file pane is saved as a `files` node (§5.1) and comes back with its
   files and active file tab; unsaved edits are not kept. Scrollback,
   running commands, window size and dragged ratios in set tabs are not kept.
@@ -460,6 +466,42 @@ session at once.
 insert, double-click `cd` and Split use the focused pane when it is a
 terminal, else the tab's last focused terminal. Split, close and focus moves
 work on either kind of pane.
+
+### 7.9 Layout and group files
+
+Open tabs can be saved to files and opened from them, anywhere on disk,
+through the Windows Save As / Open dialogs. Saving is a snapshot: the open
+tabs don't change. Cancelling a dialog does nothing.
+
+- A **group file** is a set file (§5.1): tabs with their layout, ratios,
+  each pane's env, current folder, shell and startup command, file panes,
+  and tab titles. Opening one opens its tabs as a set (§5.4), under a group
+  header named after the file. Group files saved into the sets folder are
+  ordinary sets and appear in the launcher's set list.
+- A **layout file** (`*.hydraui.toml`) is the window, in `session.toml`'s
+  format (§5.4): the open sets (by name or path), the Loose tabs, the file
+  tree, the active tab. Opening one adds to the window: its sets that aren't
+  loaded already (by path, or by name for the sets folder), its Loose tabs
+  and their file panes, the tree if it was open, and its active tab.
+
+Where:
+
+- Launcher: **Save layout to file…**, **Open layout file…**, **Open group
+  file…**, **Save Loose tabs as group…** (every Loose tab into one group
+  file).
+- Right-click a tab: **Save tab as group…**, **Close tab**.
+- Right-click a group header: **Save group…** (its tabs as they are now,
+  with the Save As dialog starting on the group's own file), **Unload group**.
+
+What is saved: current folders and splits; for set tabs also their titles and
+startup commands; file panes (§7.8). Scrollback and running commands are not.
+
+Errors: a file that isn't a valid group or layout (TOML, unknown env, missing
+folder) opens nothing and a toast names the file and problem; a layout whose
+groups or tabs partly fail opens the rest, with a toast per failure; a layout
+file given to "Open group file…", or the reverse, says so. Writes are atomic
+(a temporary file, then a replace); a failed write is a toast and changes
+nothing.
 
 ## 8. Errors summary
 

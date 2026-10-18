@@ -41,14 +41,8 @@ pub fn read_session(paths: &HydraPaths) -> Session {
 
 /// Writes through a temporary file, so a crash mid-write leaves the old session.
 pub fn write_session(paths: &HydraPaths, session: &Session) -> std::io::Result<()> {
-    let path = session_file(paths);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
     let text = toml::to_string(session).map_err(std::io::Error::other)?;
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, &path)
+    crate::files::write_atomic(&session_file(paths), &text)
 }
 
 #[cfg(test)]

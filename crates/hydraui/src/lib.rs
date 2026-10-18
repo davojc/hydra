@@ -2,6 +2,7 @@
 //! (spec: docs/superpowers/specs/2026-10-17-hydraui-design.md).
 pub mod accounts;
 pub mod activity;
+pub mod claim;
 pub mod config;
 pub mod file_doc;
 pub mod file_pane;

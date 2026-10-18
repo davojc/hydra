@@ -234,6 +234,7 @@ impl Workspace {
                     env: v.env().to_string(),
                     cwd: v.cwd().clone(),
                     shell: v.request.shell,
+                    command: None,
                 }
             })
         };
@@ -241,7 +242,7 @@ impl Workspace {
             .tabs
             .iter()
             .filter(|t| t.set.is_none())
-            .filter_map(|t| tab_file(&t.tree, &pane))
+            .filter_map(|t| tab_file(&t.tree, t.title.as_deref(), &pane))
             .collect();
         let active = self.tabs.active_id();
         let session = Session {

@@ -47,13 +47,17 @@ use crate::keys::{
 use crate::pane_view::{PaneEvent, PaneView, TermStyle};
 use crate::split::{MAX_RATIO, MIN_RATIO};
 use busy::PaneActivity;
+use terminal_list::LIST_WIDTH;
 use tree_ops::NameFor;
 
 /// The file tree's width: it starts at the default, can't be dragged narrower than the
-/// minimum, and always leaves the panes at least `MIN_PANES_WIDTH`.
+/// minimum, and always leaves the middle at least `MIN_PANES_WIDTH` beside the terminal list
+/// and the tree's divider.
 const DEFAULT_TREE_WIDTH: f32 = 260.0;
 const MIN_TREE_WIDTH: f32 = 140.0;
 const MIN_PANES_WIDTH: f32 = 200.0;
+/// The divider between the middle and the tree.
+const TREE_DIVIDER_WIDTH: f32 = 4.0;
 
 /// The tree's width with its divider dragged to `x`, the tree on the right of a window
 /// `window_width` wide (env-tabs design §2.5).
@@ -61,13 +65,15 @@ fn tree_width_at(x: f32, window_width: f32) -> f32 {
     clamp_tree_width(window_width - x, window_width)
 }
 
-/// `width` kept between the tree's minimum and what leaves the panes theirs, in a window
-/// `window_width` wide; the default when it isn't a number.
+/// `width` kept between the tree's minimum and what leaves the middle its own beside the
+/// terminal list and the divider, in a window `window_width` wide; the default when it isn't
+/// a number.
 fn clamp_tree_width(width: f32, window_width: f32) -> f32 {
     if !width.is_finite() {
         return DEFAULT_TREE_WIDTH;
     }
-    let max = (window_width - MIN_PANES_WIDTH).max(MIN_TREE_WIDTH);
+    let max =
+        (window_width - LIST_WIDTH - TREE_DIVIDER_WIDTH - MIN_PANES_WIDTH).max(MIN_TREE_WIDTH);
     width.clamp(MIN_TREE_WIDTH, max)
 }
 
@@ -1509,7 +1515,7 @@ impl Render for Workspace {
                         d.child(
                             div()
                                 .id("tree-divider")
-                                .w(px(4.))
+                                .w(px(TREE_DIVIDER_WIDTH))
                                 .h_full()
                                 .flex_none()
                                 .bg(border)
@@ -1596,7 +1602,10 @@ mod tests {
         // The tree is on the right: its width runs from the pointer to the window's right edge.
         assert_eq!(tree_width_at(900.0, 1200.0), 300.0);
         assert_eq!(tree_width_at(1150.0, 1200.0), MIN_TREE_WIDTH);
-        assert_eq!(tree_width_at(100.0, 1200.0), 1200.0 - MIN_PANES_WIDTH);
+        assert_eq!(
+            tree_width_at(100.0, 1200.0),
+            1200.0 - LIST_WIDTH - TREE_DIVIDER_WIDTH - MIN_PANES_WIDTH
+        );
         // A window too narrow for both keeps the tree at its minimum.
         assert_eq!(tree_width_at(100.0, 250.0), MIN_TREE_WIDTH);
         assert_eq!(tree_width_at(f32::NAN, 1200.0), DEFAULT_TREE_WIDTH);
@@ -1606,7 +1615,23 @@ mod tests {
     fn a_saved_tree_width_is_kept_within_limits() {
         assert_eq!(clamp_tree_width(300.0, 1200.0), 300.0);
         assert_eq!(clamp_tree_width(50.0, 1200.0), MIN_TREE_WIDTH);
-        assert_eq!(clamp_tree_width(1150.0, 1200.0), 1200.0 - MIN_PANES_WIDTH);
+        assert_eq!(
+            clamp_tree_width(1150.0, 1200.0),
+            1200.0 - LIST_WIDTH - TREE_DIVIDER_WIDTH - MIN_PANES_WIDTH
+        );
         assert_eq!(clamp_tree_width(f32::NAN, 1200.0), DEFAULT_TREE_WIDTH);
+    }
+
+    #[test]
+    fn the_middle_keeps_its_minimum_beside_the_list_and_the_tree() {
+        for window in [800.0, 1200.0, 2560.0] {
+            for x in [0.0, 50.0, 300.0, window / 2.0, window - 10.0] {
+                let middle = window - LIST_WIDTH - TREE_DIVIDER_WIDTH - tree_width_at(x, window);
+                assert!(
+                    middle >= MIN_PANES_WIDTH,
+                    "window {window}, pointer {x}: middle {middle}"
+                );
+            }
+        }
     }
 }

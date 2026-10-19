@@ -15,7 +15,7 @@ use crate::envs::PaneId;
 use crate::pane_view::label_for;
 
 /// The list's width: fixed (our call; the design leaves it to the builder).
-const LIST_WIDTH: f32 = 200.0;
+pub(super) const LIST_WIDTH: f32 = 200.0;
 
 impl Workspace {
     /// The selected environment's terminals, the shown one highlighted in the environment's
@@ -191,7 +191,10 @@ impl Workspace {
             view.update(cx, |v, cx| v.set_name(Some(name), cx));
         }
         self.autosave(window, cx);
-        self.focus_active(window, cx);
+        // Again on the next frame, after the closing dialog hands the focus back.
+        if let Some(shown) = self.envs.active().and_then(|t| t.shown) {
+            self.focus_soon(shown, window, cx);
+        }
         cx.notify();
     }
 }

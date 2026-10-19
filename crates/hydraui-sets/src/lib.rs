@@ -2,6 +2,7 @@
 //! plus which sets are loaded and the session file. No UI.
 pub mod file;
 mod files;
+pub mod layout;
 mod layouts;
 mod loaded;
 mod recent;

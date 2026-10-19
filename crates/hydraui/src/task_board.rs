@@ -21,6 +21,25 @@ pub enum TaskBoardEvent {
     Problem(String),
 }
 
+/// What became of a change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Applied {
+    /// It's in the file (or there was nothing to write).
+    Written,
+    /// Its card isn't in the file any more: dropped (§6).
+    CardGone,
+    /// The file couldn't be read or written.
+    WriteFailed,
+}
+
+impl Applied {
+    /// Whether an edit that ended this way stays open with its text: only when the write
+    /// failed, so a typed idea isn't lost (§1 anti-goal). A gone card's edit closes (§6).
+    pub fn keeps_edit(self) -> bool {
+        self == Applied::WriteFailed
+    }
+}
+
 pub struct TaskBoard {
     project: PathBuf,
     board: Board,
@@ -53,7 +72,7 @@ pub fn drop_move(
     to: Column,
     before: Option<usize>,
 ) -> Option<Change> {
-    let from = index_of(board, card)?;
+    let from = board.find(card)?;
     let len = board.cards(to).len();
     let mut index = before.unwrap_or(len).min(len);
     if card.column == to {
@@ -70,17 +89,6 @@ pub fn drop_move(
         to,
         index,
     })
-}
-
-/// Where `card` is in its column, if it still is.
-pub fn index_of(board: &Board, card: &CardRef) -> Option<usize> {
-    board
-        .cards(card.column)
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| **t == card.text)
-        .nth(card.nth)
-        .map(|(i, _)| i)
 }
 
 /// A recursive watch on `project` that sends `()` when the board file may have changed.
@@ -154,7 +162,7 @@ impl TaskBoard {
     /// Commits `change` (applied to the file as it is now, §6) and shows the result. Emits
     /// `AskGit` when this write created the file in a git repository (§3), `Problem` when the
     /// card is gone (the board then reloads) or the write failed.
-    pub fn change(&mut self, change: Change, cx: &mut Context<Self>) {
+    pub fn change(&mut self, change: Change, cx: &mut Context<Self>) -> Applied {
         match tasks_project::commit(&self.project, &change) {
             Ok(done) => {
                 self.board = done.board;
@@ -163,15 +171,20 @@ impl TaskBoard {
                     cx.emit(TaskBoardEvent::AskGit);
                 }
                 cx.notify();
+                Applied::Written
             }
             Err(CommitError::Missing) => {
                 cx.emit(TaskBoardEvent::Problem(MISSING.to_string()));
                 self.reload(cx);
+                Applied::CardGone
             }
-            Err(CommitError::Io(e)) => cx.emit(TaskBoardEvent::Problem(format!(
-                "Couldn't write {}: {e}",
-                tasks_project::tasks_path(&self.project).display()
-            ))),
+            Err(CommitError::Io(e)) => {
+                cx.emit(TaskBoardEvent::Problem(format!(
+                    "Couldn't write {}: {e}",
+                    tasks_project::tasks_path(&self.project).display()
+                )));
+                Applied::WriteFailed
+            }
         }
     }
 
@@ -202,6 +215,13 @@ mod tests {
         assert!(!needs_reload("a", "a"));
         assert!(needs_reload("a", "b"));
         assert!(needs_reload("", "# Tasks\n"));
+    }
+
+    #[test]
+    fn task_board_keeps_an_edit_only_when_the_write_failed() {
+        assert!(Applied::WriteFailed.keeps_edit());
+        assert!(!Applied::Written.keeps_edit());
+        assert!(!Applied::CardGone.keeps_edit());
     }
 
     #[test]

@@ -11,7 +11,7 @@ use gpui_component::input::{Escape, InputEvent, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::{ActiveTheme, Disableable, Sizable, WindowExt, h_flex, v_flex};
 
-use crate::task_board::{TaskBoard, drop_move, index_of};
+use crate::task_board::{Applied, TaskBoard, drop_move};
 use crate::tasks::{CardRef, Change, Column};
 use crate::tasks_project::{self, Privacy};
 
@@ -76,19 +76,27 @@ impl TaskBoardView {
     }
 
     /// Saves the card being edited, if any (§5: Enter and clicking away both save). Saving an
-    /// empty card deletes it; an unchanged one writes nothing.
+    /// empty card deletes it; an unchanged one writes nothing. When the write fails the editor
+    /// stays open with its text (`is_editing` still true), so the idea isn't lost.
     pub fn finish_edit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editing) = self.editing.take() else {
+        let Some(editing) = self.editing.as_ref() else {
             return;
         };
         let text = editing.input.read(cx).value().to_string();
-        let change = match editing.card {
+        let change = match &editing.card {
             Some(card) if card.text == text => None,
-            Some(card) => Some(Change::Edit { card, text }),
+            Some(card) => Some(Change::Edit {
+                card: card.clone(),
+                text,
+            }),
             None => Some(Change::Add { text }),
         };
-        if let Some(change) = change {
-            self.board.update(cx, |b, cx| b.change(change, cx));
+        let applied = match change {
+            Some(change) => self.board.update(cx, |b, cx| b.change(change, cx)),
+            None => Applied::Written,
+        };
+        if !applied.keeps_edit() {
+            self.editing = None;
         }
         cx.notify();
     }
@@ -99,9 +107,13 @@ impl TaskBoardView {
         cx.notify();
     }
 
-    /// Opens the editor on `card` (or a new card), saving any other edit first.
+    /// Opens the editor on `card` (or a new card), saving any other edit first; if that one
+    /// can't be saved it stays open instead.
     fn start_edit(&mut self, card: Option<CardRef>, window: &mut Window, cx: &mut Context<Self>) {
         self.finish_edit(window, cx);
+        if self.is_editing() {
+            return;
+        }
         let text = card.as_ref().map(|c| c.text.clone()).unwrap_or_default();
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -122,7 +134,9 @@ impl TaskBoardView {
                 match ev {
                     InputEvent::PressEnter { .. } => {
                         this.finish_edit(window, cx);
-                        window.focus(&this.focus, cx);
+                        if !this.is_editing() {
+                            window.focus(&this.focus, cx);
+                        }
                     }
                     InputEvent::Blur => this.finish_edit(window, cx),
                     _ => {}
@@ -404,7 +418,7 @@ impl TaskBoardView {
         // the file has lost since), `Some(Some(i))` in place of card `i`.
         let editor = self.editing.as_ref().and_then(|e| match &e.card {
             None => (col == Column::Backlog).then_some(None),
-            Some(c) if c.column == col => Some(index_of(b, c)),
+            Some(c) if c.column == col => Some(b.find(c)),
             Some(_) => None,
         });
         let line = cx.theme().drag_border;

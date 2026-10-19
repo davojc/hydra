@@ -65,8 +65,9 @@ impl Board {
         })
     }
 
-    /// Where `card` is now, if it still is.
-    fn find(&self, card: &CardRef) -> Option<usize> {
+    /// Where `card` is now (its index in its column), if it still is: the `nth` card in its
+    /// column with its text (§6).
+    pub fn find(&self, card: &CardRef) -> Option<usize> {
         self.cards(card.column)
             .iter()
             .enumerate()

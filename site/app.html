@@ -30,6 +30,7 @@
     </ol>
     <div class="grp">Working</div>
     <ol>
+      <li><a href="#tasks">Task board</a></li>
       <li><a href="#tree">File tree and git</a></li>
       <li><a href="#files">The file pane</a></li>
       <li><a href="#find">Finding files</a></li>
@@ -88,6 +89,45 @@
         <li><kbd>Tab</kbd> and <kbd>Shift+Tab</kbd> go to the shell, so PowerShell's completion cycles through matching folders and files.</li>
       </ul>
       <p>The status bar shows the shown terminal's environment, its tools with a ✓ or ✗, the git branch and changes (<code>⎇ main · +1 ~2 ?1</code>) and the current folder. If an environment can't start (a missing SSH key, a secret that isn't stored), the pane shows hydra's error and how to fix it, with <strong>Retry</strong>.</p>
+    </section>
+
+    <section id="tasks">
+      <h2>Task board</h2>
+      <p>While Claude is busy in a terminal you will think of what to do next. The task board is a place to jot those ideas down without interrupting it, then pick them up later. Right-click a terminal in the list and choose <strong>Tasks</strong>: that terminal gets a <strong>Tasks</strong> tab beside it, with the terminal and <strong>Tasks ✕</strong> in a small strip at the top. ✕ closes the tab, and the cards stay. Each terminal has its own tabs, so another terminal shows its own view, and the layout file remembers which terminals have a Tasks tab.</p>
+      <p>The board belongs to the terminal's <strong>project</strong>: the git repository its folder is in (a linked worktree has its own board), or, outside a repository, the folder itself. A folder inside a repository, including a home folder that is itself a repository, shares that repository's board, and terminals in the same project show the same cards.</p>
+      <p>There are four columns, side by side:</p>
+      <ul>
+        <li><strong>Backlog</strong>: ideas not yet picked up. Its <strong>+</strong> adds a new card at the top.</li>
+        <li><strong>Pickup</strong>: what you want to explore with Claude next.</li>
+        <li><strong>InProgress</strong>: what is being worked on now.</li>
+        <li><strong>Done</strong>: finished. Its <strong>Clear</strong> button removes every card in the column, after asking how many.</li>
+      </ul>
+      <p>A card is a short paragraph, with no title and plain text. Click a card to edit it where it is. <kbd>Enter</kbd> saves it, <kbd>Esc</kbd> cancels, and clicking elsewhere on the board saves it too, as does switching to the terminal tab, another terminal or another environment. Saving an empty card deletes it. Drag a card within a column or into another, and a line shows where it will land. Right-click a card for <strong>Move to</strong> any other column (the top of it), <strong>Move up</strong>, <strong>Move down</strong> and <strong>Delete</strong>. Every change is written to the file at once, so there is no Save button. If a save fails, the card stays open with its text and a message says why, and the Tasks tab won't close until the save works.</p>
+      <h3>The file</h3>
+      <p>Cards live in <code>.hydra/tasks.md</code> in the project, created when you save the first card. It is ordinary markdown, so you can read and edit it in any editor, and so can Claude. The board watches the file and shows what changes in it, and a change you make on the board is applied to the file as it now is rather than over it, so neither side loses an idea.</p>
+      <div class="term">
+        <div class="term-bar"><span class="tab plain">.hydra/tasks.md</span></div>
+<pre><span class="k"># Tasks</span>
+
+<span class="k">## Backlog</span>
+- Let the terminal list show which terminals have unread output, maybe a dot
+  that clears when you look at it.
+
+<span class="k">## Pickup</span>
+- Ctrl+K should open the launcher from anywhere, including the file pane.
+
+<span class="k">## InProgress</span>
+
+<span class="k">## Done</span>
+- Collapse button for the terminal list.</pre>
+      </div>
+      <ul>
+        <li>One card is one top-level list item; a long card wraps onto lines indented by two spaces. Headings match whatever the case or spacing, so <code>## In Progress</code> is InProgress. Checkboxes (<code>[ ]</code>, <code>[x]</code>) are accepted and dropped.</li>
+        <li>Order in a column is the order in the file, top first.</li>
+        <li>Any other text in the file is kept, moved under a <code>## Notes</code> heading at the end of the file.</li>
+      </ul>
+      <h3>Commit or keep private</h3>
+      <p>In a git repository, the first card you save in a new project asks <strong>Keep tasks private?</strong>: <strong>Keep private</strong> adds <code>.hydra/tasks.md</code> to the project's <code>.gitignore</code>, and <strong>Commit tasks</strong> leaves things as they are so the file can be committed. You can change your mind later with the <strong>⋯</strong> menu at the right of the <strong>Done</strong> column's header, which offers the other choice. If another <code>.gitignore</code> rule already ignores the file, the menu says <strong>Ignored by another .gitignore rule</strong> instead. The menu, and the question, appear only in git repositories.</p>
     </section>
 
     <section id="tree">

@@ -66,8 +66,9 @@ this work, but the file it will read is.
     continuation lines and any nested list items, all joined into one paragraph. Written back as
     `- ` with two-space continuation.
   - Anything else (text before the first column, unknown headings and everything under them,
-    non-list text under a column) is kept verbatim and written back after the four columns, in
-    its original order. A list item under an unknown heading is not a card and is kept there.
+    non-list text under a column) is kept and written back under a `## Notes` heading after the
+    four columns, in its original order. A list item under an unknown heading is not a card and
+    is kept there.
   - The file is never refused; never drop a card. Heading match ignores case and
   spaces, so `## In Progress` is InProgress. A missing column is an empty one.
 - Writing always produces the canonical form above for the four columns.
@@ -81,7 +82,7 @@ this work, but the file it will read is.
 - The first time a board is changed in a project where `.hydra/tasks.md` doesn't exist yet and
   the project is a git repository, hydraui asks once: **Commit tasks** (do nothing) or **Keep
   private** (add `.hydra/tasks.md` to the project's `.gitignore`, creating it if needed).
-- The board's menu (a `⋯` button in the board's header) offers the other choice later: **Keep
+- The board's menu (a `⋯` button at the right of the Done column's header, shown only in a git repository) offers the other choice later: **Keep
   private** adds the line; **Commit tasks** removes the line hydraui added. If the file is
   ignored by some other rule, the menu says so rather than fighting it (builder's call on
   wording).
@@ -127,7 +128,9 @@ this work, but the file it will read is.
 - **Backlog** has a **+** that adds an empty card at its top, already being edited.
 - **Done** has a **Clear** button that removes all its cards (asks first, showing how many).
 - A card shows its whole paragraph, wrapped. Clicking it edits it in place (multi-line input);
-  Enter saves (a card is one paragraph, so no line breaks), Esc cancels, clicking away saves.
+  Enter saves (a card is one paragraph, so no line breaks), Esc cancels, clicking away saves;
+  switching to the terminal tab, another terminal or environment saves too. If the write fails the
+  card stays open and its Tasks tab won't close until it succeeds.
   Saving an empty card deletes it.
 - Drag shows where the card will land (an insertion line) and scrolls a column when dragged
   near its edge; exact look is the builder's call.

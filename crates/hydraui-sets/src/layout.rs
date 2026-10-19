@@ -94,6 +94,14 @@ pub struct FilesFile {
     pub active: Option<usize>,
 }
 
+/// A terminal's Tasks tab when the layout was saved: open behind the terminal, or shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TasksTab {
+    Open,
+    Shown,
+}
+
 /// One terminal: its folder when saved, and optionally a title, shell and start command.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -106,6 +114,9 @@ pub struct TerminalFile {
     /// Hand-written only: run whenever the layout opens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// The terminal's Tasks tab, when it had one open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tasks: Option<TasksTab>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -204,6 +215,7 @@ pub struct Context<'a> {
 pub struct PlannedTerminal {
     pub spec: PaneSpec,
     pub title: Option<String>,
+    pub tasks: Option<TasksTab>,
 }
 
 /// An environment tab that will open.
@@ -345,6 +357,7 @@ fn plan_terminal(
             bound_elsewhere,
         },
         title: t.title.clone(),
+        tasks: t.tasks,
     })
 }
 
@@ -499,6 +512,7 @@ cwd = "~/blog"
                             cwd: "C:/a".into(),
                             shell: Some("pwsh".into()),
                             command: Some("claude".into()),
+                            tasks: None,
                         },
                         TerminalFile {
                             cwd: "C:/b".into(),
@@ -648,6 +662,7 @@ cwd = "~/blog"
                     cwd: fx.dir("api"),
                     shell: Some("bash".into()),
                     command: Some("claude".into()),
+                    tasks: Some(TasksTab::Open),
                 },
                 term(&fx.dir("web")),
             ],
@@ -663,15 +678,43 @@ cwd = "~/blog"
         assert_eq!(work.shown, Some(1));
         let t0 = &work.terminals[0];
         assert_eq!(t0.title.as_deref(), Some("claude"));
+        assert_eq!(t0.tasks, Some(TasksTab::Open));
         assert_eq!(t0.spec.env.as_str(), "work");
         assert_eq!(t0.spec.cwd, fx.home.join("api"));
         assert_eq!(t0.spec.shell, ShellKind::Bash);
         assert_eq!(t0.spec.command.as_deref(), Some("claude"));
         let t1 = &work.terminals[1];
         assert_eq!(t1.title, None);
+        assert_eq!(t1.tasks, None);
         assert_eq!(t1.spec.shell, ShellKind::Pwsh);
         assert_eq!(t1.spec.command, None);
         assert_eq!(plan.envs[1].shown, Some(0));
+    }
+
+    #[test]
+    fn a_terminals_tasks_tab_round_trips() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("l.hydraui");
+        let text = "version = 2
+[[env]]
+name = \"work\"
+[[env.terminal]]
+cwd = \"~\"
+tasks = \"shown\"
+[[env.terminal]]
+cwd = \"~\"
+";
+        let layout = parse_layout(&p, text).unwrap();
+        assert_eq!(layout.envs[0].terminals[0].tasks, Some(TasksTab::Shown));
+        assert_eq!(layout.envs[0].terminals[1].tasks, None);
+        write_layout(&p, &layout).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(
+            text.matches("tasks").count(),
+            1,
+            "omitted when none: {text}"
+        );
+        assert_eq!(read_layout(&p).unwrap(), layout);
     }
 
     #[test]
@@ -703,6 +746,7 @@ cwd = "~/blog"
         let fx = Fx::new();
         let bad = TerminalFile {
             title: Some("lost".into()),
+            tasks: Some(TasksTab::Shown),
             ..term(&fx.dir("nope"))
         };
         let l = layout(vec![env("work", vec![term(&fx.dir("api")), bad.clone()])]);

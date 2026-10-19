@@ -128,6 +128,7 @@ impl Workspace {
                             cwd: v.cwd().to_string_lossy().into_owned(),
                             shell: Some(v.request.shell.as_str().into()),
                             command: self.commands.get(id).cloned(),
+                            tasks: None,
                         })
                     })
                     .collect();

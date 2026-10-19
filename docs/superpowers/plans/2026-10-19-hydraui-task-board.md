@@ -90,12 +90,12 @@
 - [ ] **Step 1: Write the failing tests** (in `tasks.rs` `#[cfg(test)] mod tests`)
 
 ```rust
-const CANONICAL: &str = "# Tasks\n\n## Backlog\n- Let the terminal list show unread output, maybe a dot\n  that clears when you look at it.\n\n## Pickup\n- Ctrl+K opens the launcher.\n\n## InProgress\n\n## Done\n- Collapse button.\n";
+const CANONICAL: &str = "# Tasks\n\n## Backlog\n- Let the terminal list show unread output.\n\n## Pickup\n- Ctrl+K opens the launcher.\n\n## InProgress\n\n## Done\n- Collapse button.\n";
 
 #[test]
 fn canonical_file_parses() {
     let b = parse(CANONICAL);
-    assert_eq!(b.cards(Column::Backlog), ["Let the terminal list show unread output, maybe a dot that clears when you look at it."]);
+    assert_eq!(b.cards(Column::Backlog), ["Let the terminal list show unread output."]);
     assert_eq!(b.cards(Column::Pickup), ["Ctrl+K opens the launcher."]);
     assert!(b.cards(Column::InProgress).is_empty());
     assert_eq!(b.cards(Column::Done), ["Collapse button."]);
@@ -123,9 +123,9 @@ fn long_cards_wrap_at_100_columns_with_two_space_continuation() {
 
 #[test]
 fn forgiving_variants_keep_every_card() {
-    let text = "## backlog\n* star idea\n+ plus idea\n- [ ] box idea\n- [x] done box\n## In Progress\n- parent\n  - nested child\n## Done\n";
+    let text = "## backlog\n- wrapped\n  over two lines\n* star idea\n+ plus idea\n- [ ] box idea\n- [x] done box\n## In Progress\n- parent\n  - nested child\n## Done\n";
     let b = parse(text);
-    assert_eq!(b.cards(Column::Backlog), ["star idea", "plus idea", "box idea", "done box"]);
+    assert_eq!(b.cards(Column::Backlog), ["wrapped over two lines", "star idea", "plus idea", "box idea", "done box"]);
     assert_eq!(b.cards(Column::InProgress), ["parent nested child"]);
     assert!(b.cards(Column::Pickup).is_empty());
 }

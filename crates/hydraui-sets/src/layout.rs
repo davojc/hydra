@@ -60,12 +60,14 @@ pub struct TreeFile {
     pub width: Option<f32>,
 }
 
-/// The terminal list: its dragged width.
+/// The terminal list: its dragged width, and whether it is collapsed (shown by default).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<f32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 /// One environment tab: its terminals, the shown one, and its file pane if open.
@@ -426,12 +428,43 @@ cwd = "~/blog"
         let p = d.path().join("l.hydraui");
         let layout = Layout {
             version: LAYOUT_VERSION,
-            list: Some(ListFile { width: Some(240.0) }),
+            list: Some(ListFile {
+                width: Some(240.0),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         write_layout(&p, &layout).unwrap();
-        assert!(std::fs::read_to_string(&p).unwrap().contains("[list]"));
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("[list]"));
+        assert!(!text.contains("hidden"), "shown is the default: {text}");
         assert_eq!(read_layout(&p).unwrap(), layout);
+    }
+
+    #[test]
+    fn a_collapsed_list_round_trips() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("l.hydraui");
+        let layout = Layout {
+            version: LAYOUT_VERSION,
+            list: Some(ListFile {
+                width: None,
+                hidden: true,
+            }),
+            ..Default::default()
+        };
+        write_layout(&p, &layout).unwrap();
+        assert!(
+            std::fs::read_to_string(&p)
+                .unwrap()
+                .contains("hidden = true")
+        );
+        assert_eq!(read_layout(&p).unwrap(), layout);
+        let shown = parse_layout(
+            Path::new("a.hydraui"),
+            "version = 2\n[list]\nwidth = 240.0\n",
+        );
+        assert!(!shown.unwrap().list.unwrap().hidden);
     }
 
     #[test]

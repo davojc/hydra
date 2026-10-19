@@ -76,7 +76,7 @@
     <section id="tabs">
       <h2>Environments and terminals</h2>
       <p>The tab strip shows one tab per environment in the window, tinted with its colour (<code>color</code> in its <code>env.toml</code>). A dot on a tab shows its busiest terminal: working, waiting or idle, so a background environment that needs you is easy to spot. <strong>+</strong> at the end of the strip lists the environments not yet in the window, with <strong>New environment…</strong> last; choosing one adds its tab with a terminal and selects it.</p>
-      <p>Down the left side is the selected environment's list of terminals, in the order you made them, each with an activity dot and a close button on hover. Click one to show it. <strong>+ New</strong> at the top (or <kbd>Ctrl+T</kbd>) adds a terminal in the same environment, in the shown terminal's folder. A terminal is named after its folder until you give it a name: the name is yours, and a program's own title never replaces it.</p>
+      <p>Down the left side is the selected environment's list of terminals, in the order you made them, each with an activity dot and a close button on hover. Click one to show it. <strong>+ New</strong> at the top (or <kbd>Ctrl+T</kbd>) adds a terminal in the same environment, in the shown terminal's folder. A terminal is named after its folder until you give it a name: the name is yours, and a program's own title never replaces it. The button at the left end of the tab strip collapses the list to give the terminal more room, and brings it back.</p>
       <ul>
         <li>Right-click a terminal: <strong>Rename…</strong> (an empty name goes back to the folder's), <strong>Restart</strong> (in the folder it was in, so an edited <code>env.toml</code> applies) or <strong>Close</strong>.</li>
         <li>Right-click an environment's tab: <strong>New terminal</strong>, <strong>Restart environment</strong> (all its terminals) or <strong>Close environment</strong>. Closing or restarting asks first if a command is running, and closing also if a file has unsaved edits.</li>
@@ -182,7 +182,7 @@
         <div class="term-bar"><span class="tab plain">client-a.hydraui</span></div>
 <pre><span class="k">version</span> = 2
 <span class="k">active_env</span> = <span class="s">"work"</span>
-<span class="k">list</span> = { <span class="k">width</span> = 240.0 }       <span class="c"># optional: the terminal list's dragged width</span>
+<span class="k">list</span> = { <span class="k">width</span> = 240.0 }       <span class="c"># optional: the terminal list's dragged width (hidden = true when collapsed)</span>
 
 [[<span class="k">env</span>]]
 <span class="k">name</span> = <span class="s">"work"</span>

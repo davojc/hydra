@@ -100,8 +100,9 @@ the right.
 - Keys to move to the next / previous terminal in the list: builder's call (suggest
   Ctrl+PageDown / Ctrl+PageUp), rebindable under `[keys]` like the rest.
 - The list's width drags: its right edge is a divider, at least 120 px and never so wide that the
-  middle falls under its minimum beside the tree; the width is saved in the layout (§3). It can be
-  hidden with a key (builder's call) but is shown by default.
+  middle falls under its minimum beside the tree; the width is saved in the layout (§3). A button
+  at the left end of the tab strip collapses it and brings it back (shown by default); collapsed,
+  the middle takes its room, and the layout keeps it collapsed (`hidden = true`).
 
 ### 2.3 Middle
 
@@ -140,7 +141,8 @@ saving on change, the start page, the recent list, one window per file and the c
 version = 2
 active_env = "work"
 tree = { open = true, width = 280.0 }
-list = { width = 240.0 }         # the terminal list; omitted at its default width
+list = { width = 240.0 }         # the terminal list; omitted at its default width, shown
+                                 # (`hidden = true` when collapsed)
 
 [[env]]
 name = "work"

@@ -145,6 +145,8 @@ pub struct Workspace {
     list_width: f32,
     /// The divider between the terminal list and the middle is being dragged.
     list_drag: bool,
+    /// The terminal list is collapsed: the middle takes its room.
+    list_hidden: bool,
     focus: FocusHandle,
     title: String,
     subs: HashMap<PaneId, Subscription>,
@@ -271,6 +273,7 @@ impl Workspace {
             tree_drag: false,
             list_width: DEFAULT_LIST_WIDTH,
             list_drag: false,
+            list_hidden: false,
             focus: cx.focus_handle(),
             title: String::new(),
             subs: HashMap::new(),
@@ -1033,6 +1036,19 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Collapses or brings back the terminal list. Coming back, it keeps its width unless the
+    /// tree now leaves less room.
+    fn toggle_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.list_hidden = !self.list_hidden;
+        if !self.list_hidden {
+            let width = f32::from(window.viewport_size().width);
+            self.list_width = clamp_list_width(self.list_width, width, self.tree_space());
+        }
+        self.autosave(window, cx);
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
     /// The folder the tree and git marks follow: the shown terminal's, else the selected
     /// environment's home, else the user's home (an environment may have no terminal).
     fn tree_folder(&self, cx: &App) -> PathBuf {
@@ -1167,9 +1183,13 @@ impl Workspace {
         rgb(self.tints.get(env).copied().unwrap_or(0x808080)).into()
     }
 
-    /// The list's width plus its divider.
+    /// The list's width plus its divider, 0 while it is collapsed.
     fn list_space(&self) -> f32 {
-        self.list_width + LIST_DIVIDER_WIDTH
+        if self.list_hidden {
+            0.0
+        } else {
+            self.list_width + LIST_DIVIDER_WIDTH
+        }
     }
 
     /// The tree's width plus its divider, 0 while it is closed.
@@ -1356,7 +1376,17 @@ impl Workspace {
             .gap_1()
             .bg(bg)
             .border_b_1()
-            .border_color(border);
+            .border_color(border)
+            // The terminal list, at the end nearest it; highlighted while shown.
+            .child(
+                Button::new("toggle-terminal-list")
+                    .icon(IconName::PanelLeft)
+                    .ghost()
+                    .small()
+                    .selected(!self.list_hidden)
+                    .tooltip("Terminal list")
+                    .on_click(cx.listener(|ws, _, window, cx| ws.toggle_list(window, cx))),
+            );
         for tab in self.envs.iter() {
             let env = tab.env.clone();
             let tint = self.tint(&env);
@@ -1563,24 +1593,27 @@ impl Render for Workspace {
                     .flex_1()
                     .min_h_0()
                     .items_start()
-                    .when(self.start.is_none() && self.envs.active().is_some(), |d| {
-                        d.child(self.render_terminal_list(cx)).child(
-                            div()
-                                .id("list-divider")
-                                .w(px(LIST_DIVIDER_WIDTH))
-                                .h_full()
-                                .flex_none()
-                                .bg(border)
-                                .cursor(CursorStyle::ResizeLeftRight)
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|ws, _, _, cx| {
-                                        ws.list_drag = true;
-                                        cx.notify();
-                                    }),
-                                ),
-                        )
-                    })
+                    .when(
+                        self.start.is_none() && self.envs.active().is_some() && !self.list_hidden,
+                        |d| {
+                            d.child(self.render_terminal_list(cx)).child(
+                                div()
+                                    .id("list-divider")
+                                    .w(px(LIST_DIVIDER_WIDTH))
+                                    .h_full()
+                                    .flex_none()
+                                    .bg(border)
+                                    .cursor(CursorStyle::ResizeLeftRight)
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|ws, _, _, cx| {
+                                            ws.list_drag = true;
+                                            cx.notify();
+                                        }),
+                                    ),
+                            )
+                        },
+                    )
                     .child(div().flex_1().min_w_0().h_full().child(body))
                     .when_some(self.tree.clone(), |d, tree| {
                         d.child(

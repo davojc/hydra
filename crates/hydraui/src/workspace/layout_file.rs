@@ -163,8 +163,9 @@ impl Workspace {
                     width: (self.tree_width != DEFAULT_TREE_WIDTH).then_some(self.tree_width),
                 }
             }),
-            list: (self.list_width != DEFAULT_LIST_WIDTH).then_some(ListFile {
-                width: Some(self.list_width),
+            list: (self.list_hidden || self.list_width != DEFAULT_LIST_WIDTH).then(|| ListFile {
+                width: (self.list_width != DEFAULT_LIST_WIDTH).then_some(self.list_width),
+                hidden: self.list_hidden,
             }),
             envs,
         }
@@ -345,6 +346,7 @@ impl Workspace {
         // The list's limit leaves room for the tree, the tree's for the list: the list is
         // clamped alone first, the tree beside it, then the list again beside the tree.
         let width = f32::from(window.viewport_size().width);
+        self.list_hidden = plan.list.as_ref().is_some_and(|l| l.hidden);
         let list = clamp_list_width(
             plan.list
                 .and_then(|l| l.width)
@@ -352,11 +354,17 @@ impl Workspace {
             width,
             0.0,
         );
+        // A collapsed list takes no room beside the tree.
+        let list_space = if self.list_hidden {
+            0.0
+        } else {
+            list + super::LIST_DIVIDER_WIDTH
+        };
         if let Some(tree) = &plan.tree
             && self.tree.is_none()
         {
             let saved = tree.width.unwrap_or(DEFAULT_TREE_WIDTH);
-            self.tree_width = clamp_tree_width(saved, width, list + super::LIST_DIVIDER_WIDTH);
+            self.tree_width = clamp_tree_width(saved, width, list_space);
         }
         let tree_open = self.tree.is_some() || plan.tree.as_ref().is_some_and(|t| t.open);
         let tree_space = if tree_open {

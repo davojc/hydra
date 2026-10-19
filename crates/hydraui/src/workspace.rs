@@ -1023,6 +1023,9 @@ impl Workspace {
                 |ws, _, ev: &TreeEvent, window, cx| ws.on_tree_event(ev, window, cx),
             ));
             self.tree = Some(view);
+            // A wide list may leave less room than the stored width.
+            let width = f32::from(window.viewport_size().width);
+            self.tree_width = clamp_tree_width(self.tree_width, width, self.list_space());
             self.sync_tree(cx);
         }
         self.autosave(window, cx);

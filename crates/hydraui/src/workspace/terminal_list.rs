@@ -18,8 +18,7 @@ impl Workspace {
     /// The selected environment's terminals, the shown one highlighted in the environment's
     /// colour; a row's tooltip is the title its program set, when it set one.
     pub(super) fn render_terminal_list(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let theme = cx.theme();
-        let (border, muted) = (theme.border, theme.muted_foreground);
+        let muted = cx.theme().muted_foreground;
         let mut list = v_flex()
             .id("terminal-list")
             .w(px(self.list_width))
@@ -27,9 +26,7 @@ impl Workspace {
             .flex_none()
             .overflow_y_scroll()
             .p_1()
-            .gap_0p5()
-            .border_r_1()
-            .border_color(border);
+            .gap_0p5();
         let Some(tab) = self.envs.active() else {
             return list;
         };

@@ -177,7 +177,8 @@ cwd = "~/blog"
 - An `env` entry with no terminals opens as a tab with the empty state (§2.2).
 - Saved on: environments added, closed or reordered, terminals added, closed or renamed, the
   shown terminal or selected environment changing, file pane files changing, the tree toggled
-  or resized, the terminal list resized, and window close. Not saved: scrollback, running commands, unsaved edits.
+  or resized, the terminal list resized, and window close. Not saved: scrollback, running
+  commands, unsaved edits.
 - **New window** (start page) opens untitled with one environment tab and one terminal in the
   home folder; its environment is chosen as Ctrl+T's is today (folder binding → `default_env` →
   a picker).

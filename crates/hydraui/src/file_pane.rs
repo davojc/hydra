@@ -20,6 +20,8 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use crate::file_doc::{self, DiskChange, DiskFlags, FileDoc, ImageUse};
 use crate::keys::SaveFile;
 use crate::open_files::{after_close, find};
+use crate::openapi::SpecKind;
+use crate::openapi_view::{ApiView, ApiViewEvent};
 
 use std::sync::Arc;
 
@@ -46,6 +48,11 @@ enum Body {
         saved: FileDoc,
         view: View,
         _sub: Subscription,
+        /// An OpenAPI spec's docs (spec §7.8), rendered in place of Markdown.
+        api: Option<Entity<ApiView>>,
+        _api_sub: Option<Subscription>,
+        /// A Swagger 2.0 file: Raw only, with a note.
+        swagger: bool,
     },
     CantShow(String),
     /// How the file differs from git's last commit (spec §7.3), or why it can't be shown.
@@ -184,7 +191,31 @@ impl FilePane {
                 pane.edited(&key, cx);
             }
         });
-        let view = if file_doc::is_markdown(path) {
+        let kind = crate::openapi::spec_kind(path, &doc.text);
+        let (api, api_sub) = match kind {
+            Some(SpecKind::OpenApi3) => {
+                let json = path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("json"));
+                let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+                let text = doc.text.clone();
+                let view = cx.new(|cx| ApiView::new(text, json, dir, window, cx));
+                let key = path.to_path_buf();
+                let sub = cx.subscribe_in(
+                    &view,
+                    window,
+                    move |pane, _, ev: &ApiViewEvent, window, cx| match ev {
+                        ApiViewEvent::GoToLine(line) => {
+                            pane.open_at(key.clone(), *line, 1, window, cx)
+                        }
+                        ApiViewEvent::OpenFile(p) => pane.open(p.clone(), window, cx),
+                    },
+                );
+                (Some(view), Some(sub))
+            }
+            _ => (None, None),
+        };
+        let view = if file_doc::is_markdown(path) || api.is_some() {
             View::Rendered
         } else {
             View::Raw
@@ -194,6 +225,9 @@ impl FilePane {
             saved: doc,
             view,
             _sub: sub,
+            api,
+            _api_sub: api_sub,
+            swagger: kind == Some(SpecKind::Swagger2),
         }
     }
 
@@ -201,9 +235,15 @@ impl FilePane {
     fn edited(&mut self, path: &Path, cx: &mut Context<Self>) {
         if let Some(i) = file_tab(&self.tabs, path)
             && let t = &mut self.tabs[i]
-            && let Body::Text { editor, saved, .. } = &t.body
+            && let Body::Text {
+                editor, saved, api, ..
+            } = &t.body
         {
-            t.dirty = file_doc::normalize(editor.read(cx).value().as_ref()) != saved.text;
+            let text = editor.read(cx).value().to_string();
+            t.dirty = file_doc::normalize(&text) != saved.text;
+            if let Some(api) = api {
+                api.update(cx, |v, cx| v.set_text(text, cx));
+            }
             cx.notify();
         }
     }
@@ -451,7 +491,10 @@ impl FilePane {
             return;
         };
         let t = &mut self.tabs[i];
-        let Body::Text { editor, saved, .. } = &mut t.body else {
+        let Body::Text {
+            editor, saved, api, ..
+        } = &mut t.body
+        else {
             return;
         };
         let now = t.path.is_file().then(|| file_doc::load(&t.path));
@@ -460,6 +503,10 @@ impl FilePane {
         if let DiskChange::Reload(doc) = change {
             let text = doc.text.clone();
             *saved = doc;
+            if let Some(api) = api {
+                let t = text.clone();
+                api.update(cx, |v, cx| v.set_text(t, cx));
+            }
             replace_keeping_place(editor, text, window, cx);
         }
         cx.notify();
@@ -470,7 +517,10 @@ impl FilePane {
         let Some(t) = self.tabs.get_mut(self.active) else {
             return;
         };
-        let Body::Text { editor, saved, .. } = &mut t.body else {
+        let Body::Text {
+            editor, saved, api, ..
+        } = &mut t.body
+        else {
             return;
         };
         match file_doc::load(&t.path) {
@@ -479,6 +529,10 @@ impl FilePane {
                 *saved = doc;
                 t.dirty = false;
                 t.disk = DiskFlags::default();
+                if let Some(api) = api {
+                    let t = text.clone();
+                    api.update(cx, |v, cx| v.set_text(t, cx));
+                }
                 replace_keeping_place(editor, text, window, cx);
             }
             Err(e) => window.push_notification(
@@ -577,8 +631,16 @@ impl Render for FilePane {
             .justify_end()
             .border_b_1()
             .border_color(border);
-        if let Body::Text { view, .. } = &t.body
-            && file_doc::is_markdown(&t.path)
+        if let Body::Text { swagger: true, .. } = &t.body {
+            header = header.child(
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("Swagger 2.0 isn't rendered"),
+            );
+        }
+        if let Body::Text { view, api, .. } = &t.body
+            && (file_doc::is_markdown(&t.path) || api.is_some())
         {
             let other = if *view == View::Raw {
                 "Rendered"
@@ -668,6 +730,11 @@ impl Render for FilePane {
                 .bordered(false)
                 .h(gpui::relative(1.))
                 .into_any_element(),
+            Body::Text {
+                view: View::Rendered,
+                api: Some(api),
+                ..
+            } => div().size_full().child(api.clone()).into_any_element(),
             Body::Text {
                 editor,
                 view: View::Rendered,

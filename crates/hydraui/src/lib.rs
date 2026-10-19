@@ -19,6 +19,7 @@ pub mod layout;
 pub mod layout_plan;
 pub mod open_files;
 pub mod openapi;
+pub mod openapi_view;
 pub mod palette;
 pub mod pane_view;
 pub mod quick_open;

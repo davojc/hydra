@@ -7,6 +7,7 @@ mod launcher;
 mod sets;
 mod start_page;
 mod title_bar;
+mod tree_ops;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -17,9 +18,9 @@ use std::time::Instant;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Entity, FocusHandle, Focusable,
-    Hsla, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Subscription,
-    Task, Window, canvas, div, px, relative, rgb, transparent_black,
+    AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase, Entity,
+    FocusHandle, Focusable, Hsla, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    SharedString, Subscription, Task, Window, canvas, div, px, relative, rgb, transparent_black,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandItem, CommandState};
@@ -45,6 +46,7 @@ use crate::pane_view::{PaneEvent, PaneView, TermStyle};
 use crate::split::{Axis, Dir, PaneId, Tree};
 use crate::tabs::{Closed, TabId, Tabs};
 use busy::PaneActivity;
+use tree_ops::NameFor;
 
 /// A divider being dragged: the split's path in the active tab's tree.
 /// The file tree's width: it starts at the default, can't be dragged narrower than the
@@ -956,9 +958,37 @@ impl Workspace {
     }
 
     fn on_tree_event(&mut self, ev: &TreeEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // The file operations don't need a terminal.
+        match ev {
+            TreeEvent::NewFile(dir) => {
+                return self.name_dialog(NameFor::File, dir.clone(), window, cx);
+            }
+            TreeEvent::NewFolder(dir) => {
+                return self.name_dialog(NameFor::Folder, dir.clone(), window, cx);
+            }
+            TreeEvent::Rename(path) => {
+                return self.name_dialog(NameFor::Rename, path.clone(), window, cx);
+            }
+            TreeEvent::Delete(path) => return self.delete_dialog(path.clone(), window, cx),
+            TreeEvent::Reveal(path) => {
+                if let Err(e) = crate::file_ops::reveal_in_explorer(path) {
+                    window.push_notification(Notification::error(e), cx);
+                }
+                return;
+            }
+            TreeEvent::Copy(text) => {
+                return cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+            }
+            _ => {}
+        }
         let Some(view) = self.focused() else {
             return;
         };
+        if let TreeEvent::OpenTab(dir) = ev {
+            let env = view.read(cx).env().to_string();
+            self.open_tab(env, dir.clone(), window, cx);
+            return;
+        }
         match ev {
             TreeEvent::Insert(path) => view.update(cx, |v, cx| {
                 let text = format!("{} ", quote_path(v.request.shell, path));
@@ -972,6 +1002,14 @@ impl Workspace {
             }),
             TreeEvent::Show(path) => self.show_file(path.clone(), window, cx),
             TreeEvent::ShowChanges(path) => self.show_changes(path.clone(), window, cx),
+            // Handled above.
+            TreeEvent::NewFile(_)
+            | TreeEvent::NewFolder(_)
+            | TreeEvent::OpenTab(_)
+            | TreeEvent::Reveal(_)
+            | TreeEvent::Rename(_)
+            | TreeEvent::Delete(_)
+            | TreeEvent::Copy(_) => {}
         }
         self.focus_active(window, cx);
     }

@@ -6,6 +6,7 @@ pub mod assets;
 pub mod claim;
 pub mod config;
 pub mod file_doc;
+pub mod file_ops;
 pub mod file_pane;
 pub mod file_tree;
 pub mod file_tree_view;

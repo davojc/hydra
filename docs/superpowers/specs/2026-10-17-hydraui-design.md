@@ -48,7 +48,7 @@ Not in scope:
 - GUI editors for environments or sets. They stay hand-edited TOML (or managed
   with the hydra CLI). hydraui writes only its own files and secrets.
 - Restoring scrollback after a restart.
-- File operations in the file tree (create, rename, delete, drag).
+- Dragging files in the file tree.
 
 ## 3. Repository and crates
 
@@ -385,6 +385,16 @@ script, image, lock, else a plain page).
   is shown.
 - Right-click a changed file: **Show changes** opens a side-by-side diff of
   the file against the last commit in the file pane (§7.8).
+- Right-click any row for: **New file…** and **New folder…** (in the folder,
+  or beside a file; a new file opens in the file pane), **cd here** (a file:
+  its folder; only at a prompt), **Open in new tab** (folders: a tab in the
+  focused terminal's environment, starting there), **Reveal in Explorer**,
+  **Rename…**, **Delete…** (asks, then moves it to the Recycle Bin), **Copy
+  path** and **Copy relative path** (from the tree's root). Names Windows
+  refuses are explained in the dialog, which Enter confirms; nothing is
+  replaced. Open files follow a rename and close on a delete; both are refused
+  while a file they touch has unsaved edits. The click hints are the root
+  line's tooltip, so no row tooltip covers the menu.
 
 ### 7.4 Launcher
 

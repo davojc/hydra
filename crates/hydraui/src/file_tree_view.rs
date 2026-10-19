@@ -6,9 +6,7 @@ use std::path::{Path, PathBuf};
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::prelude::*;
-use gpui::{
-    AnyElement, App, ClickEvent, Context, EventEmitter, Hsla, SharedString, Task, Window, div, px,
-};
+use gpui::{AnyElement, App, ClickEvent, Context, EventEmitter, Hsla, Task, Window, div, px};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{ActiveTheme, Icon, h_flex, v_flex};
@@ -29,6 +27,110 @@ pub enum TreeEvent {
     Cd(PathBuf),
     /// Show how the file differs from git's last commit (spec §7.3).
     ShowChanges(PathBuf),
+    /// Ask for a name and create a file in this folder.
+    NewFile(PathBuf),
+    /// Ask for a name and create a folder in this folder.
+    NewFolder(PathBuf),
+    /// A new tab in the focused terminal's environment, starting in this folder.
+    OpenTab(PathBuf),
+    /// Show the file or folder selected in Explorer.
+    Reveal(PathBuf),
+    /// Ask for a new name.
+    Rename(PathBuf),
+    /// Ask, then move it to the Recycle Bin.
+    Delete(PathBuf),
+    /// Put this text on the clipboard.
+    Copy(String),
+}
+
+/// What a row's right-click menu entry does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuAction {
+    ShowChanges,
+    NewFile,
+    NewFolder,
+    Cd,
+    OpenTab,
+    Reveal,
+    Rename,
+    Delete,
+    CopyPath,
+    CopyRelativePath,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuEntry {
+    pub label: &'static str,
+    pub action: MenuAction,
+    pub enabled: bool,
+}
+
+/// A row's right-click menu, `None` for a separator. `changed`: a file git sees as changed;
+/// `can_cd`: the focused terminal is at its prompt.
+pub fn row_menu(is_dir: bool, changed: bool, can_cd: bool) -> Vec<Option<MenuEntry>> {
+    let entry = |label, action| {
+        Some(MenuEntry {
+            label,
+            action,
+            enabled: true,
+        })
+    };
+    let mut out = Vec::new();
+    if changed && !is_dir {
+        out.extend([entry("Show changes", MenuAction::ShowChanges), None]);
+    }
+    out.extend([
+        entry("New file…", MenuAction::NewFile),
+        entry("New folder…", MenuAction::NewFolder),
+        None,
+        Some(MenuEntry {
+            label: if is_dir {
+                "cd here"
+            } else {
+                "cd to its folder"
+            },
+            action: MenuAction::Cd,
+            enabled: can_cd,
+        }),
+    ]);
+    if is_dir {
+        out.push(entry("Open in new tab", MenuAction::OpenTab));
+    }
+    out.extend([
+        entry("Reveal in Explorer", MenuAction::Reveal),
+        None,
+        entry("Rename…", MenuAction::Rename),
+        entry("Delete…", MenuAction::Delete),
+        None,
+        entry("Copy path", MenuAction::CopyPath),
+        entry("Copy relative path", MenuAction::CopyRelativePath),
+    ]);
+    out
+}
+
+/// The event a menu entry sends for the row at `path`; a file's folder stands in for it where
+/// a folder is needed. Relative paths are from the tree's `root`.
+pub fn menu_event(action: MenuAction, path: &Path, is_dir: bool, root: &Path) -> TreeEvent {
+    let path = path.to_path_buf();
+    let dir = if is_dir {
+        path.clone()
+    } else {
+        path.parent().map(Path::to_path_buf).unwrap_or(path.clone())
+    };
+    match action {
+        MenuAction::ShowChanges => TreeEvent::ShowChanges(path),
+        MenuAction::NewFile => TreeEvent::NewFile(dir),
+        MenuAction::NewFolder => TreeEvent::NewFolder(dir),
+        MenuAction::Cd => TreeEvent::Cd(dir),
+        MenuAction::OpenTab => TreeEvent::OpenTab(dir),
+        MenuAction::Reveal => TreeEvent::Reveal(path),
+        MenuAction::Rename => TreeEvent::Rename(path),
+        MenuAction::Delete => TreeEvent::Delete(path),
+        MenuAction::CopyPath => TreeEvent::Copy(path.to_string_lossy().replace('/', "\\")),
+        MenuAction::CopyRelativePath => {
+            TreeEvent::Copy(crate::file_ops::relative_path(root, &path))
+        }
+    }
 }
 
 /// A click on a file: show it; with Ctrl, insert its path (spec §7.3).
@@ -182,6 +284,17 @@ impl FileTreeView {
         view
     }
 
+    /// Opens `dir` (when it isn't the root or open already) and reads it again, so an entry
+    /// just made in it shows.
+    pub fn show_in(&mut self, dir: &Path, cx: &mut Context<Self>) {
+        if dir != self.tree.root() && !self.tree.open_dirs().any(|d| d == dir) {
+            self.tree.toggle(dir);
+            self.sync_watches();
+        }
+        self.tree.refresh(dir);
+        cx.notify();
+    }
+
     /// Follows the focused pane's folder.
     pub fn set_root(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         if self.tree.set_root(root) {
@@ -273,7 +386,23 @@ impl Render for FileTreeView {
         v_flex()
             .size_full()
             .text_sm()
-            .child(div().px_2().py_1().text_color(muted).truncate().child(root))
+            // One hint for every row: a per-row tooltip would cover the right-click menu.
+            .child(
+                div()
+                    .id("tree-root")
+                    .px_2()
+                    .py_1()
+                    .text_color(muted)
+                    .truncate()
+                    .child(root)
+                    .tooltip(|window, cx| {
+                        Tooltip::new(
+                            "Click a file: open · Ctrl+click: insert its path · \
+                             Double-click a folder: cd there · Right-click: more",
+                        )
+                        .build(window, cx)
+                    }),
+            )
             .child(
                 v_flex()
                     .id("file-tree")
@@ -291,13 +420,6 @@ impl Render for FileTreeView {
                                 let label = row.entry.name.clone();
                                 let icon =
                                     row_icon(&row.entry.name, row.entry.is_dir, row.expanded);
-                                let tip: SharedString = if !row.entry.is_dir {
-                                    "Click: open · Ctrl+click: insert the path".into()
-                                } else if can_cd {
-                                    "Double-click: cd here".into()
-                                } else {
-                                    "Double-click cd works when the shell is at its prompt".into()
-                                };
                                 let indent = px(8. + 12. * row.depth as f32);
                                 let mark = git_mark(
                                     &self.git,
@@ -309,6 +431,7 @@ impl Render for FileTreeView {
                                 let changed_file = !row.entry.is_dir
                                     && mark.is_some_and(|(_, c)| c != Change::Ignored);
                                 let path = row.entry.path.clone();
+                                let is_dir = row.entry.is_dir;
                                 let el = h_flex()
                                     .id(("row", i))
                                     .pl(indent)
@@ -316,9 +439,6 @@ impl Render for FileTreeView {
                                     .gap_2()
                                     .whitespace_nowrap()
                                     .hover(move |d| d.bg(hover))
-                                    .tooltip(move |window, cx| {
-                                        Tooltip::new(tip.clone()).build(window, cx)
-                                    })
                                     .on_click(cx.listener(move |view, ev: &ClickEvent, _, cx| {
                                         view.click(&row, ev, cx)
                                     }))
@@ -341,22 +461,29 @@ impl Render for FileTreeView {
                                                 .child(m),
                                         )
                                     });
-                                if changed_file {
-                                    let me = me.clone();
-                                    el.context_menu(move |menu, _, _| {
-                                        let (me, path) = (me.clone(), path.clone());
-                                        menu.item(PopupMenuItem::new("Show changes").on_click(
-                                            move |_, _, cx| {
-                                                me.update(cx, |_, cx| {
-                                                    cx.emit(TreeEvent::ShowChanges(path.clone()))
-                                                })
-                                            },
-                                        ))
-                                    })
-                                    .into_any_element()
-                                } else {
-                                    el.into_any_element()
-                                }
+                                let me = me.clone();
+                                let root = self.tree.root().to_path_buf();
+                                el.context_menu(move |menu, _, _| {
+                                    row_menu(is_dir, changed_file, can_cd).into_iter().fold(
+                                        menu,
+                                        |menu, entry| {
+                                            let Some(entry) = entry else {
+                                                return menu.separator();
+                                            };
+                                            let ev = menu_event(entry.action, &path, is_dir, &root);
+                                            let me = me.clone();
+                                            menu.item(
+                                                PopupMenuItem::new(entry.label)
+                                                    .disabled(!entry.enabled)
+                                                    .on_click(move |_, _, cx| {
+                                                        let ev = ev.clone();
+                                                        me.update(cx, |_, cx| cx.emit(ev))
+                                                    }),
+                                            )
+                                        },
+                                    )
+                                })
+                                .into_any_element()
                             })
                             .collect::<Vec<AnyElement>>(),
                     ),
@@ -367,6 +494,77 @@ impl Render for FileTreeView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn labels(entries: &[Option<MenuEntry>]) -> Vec<String> {
+        entries
+            .iter()
+            .map(|e| match e {
+                Some(e) if e.enabled => e.label.to_string(),
+                Some(e) => format!("({})", e.label),
+                None => "-".into(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_folder_offers_new_cd_tab_and_the_file_operations() {
+        assert_eq!(
+            labels(&row_menu(true, false, true)),
+            [
+                "New file…",
+                "New folder…",
+                "-",
+                "cd here",
+                "Open in new tab",
+                "Reveal in Explorer",
+                "-",
+                "Rename…",
+                "Delete…",
+                "-",
+                "Copy path",
+                "Copy relative path"
+            ]
+        );
+        // cd only works at a prompt.
+        assert!(labels(&row_menu(true, false, false)).contains(&"(cd here)".to_string()));
+    }
+
+    #[test]
+    fn a_file_offers_its_changes_and_no_tab() {
+        let got = labels(&row_menu(false, true, true));
+        assert_eq!(got[0], "Show changes");
+        assert!(got.contains(&"cd to its folder".to_string()));
+        assert!(!got.iter().any(|l| l.contains("new tab")));
+        assert!(!labels(&row_menu(false, false, true)).contains(&"Show changes".to_string()));
+    }
+
+    #[test]
+    fn menu_actions_act_on_the_folder_a_file_is_in() {
+        let root = Path::new(r"C:\repo");
+        let file = PathBuf::from(r"C:\repo\src\main.rs");
+        let dir = PathBuf::from(r"C:\repo\src");
+        let ev = |a| menu_event(a, &file, false, root);
+        assert_eq!(ev(MenuAction::NewFile), TreeEvent::NewFile(dir.clone()));
+        assert_eq!(ev(MenuAction::NewFolder), TreeEvent::NewFolder(dir.clone()));
+        assert_eq!(ev(MenuAction::Cd), TreeEvent::Cd(dir.clone()));
+        assert_eq!(ev(MenuAction::Rename), TreeEvent::Rename(file.clone()));
+        assert_eq!(
+            ev(MenuAction::CopyPath),
+            TreeEvent::Copy(r"C:\repo\src\main.rs".into())
+        );
+        assert_eq!(
+            ev(MenuAction::CopyRelativePath),
+            TreeEvent::Copy(r"src\main.rs".into())
+        );
+        assert_eq!(
+            menu_event(MenuAction::NewFile, &dir, true, root),
+            TreeEvent::NewFile(dir.clone())
+        );
+        assert_eq!(
+            menu_event(MenuAction::OpenTab, &dir, true, root),
+            TreeEvent::OpenTab(dir)
+        );
+    }
 
     #[test]
     fn rows_get_an_icon_for_what_they_hold() {

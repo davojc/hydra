@@ -18,6 +18,7 @@ use gpui_component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::file_doc::{self, DiskChange, DiskFlags, FileDoc, ImageUse};
+use crate::file_ops;
 use crate::keys::SaveFile;
 use crate::open_files::{after_close, find};
 use crate::openapi::SpecKind;
@@ -365,6 +366,40 @@ impl FilePane {
             .filter(|t| t.dirty)
             .map(|t| t.path.clone())
             .collect()
+    }
+
+    /// Whether a file at or inside `path` has unsaved edits.
+    pub fn unsaved_under(&self, path: &Path) -> bool {
+        self.tabs
+            .iter()
+            .any(|t| t.dirty && file_ops::is_under(&t.path, path))
+    }
+
+    /// Points the tabs of files at or inside `old` at where a rename put them.
+    pub fn renamed(&mut self, old: &Path, new: &Path, cx: &mut Context<Self>) {
+        let mut any = false;
+        for t in &mut self.tabs {
+            if let Some(p) = file_ops::moved(&t.path, old, new) {
+                t.path = p;
+                any = true;
+            }
+        }
+        if any {
+            self.sync_watches();
+            cx.emit(FilePaneEvent::Changed);
+            cx.notify();
+        }
+    }
+
+    /// Closes the tabs of files at or inside `path`, after it was deleted.
+    pub fn close_under(&mut self, path: &Path, cx: &mut Context<Self>) {
+        while let Some(i) = self
+            .tabs
+            .iter()
+            .position(|t| file_ops::is_under(&t.path, path))
+        {
+            self.remove_tab(i, cx);
+        }
     }
 
     fn save_tab(&mut self, i: usize, cx: &mut Context<Self>) -> Result<(), String> {

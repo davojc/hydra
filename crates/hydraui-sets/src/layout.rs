@@ -336,16 +336,24 @@ fn plan_terminal(
 
 /// The file pane with missing files dropped; `None` when none are left.
 fn plan_files(ctx: &Context, f: &FilesFile) -> Option<FilesSpec> {
-    let files: Vec<PathBuf> = f
-        .files
-        .iter()
-        .map(|p| resolve_path(ctx, p))
-        .filter(|p| p.is_file())
-        .collect();
+    let mut files = Vec::new();
+    let mut active = 0;
+    for (i, p) in f.files.iter().enumerate() {
+        let path = resolve_path(ctx, p);
+        if path.is_file() {
+            if f.active == Some(i) {
+                active = files.len();
+            }
+            files.push(path);
+        }
+    }
     if files.is_empty() {
         return None;
     }
-    let active = f.active.unwrap_or(0).min(files.len() - 1);
+    // Past the end of the saved list still clamps to the last file.
+    if f.active.is_some_and(|a| a >= f.files.len()) {
+        active = files.len() - 1;
+    }
     Some(FilesSpec { files, active })
 }
 
@@ -745,6 +753,32 @@ cwd = "~/blog"
         assert_eq!(got.active, 1);
         assert_eq!(files(vec![s(&a)], None).unwrap().active, 0);
         assert_eq!(files(vec![fx.dir("gone.md")], Some(0)), None);
+    }
+
+    #[test]
+    fn the_active_file_follows_the_files_dropped_before_it() {
+        let fx = Fx::new();
+        let a = fx.home.join("a.md");
+        let b = fx.home.join("b.md");
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&b, "b").unwrap();
+        let s = |p: &Path| p.to_string_lossy().into_owned();
+        let active = |active| {
+            let mut e = env("work", vec![]);
+            e.files = Some(FilesFile {
+                files: vec![fx.dir("gone.md"), s(&a), s(&b)],
+                active: Some(active),
+            });
+            plan_layout(&fx.ctx(), &layout(vec![e])).envs[0]
+                .files
+                .clone()
+                .unwrap()
+                .active
+        };
+        // b stays the active file though it moves from 2 to 1; a missing one falls back to 0.
+        assert_eq!(active(2), 1);
+        assert_eq!(active(1), 0);
+        assert_eq!(active(0), 0);
     }
 
     #[test]

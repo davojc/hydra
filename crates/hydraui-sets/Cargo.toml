@@ -8,7 +8,6 @@ rust-version.workspace = true
 hydra-core.workspace = true
 hydra-platform.workspace = true
 serde.workspace = true
-thiserror.workspace = true
 toml.workspace = true
 
 [dev-dependencies]

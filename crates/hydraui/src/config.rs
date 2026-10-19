@@ -41,7 +41,7 @@ pub struct UiConfig {
     /// Opens files from the file tree (plan 4); read now so the file format is stable.
     pub editor: Option<String>,
     pub colors: ColorsConfig,
-    /// Command name → keys, e.g. `split_right = "ctrl-alt-d"`; `""` unbinds.
+    /// Command name → keys, e.g. `new_terminal = "ctrl-alt-d"`; `""` unbinds.
     pub keys: BTreeMap<String, String>,
 }
 
@@ -191,7 +191,7 @@ background = "#101010"
 palette = ["#000000", "#111111"]
 
 [keys]
-split_right = "ctrl-alt-d"
+new_terminal = "ctrl-alt-d"
 "##,
         );
         assert_eq!(cfg.font, "JetBrains Mono");
@@ -202,7 +202,7 @@ split_right = "ctrl-alt-d"
         assert_eq!(cfg.editor.as_deref(), Some("code"));
         assert_eq!(cfg.colors.background.as_deref(), Some("#101010"));
         assert_eq!(cfg.colors.palette.as_ref().map(Vec::len), Some(2));
-        assert_eq!(cfg.keys["split_right"], "ctrl-alt-d");
+        assert_eq!(cfg.keys["new_terminal"], "ctrl-alt-d");
     }
 
     #[test]

@@ -339,6 +339,8 @@ impl Workspace {
                 }
                 window
                     .push_notification(Notification::success(text).title("Delete environment"), cx);
+                // An environment with no terminals can still have a tab: close it.
+                self.close_env_now(env, window, cx);
                 self.reload_config(window, cx);
             }
             Err(e) => {

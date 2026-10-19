@@ -3011,7 +3011,6 @@ dependencies = [
  "hydra-platform",
  "serde",
  "tempfile",
- "thiserror 2.0.21",
  "toml 0.8.23",
 ]
 

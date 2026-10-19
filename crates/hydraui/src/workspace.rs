@@ -927,10 +927,7 @@ impl Workspace {
             self.git_again = true;
             return;
         }
-        let Some(view) = self.focused() else {
-            return;
-        };
-        let cwd = view.read(cx).cwd().clone();
+        let cwd = self.tree_folder(cx);
         self.git_busy = true;
         cx.spawn(async move |this, cx| {
             let dir = cwd.clone();
@@ -1005,15 +1002,23 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The folder the tree and git marks follow: the shown terminal's, else the selected
+    /// environment's home, else the user's home (an environment may have no terminal).
+    fn tree_folder(&self, cx: &App) -> PathBuf {
+        let shown = self.focused().map(|v| v.read(cx).cwd().clone());
+        let home = self.envs.active().and_then(|t| self.hydra.env_home(&t.env));
+        crate::envs::new_terminal_cwd(shown.as_deref(), home.as_deref(), &self.hydra.user_home)
+    }
+
     /// Roots the tree at the focused pane's folder; `cd` only while it is at its prompt.
     fn sync_tree(&mut self, cx: &mut Context<Self>) {
-        let (Some(tree), Some(view)) = (self.tree.clone(), self.focused()) else {
+        let Some(tree) = self.tree.clone() else {
             return;
         };
-        let (cwd, at_prompt) = {
-            let v = view.read(cx);
-            (v.cwd().clone(), v.prompt() == Some(PromptState::AtPrompt))
-        };
+        let cwd = self.tree_folder(cx);
+        let at_prompt = self
+            .focused()
+            .is_some_and(|v| v.read(cx).prompt() == Some(PromptState::AtPrompt));
         tree.update(cx, |t, cx| {
             t.set_root(cwd, cx);
             t.set_can_cd(at_prompt, cx);

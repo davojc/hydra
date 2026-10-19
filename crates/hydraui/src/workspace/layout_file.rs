@@ -154,9 +154,12 @@ impl Workspace {
         Layout {
             version: LAYOUT_VERSION,
             active_env: self.envs.active().map(|t| t.env.clone()),
-            tree: self.tree.is_some().then(|| TreeFile {
-                open: true,
-                width: (self.tree_width != DEFAULT_TREE_WIDTH).then_some(self.tree_width),
+            // A dragged width outlives closing the tree.
+            tree: (self.tree.is_some() || self.tree_width != DEFAULT_TREE_WIDTH).then(|| {
+                TreeFile {
+                    open: self.tree.is_some(),
+                    width: (self.tree_width != DEFAULT_TREE_WIDTH).then_some(self.tree_width),
+                }
             }),
             envs,
         }
@@ -334,12 +337,14 @@ impl Workspace {
                 self.envs.set_files(&env.name, Some(id));
             }
         }
-        if let Some(tree) = plan.tree.filter(|t| t.open)
+        if let Some(tree) = plan.tree
             && self.tree.is_none()
         {
             let width = f32::from(window.viewport_size().width);
             self.tree_width = clamp_tree_width(tree.width.unwrap_or(DEFAULT_TREE_WIDTH), width);
-            self.toggle_tree(&FileTree, window, cx);
+            if tree.open {
+                self.toggle_tree(&FileTree, window, cx);
+            }
         }
         if let Some(env) = plan.active_env {
             self.envs.activate(&env);

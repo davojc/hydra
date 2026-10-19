@@ -117,7 +117,8 @@ this work, but the file it will read is.
   terminal's view.
 - The layout file saves, per terminal, whether it has a Tasks tab and whether it was selected
   (`tasks = "open"` / `"shown"` on `[[env.terminal]]`, omitted when none; exact shape builder's
-  call). Version stays 2; older hydraui builds of version 2 ignore the unknown key. A terminal
+  call). Version stays 2. Layout files refuse unknown keys, so a hydraui build from before this
+  feature won't open a layout that has a Tasks tab; accepted, as version 2 is days old. A terminal
   skipped on open keeps its `tasks` key on write, as skipped entries do.
 
 ## 5. The board

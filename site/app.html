@@ -221,10 +221,9 @@
         <table>
           <thead><tr><th>Action</th><th>Default</th><th>Setting</th></tr></thead>
           <tbody>
-            <tr><td>New tab</td><td><kbd>Ctrl+T</kbd></td><td><code>new_tab</code></td></tr>
+            <tr><td>New terminal</td><td><kbd>Ctrl+T</kbd></td><td><code>new_terminal</code></td></tr>
             <tr><td>Close pane</td><td><kbd>Ctrl+W</kbd></td><td><code>close_pane</code></td></tr>
-            <tr><td>Split right / down</td><td><kbd>Ctrl+Shift+D</kbd> / <kbd>Ctrl+Shift+E</kbd></td><td><code>split_right</code>, <code>split_down</code></td></tr>
-            <tr><td>Move focus</td><td><kbd>Alt+Arrows</kbd></td><td><code>focus_left</code>, <code>focus_right</code>, <code>focus_up</code>, <code>focus_down</code></td></tr>
+            <tr><td>Next / previous terminal</td><td><kbd>Ctrl+PageDown</kbd> / <kbd>Ctrl+PageUp</kbd></td><td><code>next_terminal</code>, <code>previous_terminal</code></td></tr>
             <tr><td>Next / previous tab</td><td><kbd>Ctrl+Tab</kbd> / <kbd>Ctrl+Shift+Tab</kbd></td><td><code>next_tab</code>, <code>previous_tab</code></td></tr>
             <tr><td>Copy / paste</td><td><kbd>Ctrl+Shift+C</kbd> / <kbd>Ctrl+Shift+V</kbd></td><td><code>copy</code>, <code>paste</code></td></tr>
             <tr><td>Find in scrollback</td><td><kbd>Ctrl+F</kbd></td><td><code>find</code></td></tr>
@@ -236,7 +235,7 @@
           </tbody>
         </table>
       </div>
-      <p>Change any of them under <code>[keys]</code> in the settings: <code>split_right = "ctrl-alt-d"</code>, or <code>""</code> to unbind. Key changes apply the next time hydraui starts.</p>
+      <p>Change any of them under <code>[keys]</code> in the settings: <code>new_terminal = "ctrl-alt-n"</code>, or <code>""</code> to unbind. Key changes apply the next time hydraui starts.</p>
     </section>
 
     <section id="settings">
@@ -255,7 +254,7 @@
 <span class="k">background</span> = <span class="s">"#0b1116"</span>
 
 [<span class="k">keys</span>]
-<span class="k">split_right</span> = <span class="s">"ctrl-alt-d"</span></pre>
+<span class="k">new_terminal</span> = <span class="s">"ctrl-alt-n"</span></pre>
       </div>
       <p><code>[colors]</code> also takes <code>foreground</code>, <code>cursor</code>, <code>selection</code> and <code>palette</code>, a list of the 16 ANSI colours.</p>
     </section>

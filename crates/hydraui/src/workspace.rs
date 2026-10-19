@@ -38,8 +38,8 @@ use crate::file_tree_view::{FileTreeView, TreeEvent};
 use crate::git_status;
 use crate::hydra::{Borrowing, Hydra, PaneRequest, STATUS_TTL, StatusCache, account_marks};
 use crate::keys::{
-    ClosePane, FileTree, FocusDown, FocusLeft, FocusRight, FocusUp, NewTab, NextTab, PreviousTab,
-    SplitDown, SplitRight, TestDialog,
+    ClosePane, FileTree, FocusDown, FocusLeft, FocusRight, FocusUp, NewTerminal, NextTab,
+    PreviousTab, SplitDown, SplitRight, TestDialog,
 };
 use crate::open_files::{last_terminal_closes_tab, terminal_for};
 use crate::pane_view::{PaneEvent, PaneView, TermStyle};
@@ -684,7 +684,7 @@ impl Workspace {
         }
     }
 
-    fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
+    fn new_tab(&mut self, _: &NewTerminal, window: &mut Window, cx: &mut Context<Self>) {
         let cwd = self.focused_cwd(cx);
         self.new_tab_in(cwd, window, cx);
     }
@@ -1369,7 +1369,7 @@ impl Workspace {
                 .px_2()
                 .text_color(muted)
                 .child("+")
-                .on_click(cx.listener(|ws, _, window, cx| ws.new_tab(&NewTab, window, cx))),
+                .on_click(cx.listener(|ws, _, window, cx| ws.new_tab(&NewTerminal, window, cx))),
         )
     }
 

@@ -8,6 +8,9 @@ gpui::actions!(
     hydraui,
     [
         NewTab,
+        NewTerminal,
+        NextTerminal,
+        PreviousTerminal,
         ClosePane,
         SplitRight,
         SplitDown,
@@ -56,14 +59,10 @@ pub fn terminal_bindings() -> Vec<KeyBinding> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
-    NewTab,
+    NewTerminal,
     ClosePane,
-    SplitRight,
-    SplitDown,
-    FocusLeft,
-    FocusRight,
-    FocusUp,
-    FocusDown,
+    NextTerminal,
+    PreviousTerminal,
     NextTab,
     PreviousTab,
     Copy,
@@ -76,15 +75,11 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 17] = [
-        Command::NewTab,
+    pub const ALL: [Command; 13] = [
+        Command::NewTerminal,
         Command::ClosePane,
-        Command::SplitRight,
-        Command::SplitDown,
-        Command::FocusLeft,
-        Command::FocusRight,
-        Command::FocusUp,
-        Command::FocusDown,
+        Command::NextTerminal,
+        Command::PreviousTerminal,
         Command::NextTab,
         Command::PreviousTab,
         Command::Copy,
@@ -99,14 +94,10 @@ impl Command {
     /// The name under `[keys]` in config.toml.
     pub fn name(self) -> &'static str {
         match self {
-            Command::NewTab => "new_tab",
+            Command::NewTerminal => "new_terminal",
             Command::ClosePane => "close_pane",
-            Command::SplitRight => "split_right",
-            Command::SplitDown => "split_down",
-            Command::FocusLeft => "focus_left",
-            Command::FocusRight => "focus_right",
-            Command::FocusUp => "focus_up",
-            Command::FocusDown => "focus_down",
+            Command::NextTerminal => "next_terminal",
+            Command::PreviousTerminal => "previous_terminal",
             Command::NextTab => "next_tab",
             Command::PreviousTab => "previous_tab",
             Command::Copy => "copy",
@@ -122,14 +113,10 @@ impl Command {
     /// The spec §7.6 defaults.
     pub fn default_keys(self) -> &'static str {
         match self {
-            Command::NewTab => "ctrl-t",
+            Command::NewTerminal => "ctrl-t",
             Command::ClosePane => "ctrl-w",
-            Command::SplitRight => "ctrl-shift-d",
-            Command::SplitDown => "ctrl-shift-e",
-            Command::FocusLeft => "alt-left",
-            Command::FocusRight => "alt-right",
-            Command::FocusUp => "alt-up",
-            Command::FocusDown => "alt-down",
+            Command::NextTerminal => "ctrl-pagedown",
+            Command::PreviousTerminal => "ctrl-pageup",
             Command::NextTab => "ctrl-tab",
             Command::PreviousTab => "ctrl-shift-tab",
             Command::Copy => "ctrl-shift-c",
@@ -144,14 +131,10 @@ impl Command {
 
     pub fn action(self) -> Box<dyn Action> {
         match self {
-            Command::NewTab => Box::new(NewTab),
+            Command::NewTerminal => Box::new(NewTerminal),
             Command::ClosePane => Box::new(ClosePane),
-            Command::SplitRight => Box::new(SplitRight),
-            Command::SplitDown => Box::new(SplitDown),
-            Command::FocusLeft => Box::new(FocusLeft),
-            Command::FocusRight => Box::new(FocusRight),
-            Command::FocusUp => Box::new(FocusUp),
-            Command::FocusDown => Box::new(FocusDown),
+            Command::NextTerminal => Box::new(NextTerminal),
+            Command::PreviousTerminal => Box::new(PreviousTerminal),
             Command::NextTab => Box::new(NextTab),
             Command::PreviousTab => Box::new(PreviousTab),
             Command::Copy => Box::new(CopyText),
@@ -165,12 +148,24 @@ impl Command {
     }
 }
 
+/// Commands that earlier versions had and this one dropped (hydraui has no splits). A `[keys]`
+/// entry naming one is ignored silently, so an old config.toml keeps loading (spec §4).
+pub const REMOVED: [&str; 7] = [
+    "new_tab",
+    "split_right",
+    "split_down",
+    "focus_left",
+    "focus_right",
+    "focus_up",
+    "focus_down",
+];
+
 /// Each command's keys after `[keys]` overrides (`""` unbinds), plus what was wrong. A bad
 /// keystroke keeps the default, so one typo doesn't lose a command.
 pub fn keymap(overrides: &BTreeMap<String, String>) -> (Vec<(Command, String)>, Vec<String>) {
     let mut problems = Vec::new();
     for name in overrides.keys() {
-        if !Command::ALL.iter().any(|c| c.name() == name) {
+        if !Command::ALL.iter().any(|c| c.name() == name) && !REMOVED.contains(&name.as_str()) {
             problems.push(format!("[keys]: unknown command {name:?}"));
         }
     }
@@ -265,7 +260,7 @@ mod tests {
         let (keys, problems) = keymap(&BTreeMap::new());
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(keys.len(), Command::ALL.len());
-        assert!(keys.contains(&(Command::SplitRight, "ctrl-shift-d".to_string())));
+        assert!(keys.contains(&(Command::NewTerminal, "ctrl-t".to_string())));
         assert!(keys.contains(&(Command::NextTab, "ctrl-tab".to_string())));
         assert!(keys.contains(&(Command::Launcher, "ctrl-shift-p".to_string())));
         assert!(keys.contains(&(Command::FileTree, "ctrl-b".to_string())));
@@ -275,9 +270,9 @@ mod tests {
 
     #[test]
     fn overrides_replace_and_an_empty_string_unbinds() {
-        let (keys, problems) = keymap(&map(&[("split_right", "ctrl-alt-d"), ("find", "")]));
+        let (keys, problems) = keymap(&map(&[("new_terminal", "ctrl-alt-n"), ("find", "")]));
         assert!(problems.is_empty(), "{problems:?}");
-        assert!(keys.contains(&(Command::SplitRight, "ctrl-alt-d".to_string())));
+        assert!(keys.contains(&(Command::NewTerminal, "ctrl-alt-n".to_string())));
         assert!(!keys.iter().any(|(c, _)| *c == Command::Find));
         assert_eq!(keys.len(), Command::ALL.len() - 1);
     }
@@ -302,9 +297,33 @@ mod tests {
         let (_, problems) = keymap(&map(&[("find", "ctrl-t")]));
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(
-            problems[0].contains("new_tab") && problems[0].contains("find"),
+            problems[0].contains("new_terminal") && problems[0].contains("find"),
             "{problems:?}"
         );
+    }
+
+    #[test]
+    fn removed_commands_are_ignored_not_errors() {
+        let overrides = map(&[("split_right", "ctrl-x"), ("new_tab", "ctrl-y")]);
+        let (keys, problems) = keymap(&overrides);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(keys.len(), Command::ALL.len());
+        assert!(!keys.iter().any(|(_, k)| k == "ctrl-x" || k == "ctrl-y"));
+    }
+
+    #[test]
+    fn terminal_keys_have_defaults() {
+        let (keys, _) = keymap(&BTreeMap::new());
+        for (name, key) in [
+            ("new_terminal", "ctrl-t"),
+            ("next_terminal", "ctrl-pagedown"),
+            ("previous_terminal", "ctrl-pageup"),
+        ] {
+            assert!(
+                keys.iter().any(|(c, k)| c.name() == name && k == key),
+                "{name}"
+            );
+        }
     }
 
     #[test]

@@ -97,6 +97,13 @@ impl Workspace {
                 let cwd = self.focused_cwd(cx);
                 self.open_tab(env, cwd, window, cx);
             }
+            Action::EditEnv(env) => match hydra_core::name::EnvName::parse(&env) {
+                Ok(name) => self.show_file(self.hydra.paths.env_file(&name), window, cx),
+                Err(e) => window.push_notification(
+                    Notification::error(e.to_string()).title("Edit environment"),
+                    cx,
+                ),
+            },
             Action::SignIn { env, tool } => {
                 let cwd = self.focused_cwd(cx);
                 let shell = self.hydra.shell(self.ui.default_shell.as_deref());

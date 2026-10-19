@@ -767,6 +767,59 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Restarts a tab's terminals so an edited env.toml applies, asking first when commands
+    /// are running.
+    fn restart_tab(&mut self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self
+            .tabs
+            .get(tab)
+            .and_then(|t| {
+                t.title
+                    .clone()
+                    .or_else(|| self.tab_terminal(t).map(|v| v.read(cx).label()))
+            })
+            .unwrap_or_default();
+        let running = self.running(&[tab], cx);
+        let Some(question) = sets::unload_question(&name, &running) else {
+            self.restart_tab_now(tab, cx);
+            return;
+        };
+        let workspace = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let ws = workspace.clone();
+            dialog
+                .title(format!("Restart {name}?"))
+                .child(v_flex().children(question.lines().map(|l| div().child(l.to_string()))))
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(Button::new("confirm").label("Restart").danger().on_click(
+                            move |_, window, cx| {
+                                window.close_dialog(cx);
+                                ws.update(cx, |ws, cx| ws.restart_tab_now(tab, cx));
+                            },
+                        )),
+                )
+        });
+    }
+
+    fn restart_tab_now(&mut self, tab: TabId, cx: &mut Context<Self>) {
+        let Some(t) = self.tabs.get(tab) else {
+            return;
+        };
+        for id in t.tree.panes() {
+            if let Some(view) = self.panes.get(&id) {
+                view.update(cx, |v, cx| v.restart(cx));
+            }
+        }
+    }
+
     fn move_focus(&mut self, dir: Dir, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = self.tabs.focus_dir(dir) {
             self.focus_pane(id, window, cx);
@@ -1231,7 +1284,14 @@ impl Workspace {
                             let ws = cx.entity();
                             move |menu, _, _| {
                                 let (save_ws, close_ws) = (ws.clone(), ws.clone());
-                                menu.item(PopupMenuItem::new("Save tab as group…").on_click(
+                                let restart_ws = ws.clone();
+                                menu.item(PopupMenuItem::new("Restart terminals").on_click(
+                                    move |_, window, cx| {
+                                        restart_ws
+                                            .update(cx, |ws, cx| ws.restart_tab(id, window, cx));
+                                    },
+                                ))
+                                .item(PopupMenuItem::new("Save tab as group…").on_click(
                                     move |_, window, cx| {
                                         save_ws.update(cx, |ws, cx| {
                                             ws.save_tab_as_group(id, window, cx)

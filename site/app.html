@@ -83,7 +83,7 @@
         <li>Selecting text copies it, with a brief "Copied" label. <kbd>Ctrl+Shift+V</kbd> pastes and <kbd>Ctrl+F</kbd> finds in the scrollback.</li>
         <li>Scrolled up into the history, a ↓ button appears at the bottom right and jumps back to the latest output.</li>
         <li><kbd>Tab</kbd> and <kbd>Shift+Tab</kbd> go to the shell, so PowerShell's completion cycles through matching folders and files.</li>
-        <li>Right-click a tab to save it as a group file or close it.</li>
+        <li>Right-click a tab to restart its terminals (in the folders they were in, so an edited <code>env.toml</code> applies; it asks first if a command is running), save it as a group file, or close it.</li>
       </ul>
       <p>The status bar shows the focused terminal's environment, its tools with a ✓ or ✗, the git branch and changes (<code>⎇ main · +1 ~2 ?1</code>) and the current folder. If an environment can't start (a missing SSH key, a secret that isn't stored), the pane shows hydra's error and how to fix it, with <strong>Retry</strong>.</p>
     </section>
@@ -159,6 +159,7 @@
           <tbody>
             <tr><td>Set: <em>name</em></td><td>Opens a <a href="#sets">set</a>, or focuses it if it's already open; a second entry unloads it.</td></tr>
             <tr><td>New tab: <em>env</em></td><td>A tab in that environment.</td></tr>
+            <tr><td>Edit environment: <em>env</em></td><td>Opens that environment's <code>env.toml</code> in the file pane. Restart the tab's terminals afterwards to apply it.</td></tr>
             <tr><td>Sign in: <em>tool</em> in <em>env</em></td><td>Runs the tool's sign-in in a new tab, as <code>hydra auth</code> does.</td></tr>
             <tr><td>Set secret: <em>env/key</em></td><td>Stores a value in a masked box, for secrets an <code>env.toml</code> refers to but that aren't stored yet (or any other).</td></tr>
             <tr><td>Open file… / Search in files…</td><td><a href="#find">Quick open and search</a>.</td></tr>

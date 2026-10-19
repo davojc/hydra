@@ -120,7 +120,7 @@ impl Workspace {
     }
 
     /// The panes of these tabs that are running a command, as `tab: pane`.
-    fn running(&self, tabs: &[TabId], cx: &App) -> Vec<String> {
+    pub(super) fn running(&self, tabs: &[TabId], cx: &App) -> Vec<String> {
         let mut out = Vec::new();
         for tab in tabs.iter().filter_map(|t| self.tabs.get(*t)) {
             for id in tab.tree.panes() {

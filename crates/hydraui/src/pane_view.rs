@@ -266,6 +266,13 @@ impl PaneView {
         cx.notify();
     }
 
+    /// Ends the shell (and whatever it runs) and starts a new one in the folder it was in, so
+    /// an edited env.toml applies.
+    pub fn restart(&mut self, cx: &mut Context<Self>) {
+        self.request.cwd = self.cwd.clone();
+        self.start(cx);
+    }
+
     /// Runs `prepare` and starts the shell off the UI thread. Also Retry and restart, so an
     /// edited env.toml applies (spec §6.4).
     fn start(&mut self, cx: &mut Context<Self>) {

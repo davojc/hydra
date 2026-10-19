@@ -16,6 +16,8 @@ pub enum Action {
     UnloadSet(String),
     /// A Loose tab in the environment.
     OpenEnv(String),
+    /// The environment's env.toml in the file pane.
+    EditEnv(String),
     SignIn {
         env: String,
         tool: String,
@@ -84,6 +86,10 @@ pub fn entries(
     }
     for env in envs {
         add(format!("New tab: {env}"), Action::OpenEnv(env.clone()));
+        add(
+            format!("Edit environment: {env}"),
+            Action::EditEnv(env.clone()),
+        );
     }
     for (env, tool) in sign_ins {
         add(
@@ -145,6 +151,7 @@ mod tests {
                 "Set: personal",
                 "Set: broken (invalid)",
                 "New tab: work",
+                "Edit environment: work",
                 "Sign in: github in work",
                 "Set secret: work/linear",
                 "Open file…",
@@ -169,25 +176,26 @@ mod tests {
             Action::Problem("line 3: unknown field".into())
         );
         assert_eq!(got[4].action, Action::OpenEnv("work".into()));
+        assert_eq!(got[5].action, Action::EditEnv("work".into()));
         assert_eq!(
-            got[5].action,
+            got[6].action,
             Action::SignIn {
                 env: "work".into(),
                 tool: "github".into()
             }
         );
-        assert_eq!(got[6].action, Action::SetSecret("work/linear".into()));
-        assert_eq!(got[7].action, Action::OpenFile);
-        assert_eq!(got[8].action, Action::SearchFiles);
-        assert_eq!(got[9].action, Action::OpenLayout);
-        assert_eq!(got[10].action, Action::SaveLayout);
-        assert_eq!(got[11].action, Action::StartPage);
-        assert_eq!(got[12].action, Action::OpenGroupFile);
-        assert_eq!(got[13].action, Action::SaveLooseAsGroup);
-        assert_eq!(got[14].action, Action::DeleteEnv);
-        assert_eq!(got[15].action, Action::SetEnvHome);
-        assert_eq!(got[16].action, Action::NewEnv);
-        assert_eq!(got[17].action, Action::NewSecret);
+        assert_eq!(got[7].action, Action::SetSecret("work/linear".into()));
+        assert_eq!(got[8].action, Action::OpenFile);
+        assert_eq!(got[9].action, Action::SearchFiles);
+        assert_eq!(got[10].action, Action::OpenLayout);
+        assert_eq!(got[11].action, Action::SaveLayout);
+        assert_eq!(got[12].action, Action::StartPage);
+        assert_eq!(got[13].action, Action::OpenGroupFile);
+        assert_eq!(got[14].action, Action::SaveLooseAsGroup);
+        assert_eq!(got[15].action, Action::DeleteEnv);
+        assert_eq!(got[16].action, Action::SetEnvHome);
+        assert_eq!(got[17].action, Action::NewEnv);
+        assert_eq!(got[18].action, Action::NewSecret);
     }
 
     #[test]

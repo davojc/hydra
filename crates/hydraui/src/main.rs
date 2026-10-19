@@ -57,7 +57,7 @@ fn main() {
         hydraui::updater::clean_old(&exe, hydra.as_deref());
     }
     gpui_platform::application()
-        .with_assets(gpui_kit_assets::Assets)
+        .with_assets(hydraui::assets::AppAssets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
             let mode = match ui.theme {

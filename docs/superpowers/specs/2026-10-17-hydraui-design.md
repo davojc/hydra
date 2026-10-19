@@ -370,7 +370,9 @@ built-in default theme.
 
 Toggled with `Ctrl+B`. Rooted at the focused pane's last OSC 7 folder (before
 any OSC 7, the pane's start cwd). Folders load lazily; `.gitignore` is
-respected; `notify` keeps it current.
+respected; `notify` keeps it current. Each row has an icon: an open or closed
+folder, or a file icon by extension (`{ }` for JSON, text, config, code,
+script, image, lock, else a plain page).
 
 - Click a file: open it in the tab's file pane (§7.8).
 - Ctrl-click a file: insert its quoted path at the terminal's cursor.

@@ -1204,7 +1204,7 @@ impl Workspace {
                 let tint = self.tint(&env);
                 let label = tab.title.clone().unwrap_or(label);
                 let busy = self.tab_activity(tab);
-                let dot = busy.map(|a| self.render_busy(a, tint, cx));
+                let dot = self.render_tab_dot(busy, tint, cx);
                 strip = strip.child(
                     h_flex()
                         .id(("tab", id))
@@ -1219,9 +1219,8 @@ impl Workspace {
                             ws.focus_active(window, cx);
                             cx.notify();
                         }))
-                        .child(div().size(px(8.)).rounded_full().bg(tint))
+                        .child(dot)
                         .child(div().text_sm().child(label))
-                        .children(dot)
                         .when_some(busy, |d, a| {
                             d.tooltip(move |window, cx| {
                                 gpui_component::tooltip::Tooltip::new(busy::tooltip_text(a))

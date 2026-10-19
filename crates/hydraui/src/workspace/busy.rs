@@ -80,20 +80,34 @@ impl Workspace {
             .flatten()
     }
 
-    /// The dot after a tab's name: blinking in the environment's colour while working,
-    /// steady amber while quiet.
-    pub(super) fn render_busy(
+    /// The tab's dot in the environment's colour: blinking while working, ringed in amber
+    /// while quiet, steady when idle.
+    pub(super) fn render_tab_dot(
         &self,
-        a: PaneActivity,
+        a: Option<PaneActivity>,
         tint: Hsla,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let dot = div().size(px(7.)).rounded_full();
-        match a.state {
-            Activity::Working => dot.bg(tint).opacity(if self.blink { 1.0 } else { 0.4 }),
-            _ => dot.bg(cx.theme().warning),
-        }
-        .into_any_element()
+        let state = a.map(|a| a.state).unwrap_or_default();
+        let dim = state == Activity::Working && !self.blink;
+        div()
+            .size(px(12.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .when(state == Activity::Waiting, |d| {
+                d.border_2().border_color(cx.theme().warning)
+            })
+            .child(
+                div()
+                    .size(px(8.))
+                    .rounded_full()
+                    .bg(tint)
+                    .opacity(if dim { 0.3 } else { 1.0 }),
+            )
+            .into_any_element()
     }
 }
 

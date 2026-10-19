@@ -11,7 +11,8 @@ use gpui::{
 };
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::tooltip::Tooltip;
-use gpui_component::{ActiveTheme, h_flex, v_flex};
+use gpui_component::{ActiveTheme, Icon, h_flex, v_flex};
+use gpui_kit_assets::IconName;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::file_tree::{FileTree, Row};
@@ -94,6 +95,35 @@ fn git_mark(
         )),
         _ if is_dir && changed.contains(rel) => Some(("•", Change::Modified)),
         _ => None,
+    }
+}
+
+/// A row's icon: an open or closed folder, or a file icon picked by extension.
+fn row_icon(name: &str, is_dir: bool, expanded: bool) -> IconName {
+    if is_dir {
+        return if expanded {
+            IconName::FolderOpen
+        } else {
+            IconName::Folder
+        };
+    }
+    let ext = Path::new(name)
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "json" | "jsonc" => IconName::FileBraces,
+        "md" | "markdown" | "txt" | "log" => IconName::FileText,
+        "yaml" | "yml" | "toml" | "ini" | "config" | "cfg" | "conf" | "env" | "xml" | "hydraui" => {
+            IconName::FileCog
+        }
+        "rs" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "py" | "cs" | "go" | "java" | "kt" | "c"
+        | "h" | "cpp" | "hpp" | "rb" | "php" | "swift" | "html" | "css" | "scss" | "sql"
+        | "lua" => IconName::FileCode,
+        "ps1" | "psm1" | "sh" | "bash" | "bat" | "cmd" => IconName::FileTerminal,
+        "png" | "jpg" | "jpeg" | "gif" | "svg" | "ico" | "webp" | "bmp" => IconName::FileImage,
+        "lock" => IconName::FileLock,
+        _ => IconName::File,
     }
 }
 
@@ -254,11 +284,13 @@ impl Render for FileTreeView {
                             .enumerate()
                             .map(|(i, row)| {
                                 let marker = match (row.entry.is_dir, row.expanded) {
-                                    (true, true) => "▾ ",
-                                    (true, false) => "▸ ",
-                                    _ => "  ",
+                                    (true, true) => "▾",
+                                    (true, false) => "▸",
+                                    _ => "",
                                 };
-                                let label = format!("{marker}{}", row.entry.name);
+                                let label = row.entry.name.clone();
+                                let icon =
+                                    row_icon(&row.entry.name, row.entry.is_dir, row.expanded);
                                 let tip: SharedString = if !row.entry.is_dir {
                                     "Click: open · Ctrl+click: insert the path".into()
                                 } else if can_cd {
@@ -290,6 +322,10 @@ impl Render for FileTreeView {
                                     .on_click(cx.listener(move |view, ev: &ClickEvent, _, cx| {
                                         view.click(&row, ev, cx)
                                     }))
+                                    .child(div().w(px(8.)).flex_none().child(marker))
+                                    .child(
+                                        Icon::new(icon).size(px(14.)).flex_none().text_color(muted),
+                                    )
                                     .child(
                                         div()
                                             .flex_1()
@@ -331,6 +367,42 @@ impl Render for FileTreeView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rows_get_an_icon_for_what_they_hold() {
+        use IconName::*;
+        assert_eq!(row_icon("src", true, false), Folder);
+        assert_eq!(row_icon("src", true, true), FolderOpen);
+        assert_eq!(row_icon("a.json", false, false), FileBraces);
+        assert_eq!(row_icon("README.MD", false, false), FileText);
+        assert_eq!(row_icon("ci.yml", false, false), FileCog);
+        assert_eq!(row_icon("Cargo.toml", false, false), FileCog);
+        assert_eq!(row_icon("main.rs", false, false), FileCode);
+        assert_eq!(row_icon("build.ps1", false, false), FileTerminal);
+        assert_eq!(row_icon("logo.png", false, false), FileImage);
+        assert_eq!(row_icon("Cargo.lock", false, false), FileLock);
+        assert_eq!(row_icon("LICENSE", false, false), File);
+        assert_eq!(row_icon(".gitignore", false, false), File);
+    }
+
+    #[test]
+    fn every_row_icon_is_bundled() {
+        use gpui::AssetSource;
+        let names = [
+            "a.json", "a.md", "a.yml", "a.rs", "a.ps1", "a.png", "a.lock", "a",
+        ];
+        let icons = names
+            .iter()
+            .map(|n| row_icon(n, false, false))
+            .chain([row_icon("d", true, false), row_icon("d", true, true)]);
+        for icon in icons {
+            let path = icon.path();
+            assert!(
+                crate::assets::AppAssets.load(&path).unwrap().is_some(),
+                "{path} isn't bundled"
+            );
+        }
+    }
 
     #[test]
     fn click_shows_a_file_and_ctrl_click_inserts_its_path() {

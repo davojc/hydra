@@ -1091,6 +1091,7 @@ impl Workspace {
         tree: &Tree,
         path: Vec<usize>,
         focused: PaneId,
+        current: Option<PaneId>,
         border: Hsla,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1112,7 +1113,8 @@ impl Workspace {
                 let Some(view) = self.panes.get(id) else {
                     return div().into_any_element();
                 };
-                let edge = if *id == focused {
+                // The tab's terminal keeps its outline while its file pane has the focus.
+                let edge = if *id == focused || Some(*id) == current {
                     self.tint(view.read(cx).env())
                 } else {
                     transparent_black()
@@ -1171,13 +1173,13 @@ impl Workspace {
                             d.w_full().h(relative(*ratio))
                         }
                     })
-                    .child(self.render_tree(first, child_path(0), focused, border, cx));
+                    .child(self.render_tree(first, child_path(0), focused, current, border, cx));
                 let two = div()
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
                     .overflow_hidden()
-                    .child(self.render_tree(second, child_path(1), focused, border, cx));
+                    .child(self.render_tree(second, child_path(1), focused, current, border, cx));
                 div()
                     .size_full()
                     .relative()
@@ -1401,7 +1403,14 @@ impl Render for Workspace {
         );
         let body = match self.tabs.active() {
             _ if self.start.is_some() => self.render_start_page(cx),
-            Some(tab) => self.render_tree(&tab.tree, Vec::new(), tab.focused, border, cx),
+            Some(tab) => {
+                let current = self
+                    .files
+                    .contains_key(&tab.focused)
+                    .then(|| self.tab_terminal(tab).map(|v| v.read(cx).id))
+                    .flatten();
+                self.render_tree(&tab.tree, Vec::new(), tab.focused, current, border, cx)
+            }
             None => div()
                 .size_full()
                 .flex()

@@ -231,6 +231,16 @@ pub fn write(board: &Board) -> String {
     }
     if !board.extra.is_empty() {
         out.push('\n');
+        // Under a bare `## Done` list a stray bullet would read back as a card, so unheaded
+        // extra gets a heading of its own (which parses as extra again).
+        if !board
+            .extra
+            .lines()
+            .next()
+            .is_some_and(|l| heading(l).is_some())
+        {
+            out.push_str("## Notes\n");
+        }
         out.push_str(&board.extra);
         out.push('\n');
     }
@@ -341,7 +351,25 @@ mod tests {
         assert!(b.extra.contains("Intro line") && b.extra.contains("loose prose"));
         assert!(b.extra.contains("## Notes\n- not a card"));
         let again = parse(&write(&b));
-        assert_eq!(again, b);
+        assert_eq!(again.columns, b.columns);
+        assert!(again.extra.starts_with("## Notes\n"));
+        assert!(again.extra.contains("Intro line") && again.extra.contains("loose prose"));
+        assert_eq!(parse(&write(&again)), again);
+    }
+
+    #[test]
+    fn extra_bullets_never_become_done_cards() {
+        for text in [
+            "Notes:\n- x\n\n## Backlog\n- a\n",
+            "## Backlog\n- a\n\nsome prose\n- b\n",
+        ] {
+            let b = parse(text);
+            assert!(!b.extra.is_empty());
+            let b2 = parse(&write(&b));
+            assert!(b2.cards(Column::Done).is_empty(), "{text:?}");
+            assert_eq!(b2.cards(Column::Backlog).first().unwrap(), "a");
+            assert_eq!(parse(&write(&b2)), b2);
+        }
     }
 
     #[test]

@@ -63,10 +63,17 @@ impl Workspace {
     }
 
     /// ✕ on the Tasks tab, or Ctrl+W in the board: the tab closes (the file stays) and the
-    /// terminal shows again with the focus.
+    /// terminal shows again with the focus. An edit that can't be saved keeps the tab open, so
+    /// the idea isn't lost (§1); its toast has said why.
     pub(super) fn close_tasks(&mut self, id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
         if !self.tasks_tabs.contains_key(&id) {
             return;
+        }
+        if let Some(view) = self.board_views.get(&id).cloned() {
+            view.update(cx, |v, cx| v.finish_edit(window, cx));
+            if view.read(cx).is_editing() {
+                return;
+            }
         }
         self.drop_tasks(id, window, cx);
         self.focus_active(window, cx);
@@ -76,6 +83,7 @@ impl Workspace {
 
     /// Removes terminal `id`'s Tasks tab, if any, saving an edit in progress first; its board
     /// goes when no other tab uses it. For closing the tab and closing the terminal.
+    /// A closing terminal takes its tab with it: an edit whose write fails is lost then.
     pub(super) fn drop_tasks(&mut self, id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
         self.tasks_tabs.remove(&id);
         self.board_focus.remove(&id);
@@ -106,15 +114,7 @@ impl Workspace {
     /// (a click elsewhere doesn't blur the editor), and the one on screen follows its terminal.
     pub(super) fn sync_boards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let visible = self.visible_tasks();
-        let hidden: Vec<Entity<TaskBoardView>> = self
-            .board_views
-            .iter()
-            .filter(|(id, v)| Some(**id) != visible && v.read(cx).is_editing())
-            .map(|(_, v)| v.clone())
-            .collect();
-        for view in hidden {
-            view.update(cx, |v, cx| v.finish_edit(window, cx));
-        }
+        self.finish_edits_except(visible, window, cx);
         if let Some(id) = visible {
             self.follow_project(id, window, cx);
         }
@@ -122,8 +122,23 @@ impl Workspace {
 
     /// Saves every board's edit in progress, as the window closes.
     pub(super) fn finish_board_edits(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let views: Vec<Entity<TaskBoardView>> = self.board_views.values().cloned().collect();
-        for view in views {
+        self.finish_edits_except(None, window, cx);
+    }
+
+    /// Saves the edit in progress of every board view but terminal `keep`'s.
+    fn finish_edits_except(
+        &mut self,
+        keep: Option<PaneId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let editing: Vec<Entity<TaskBoardView>> = self
+            .board_views
+            .iter()
+            .filter(|(id, v)| Some(**id) != keep && v.read(cx).is_editing())
+            .map(|(_, v)| v.clone())
+            .collect();
+        for view in editing {
             view.update(cx, |v, cx| v.finish_edit(window, cx));
         }
     }

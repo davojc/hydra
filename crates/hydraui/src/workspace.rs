@@ -479,6 +479,8 @@ impl Workspace {
         self.add_env_tab(env);
         let id = self.new_pane(request, window, cx);
         self.envs.add_terminal(env, id);
+        // The terminal it replaces on screen may have had a board with an edit open.
+        self.sync_boards(window, cx);
         self.focus_soon(id, window, cx);
         self.sync_tree(cx);
         self.autosave(window, cx);

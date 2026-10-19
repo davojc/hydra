@@ -27,6 +27,7 @@ pub mod quick_open;
 pub mod save_dialog;
 pub mod search;
 pub mod start_page;
+pub mod tasks;
 pub mod term_paths;
 pub mod updater;
 pub mod version;

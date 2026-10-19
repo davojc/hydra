@@ -2998,6 +2998,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "toml 0.8.23",
+ "windows 0.61.3",
  "windows-sys 0.61.2",
  "winresource",
 ]

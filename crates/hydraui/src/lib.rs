@@ -25,6 +25,7 @@ pub mod openapi_view;
 pub mod palette;
 pub mod pane_view;
 pub mod quick_open;
+pub mod save_dialog;
 pub mod search;
 pub mod split;
 pub mod start_page;

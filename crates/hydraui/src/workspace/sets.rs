@@ -22,6 +22,7 @@ use super::{DEFAULT_TREE_WIDTH, Workspace, tree_width_at};
 use crate::keys::FileTree;
 use crate::layout::{SavedPane, TabLayout, tab_file, tab_layout};
 use crate::layout_plan::{open_plan, reload_from, session_entry, taken_names};
+use crate::save_dialog::SaveKind;
 use crate::tabs::Tab;
 use crate::tabs::TabId;
 
@@ -494,8 +495,10 @@ impl Workspace {
 
     /// Asks where to save (the Save As dialog), then calls `then` with the path. Cancel does
     /// nothing. Debug builds take `HYDRAUI_TEST_SAVE_PATH` instead, for smoke tests.
+    /// The dialog knows the file type, so a name typed without one gets its extension.
     fn save_dialog(
         &mut self,
+        kind: SaveKind,
         dir: PathBuf,
         name: String,
         window: &mut Window,
@@ -507,11 +510,21 @@ impl Workspace {
             then(self, PathBuf::from(p), window, cx);
             return;
         }
-        let rx = cx.prompt_for_new_path(&dir, Some(&name));
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(path))) = rx.await {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        let owner = crate::claim::hwnd_of(window);
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::save_dialog::prompt(kind, &dir, &name, owner));
+        });
+        cx.spawn_in(window, async move |this, cx| match rx.await {
+            Ok(Ok(Some(path))) => {
                 let _ = this.update_in(cx, |ws, window, cx| then(ws, path, window, cx));
             }
+            Ok(Err(e)) => {
+                let _ = this.update_in(cx, |_, window, cx| {
+                    window.push_notification(Notification::error(e).title("Save"), cx)
+                });
+            }
+            _ => {}
         })
         .detach();
     }
@@ -578,9 +591,16 @@ impl Workspace {
                 (dir, "layout.hydraui".into())
             }
         };
-        self.save_dialog(dir, name, window, cx, |ws, path, window, cx| {
-            ws.save_layout_to(path, window, cx);
-        });
+        self.save_dialog(
+            SaveKind::Layout,
+            dir,
+            name,
+            window,
+            cx,
+            |ws, path, window, cx| {
+                ws.save_layout_to(path, window, cx);
+            },
+        );
     }
 
     pub(super) fn open_layout_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -606,14 +626,21 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.save_dialog(dir, name, window, cx, move |ws, path, window, cx| {
-            let result = write_set_file(&path, &ws.group_file_of(&tabs, cx));
-            if result.is_ok() {
-                // Saving a group over its own file isn't a change to offer a reload for.
-                ws.loaded.saved_to(&path);
-            }
-            ws.saved("the group", &path, result, window, cx);
-        });
+        self.save_dialog(
+            SaveKind::Group,
+            dir,
+            name,
+            window,
+            cx,
+            move |ws, path, window, cx| {
+                let result = write_set_file(&path, &ws.group_file_of(&tabs, cx));
+                if result.is_ok() {
+                    // Saving a group over its own file isn't a change to offer a reload for.
+                    ws.loaded.saved_to(&path);
+                }
+                ws.saved("the group", &path, result, window, cx);
+            },
+        );
     }
 
     pub(super) fn save_loose_as_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {

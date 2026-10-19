@@ -1,10 +1,10 @@
 use hydra_core::config::EnvConfig;
 use hydra_core::contribution::Contribution;
-use hydra_core::provider::{CommandRunner, Ctx, IdentityReport, Provider, ProviderError};
+use hydra_core::provider::{CommandRunner, Ctx, IdentityReport, Provider, ProviderError, Status};
 use hydra_core::secret::SecretRef;
 use hydra_platform::fs::write_private;
 
-use crate::report::from_command;
+use crate::report::{from_output, report};
 
 pub struct Gws;
 
@@ -69,8 +69,27 @@ impl Provider for Gws {
         })
     }
 
+    /// `gws auth status` prints JSON: when signed in, it checks the token and adds the
+    /// account's email as `user`.
     fn check(&self, _ctx: &Ctx, run: &dyn CommandRunner) -> IdentityReport {
-        from_command("gws", run, &["gws", "auth", "status"])
+        let out = run.output("gws", &["auth", "status"]);
+        let Some(status) = out
+            .as_ref()
+            .ok()
+            .and_then(|o| serde_json::from_str::<serde_json::Value>(o).ok())
+        else {
+            // An error, or not JSON (an older gws): read the way other tools are.
+            return from_output("gws", out);
+        };
+        let text = |key: &str| status.get(key).and_then(|v| v.as_str());
+        if text("auth_method").is_none_or(|m| m == "none") {
+            return report("gws", Status::Missing, "not signed in");
+        }
+        if status.get("token_valid").and_then(|v| v.as_bool()) == Some(false) {
+            let why = text("token_error").unwrap_or("the token was refused");
+            return report("gws", Status::Missing, format!("sign-in expired: {why}"));
+        }
+        report("gws", Status::Ok, text("user").unwrap_or("signed in"))
     }
 
     fn auth_command(&self, ctx: &Ctx) -> Option<Vec<String>> {
@@ -84,7 +103,7 @@ impl Provider for Gws {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::Fixture;
+    use crate::testutil::{FakeRunner, Fixture};
     use hydra_core::contribution::VarValue;
     use hydra_core::secret::SecretStore;
 
@@ -146,6 +165,67 @@ mod tests {
         let file = dir.join("credentials.json");
         std::fs::write(&file, "{\"old\":true}").unwrap();
         file
+    }
+
+    fn check_with(out: Result<&str, &str>) -> (Status, String) {
+        let f = Fixture::new("[gws]\n");
+        let run = FakeRunner::default().with("gws auth status", out);
+        let r = Gws.check(&f.ctx(), &run);
+        (r.status, r.detail)
+    }
+
+    #[test]
+    fn check_shows_the_signed_in_account() {
+        let signed_in = r#"{
+  "auth_method": "oauth2",
+  "credential_source": "encrypted_credentials",
+  "token_valid": true,
+  "user": "david@example.com",
+  "scopes": ["openid"]
+}"#;
+        assert_eq!(
+            check_with(Ok(signed_in)),
+            (Status::Ok, "david@example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn check_says_when_no_one_is_signed_in() {
+        let none = r#"
+{
+  "auth_method": "none",
+  "credential_source": "none",
+  "storage": "none",
+  "token_cache_exists": false
+}"#;
+        assert_eq!(
+            check_with(Ok(none)),
+            (Status::Missing, "not signed in".to_string())
+        );
+        let expired = r#"{"auth_method": "oauth2", "token_valid": false,
+            "token_error": "invalid_grant: Token has been expired or revoked."}"#;
+        assert_eq!(
+            check_with(Ok(expired)),
+            (
+                Status::Missing,
+                "sign-in expired: invalid_grant: Token has been expired or revoked.".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn check_without_an_email_still_says_signed_in() {
+        let no_user = r#"{"auth_method": "oauth2", "token_valid": true}"#;
+        assert_eq!(
+            check_with(Ok(no_user)),
+            (Status::Ok, "signed in".to_string())
+        );
+        // Output that isn't JSON (an older gws) and errors pass through.
+        assert_eq!(
+            check_with(Ok("Logged in as a@b.c\nmore")),
+            (Status::Ok, "Logged in as a@b.c".to_string())
+        );
+        assert_eq!(check_with(Err("gws: not found")).0, Status::Missing);
     }
 
     #[test]

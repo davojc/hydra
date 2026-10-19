@@ -14,7 +14,12 @@ pub fn from_command(provider: &str, run: &dyn CommandRunner, cmd: &[&str]) -> Id
     let Some((program, args)) = cmd.split_first() else {
         return report(provider, Status::Info, "configured");
     };
-    match run.output(program, args) {
+    from_output(provider, run.output(program, args))
+}
+
+/// An identity command's result read as `from_command` does: the first output line.
+pub fn from_output(provider: &str, out: Result<String, String>) -> IdentityReport {
+    match out {
         Ok(out) if !out.is_empty() => {
             report(provider, Status::Ok, out.lines().next().unwrap_or_default())
         }

@@ -175,12 +175,16 @@ impl ApiView {
             .id(SharedString::from(key.clone()))
             .gap_2()
             .child(div().w(px(12.)).text_color(muted).child(arrow));
+        // A schema listed by its own name (Schemas) doesn't repeat it as its type.
+        let repeats = name.as_ref().is_some_and(|(n, _)| *n == shown);
         if let Some((n, required)) = name {
             head = head
                 .child(div().font_family(mono.clone()).child(n))
                 .when(required, |d| d.child(div().text_color(danger).child("*")));
         }
-        head = head.child(div().text_color(muted).child(shown));
+        if !repeats {
+            head = head.child(div().text_color(muted).child(shown));
+        }
         let head = match &lvl.kind {
             Kind::External { file, .. } => {
                 let path = self.dir.join(file);
@@ -484,7 +488,9 @@ impl Render for ApiView {
                     .child(s.clone()),
             );
         }
-        content = content.child(Input::new(&self.filter).small());
+        if !api.groups.is_empty() {
+            content = content.child(Input::new(&self.filter).small());
+        }
         for g in &api.groups {
             let ops: Vec<&Operation> = g
                 .operations

@@ -198,6 +198,27 @@ fn operation(
     }
 }
 
+/// A parser's message as one plain line for the banner (which shows the line itself): the
+/// first line only, without `error:`, `line N column M:` or a trailing `at line N column M`.
+pub fn short_message(message: &str) -> String {
+    let first = message.lines().next().unwrap_or("").trim();
+    let mut s = first.strip_prefix("error:").unwrap_or(first).trim_start();
+    if let Some(rest) = s.strip_prefix("line ")
+        && let Some((_, after)) = rest.split_once(": ")
+    {
+        s = after;
+    }
+    let s = match s.rfind(" at line ") {
+        Some(i) => &s[..i],
+        None => s,
+    };
+    // serde's wording about Rust types means nothing to someone editing YAML.
+    if s.contains("deserialize") || s.contains("Option<") {
+        return "this isn't valid YAML here".into();
+    }
+    s.trim().to_string()
+}
+
 /// Reads a spec: YAML, or JSON when `json`. Operations are grouped by their first tag,
 /// groups in the `tags` list's order then as operations name them, untagged ones last
 /// under "default".
@@ -205,12 +226,12 @@ pub fn parse(text_in: &str, json: bool) -> Result<Api, ParseError> {
     let src = text_in.trim_start_matches('\u{feff}');
     let root: Value = if json {
         serde_json::from_str(src).map_err(|e| ParseError {
-            message: e.to_string(),
+            message: short_message(&e.to_string()),
             line: Some(e.line()),
         })?
     } else {
         serde_saphyr::from_str(src).map_err(|e| ParseError {
-            message: e.to_string(),
+            message: short_message(&e.to_string()),
             line: e.location().map(|l| l.line() as usize),
         })?
     };
@@ -498,6 +519,30 @@ components:
         assert_eq!(api.missing, ["info", "paths"]);
         assert_eq!(api.schemas, ["A"]);
         assert!(api.groups.is_empty());
+    }
+
+    #[test]
+    fn error_messages_are_one_plain_line() {
+        let err = parse("openapi: 3.0.0\ninfo:\n  title: [\n", false).unwrap_err();
+        assert!(!err.message.contains('\n'), "{:?}", err.message);
+        assert!(!err.message.starts_with("error:"), "{:?}", err.message);
+        assert!(
+            !err.message.contains("line "),
+            "the banner says the line: {:?}",
+            err.message
+        );
+        assert!(!err.message.is_empty());
+        assert_eq!(
+            short_message("error: line 1 column 1: cannot read this\n --> <input>:1:1\n |"),
+            "cannot read this"
+        );
+        assert_eq!(
+            short_message("expected value at line 3 column 1"),
+            "expected value"
+        );
+        // The YAML library's Rust wording becomes plain words.
+        let err = parse(": [openapi: 3.0.3\ninfo: {}\n", false).unwrap_err();
+        assert_eq!(err.message, "this isn't valid YAML here", "{err:?}");
     }
 
     #[test]

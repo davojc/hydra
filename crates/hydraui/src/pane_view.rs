@@ -1,7 +1,7 @@
 //! One terminal pane (spec §7.2, §7.5, §6.4): starts its shell through hydra off the UI
 //! thread, paints the grid, and turns keys, mouse and clipboard into input for the shell.
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
@@ -80,6 +80,9 @@ pub struct PaneView {
     warnings: Vec<String>,
     cwd: PathBuf,
     prompt: Option<PromptState>,
+    /// The user's name for this terminal (Rename, a layout's `title`); none: the folder's.
+    name: Option<String>,
+    /// The title the program set, kept for a tooltip; it never names the terminal.
     title: Option<String>,
     focus: FocusHandle,
     size: GridSize,
@@ -159,6 +162,17 @@ fn hit_cell(dx: f32, dy: f32, cell: (f32, f32), size: GridSize) -> Option<(usize
 
 /// The console host titles a pane with its program's path (`C:\...\pwsh.exe`) until the
 /// program sets a title of its own; that path names nothing useful, so the folder is used.
+/// A terminal's name: the user's, else its folder's name (spec §2.2 of the env-tabs design).
+pub fn label_for(name: Option<&str>, cwd: &Path) -> String {
+    match name.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => n.to_string(),
+        None => cwd
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| cwd.display().to_string()),
+    }
+}
+
 fn is_program_path(title: &str) -> bool {
     title.to_ascii_lowercase().ends_with(".exe")
 }
@@ -201,6 +215,7 @@ impl PaneView {
             slot: Slot::Starting,
             warnings,
             prompt: None,
+            name: None,
             title: None,
             focus,
             size: GridSize { cols: 80, rows: 24 },
@@ -245,14 +260,24 @@ impl PaneView {
         crate::activity::activity(running, self.prompt, last, now)
     }
 
-    /// The tab label: the title a program set, else the folder's name.
+    /// The terminal's name: the user's, else its folder's (spec §2.2 of the env-tabs design).
     pub fn label(&self) -> String {
-        self.title.clone().unwrap_or_else(|| {
-            self.cwd
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| self.cwd.display().to_string())
-        })
+        label_for(self.name.as_deref(), &self.cwd)
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// Names the terminal (trimmed; empty clears it back to the folder's name).
+    pub fn set_name(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        self.name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+        cx.emit(PaneEvent::TitleChanged);
+    }
+
+    /// The title the program set, for a tooltip only.
+    pub fn program_title(&self) -> Option<&str> {
+        self.title.as_deref()
     }
 
     /// Text for the shell as if typed (a path from the file tree, a `cd`).
@@ -1240,6 +1265,16 @@ mod tests {
         assert!(!shows_jump_to_bottom(0));
         assert!(shows_jump_to_bottom(1));
         assert!(shows_jump_to_bottom(500));
+    }
+
+    #[test]
+    fn the_users_name_wins_else_the_folder() {
+        let cwd = Path::new("C:/w/web");
+        assert_eq!(label_for(Some("api"), cwd), "api");
+        assert_eq!(label_for(None, cwd), "web");
+        assert_eq!(label_for(Some("  "), cwd), "web");
+        let root = Path::new("/");
+        assert_eq!(label_for(None, root), root.display().to_string());
     }
 
     #[test]

@@ -245,6 +245,13 @@ impl Hydra {
         env_tint(env, rgb)
     }
 
+    /// `env`'s `home` from env.toml (with `~`), when that folder exists.
+    pub fn env_home(&self, env: &str) -> Option<PathBuf> {
+        let cfg = load_env(&self.paths, &EnvName::parse(env).ok()?).ok()?;
+        let home = expand_tilde(cfg.home.as_deref()?, &self.user_home);
+        home.is_dir().then_some(home)
+    }
+
     /// `prepare` for a pane: guards off (spec §4.1), plus a sign-in's dropped variables and
     /// leniency about missing secrets.
     pub fn prepare(&self, req: &PaneRequest) -> Result<LaunchEnv, String> {
@@ -1084,6 +1091,44 @@ email = \"p@example.com\"
         let f = fx("");
         assert_eq!(f.hydra.tint("personal"), 0x112233);
         assert_eq!(f.hydra.tint("work"), env_tint("work", None));
+    }
+
+    #[test]
+    fn env_home_reads_env_toml_and_needs_the_folder() {
+        let f = fx("");
+        let root = f.hydra.paths.root().parent().unwrap().to_path_buf();
+        let write = |env: &str, toml: String| {
+            let n = EnvName::parse(env).unwrap();
+            std::fs::write(f.hydra.paths.env_file(&n), toml).unwrap();
+        };
+        let acme = root.join("acme");
+        std::fs::create_dir_all(&acme).unwrap();
+        write(
+            "work",
+            format!(
+                "home = {:?}
+",
+                acme.to_string_lossy()
+            ),
+        );
+        assert_eq!(f.hydra.env_home("work"), Some(acme));
+        let under = f.hydra.user_home.join("code");
+        std::fs::create_dir_all(&under).unwrap();
+        write(
+            "work",
+            "home = \"~/code\"
+"
+            .into(),
+        );
+        assert_eq!(f.hydra.env_home("work"), Some(under));
+        write(
+            "work",
+            "home = \"~/nope\"
+"
+            .into(),
+        );
+        assert_eq!(f.hydra.env_home("work"), None);
+        assert_eq!(f.hydra.env_home("personal"), None);
     }
 
     #[test]

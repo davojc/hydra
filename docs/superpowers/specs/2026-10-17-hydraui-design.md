@@ -142,6 +142,8 @@ Each change keeps the CLI's behaviour identical.
 
 ## 5. Sets (`hydraui-sets`)
 
+> Superseded by `2026-10-19-hydraui-environment-tabs-design.md`.
+
 ### 5.1 Format
 
 `~/.hydra/hydraui/sets/client-a.toml`; the file stem is the set name and must
@@ -305,6 +307,8 @@ disabled.
 
 ### 7.1 Window
 
+> Amended by `2026-10-19-hydraui-environment-tabs-design.md`.
+
 ```
 ┌───────────────────────────────────────────────────────────┐
 │ ⑂ client-a ▾               [Update hydra 0.7.0]  _  □  ✕  │  title bar (§7.11)
@@ -434,6 +438,8 @@ script, image, lock, else a plain page).
   marks the set invalid.
 
 ### 7.6 Ad-hoc tabs and keys
+
+> Amended by `2026-10-19-hydraui-environment-tabs-design.md`.
 
 `Ctrl+T` opens a Loose tab in the focused pane's cwd. Environment: folder
 binding → `default_env` in `config.toml` → a picker.
@@ -631,6 +637,8 @@ work on either kind of pane.
 
 ### 7.9 Layout and group files
 
+> Superseded by `2026-10-19-hydraui-environment-tabs-design.md`.
+
 Open tabs can be saved to files and opened from them, anywhere on disk,
 through the Windows Save As / Open dialogs. Saving is a snapshot: the open
 tabs don't change. Cancelling a dialog does nothing.
@@ -747,6 +755,8 @@ The release check, download, checksum and swap live in `hydra-update`, used by
 both `hydra update` (whose behaviour and output don't change) and hydraui.
 
 ### 7.12 Layouts and the start page
+
+> Amended by `2026-10-19-hydraui-environment-tabs-design.md`.
 
 Each window is either **untitled** or backed by one layout file (§7.9). Two
 hydraui windows never write the same file, and nothing is written behind the

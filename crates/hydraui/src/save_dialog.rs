@@ -1,4 +1,4 @@
-//! Save As for layout and group files (spec §7.9). The dialog knows the file type, so Windows
+//! Save As for layout files (spec §7.9). The dialog knows the file type, so Windows
 //! adds the extension when it's left off, and its "replace?" question is about the file that
 //! will really be written.
 use std::path::{Path, PathBuf};

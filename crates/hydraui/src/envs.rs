@@ -3,7 +3,12 @@
 //! the environment's single file pane.
 use std::path::{Path, PathBuf};
 
-pub use crate::split::PaneId;
+/// Identifies a terminal or file pane for the life of the window.
+pub type PaneId = u64;
+
+/// The file pane's share of the middle is dragged within these bounds.
+pub const MIN_RATIO: f32 = 0.1;
+pub const MAX_RATIO: f32 = 0.9;
 
 /// The terminal's share of the middle while the file pane shows.
 pub const DEFAULT_FILES_RATIO: f32 = 0.5;

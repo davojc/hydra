@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use hydra_core::paths::HydraPaths;
 use serde::{Deserialize, Serialize};
 
-use crate::files::write_atomic;
+use crate::layout::write_atomic;
 
 pub const MAX_RECENT: usize = 12;
 

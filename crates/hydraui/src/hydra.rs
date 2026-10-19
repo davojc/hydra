@@ -209,7 +209,7 @@ impl Hydra {
         std::fs::write(&config_file, config).map_err(|e| e.to_string())
     }
 
-    /// The environment for a new Loose tab in `cwd`: the folder's binding, else
+    /// The environment for a new terminal or window in `cwd`: the folder's binding, else
     /// `default_env`; `None` means ask (spec §7.6).
     pub fn adhoc_env(&self, cwd: &Path, default_env: Option<&str>) -> Option<String> {
         bindings::resolve(cwd, &self.global.bindings)

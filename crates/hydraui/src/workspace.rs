@@ -34,7 +34,7 @@ use hydraui_sets::layout::Layout;
 use hydraui_term::PromptState;
 
 use crate::config::UiConfig;
-use crate::envs::{EnvTab, EnvTabs, PaneId, new_terminal_cwd};
+use crate::envs::{EnvTab, EnvTabs, MAX_RATIO, MIN_RATIO, PaneId, new_terminal_cwd};
 use crate::file_pane::{FilePane, FilePaneEvent};
 use crate::file_tree::{cd_command, editor_command, quote_path};
 use crate::file_tree_view::{FileTreeView, TreeEvent};
@@ -45,7 +45,6 @@ use crate::keys::{
     TestDialog,
 };
 use crate::pane_view::{PaneEvent, PaneView, TermStyle};
-use crate::split::{MAX_RATIO, MIN_RATIO};
 use busy::PaneActivity;
 use terminal_list::LIST_WIDTH;
 use tree_ops::NameFor;

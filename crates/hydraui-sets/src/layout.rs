@@ -11,8 +11,26 @@ use hydra_core::paths::{HydraPaths, expand_tilde};
 use hydra_platform::shell::ShellKind;
 use serde::{Deserialize, Serialize};
 
-use crate::files::write_atomic;
-use crate::spec::{FilesSpec, PaneSpec};
+/// A file pane after resolution (spec §7.8).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FilesSpec {
+    /// Existing files, in file-tab order.
+    pub files: Vec<PathBuf>,
+    /// Always a valid index into `files` (0 when there are none).
+    pub active: usize,
+}
+
+/// A terminal after resolution: an environment, an existing folder and a shell.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaneSpec {
+    pub env: EnvName,
+    pub cwd: PathBuf,
+    pub shell: ShellKind,
+    /// Shell text run after the shell starts.
+    pub command: Option<String>,
+    /// The folder's bound environment, when an explicit `env` differs from it.
+    pub bound_elsewhere: Option<String>,
+}
 
 pub const LAYOUT_VERSION: u32 = 2;
 
@@ -142,6 +160,21 @@ pub fn write_layout(path: &Path, layout: &Layout) -> std::io::Result<()> {
         path,
         &toml::to_string(&layout).map_err(std::io::Error::other)?,
     )
+}
+
+/// Writes through a temporary file beside `path`, then replaces it: a failure leaves the old
+/// file and no temporary one.
+pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 /// What resolution needs from outside the file being opened.

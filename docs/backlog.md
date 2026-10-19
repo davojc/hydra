@@ -61,9 +61,11 @@ Detail: [plan 1 deferred](superpowers/notes/2026-10-03-plan-1-deferred.md),
 - **Sign-in URLs that a program breaks itself.** Plain URLs are clickable across rows the
   terminal wrapped; if Claude Code's sign-in screen splits a URL with its own line breaks, only
   one piece is clickable. Check during a real sign-in before changing anything.
-- **Not yet tried in the app:** Reveal in Explorer and New folder… in the file tree, saving a
-  group file through the new Save As, and the gws account line for a signed-in environment
-  (its fields were read from the gws program, not seen live).
+- **Not yet tried in the app:** Reveal in Explorer and New folder… in the file tree, and the
+  gws account line for a signed-in environment (its fields were read from the gws program, not
+  seen live).
+- **Terminal splits.** Removed with environment tabs; the user wants to decide how splitting
+  should behave before it returns.
 - Rows in the file tree lost their hover hints (they covered the right-click menu); the hints
   are the root line's tooltip now. A status-line hint might be easier to find.
 
@@ -81,7 +83,7 @@ Detail: [plan 1 deferred](superpowers/notes/2026-10-03-plan-1-deferred.md),
 ## Out of scope (decided, not pending)
 
 From the [hydraui spec](superpowers/specs/2026-10-17-hydraui-design.md): GUI editors for
-environments and sets, restoring scrollback after a restart, dragging files in the file tree,
+environments, restoring scrollback after a restart, dragging files in the file tree,
 command blocks, AI features and team features.
 
 ## Decided against

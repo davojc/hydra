@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>hydraui guide</title>
 <link rel="icon" type="image/png" href="favicon.png">
-<meta name="description" content="hydraui, hydra's desktop app: terminal tabs per environment, sets of tabs, a file tree with git changes and diffs, quick open and search, and each environment's accounts at a glance.">
+<meta name="description" content="hydraui, hydra's desktop app: one tab per environment with its terminals listed beside it, saved layouts, a file tree with git changes and diffs, quick open and search, and each environment's accounts at a glance.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@500;700;800&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap">
@@ -26,7 +26,7 @@
     <div class="grp">Getting started</div>
     <ol>
       <li><a href="#start">Install and first start</a></li>
-      <li><a href="#tabs">Tabs and splits</a></li>
+      <li><a href="#tabs">Environments and terminals</a></li>
     </ol>
     <div class="grp">Working</div>
     <ol>
@@ -38,8 +38,7 @@
     </ol>
     <div class="grp">Organising</div>
     <ol>
-      <li><a href="#sets">Sets</a></li>
-      <li><a href="#layouts">Layout and group files</a></li>
+      <li><a href="#layouts">Layout files</a></li>
     </ol>
     <div class="grp">Reference</div>
     <ol>
@@ -53,46 +52,49 @@
     <header class="hero">
       <span class="status">App guide · Windows 11</span>
       <h1>hydraui, the desktop app.</h1>
-      <p class="lede">hydraui is a terminal app built around hydra's <strong>environments</strong>. Every tab runs in one, coloured to match, with that environment's logins already in place. Around the terminals it adds what you reach for while working: a file tree that shows git changes, a pane for reading and editing files, quick open and search, and each environment's accounts in the status bar.</p>
+      <p class="lede">hydraui is a terminal app built around hydra's <strong>environments</strong>. Each environment you add gets a tab, coloured to match, with a list of its terminals beside it and that environment's logins already in place. Around the terminals it adds what you reach for while working: a file tree that shows git changes, a pane for reading and editing files, quick open and search, and each environment's accounts in the status bar.</p>
       <p><a class="download" href="https://github.com/davojc/hydra/releases/latest/download/hydra-setup.exe" download>Download the installer <span class="dl-version"></span><small>hydra + hydraui</small></a></p>
       <p class="portable">Portable: <a href="https://github.com/davojc/hydra/releases/latest/download/hydraui-x86_64-pc-windows-msvc.exe" download>hydraui.exe</a> · <a href="https://github.com/davojc/hydra/releases/latest/download/hydra-x86_64-pc-windows-msvc.exe" download>hydra.exe</a></p>
     </header>
 
     <figure class="shot">
       <img src="img/hydraui-window.png" width="1600" height="1013" alt="hydraui with tabs in three environments, the file tree marking changed files, a terminal and a rendered README.">
-      <figcaption>Tabs for the work, personal and client environments. The file tree marks what git sees changed; the README is rendered in the file pane beside the terminal.</figcaption>
+      <figcaption>Tabs for the work, personal and client environments. The file tree marks what git sees changed; the README is rendered in the file pane beside the terminal. Each environment lists its terminals on the left, and the file tree sits on the right.</figcaption>
     </figure>
 
     <section id="start">
       <h2>Install and first start</h2>
       <p>Run the <a href="https://github.com/davojc/hydra/releases/latest/download/hydra-setup.exe">installer</a>: it installs hydraui and hydra for you alone, with no admin prompt, puts hydraui in the Start menu and hydra on your <code>PATH</code>. Prefer a single file? The portable <code>hydraui-x86_64-pc-windows-msvc.exe</code> from the <a href="https://github.com/davojc/hydra/releases/latest">latest release</a> runs from anywhere and doesn't need <code>hydra.exe</code>. Either way hydraui reads and writes the same <code>~/.hydra</code> folder as the CLI, so environments made with either show up in both.</p>
-      <p>The first time, hydraui opens a tab in your home folder. With no environments yet, it asks you to name one and creates it, as <code>hydra env new</code> does. From then on hydraui starts on a page of your recent <a href="#layouts">layouts</a>: pick one, or <strong>New window</strong> for a plain terminal. A window saved as a layout keeps its file up to date as you work (the tabs, their folders and splits, the file tree and the files in each file pane); an untitled window isn't kept when you close it.</p>
-      <p>A new tab (<kbd>Ctrl+T</kbd>, or <strong>+</strong> in the tab strip) opens in the focused terminal's folder. Its environment is the one bound to that folder, else <code>default_env</code> from the <a href="#settings">settings</a>, else you pick one:</p>
+      <p>The first time, hydraui opens a terminal in your home folder. With no environments yet, it asks you to name one and creates it, as <code>hydra env new</code> does. From then on hydraui starts on a page of your recent <a href="#layouts">layouts</a>: pick one, or <strong>New window</strong> for a plain terminal. A window saved as a layout keeps its file up to date as you work (its environments, their terminals and folders, the file tree and the files in each file pane); an untitled window isn't kept when you close it.</p>
+      <p>A new window's first environment is the one bound to the home folder, else <code>default_env</code> from the <a href="#settings">settings</a>, else you pick one:</p>
       <figure class="shot narrow">
         <img src="img/hydraui-picker.png" width="598" height="325" alt="The Open a tab in… picker listing the client, personal and work environments with their colours, and New environment…" loading="lazy">
       </figure>
-      <div class="note"><strong>No folder guard in the app.</strong> A hydraui terminal gets exactly the isolation <code>hydra shell</code> gives, with one exception: it skips the CLI's folder guard. A push to the wrong account fails on its credentials anyway. If a tab's environment differs from the folder's binding, the pane shows a warning badge.</div>
+      <div class="note"><strong>No folder guard in the app.</strong> A hydraui terminal gets exactly the isolation <code>hydra shell</code> gives, with one exception: it skips the CLI's folder guard. A push to the wrong account fails on its credentials anyway. If a terminal's folder is bound to a different environment than the one it runs in, the pane shows a warning badge.</div>
     </section>
 
     <section id="tabs">
-      <h2>Tabs and splits</h2>
-      <p>Each tab is tinted with its environment's colour (<code>color</code> in its <code>env.toml</code>). Inside a tab, terminals form a split tree you can resize by dragging the dividers.</p>
+      <h2>Environments and terminals</h2>
+      <p>The tab strip shows one tab per environment in the window, tinted with its colour (<code>color</code> in its <code>env.toml</code>). A dot on a tab shows its busiest terminal: working, waiting or idle, so a background environment that needs you is easy to spot. <strong>+</strong> at the end of the strip lists the environments not yet in the window, with <strong>New environment…</strong> last; choosing one adds its tab with a terminal and selects it.</p>
+      <p>Down the left side is the selected environment's list of terminals, in the order you made them, each with an activity dot and a close button on hover. Click one to show it. <strong>+ New</strong> at the top (or <kbd>Ctrl+T</kbd>) adds a terminal in the same environment, in the shown terminal's folder. A terminal is named after its folder until you give it a name: the name is yours, and a program's own title never replaces it.</p>
       <ul>
-        <li><kbd>Ctrl+Shift+D</kbd> splits right and <kbd>Ctrl+Shift+E</kbd> splits down. The new terminal has the same environment and current folder as the one you split.</li>
-        <li><kbd>Alt+Arrows</kbd> move between panes; <kbd>Ctrl+Tab</kbd> and <kbd>Ctrl+Shift+Tab</kbd> move between tabs; <kbd>Ctrl+W</kbd> closes the focused pane.</li>
+        <li>Right-click a terminal: <strong>Rename…</strong> (an empty name goes back to the folder's), <strong>Restart</strong> (in the folder it was in, so an edited <code>env.toml</code> applies) or <strong>Close</strong>.</li>
+        <li>Right-click an environment's tab: <strong>New terminal</strong>, <strong>Restart environment</strong> (all its terminals) or <strong>Close environment</strong>. Closing or restarting asks first if a command is running, and closing also if a file has unsaved edits.</li>
+        <li>Closing a single terminal also asks when a command is running in it. An environment whose last terminal closes keeps its tab, with a <strong>New terminal</strong> button.</li>
+        <li><kbd>Ctrl+PageDown</kbd> and <kbd>Ctrl+PageUp</kbd> move between terminals in the list; <kbd>Ctrl+Tab</kbd> and <kbd>Ctrl+Shift+Tab</kbd> move between environment tabs; <kbd>Ctrl+W</kbd> closes the shown terminal.</li>
+        <li>Terminals you aren't looking at keep running and keep their scrollback.</li>
         <li>Selecting text copies it, with a brief "Copied" label. <kbd>Ctrl+Shift+V</kbd> pastes and <kbd>Ctrl+F</kbd> finds in the scrollback.</li>
         <li>Scrolled up into the history, a ↓ button appears at the bottom right and jumps back to the latest output.</li>
         <li><kbd>Tab</kbd> and <kbd>Shift+Tab</kbd> go to the shell, so PowerShell's completion cycles through matching folders and files.</li>
-        <li>Right-click a tab to restart its terminals (in the folders they were in, so an edited <code>env.toml</code> applies; it asks first if a command is running), save it as a group file, or close it.</li>
       </ul>
-      <p>The status bar shows the focused terminal's environment, its tools with a ✓ or ✗, the git branch and changes (<code>⎇ main · +1 ~2 ?1</code>) and the current folder. If an environment can't start (a missing SSH key, a secret that isn't stored), the pane shows hydra's error and how to fix it, with <strong>Retry</strong>.</p>
+      <p>The status bar shows the shown terminal's environment, its tools with a ✓ or ✗, the git branch and changes (<code>⎇ main · +1 ~2 ?1</code>) and the current folder. If an environment can't start (a missing SSH key, a secret that isn't stored), the pane shows hydra's error and how to fix it, with <strong>Retry</strong>.</p>
     </section>
 
     <section id="tree">
       <h2>File tree and git</h2>
-      <p><kbd>Ctrl+B</kbd> shows the file tree, rooted at the focused terminal's current folder; it follows you as you <code>cd</code>. It respects <code>.gitignore</code> and updates as files change.</p>
+      <p><kbd>Ctrl+B</kbd> shows the file tree on the right, rooted at the shown terminal's current folder; it follows you as you <code>cd</code> and as you switch terminals or environments. Drag its edge to resize it. It respects <code>.gitignore</code> and updates as files change.</p>
       <ul>
-        <li><strong>Click</strong> a file to open it in the tab's file pane.</li>
+        <li><strong>Click</strong> a file to open it in the environment's file pane.</li>
         <li><strong>Ctrl+click</strong> a file to type its quoted path at the terminal's cursor.</li>
         <li><strong>Double-click</strong> a folder to <code>cd</code> there, when the shell is at its prompt.</li>
       </ul>
@@ -101,12 +103,12 @@
         <img src="img/hydraui-diff.png" width="1600" height="1013" alt="A side-by-side diff of src/routes.rs: removed lines on the left, added lines on the right." loading="lazy">
         <figcaption>The diff opens as its own tab in the file pane, next to the file itself. Renamed files are compared with their old name.</figcaption>
       </figure>
-      <p>Right-click a file or folder for <strong>New file…</strong>, <strong>New folder…</strong>, <strong>cd here</strong>, <strong>Open in new tab</strong> (folders), <strong>Reveal in Explorer</strong>, <strong>Rename…</strong>, <strong>Delete…</strong> (to the Recycle Bin, after asking), <strong>Copy path</strong> and <strong>Copy relative path</strong>. Open files follow a rename.</p>
+      <p>Right-click a file or folder for <strong>New file…</strong>, <strong>New folder…</strong>, <strong>cd here</strong>, <strong>New terminal here</strong> (folders), <strong>Reveal in Explorer</strong>, <strong>Rename…</strong>, <strong>Delete…</strong> (to the Recycle Bin, after asking), <strong>Copy path</strong> and <strong>Copy relative path</strong>. Open files follow a rename.</p>
     </section>
 
     <section id="files">
       <h2>The file pane</h2>
-      <p>Opening a file splits the tab: the terminal on the left, the file pane on the right, with a tab per open file.</p>
+      <p>Opening a file splits the middle: the shown terminal on the left, the file pane on its right, next to the tree, with a tab per open file. Each environment has one file pane, and it stays beside whichever of its terminals is shown.</p>
       <ul>
         <li><strong>Raw</strong> is an editor with syntax highlighting, line numbers and find. <kbd>Ctrl+S</kbd> saves, keeping the file's line endings and encoding, so a save changes only what you edited.</li>
         <li><strong>Rendered</strong> shows Markdown as a page. Markdown files open rendered; the header switches between the two. Links open in your browser, and images load only from local files.</li>
@@ -119,7 +121,7 @@
 
     <section id="find">
       <h2>Finding files</h2>
-      <p>All three search the focused terminal's folder and respect <code>.gitignore</code>.</p>
+      <p>All three search the shown terminal's folder and respect <code>.gitignore</code>.</p>
       <h3>Clickable paths</h3>
       <p>Hold <kbd>Ctrl</kbd> over terminal output and a path under the mouse is underlined; <kbd>Ctrl</kbd>+click opens it at its line. Compiler errors, test failures and <code>grep -n</code> output all work: <code>src/main.rs:42</code>, <code>src/main.rs:42:7</code>, <code>src\main.rs(42,7)</code>, even when a long path wraps onto the next row. Web links, such as the URL a sign-in prints, open in the browser the same way.</p>
       <h3>Quick open <kbd>Ctrl+Shift+O</kbd></h3>
@@ -137,12 +139,12 @@
 
     <section id="accounts">
       <h2>Accounts</h2>
-      <p>The status bar lists the focused environment's tools, each with a ✓ when its login matches and a ✗ when it's missing or wrong. Click the environment's name for the details, checked again as it opens:</p>
+      <p>The status bar lists the shown environment's tools, each with a ✓ when its login matches and a ✗ when it's missing or wrong. Click the environment's name for the details, checked again as it opens:</p>
       <figure class="shot narrow">
         <img src="img/hydraui-accounts.png" width="751" height="223" alt="The Accounts in work popover: github not signed in, git signed in as sam@work.example, with Refresh and Add account…" loading="lazy">
       </figure>
       <ul>
-        <li><strong>Add account…</strong> turns a tool on for the environment, as <code>hydra add</code> does. Tools that only need a sign-in (Claude Code, GitHub, Azure, Google Cloud, Codex, Google Workspace) sign in straight away in a new tab; git, AWS, Gemini and Kubernetes ask for their settings first.</li>
+        <li><strong>Add account…</strong> turns a tool on for the environment, as <code>hydra add</code> does. Tools that only need a sign-in (Claude Code, GitHub, Azure, Google Cloud, Codex, Google Workspace) sign in straight away in a new terminal; git, AWS, Gemini and Kubernetes ask for their settings first.</li>
         <li><strong>Use from…</strong> on a tool borrows another environment's login for it, so you sign in once and use it in both.</li>
         <li>A borrowed login says which environment it comes from.</li>
       </ul>
@@ -152,67 +154,51 @@
       <h2>The launcher</h2>
       <p><kbd>Ctrl+Shift+P</kbd> opens the launcher: type to filter, Enter to run.</p>
       <figure class="shot narrow">
-        <img src="img/hydraui-launcher.png" width="598" height="531" alt="The launcher listing New tab entries for each environment, Sign in: github in work, Open file…, Search in files…, and layout entries." loading="lazy">
+        <img src="img/hydraui-launcher.png" width="598" height="531" alt="The launcher listing Environment entries for each environment, Sign in: github in work, Open file…, Search in files…, and layout entries." loading="lazy">
       </figure>
       <div class="tbl">
         <table>
           <thead><tr><th>Entry</th><th>What it does</th></tr></thead>
           <tbody>
-            <tr><td>Set: <em>name</em></td><td>Opens a <a href="#sets">set</a>, or focuses it if it's already open; a second entry unloads it.</td></tr>
-            <tr><td>New tab: <em>env</em></td><td>A tab in that environment.</td></tr>
-            <tr><td>Edit environment: <em>env</em></td><td>Opens that environment's <code>env.toml</code> in the file pane. Restart the tab's terminals afterwards to apply it.</td></tr>
-            <tr><td>Sign in: <em>tool</em> in <em>env</em></td><td>Runs the tool's sign-in in a new tab, as <code>hydra auth</code> does.</td></tr>
+            <tr><td>Environment: <em>env</em></td><td>Adds that environment's tab to the window, or selects it if it's already there.</td></tr>
+            <tr><td>Edit environment: <em>env</em></td><td>Opens that environment's <code>env.toml</code> in the file pane. Restart the environment afterwards to apply it.</td></tr>
+            <tr><td>Sign in: <em>tool</em> in <em>env</em></td><td>Runs the tool's sign-in in a new terminal, adding the environment's tab if needed, as <code>hydra auth</code> does.</td></tr>
             <tr><td>Set secret: <em>env/key</em></td><td>Stores a value in a masked box, for secrets an <code>env.toml</code> refers to but that aren't stored yet (or any other).</td></tr>
             <tr><td>Open file… / Search in files…</td><td><a href="#find">Quick open and search</a>.</td></tr>
-            <tr><td>New environment…</td><td>Name it and it's created, as <code>hydra env new</code> does, with a tab open in it.</td></tr>
+            <tr><td>New environment…</td><td>Name it and it's created, as <code>hydra env new</code> does, with its tab added.</td></tr>
             <tr><td>Delete environment…</td><td>Like <code>hydra env rm</code>: refused while it has terminals open; otherwise lists its folder and secrets, and asks whether its saved logins go too.</td></tr>
             <tr><td>Set environment home…</td><td>Pick a folder: new terminals for the environment open there, and the folder is bound to it.</td></tr>
-            <tr><td>Layout and group files</td><td>Save and open <a href="#layouts">layout and group files</a>.</td></tr>
-            <tr><td>Open config folder / Reload config</td><td>Opens <code>~/.hydra/hydraui</code>, where the settings and sets live; reloads the <a href="#settings">settings</a> and hydra's bindings without restarting.</td></tr>
+            <tr><td>Open layout file… / Save layout as… / Start page</td><td>Open and save <a href="#layouts">layout files</a>, or go back to the start page.</td></tr>
+            <tr><td>Open config folder / Reload config</td><td>Opens <code>~/.hydra/hydraui</code>, where the settings live; reloads the <a href="#settings">settings</a> and hydra's bindings without restarting.</td></tr>
           </tbody>
         </table>
       </div>
     </section>
 
-    <section id="sets">
-      <h2>Sets</h2>
-      <p>A set is a project's tabs written down: which environments, folders, splits and startup commands. Put it in <code>~/.hydra/hydraui/sets/</code> and it appears in the launcher; loading it opens all its tabs under one group header, and unloading it closes them (asking first if something is still running).</p>
+    <section id="layouts">
+      <h2>Layout files</h2>
+      <p>A layout file (<code>*.hydraui</code>) is a window written down: its environments in tab order, each one's terminals (their names and folders) and file pane, the file tree and what is selected. Each window has one layout, named in its title bar; the name's ▾ menu has <strong>Save layout as…</strong>, <strong>Open layout file…</strong>, <strong>Recent</strong> and <strong>Reveal in Explorer</strong>. Once saved, the window keeps the file up to date. Opening a layout in a window that already has one opens a new window; opening one that's already open brings its window forward, so two windows never write the same file. With the installer, double-clicking a <code>.hydraui</code> file opens it.</p>
       <div class="term">
-        <div class="term-bar"><span class="tab plain">~/.hydra/hydraui/sets/client-a.toml</span></div>
-<pre><span class="k">env</span> = <span class="s">"work"</span>                    <span class="c"># every pane's environment unless it says otherwise</span>
-<span class="k">cwd</span> = <span class="s">"E:/work/client-a"</span>
+        <div class="term-bar"><span class="tab plain">client-a.hydraui</span></div>
+<pre><span class="k">version</span> = 2
+<span class="k">active_env</span> = <span class="s">"work"</span>
 
-[[<span class="k">tab</span>]]
-<span class="k">title</span> = <span class="s">"api"</span>
-<span class="k">cwd</span> = <span class="s">"api"</span>                     <span class="c"># relative to the set's cwd</span>
-<span class="k">layout</span> = { split = <span class="s">"right"</span>, ratio = 0.6, panes = [
-  { command = <span class="s">"claude"</span> },
-  { split = <span class="s">"down"</span>, panes = [
-      { command = <span class="s">"npm run dev"</span> },
-      { },                        <span class="c"># a plain shell</span>
-  ] },
-] }
+[[<span class="k">env</span>]]
+<span class="k">name</span> = <span class="s">"work"</span>
 
-[[<span class="k">tab</span>]]
-<span class="k">title</span> = <span class="s">"infra"</span>
-<span class="k">env</span> = <span class="s">"personal"</span>
-<span class="k">command</span> = <span class="s">"terraform plan"</span></pre>
+[[<span class="k">env</span>.<span class="k">terminal</span>]]
+<span class="k">title</span> = <span class="s">"claude"</span>                  <span class="c"># optional: the name you gave it</span>
+<span class="k">cwd</span> = <span class="s">"E:/work/api"</span>
+<span class="k">command</span> = <span class="s">"claude"</span>                <span class="c"># optional, hand-written: runs whenever the layout opens</span>
+
+[[<span class="k">env</span>.<span class="k">terminal</span>]]
+<span class="k">cwd</span> = <span class="s">"~/blog"</span></pre>
       </div>
       <ul>
-        <li>A pane's environment comes from the pane, then the tab, then the set, then the folder's binding. A set that can't resolve one doesn't open, and says which pane.</li>
-        <li>A layout node can be a file pane instead: <code>files = ["README.md"]</code> opens those files beside the terminals.</li>
-        <li>If a loaded set's file changes, its header offers <strong>reload</strong>. Several sets can be open at once; tabs you open by hand sit in the <strong>Loose</strong> group.</li>
+        <li>An environment that no longer exists, or a terminal whose folder is gone, is skipped with a message but kept in the file.</li>
+        <li>Scrollback, running programs and unsaved edits aren't saved.</li>
+        <li>Layouts made by earlier versions of hydraui (without <code>version = 2</code>) aren't opened, and the file is left as it is. Sets and group files are gone; <code>~/.hydra/hydraui/sets</code> is no longer read.</li>
       </ul>
-    </section>
-
-    <section id="layouts">
-      <h2>Layout and group files</h2>
-      <p>You don't have to write sets by hand: save what's open instead.</p>
-      <ul>
-        <li><strong>Group file:</strong> tabs in the set format, with their splits, folders, environments, startup commands and file panes. Right-click a tab (<strong>Save tab as group…</strong>) or a group header (<strong>Save group…</strong>), or save every Loose tab from the launcher. Save it into the sets folder and it becomes a set.</li>
-        <li><strong>Layout file</strong> (<code>*.hydraui</code>): the whole window, meaning its open sets, Loose tabs and file tree. Each window has one layout, named in its title bar; the name's ▾ menu has <strong>Save layout as…</strong>, <strong>Open layout file…</strong>, <strong>Recent</strong> and <strong>Reveal in Explorer</strong>. Once saved, the window keeps the file up to date. Opening a layout in a window that already has one opens a new window; opening one that's already open brings its window forward, so two windows never write the same file. With the installer, double-clicking a <code>.hydraui</code> file opens it. Older <code>*.hydraui.toml</code> files are converted when you open them.</li>
-      </ul>
-      <p>A group file is a snapshot: the open tabs don't change. Scrollback and running programs aren't saved in either kind of file.</p>
     </section>
 
     <section id="keys">
@@ -222,9 +208,9 @@
           <thead><tr><th>Action</th><th>Default</th><th>Setting</th></tr></thead>
           <tbody>
             <tr><td>New terminal</td><td><kbd>Ctrl+T</kbd></td><td><code>new_terminal</code></td></tr>
-            <tr><td>Close pane</td><td><kbd>Ctrl+W</kbd></td><td><code>close_pane</code></td></tr>
+            <tr><td>Close terminal</td><td><kbd>Ctrl+W</kbd></td><td><code>close_pane</code></td></tr>
             <tr><td>Next / previous terminal</td><td><kbd>Ctrl+PageDown</kbd> / <kbd>Ctrl+PageUp</kbd></td><td><code>next_terminal</code>, <code>previous_terminal</code></td></tr>
-            <tr><td>Next / previous tab</td><td><kbd>Ctrl+Tab</kbd> / <kbd>Ctrl+Shift+Tab</kbd></td><td><code>next_tab</code>, <code>previous_tab</code></td></tr>
+            <tr><td>Next / previous environment</td><td><kbd>Ctrl+Tab</kbd> / <kbd>Ctrl+Shift+Tab</kbd></td><td><code>next_tab</code>, <code>previous_tab</code></td></tr>
             <tr><td>Copy / paste</td><td><kbd>Ctrl+Shift+C</kbd> / <kbd>Ctrl+Shift+V</kbd></td><td><code>copy</code>, <code>paste</code></td></tr>
             <tr><td>Find in scrollback</td><td><kbd>Ctrl+F</kbd></td><td><code>find</code></td></tr>
             <tr><td>Launcher</td><td><kbd>Ctrl+Shift+P</kbd></td><td><code>launcher</code></td></tr>
@@ -246,7 +232,7 @@
 <pre><span class="k">font</span> = <span class="s">"Cascadia Mono"</span>          <span class="c"># the default</span>
 <span class="k">font_size</span> = 14
 <span class="k">theme</span> = <span class="s">"dark"</span>                   <span class="c"># or "light": hydraui's own controls</span>
-<span class="k">default_env</span> = <span class="s">"work"</span>             <span class="c"># for new tabs in folders nothing is bound to</span>
+<span class="k">default_env</span> = <span class="s">"work"</span>             <span class="c"># for new windows in folders nothing is bound to</span>
 <span class="k">default_shell</span> = <span class="s">"pwsh"</span>           <span class="c"># or "bash"</span>
 <span class="k">editor</span> = <span class="s">"code"</span>                  <span class="c"># for Open in editor</span>
 

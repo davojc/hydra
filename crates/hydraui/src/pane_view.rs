@@ -26,6 +26,7 @@ use hydraui_term::alacritty_terminal::term::search::Match;
 use hydraui_term::alacritty_terminal::term::{TermMode, viewport_to_point};
 use hydraui_term::{GridSize, Pane, PromptState, TermEvent};
 
+use crate::envs::PaneId;
 use crate::frame::{
     CursorKind, Frame, Span, Style, build_frame, find_next, link_at, underline_cells, visible_rows,
 };
@@ -35,7 +36,6 @@ use crate::input::{
 };
 use crate::keys::{CopyText, Find, PasteText, TerminalBackTab, TerminalTab};
 use crate::palette::Palette;
-use crate::split::PaneId;
 
 /// The font and colours every pane draws with.
 pub struct TermStyle {
@@ -160,8 +160,6 @@ fn hit_cell(dx: f32, dy: f32, cell: (f32, f32), size: GridSize) -> Option<(usize
     inside.then(|| grid_cell(dx, dy, cell, size))
 }
 
-/// The console host titles a pane with its program's path (`C:\...\pwsh.exe`) until the
-/// program sets a title of its own; that path names nothing useful, so the folder is used.
 /// A terminal's name: the user's, else its folder's name (spec §2.2 of the env-tabs design).
 pub fn label_for(name: Option<&str>, cwd: &Path) -> String {
     match name.map(str::trim).filter(|n| !n.is_empty()) {
@@ -173,6 +171,8 @@ pub fn label_for(name: Option<&str>, cwd: &Path) -> String {
     }
 }
 
+/// The console host titles a pane with its program's path (`C:\...\pwsh.exe`) until the
+/// program sets a title of its own; that path names nothing useful, so the folder is used.
 fn is_program_path(title: &str) -> bool {
     title.to_ascii_lowercase().ends_with(".exe")
 }

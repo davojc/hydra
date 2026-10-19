@@ -99,8 +99,9 @@ the right.
   purpose.)
 - Keys to move to the next / previous terminal in the list: builder's call (suggest
   Ctrl+PageDown / Ctrl+PageUp), rebindable under `[keys]` like the rest.
-- The list's width is fixed or draggable at the builder's call; it can be hidden with a key
-  (builder's call) but is shown by default.
+- The list's width drags: its right edge is a divider, at least 120 px and never so wide that the
+  middle falls under its minimum beside the tree; the width is saved in the layout (§3). It can be
+  hidden with a key (builder's call) but is shown by default.
 
 ### 2.3 Middle
 
@@ -139,6 +140,7 @@ saving on change, the start page, the recent list, one window per file and the c
 version = 2
 active_env = "work"
 tree = { open = true, width = 280.0 }
+list = { width = 240.0 }         # the terminal list; omitted at its default width
 
 [[env]]
 name = "work"
@@ -175,7 +177,7 @@ cwd = "~/blog"
 - An `env` entry with no terminals opens as a tab with the empty state (§2.2).
 - Saved on: environments added, closed or reordered, terminals added, closed or renamed, the
   shown terminal or selected environment changing, file pane files changing, the tree toggled
-  or resized, and window close. Not saved: scrollback, running commands, unsaved edits.
+  or resized, the terminal list resized, and window close. Not saved: scrollback, running commands, unsaved edits.
 - **New window** (start page) opens untitled with one environment tab and one terminal in the
   home folder; its environment is chosen as Ctrl+T's is today (folder binding → `default_env` →
   a picker).

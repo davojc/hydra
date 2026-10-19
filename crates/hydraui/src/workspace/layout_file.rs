@@ -9,13 +9,15 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::notification::Notification;
 use gpui_component::{WindowExt, h_flex, v_flex};
 use hydraui_sets::layout::{
-    EnvFile, FilesFile, LAYOUT_VERSION, Layout, LayoutError, TerminalFile, TreeFile, plan_layout,
-    read_layout, write_layout,
+    EnvFile, FilesFile, LAYOUT_VERSION, Layout, LayoutError, ListFile, TerminalFile, TreeFile,
+    plan_layout, read_layout, write_layout,
 };
 use hydraui_sets::{Context as LayoutContext, PaneSpec};
 use hydraui_term::PromptState;
 
-use super::{DEFAULT_TREE_WIDTH, Workspace, clamp_tree_width};
+use super::{
+    DEFAULT_LIST_WIDTH, DEFAULT_TREE_WIDTH, Workspace, clamp_list_width, clamp_tree_width,
+};
 use crate::envs::PaneId;
 use crate::hydra::PaneRequest;
 use crate::keys::FileTree;
@@ -160,6 +162,9 @@ impl Workspace {
                     open: self.tree.is_some(),
                     width: (self.tree_width != DEFAULT_TREE_WIDTH).then_some(self.tree_width),
                 }
+            }),
+            list: (self.list_width != DEFAULT_LIST_WIDTH).then_some(ListFile {
+                width: Some(self.list_width),
             }),
             envs,
         }
@@ -337,14 +342,34 @@ impl Workspace {
                 self.envs.set_files(&env.name, Some(id));
             }
         }
-        if let Some(tree) = plan.tree
+        // The list's limit leaves room for the tree, the tree's for the list: the list is
+        // clamped alone first, the tree beside it, then the list again beside the tree.
+        let width = f32::from(window.viewport_size().width);
+        let list = clamp_list_width(
+            plan.list
+                .and_then(|l| l.width)
+                .unwrap_or(DEFAULT_LIST_WIDTH),
+            width,
+            0.0,
+        );
+        if let Some(tree) = &plan.tree
             && self.tree.is_none()
         {
-            let width = f32::from(window.viewport_size().width);
-            self.tree_width = clamp_tree_width(tree.width.unwrap_or(DEFAULT_TREE_WIDTH), width);
-            if tree.open {
-                self.toggle_tree(&FileTree, window, cx);
-            }
+            let saved = tree.width.unwrap_or(DEFAULT_TREE_WIDTH);
+            self.tree_width = clamp_tree_width(saved, width, list + super::LIST_DIVIDER_WIDTH);
+        }
+        let tree_open = self.tree.is_some() || plan.tree.as_ref().is_some_and(|t| t.open);
+        let tree_space = if tree_open {
+            self.tree_width + super::TREE_DIVIDER_WIDTH
+        } else {
+            0.0
+        };
+        self.list_width = clamp_list_width(list, width, tree_space);
+        if let Some(tree) = plan.tree
+            && self.tree.is_none()
+            && tree.open
+        {
+            self.toggle_tree(&FileTree, window, cx);
         }
         if let Some(env) = plan.active_env {
             self.envs.activate(&env);

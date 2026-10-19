@@ -44,6 +44,8 @@ pub struct Layout {
     pub active_env: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tree: Option<TreeFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list: Option<ListFile>,
     #[serde(default, rename = "env", skip_serializing_if = "Vec::is_empty")]
     pub envs: Vec<EnvFile>,
 }
@@ -54,6 +56,14 @@ pub struct Layout {
 pub struct TreeFile {
     #[serde(default)]
     pub open: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f32>,
+}
+
+/// The terminal list: its dragged width.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<f32>,
 }
@@ -210,6 +220,7 @@ pub struct LayoutPlan {
     pub envs: Vec<PlannedEnv>,
     pub active_env: Option<String>,
     pub tree: Option<TreeFile>,
+    pub list: Option<ListFile>,
     /// One toast each.
     pub problems: Vec<String>,
     /// Environments and terminals that didn't open, kept in what is written back.
@@ -233,6 +244,7 @@ pub fn plan_layout(ctx: &Context, layout: &Layout) -> LayoutPlan {
         envs: Vec::new(),
         active_env: None,
         tree: layout.tree.clone(),
+        list: layout.list.clone(),
         problems: Vec::new(),
         unopened: Layout {
             version: LAYOUT_VERSION,
@@ -409,6 +421,26 @@ cwd = "~/blog"
     }
 
     #[test]
+    fn a_list_width_round_trips() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("l.hydraui");
+        let layout = Layout {
+            version: LAYOUT_VERSION,
+            list: Some(ListFile { width: Some(240.0) }),
+            ..Default::default()
+        };
+        write_layout(&p, &layout).unwrap();
+        assert!(std::fs::read_to_string(&p).unwrap().contains("[list]"));
+        assert_eq!(read_layout(&p).unwrap(), layout);
+    }
+
+    #[test]
+    fn a_layout_without_a_list_parses_with_none() {
+        let l = parse_layout(Path::new("a.hydraui"), SPEC).unwrap();
+        assert_eq!(l.list, None);
+    }
+
+    #[test]
     fn a_layout_round_trips() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("l.hydraui");
@@ -419,6 +451,7 @@ cwd = "~/blog"
                 open: false,
                 width: None,
             }),
+            list: None,
             envs: vec![
                 EnvFile {
                     name: "a".into(),

@@ -14,9 +14,6 @@ use super::Workspace;
 use crate::envs::PaneId;
 use crate::pane_view::label_for;
 
-/// The list's width: fixed (our call; the design leaves it to the builder).
-pub(super) const LIST_WIDTH: f32 = 200.0;
-
 impl Workspace {
     /// The selected environment's terminals, the shown one highlighted in the environment's
     /// colour; a row's tooltip is the title its program set, when it set one.
@@ -25,7 +22,7 @@ impl Workspace {
         let (border, muted) = (theme.border, theme.muted_foreground);
         let mut list = v_flex()
             .id("terminal-list")
-            .w(px(LIST_WIDTH))
+            .w(px(self.list_width))
             .h_full()
             .flex_none()
             .overflow_y_scroll()

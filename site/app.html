@@ -92,7 +92,7 @@
 
     <section id="tree">
       <h2>File tree and git</h2>
-      <p><kbd>Ctrl+B</kbd> shows the file tree on the right, rooted at the shown terminal's current folder; it follows you as you <code>cd</code> and as you switch terminals or environments. Drag its edge to resize it. It respects <code>.gitignore</code> and updates as files change.</p>
+      <p><kbd>Ctrl+B</kbd> shows the file tree on the right, rooted at the shown terminal's current folder; it follows you as you <code>cd</code> and as you switch terminals or environments. Drag its edge to resize it; the terminal list on the left drags the same way. It respects <code>.gitignore</code> and updates as files change.</p>
       <ul>
         <li><strong>Click</strong> a file to open it in the environment's file pane.</li>
         <li><strong>Ctrl+click</strong> a file to type its quoted path at the terminal's cursor.</li>
@@ -177,11 +177,12 @@
 
     <section id="layouts">
       <h2>Layout files</h2>
-      <p>A layout file (<code>*.hydraui</code>) is a window written down: its environments in tab order, each one's terminals (their names and folders) and file pane, the file tree and what is selected. Each window has one layout, named in its title bar; the name's ▾ menu has <strong>Save layout as…</strong>, <strong>Open layout file…</strong>, <strong>Recent</strong> and <strong>Reveal in Explorer</strong>. Once saved, the window keeps the file up to date. Opening a layout in a window that already has one opens a new window; opening one that's already open brings its window forward, so two windows never write the same file. With the installer, double-clicking a <code>.hydraui</code> file opens it.</p>
+      <p>A layout file (<code>*.hydraui</code>) is a window written down: its environments in tab order, each one's terminals (their names and folders) and file pane, the file tree and terminal list widths and what is selected. Each window has one layout, named in its title bar; the name's ▾ menu has <strong>Save layout as…</strong>, <strong>Open layout file…</strong>, <strong>Recent</strong> and <strong>Reveal in Explorer</strong>. Once saved, the window keeps the file up to date. Opening a layout in a window that already has one opens a new window; opening one that's already open brings its window forward, so two windows never write the same file. With the installer, double-clicking a <code>.hydraui</code> file opens it.</p>
       <div class="term">
         <div class="term-bar"><span class="tab plain">client-a.hydraui</span></div>
 <pre><span class="k">version</span> = 2
 <span class="k">active_env</span> = <span class="s">"work"</span>
+<span class="k">list</span> = { <span class="k">width</span> = 240.0 }       <span class="c"># optional: the terminal list's dragged width</span>
 
 [[<span class="k">env</span>]]
 <span class="k">name</span> = <span class="s">"work"</span>

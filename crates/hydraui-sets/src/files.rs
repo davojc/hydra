@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use hydra_core::name::EnvName;
 
 use crate::file::SetFile;
-use crate::resolve::{Context, SetError, parse_set};
+use crate::layout::Context;
+use crate::resolve::{SetError, parse_set};
 use crate::session::Session;
 use crate::spec::SetSpec;
 

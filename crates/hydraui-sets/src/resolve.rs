@@ -1,6 +1,5 @@
 //! Set file → `SetSpec`: inheritance (pane → tab → set → folder binding), folder and shell
 //! checks. Collects every problem before failing, so one save shows them all.
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use hydra_core::bindings;
@@ -9,17 +8,8 @@ use hydra_core::paths::{HydraPaths, expand_tilde};
 use hydra_platform::shell::ShellKind;
 
 use crate::file::{self, NodeFile, SetFile, TabFile};
+use crate::layout::Context;
 use crate::spec::{FilesSpec, Node, PaneSpec, SetSpec, SplitDir, TabSpec};
-
-/// What resolution needs from outside the set file.
-pub struct Context<'a> {
-    pub paths: &'a HydraPaths,
-    pub user_home: &'a Path,
-    /// hydra's `[bindings]` from config.toml.
-    pub bindings: &'a BTreeMap<String, String>,
-    /// From hydraui's config.toml; pwsh when unset.
-    pub default_shell: ShellKind,
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SetError {
@@ -397,6 +387,8 @@ fn default_title(root: &Node) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     struct Fx {

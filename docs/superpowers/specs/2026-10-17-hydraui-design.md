@@ -519,15 +519,15 @@ open switches to its file tab.
 
 **Layout.** The pane has a row of file tabs (name, a dot for unsaved edits,
 ×), a header, and the file. Header: a **Raw / Rendered** switch for Markdown
-(`.md`, `.markdown`), and **Open in editor** (`editor` from `config.toml`,
-else the OS default).
+(`.md`, `.markdown`) and OpenAPI specs (below), and **Open in editor**
+(`editor` from `config.toml`, else the OS default).
 
 - **Raw**: gpui-component's code editor, editable, with syntax highlighting
   chosen by extension, line numbers and find (`Ctrl+F`). `Ctrl+S` saves.
 - **Rendered**: Markdown, read-only, reflecting unsaved edits. Markdown files
-  open in Rendered, others in Raw. Links open in the browser when clicked;
-  images load only from local files, never from the network; only `http`,
-  `https` and `mailto` links open; nothing runs.
+  and OpenAPI specs open in Rendered, others in Raw. Links open in the browser
+  when clicked; images load only from local files, never from the network;
+  only `http`, `https` and `mailto` links open; nothing runs.
 
 **Reading.** A file over 5 MB, or binary (a NUL byte in the first 8 KB, or not
 valid UTF-8), shows "can't show this file" with Open in editor; so does one
@@ -561,6 +561,51 @@ against the last commit (`git diff HEAD -- <file>`; `--no-index` for an
 untracked file) in gpui-component's diff view, side by side, with Open file
 to switch to the file. If git fails the tab shows git's error; a binary file
 shows "binary file changed".
+
+**OpenAPI specs.** A `.yaml`, `.yml` or `.json` file whose top level has
+`openapi:` with a value starting `3.` (OpenAPI 3.0 and 3.1) renders as API
+docs: a native, read-only view, with no "try it out". Detection reads only the
+file's first 4 KB for a top-level `openapi` key, so other YAML (CI files,
+compose files) costs nothing. A Swagger 2.0 file (`swagger: "2.0"`) opens in
+Raw with "Swagger 2.0 isn't rendered" in the header and no switch.
+
+- **Model.** YAML (`serde-saphyr`) or JSON (`serde_json`) becomes: the title,
+  version, description (Markdown) and servers; operations grouped by their
+  first tag in the tags' order (`tags` list first, then as they appear), with
+  untagged ones under "default", each operation in file order; and
+  `components.schemas`. Path-level parameters apply to each of the path's
+  operations; an operation's own parameter of the same name and `in` wins.
+- **References.** `$ref`s within the file (`#/...`) are followed when shown,
+  not inlined, so recursive schemas work; a ref back to a schema already open
+  above shows "↻ Pet" instead of expanding. A ref into another file
+  (`other.yaml#/Pet`) shows as a label that opens that file (resolved against
+  the spec's folder) in the file pane. A ref that resolves to nothing shows
+  "⚠ <ref> (missing)". Nothing is fetched from the network; server URLs are
+  text.
+- **Schemas** show as trees: each property's name, type (`format`, enum
+  values), and required mark; arrays read `Pet[]`; `allOf` is merged into one
+  object; `oneOf` / `anyOf` read "one of: A | B", each expandable; OpenAPI 3.1
+  `type: [string, "null"]` reads `string?`. Trees open one level at a time and
+  start collapsed below their first level.
+- **View**, top to bottom: the title and version, the description, the
+  servers; a filter box (narrows operations by path, summary, method or
+  operationId, hiding tags with none left); a collapsible group per tag
+  (open at first) with its description, then one row per operation: a method
+  badge (GET blue, POST green, PUT amber, PATCH teal, DELETE red, others
+  grey), the path in monospace, the summary muted, struck through when
+  deprecated. Clicking a row opens its description, **Parameters** (a table:
+  name, in, type, required, description), **Request body** (each media type's
+  schema) and **Responses** (each status, 2xx green, 4xx amber, 5xx red, with
+  its description and each media type's schema). Last, **Schemas**
+  (collapsed): every `components.schemas` entry as a tree. Text can be
+  selected and copied.
+- **State.** What is open is kept per file tab while it is open, not in the
+  layout. Rendered follows unsaved edits, parsing again 300 ms after typing
+  stops and keeping open rows open (by method and path).
+- **Errors.** A YAML or JSON error shows a banner with the message, its line
+  and **Go to line** (Raw, at that line), with the last good render greyed
+  below it, or nothing below if there was none. A parsable file missing
+  `info` or `paths` renders what it has, with a banner naming what's missing.
 
 **Opening at a line.** Quick open, search and clickable paths (§7.10) open a
 file at a line and column: the file's tab (a new one or the open one), Raw

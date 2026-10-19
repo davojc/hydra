@@ -1092,13 +1092,14 @@ impl Workspace {
         path: Vec<usize>,
         focused: PaneId,
         border: Hsla,
+        file_edge: Hsla,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match tree {
             Tree::Leaf(id) => {
                 if let Some(view) = self.files.get(id) {
                     let edge = if *id == focused {
-                        cx.theme().accent
+                        file_edge
                     } else {
                         transparent_black()
                     };
@@ -1171,13 +1172,13 @@ impl Workspace {
                             d.w_full().h(relative(*ratio))
                         }
                     })
-                    .child(self.render_tree(first, child_path(0), focused, border, cx));
+                    .child(self.render_tree(first, child_path(0), focused, border, file_edge, cx));
                 let two = div()
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
                     .overflow_hidden()
-                    .child(self.render_tree(second, child_path(1), focused, border, cx));
+                    .child(self.render_tree(second, child_path(1), focused, border, file_edge, cx));
                 div()
                     .size_full()
                     .relative()
@@ -1401,7 +1402,15 @@ impl Render for Workspace {
         );
         let body = match self.tabs.active() {
             _ if self.start.is_some() => self.render_start_page(cx),
-            Some(tab) => self.render_tree(&tab.tree, Vec::new(), tab.focused, border, cx),
+            Some(tab) => {
+                // A focused file pane is outlined in its tab's environment colour, as a
+                // focused terminal is.
+                let file_edge = self
+                    .tab_terminal(tab)
+                    .map(|v| self.tint(v.read(cx).env()))
+                    .unwrap_or(cx.theme().accent);
+                self.render_tree(&tab.tree, Vec::new(), tab.focused, border, file_edge, cx)
+            }
             None => div()
                 .size_full()
                 .flex()

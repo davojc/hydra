@@ -109,6 +109,7 @@
       <ul>
         <li><strong>Raw</strong> is an editor with syntax highlighting, line numbers and find. <kbd>Ctrl+S</kbd> saves, keeping the file's line endings and encoding, so a save changes only what you edited.</li>
         <li><strong>Rendered</strong> shows Markdown as a page. Markdown files open rendered; the header switches between the two. Links open in your browser, and images load only from local files.</li>
+        <li><strong>OpenAPI 3 specs</strong> (<code>.yaml</code>, <code>.yml</code>, <code>.json</code>) open as API docs: endpoints grouped by tag, each with its parameters, request body and responses, and schemas you can unfold. A filter finds endpoints by path, method, summary or operation id. <strong>Raw</strong> shows the file, and your edits show up in the docs as you type; if an edit breaks the YAML, the docs say which line, with <strong>Go to line</strong>.</li>
         <li><strong>Open in editor</strong> hands the file to your editor (<code>editor</code> in the settings, else Windows' default).</li>
         <li>If the file changes on disk it reloads; if you have unsaved edits you get <strong>Reload</strong> or <strong>Keep mine</strong>. Closing a file with unsaved edits asks first.</li>
         <li>Files over 5 MB and binary files aren't shown, with <strong>Open in editor</strong> instead.</li>

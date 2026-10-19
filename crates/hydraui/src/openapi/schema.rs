@@ -107,16 +107,23 @@ fn merged(
     schema: &Value,
     props: &mut serde_json::Map<String, Value>,
     required: &mut Vec<String>,
+    seen: &mut Vec<String>,
     depth: u8,
 ) {
     if depth > 16 {
         return;
     }
     let schema = match schema.get("$ref").and_then(Value::as_str) {
-        Some(r) => match resolve(root, r) {
-            Some(s) => s,
-            None => return,
-        },
+        // Each ref is merged once: an `allOf` that includes itself (a typo) stops here
+        // instead of multiplying.
+        Some(r) if seen.iter().any(|s| s == r) => return,
+        Some(r) => {
+            seen.push(r.to_string());
+            match resolve(root, r) {
+                Some(s) => s,
+                None => return,
+            }
+        }
         None => schema,
     };
     if let Some(p) = schema.get("properties").and_then(Value::as_object) {
@@ -129,7 +136,7 @@ fn merged(
     }
     if let Some(parts) = schema.get("allOf").and_then(Value::as_array) {
         for part in parts {
-            merged(root, part, props, required, depth + 1);
+            merged(root, part, props, required, seen, depth + 1);
         }
     }
 }
@@ -152,7 +159,9 @@ fn kind_of(root: &Value, schema: &Value, above: &[String], depth: u8) -> Kind {
         return kind_of(root, &items, above, depth + 1);
     }
     if let Some(r) = schema.get("$ref").and_then(Value::as_str) {
-        if let Some((file, pointer)) = r.split_once('#').filter(|(f, _)| !f.is_empty()) {
+        // Anything not starting `#` is another file: `common.yaml#/X`, or a whole file.
+        if !r.starts_with('#') {
+            let (file, pointer) = r.split_once('#').unwrap_or((r, ""));
             return Kind::External {
                 file: file.to_string(),
                 pointer: format!("#{pointer}"),
@@ -171,7 +180,7 @@ fn kind_of(root: &Value, schema: &Value, above: &[String], depth: u8) -> Kind {
     }
     let mut props = serde_json::Map::new();
     let mut required = Vec::new();
-    merged(root, schema, &mut props, &mut required, 0);
+    merged(root, schema, &mut props, &mut required, &mut Vec::new(), 0);
     if props.is_empty() {
         return Kind::Leaf;
     }
@@ -301,6 +310,39 @@ mod tests {
         };
         assert_eq!(choices.len(), 2);
         assert_eq!(choices[0].0, "Pet");
+    }
+
+    #[test]
+    fn a_whole_file_ref_opens_the_file() {
+        let r = root();
+        let l = level(&r, &json!({"$ref": "./schemas/Pet.yaml"}), &[]);
+        assert_eq!(
+            l.kind,
+            Kind::External {
+                file: "./schemas/Pet.yaml".into(),
+                pointer: "#".into()
+            }
+        );
+        assert_eq!(l.label, "Pet.yaml");
+    }
+
+    #[test]
+    fn a_self_referencing_all_of_does_not_hang() {
+        // A typo: A includes itself three times. Each ref is merged once.
+        let r = json!({"components": {"schemas": {"A": {"allOf": [
+            {"$ref": "#/components/schemas/A"},
+            {"$ref": "#/components/schemas/A"},
+            {"$ref": "#/components/schemas/A"},
+            {"properties": {"x": {"type": "string"}}}
+        ]}}}});
+        let start = std::time::Instant::now();
+        let l = level(&r, &json!({"$ref": "#/components/schemas/A"}), &[]);
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(200),
+            "{:?}",
+            start.elapsed()
+        );
+        assert_eq!(names(&l), [("x".into(), false)]);
     }
 
     #[test]

@@ -39,6 +39,8 @@ pub struct Operation {
     pub parameters: Vec<Parameter>,
     pub request_body: Option<Body>,
     pub responses: Vec<Response>,
+    /// A path item that is a `$ref` this view can't follow (another file, or missing).
+    pub reference: Option<String>,
 }
 
 impl Operation {
@@ -125,12 +127,32 @@ fn content(v: &Value) -> Vec<(String, Value)> {
         .unwrap_or_default()
 }
 
+/// The `$ref` of an object this view can't follow (into another file, or to nothing), so it
+/// shows as a ref instead of vanishing.
+fn unresolved<'a>(root: &Value, v: &'a Value) -> Option<&'a str> {
+    let r = v.get("$ref").and_then(Value::as_str)?;
+    deref(root, v).is_null().then_some(r)
+}
+
+fn ref_schema(r: &str) -> Value {
+    serde_json::json!({ "$ref": r })
+}
+
 fn parameters(root: &Value, list: Option<&Value>) -> Vec<Parameter> {
     list.and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .map(|p| deref(root, p))
         .filter_map(|p| {
+            if let Some(r) = unresolved(root, p) {
+                return Some(Parameter {
+                    name: super::schema::ref_name(r).to_string(),
+                    location: String::new(),
+                    required: false,
+                    description: None,
+                    schema: ref_schema(r),
+                });
+            }
+            let p = deref(root, p);
             Some(Parameter {
                 name: text(p, "name")?,
                 location: text(p, "in").unwrap_or_default(),
@@ -165,6 +187,13 @@ fn operation(
         .map(|m| {
             m.iter()
                 .map(|(status, r)| {
+                    if let Some(rf) = unresolved(root, r) {
+                        return Response {
+                            status: status.clone(),
+                            description: None,
+                            content: vec![(String::new(), ref_schema(rf))],
+                        };
+                    }
                     let r = deref(root, r);
                     Response {
                         status: status.clone(),
@@ -195,6 +224,7 @@ fn operation(
         parameters: params,
         request_body,
         responses,
+        reference: None,
     }
 }
 
@@ -279,6 +309,22 @@ pub fn parse(text_in: &str, json: bool) -> Result<Api, ParseError> {
     let mut untagged = Vec::new();
     if let Some(paths) = root.get("paths").and_then(Value::as_object) {
         for (path, item) in paths {
+            // A path item in another file (split specs) or missing: one row that links to it.
+            if let Some(r) = unresolved(&root, item) {
+                untagged.push(Operation {
+                    method: "REF".into(),
+                    path: path.clone(),
+                    summary: None,
+                    description: None,
+                    operation_id: None,
+                    deprecated: false,
+                    parameters: Vec::new(),
+                    request_body: None,
+                    responses: Vec::new(),
+                    reference: Some(r.to_string()),
+                });
+                continue;
+            }
             let item = deref(&root, item);
             let shared = parameters(&root, item.get("parameters"));
             for method in METHODS {
@@ -570,6 +616,59 @@ components:
         // The YAML library's Rust wording becomes plain words.
         let err = parse(": [openapi: 3.0.3\ninfo: {}\n", false).unwrap_err();
         assert_eq!(err.message, "this isn't valid YAML here", "{err:?}");
+    }
+
+    #[test]
+    fn refs_that_cannot_be_followed_stay_visible() {
+        let text = r##"openapi: 3.0.0
+info: {title: Split, version: '1'}
+paths:
+  /pets:
+    $ref: paths/pets.yaml
+  /orders:
+    get:
+      parameters:
+        - $ref: '../common.yaml#/components/parameters/PageSize'
+        - $ref: '#/components/parameters/Nope'
+      responses:
+        '404':
+          $ref: 'errors.yaml#/NotFound'
+"##;
+        let api = parse(text, false).unwrap();
+        let ops: Vec<&Operation> = api.groups.iter().flat_map(|g| &g.operations).collect();
+        let pets = ops
+            .iter()
+            .find(|o| o.path == "/pets")
+            .expect("the path item shows");
+        assert_eq!(pets.method, "REF");
+        assert_eq!(pets.reference.as_deref(), Some("paths/pets.yaml"));
+        let get = ops.iter().find(|o| o.path == "/orders").unwrap();
+        let params: Vec<(&str, &Value)> = get
+            .parameters
+            .iter()
+            .map(|p| (p.name.as_str(), &p.schema))
+            .collect();
+        assert_eq!(
+            params,
+            [
+                (
+                    "PageSize",
+                    &serde_json::json!({"$ref": "../common.yaml#/components/parameters/PageSize"})
+                ),
+                (
+                    "Nope",
+                    &serde_json::json!({"$ref": "#/components/parameters/Nope"})
+                ),
+            ]
+        );
+        assert_eq!(get.responses[0].status, "404");
+        assert_eq!(
+            get.responses[0].content,
+            [(
+                "".to_string(),
+                serde_json::json!({"$ref": "errors.yaml#/NotFound"})
+            )]
+        );
     }
 
     #[test]

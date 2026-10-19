@@ -38,6 +38,7 @@ mod tests {
             parameters: vec![],
             request_body: None,
             responses: vec![],
+            reference: None,
         };
         for f in ["", "get", "PETS", "info for", "showpet"] {
             assert!(matches(&op, f), "{f}");

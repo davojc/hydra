@@ -49,6 +49,23 @@ impl ViewState {
     }
 }
 
+/// The file a `$ref` names, relative to the spec's folder, with `.` and `..` worked out, so
+/// it opens in the same file tab as the file opened any other way.
+pub fn ref_file(dir: &std::path::Path, file: &str) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in dir.join(file).components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Above this many operations, tag groups start collapsed.
 const COLLAPSE_ABOVE: usize = 500;
 /// At most this many operation rows are drawn at once; the rest wait for the filter.
@@ -238,7 +255,7 @@ impl ApiView {
         }
         let head = match &lvl.kind {
             Kind::External { file, .. } => {
-                let path = self.dir.join(file);
+                let path = ref_file(&self.dir, file);
                 head.cursor_pointer().underline().on_click(
                     cx.listener(move |_, _, _, cx| cx.emit(ApiViewEvent::OpenFile(path.clone()))),
                 )
@@ -336,6 +353,17 @@ impl ApiView {
             return block.into_any_element();
         }
         let mut detail = v_flex().pl(px(84.)).pb_2().gap_2();
+        // A path item defined elsewhere: its ref, as a link to the file (or ⚠ missing).
+        if let Some(r) = &op.reference {
+            detail = detail.child(self.render_schema(
+                api,
+                format!("{key}/ref"),
+                None,
+                &serde_json::json!({ "$ref": r }),
+                Vec::new(),
+                cx,
+            ));
+        }
         if let Some(d) = &op.description {
             detail = detail.child(div().text_sm().child(d.clone()));
         }
@@ -598,6 +626,23 @@ mod tests {
     use crate::openapi::parse;
 
     const ONE: &str = "openapi: 3.0.0\ninfo: {title: A, version: '1'}\npaths:\n  /a:\n    get:\n      responses: {'200': {description: ok}}\n";
+
+    #[test]
+    fn referenced_files_open_under_their_plain_path() {
+        let dir = std::path::Path::new(r"C:\x\api");
+        assert_eq!(
+            ref_file(dir, "./common.yaml"),
+            PathBuf::from(r"C:\x\api\common.yaml")
+        );
+        assert_eq!(
+            ref_file(dir, "../shared/./errors.yaml"),
+            PathBuf::from(r"C:\x\shared\errors.yaml")
+        );
+        assert_eq!(
+            ref_file(dir, "paths/pets.yaml"),
+            PathBuf::from(r"C:\x\api\paths\pets.yaml")
+        );
+    }
 
     #[test]
     fn a_failed_parse_keeps_the_last_good_api() {

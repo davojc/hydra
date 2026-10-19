@@ -58,8 +58,8 @@
     </header>
 
     <figure class="shot">
-      <img src="img/hydraui-window.png" width="1600" height="1013" alt="hydraui with tabs in three environments, the file tree marking changed files, a terminal and a rendered README.">
-      <figcaption>Tabs for the work, personal and client environments. The file tree marks what git sees changed; the README is rendered in the file pane beside the terminal. Each environment lists its terminals on the left, and the file tree sits on the right.</figcaption>
+      <img src="img/hydraui-window.png" width="1600" height="1013" alt="hydraui with tabs for the api, blog and site projects, a file tree on the left marking changed files, a terminal and a rendered README.">
+      <figcaption>The file tree marks what git sees changed; the README is rendered in the file pane beside the terminal. This screenshot predates environment tabs: the tabs are now environments, each with its terminals listed on the left, and the file tree sits on the right.</figcaption>
     </figure>
 
     <section id="start">
@@ -68,7 +68,7 @@
       <p>The first time, hydraui opens a terminal in your home folder. With no environments yet, it asks you to name one and creates it, as <code>hydra env new</code> does. From then on hydraui starts on a page of your recent <a href="#layouts">layouts</a>: pick one, or <strong>New window</strong> for a plain terminal. A window saved as a layout keeps its file up to date as you work (its environments, their terminals and folders, the file tree and the files in each file pane); an untitled window isn't kept when you close it.</p>
       <p>A new window's first environment is the one bound to the home folder, else <code>default_env</code> from the <a href="#settings">settings</a>, else you pick one:</p>
       <figure class="shot narrow">
-        <img src="img/hydraui-picker.png" width="598" height="325" alt="The Open a tab in… picker listing the client, personal and work environments with their colours, and New environment…" loading="lazy">
+        <img src="img/hydraui-picker.png" width="598" height="325" alt="The environment picker as an earlier version showed it, titled Open a tab in…, listing the client, personal and work environments with their colours, and New environment…" loading="lazy">
       </figure>
       <div class="note"><strong>No folder guard in the app.</strong> A hydraui terminal gets exactly the isolation <code>hydra shell</code> gives, with one exception: it skips the CLI's folder guard. A push to the wrong account fails on its credentials anyway. If a terminal's folder is bound to a different environment than the one it runs in, the pane shows a warning badge.</div>
     </section>
@@ -154,7 +154,7 @@
       <h2>The launcher</h2>
       <p><kbd>Ctrl+Shift+P</kbd> opens the launcher: type to filter, Enter to run.</p>
       <figure class="shot narrow">
-        <img src="img/hydraui-launcher.png" width="598" height="531" alt="The launcher listing Environment entries for each environment, Sign in: github in work, Open file…, Search in files…, and layout entries." loading="lazy">
+        <img src="img/hydraui-launcher.png" width="598" height="531" alt="The launcher listing New tab entries for each environment, Sign in: github in work, Open file…, Search in files…, and layout entries (an earlier version: the entries are now Environment: name)." loading="lazy">
       </figure>
       <div class="tbl">
         <table>

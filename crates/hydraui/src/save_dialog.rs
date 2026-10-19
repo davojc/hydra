@@ -3,31 +3,12 @@
 //! will really be written.
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SaveKind {
-    Layout,
-    Group,
-}
-
-impl SaveKind {
-    /// The dialog's file type: its label, its pattern, and the extension added when none is
-    /// typed.
-    pub fn file_type(self) -> (&'static str, &'static str, &'static str) {
-        match self {
-            SaveKind::Layout => ("hydraui layout (*.hydraui)", "*.hydraui", "hydraui"),
-            SaveKind::Group => ("Group file (*.toml)", "*.toml", "toml"),
-        }
-    }
-}
+/// The dialog's file type: its label, its pattern, and the extension added when none is typed.
+const FILE_TYPE: (&str, &str, &str) = ("hydraui layout (*.hydraui)", "*.hydraui", "hydraui");
 
 /// Shows the Save As dialog in `dir` with `name` filled in, owned by the window `owner` (an
 /// HWND, 0 for none). `None` when cancelled. It blocks until closed: call it off the UI thread.
-pub fn prompt(
-    kind: SaveKind,
-    dir: &Path,
-    name: &str,
-    owner: isize,
-) -> Result<Option<PathBuf>, String> {
+pub fn prompt(dir: &Path, name: &str, owner: isize) -> Result<Option<PathBuf>, String> {
     use windows::Win32::Foundation::{ERROR_CANCELLED, HWND};
     use windows::Win32::System::Com::{
         CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
@@ -39,7 +20,7 @@ pub fn prompt(
     };
     use windows::core::{HRESULT, HSTRING, PCWSTR};
 
-    let (label, pattern, ext) = kind.file_type();
+    let (label, pattern, ext) = FILE_TYPE;
     let (label, pattern) = (HSTRING::from(label), HSTRING::from(pattern));
     let failed = |e: windows::core::Error| format!("the Save As dialog failed: {e}");
     // SAFETY: plain COM calls on this thread; the strings outlive the calls that use them.
@@ -82,13 +63,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn each_kind_names_its_extension() {
-        assert_eq!(SaveKind::Layout.file_type().2, "hydraui");
-        assert_eq!(SaveKind::Group.file_type().2, "toml");
-        for kind in [SaveKind::Layout, SaveKind::Group] {
-            let (label, pattern, ext) = kind.file_type();
-            assert_eq!(pattern, format!("*.{ext}"));
-            assert!(label.contains(pattern), "{label}");
-        }
+    fn the_file_type_names_its_extension() {
+        let (label, pattern, ext) = FILE_TYPE;
+        assert_eq!(ext, "hydraui");
+        assert_eq!(pattern, format!("*.{ext}"));
+        assert!(label.contains(pattern), "{label}");
     }
 }

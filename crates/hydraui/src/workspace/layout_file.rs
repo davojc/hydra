@@ -19,7 +19,6 @@ use super::{DEFAULT_TREE_WIDTH, Workspace, clamp_tree_width};
 use crate::envs::PaneId;
 use crate::hydra::PaneRequest;
 use crate::keys::FileTree;
-use crate::save_dialog::SaveKind;
 
 /// What to ask before stopping `what` when some of its terminals are running a command (OSC
 /// 133); `running` names each terminal. `None`: nothing runs, so don't ask.
@@ -420,7 +419,6 @@ impl Workspace {
     /// The dialog knows the file type, so a name typed without one gets its extension.
     fn save_dialog(
         &mut self,
-        kind: SaveKind,
         dir: PathBuf,
         name: String,
         window: &mut Window,
@@ -435,7 +433,7 @@ impl Workspace {
         let (tx, rx) = futures::channel::oneshot::channel();
         let owner = crate::claim::hwnd_of(window);
         std::thread::spawn(move || {
-            let _ = tx.send(crate::save_dialog::prompt(kind, &dir, &name, owner));
+            let _ = tx.send(crate::save_dialog::prompt(&dir, &name, owner));
         });
         cx.spawn_in(window, async move |this, cx| match rx.await {
             Ok(Ok(Some(path))) => {
@@ -513,16 +511,9 @@ impl Workspace {
                 (dir, "layout.hydraui".into())
             }
         };
-        self.save_dialog(
-            SaveKind::Layout,
-            dir,
-            name,
-            window,
-            cx,
-            |ws, path, window, cx| {
-                ws.save_layout_to(path, window, cx);
-            },
-        );
+        self.save_dialog(dir, name, window, cx, |ws, path, window, cx| {
+            ws.save_layout_to(path, window, cx);
+        });
     }
 
     pub(super) fn open_layout_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {

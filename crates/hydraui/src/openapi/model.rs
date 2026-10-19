@@ -198,6 +198,19 @@ fn operation(
     }
 }
 
+/// The YAML library's limits, with room for big specs: its default of 250,000 nodes turns
+/// away real APIs of a few MB. The file pane never reads more than 5 MB, and a node takes
+/// at least a couple of bytes, so these bound the work as well; the alias and anchor caps
+/// that stop expansion bombs keep their defaults.
+fn yaml_options() -> serde_saphyr::Options {
+    let mut budget = serde_saphyr::Budget::default();
+    budget.max_nodes = 5_000_000;
+    budget.max_events = 10_000_000;
+    let mut options = serde_saphyr::Options::default();
+    options.budget = Some(budget);
+    options
+}
+
 /// A parser's message as one plain line for the banner (which shows the line itself): the
 /// first line only, without `error:`, `line N column M:` or a trailing `at line N column M`.
 pub fn short_message(message: &str) -> String {
@@ -230,7 +243,7 @@ pub fn parse(text_in: &str, json: bool) -> Result<Api, ParseError> {
             line: Some(e.line()),
         })?
     } else {
-        serde_saphyr::from_str(src).map_err(|e| ParseError {
+        serde_saphyr::from_str_with_options(src, yaml_options()).map_err(|e| ParseError {
             message: short_message(&e.to_string()),
             line: e.location().map(|l| l.line() as usize),
         })?
@@ -519,6 +532,20 @@ components:
         assert_eq!(api.missing, ["info", "paths"]);
         assert_eq!(api.schemas, ["A"]);
         assert!(api.groups.is_empty());
+    }
+
+    #[test]
+    fn a_big_spec_is_not_refused_for_its_size() {
+        // ~300,000 nodes: over the YAML library's default budget of 250,000, yet a few MB,
+        // the size of a real large API.
+        let mut text = String::from(
+            "openapi: 3.0.0\ninfo: {title: Big, version: '1'}\npaths: {}\ncomponents:\n  schemas:\n    X:\n      enum:\n",
+        );
+        for i in 0..300_000 {
+            text.push_str(&format!("        - v{i}\n"));
+        }
+        let api = parse(&text, false).unwrap();
+        assert_eq!(api.schemas, ["X"]);
     }
 
     #[test]

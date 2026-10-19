@@ -32,12 +32,63 @@ impl ViewState {
     pub fn apply(&mut self, result: Result<Api, ParseError>) {
         match result {
             Ok(api) => {
+                // A big API starts folded to its tags, so it opens fast and reads as a list;
+                // only the first good parse decides, so groups opened since stay open.
+                if self.api.is_none() {
+                    let count: usize = api.groups.iter().map(|g| g.operations.len()).sum();
+                    if count > COLLAPSE_ABOVE {
+                        self.open
+                            .extend(api.groups.iter().map(|g| format!("tag:{}", g.name)));
+                    }
+                }
                 self.api = Some(Rc::new(api));
                 self.error = None;
             }
             Err(e) => self.error = Some(e),
         }
     }
+}
+
+/// Above this many operations, tag groups start collapsed.
+const COLLAPSE_ABOVE: usize = 500;
+/// At most this many operation rows are drawn at once; the rest wait for the filter.
+pub const ROW_CAP: usize = 300;
+
+/// Which operation rows to draw: each group with matches, as (group index, operation
+/// indices); a collapsed group, and every group once `cap` rows are drawn, lists none. A
+/// filter looks inside collapsed groups. Also returns how many matching rows the cap hid.
+pub fn rows_to_show(
+    api: &Api,
+    filter: &str,
+    open: &HashSet<String>,
+    cap: usize,
+) -> (Vec<(usize, Vec<usize>)>, usize) {
+    let filtering = !filter.trim().is_empty();
+    let (mut shown, mut hidden) = (0usize, 0usize);
+    let mut out = Vec::new();
+    for (gi, g) in api.groups.iter().enumerate() {
+        let hits: Vec<usize> = g
+            .operations
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| matches(o, filter))
+            .map(|(i, _)| i)
+            .collect();
+        if hits.is_empty() {
+            continue;
+        }
+        // The `tag:` key marks a collapsed group (groups start open).
+        let collapsed = !filtering && open.contains(&format!("tag:{}", g.name));
+        let mut rows = Vec::new();
+        if !collapsed {
+            let room = cap.saturating_sub(shown);
+            rows = hits.iter().copied().take(room).collect();
+            hidden += hits.len() - rows.len();
+            shown += rows.len();
+        }
+        out.push((gi, rows));
+    }
+    (out, hidden)
 }
 
 pub enum ApiViewEvent {
@@ -491,31 +542,29 @@ impl Render for ApiView {
         if !api.groups.is_empty() {
             content = content.child(Input::new(&self.filter).small());
         }
-        for g in &api.groups {
-            let ops: Vec<&Operation> = g
-                .operations
-                .iter()
-                .filter(|o| matches(o, &filter))
-                .collect();
-            if ops.is_empty() {
-                continue;
-            }
-            // Groups start open: the key marks a collapsed one.
+        let (groups, hidden) = rows_to_show(&api, &filter, &self.state.open, ROW_CAP);
+        for (gi, ops) in groups {
+            let g = &api.groups[gi];
+            // Groups start open: the key marks a collapsed one. A filter shows its matches
+            // inside collapsed groups too.
             let tkey = format!("tag:{}", g.name);
-            let collapsed = self.is_open(&tkey);
+            let shown_open = !self.is_open(&tkey) || !filter.trim().is_empty();
             let mut group = v_flex().child(self.section_header(
                 &tkey,
                 g.name.clone(),
                 g.description.clone(),
-                !collapsed,
+                shown_open,
                 cx,
             ));
-            if !collapsed {
-                for op in ops {
-                    group = group.child(self.render_operation(&api, op, cx));
-                }
+            for i in ops {
+                group = group.child(self.render_operation(&api, &g.operations[i], cx));
             }
             content = content.child(group);
+        }
+        if hidden > 0 {
+            content = content.child(div().text_sm().text_color(muted).child(format!(
+                "{hidden} more operations: narrow the filter to see them"
+            )));
         }
         if !api.schemas.is_empty() {
             let open = self.is_open("schemas");
@@ -562,5 +611,59 @@ mod tests {
         assert!(s.error.is_none());
         assert_eq!(s.api.as_ref().unwrap().title, "B");
         assert!(s.open.contains("op:GET /a"), "open rows stay open");
+    }
+
+    /// `tags` groups of `per` operations each (GET /t<g>/<i>).
+    fn spec(tags: usize, per: usize) -> String {
+        let mut s = String::from("openapi: 3.0.0\ninfo: {title: B, version: '1'}\npaths:\n");
+        for g in 0..tags {
+            for i in 0..per {
+                s.push_str(&format!(
+                    "  /t{g}/{i}:\n    get:\n      tags: [t{g}]\n      responses: {{'200': {{description: ok}}}}\n"
+                ));
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn a_big_api_starts_with_its_groups_collapsed() {
+        let mut big = ViewState::default();
+        big.apply(parse(&spec(6, 100), false));
+        assert!(
+            (0..6).all(|g| big.open.contains(&format!("tag:t{g}"))),
+            "600 operations"
+        );
+        let mut small = ViewState::default();
+        small.apply(parse(&spec(2, 10), false));
+        assert!(small.open.is_empty(), "20 operations stay open");
+        // Only the first good parse decides: a group opened by hand stays open after edits.
+        big.open.remove("tag:t0");
+        big.apply(parse(&spec(6, 100), false));
+        assert!(!big.open.contains("tag:t0"));
+    }
+
+    #[test]
+    fn rows_are_capped_and_a_filter_looks_inside_collapsed_groups() {
+        let api = parse(&spec(3, 200), false).unwrap();
+        let none = HashSet::new();
+        let (groups, hidden) = rows_to_show(&api, "", &none, 300);
+        let shown: usize = groups.iter().map(|(_, ops)| ops.len()).sum();
+        assert_eq!((groups.len(), shown, hidden), (3, 300, 300));
+        assert!(
+            groups[2].1.is_empty(),
+            "past the cap a group shows only its header"
+        );
+        let collapsed: HashSet<String> = ["tag:t0", "tag:t1", "tag:t2"].map(String::from).into();
+        let (groups, hidden) = rows_to_show(&api, "", &collapsed, 300);
+        assert!(groups.iter().all(|(_, ops)| ops.is_empty()));
+        assert_eq!(hidden, 0, "collapsed rows aren't counted as hidden");
+        let (groups, hidden) = rows_to_show(&api, "/t1/19", &collapsed, 300);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            (groups[0].0, groups[0].1.len(), hidden),
+            (1, 11, 0),
+            "/t1/19, /t1/190..199"
+        );
     }
 }

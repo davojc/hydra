@@ -31,8 +31,8 @@ pub enum TreeEvent {
     NewFile(PathBuf),
     /// Ask for a name and create a folder in this folder.
     NewFolder(PathBuf),
-    /// A new tab in the focused terminal's environment, starting in this folder.
-    OpenTab(PathBuf),
+    /// A new terminal in the selected environment, starting in this folder.
+    NewTerminal(PathBuf),
     /// Show the file or folder selected in Explorer.
     Reveal(PathBuf),
     /// Ask for a new name.
@@ -50,7 +50,7 @@ pub enum MenuAction {
     NewFile,
     NewFolder,
     Cd,
-    OpenTab,
+    NewTerminal,
     Reveal,
     Rename,
     Delete,
@@ -94,7 +94,7 @@ pub fn row_menu(is_dir: bool, changed: bool, can_cd: bool) -> Vec<Option<MenuEnt
         }),
     ]);
     if is_dir {
-        out.push(entry("Open in new tab", MenuAction::OpenTab));
+        out.push(entry("New terminal here", MenuAction::NewTerminal));
     }
     out.extend([
         entry("Reveal in Explorer", MenuAction::Reveal),
@@ -122,7 +122,7 @@ pub fn menu_event(action: MenuAction, path: &Path, is_dir: bool, root: &Path) ->
         MenuAction::NewFile => TreeEvent::NewFile(dir),
         MenuAction::NewFolder => TreeEvent::NewFolder(dir),
         MenuAction::Cd => TreeEvent::Cd(dir),
-        MenuAction::OpenTab => TreeEvent::OpenTab(dir),
+        MenuAction::NewTerminal => TreeEvent::NewTerminal(dir),
         MenuAction::Reveal => TreeEvent::Reveal(path),
         MenuAction::Rename => TreeEvent::Rename(path),
         MenuAction::Delete => TreeEvent::Delete(path),
@@ -507,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn a_folder_offers_new_cd_tab_and_the_file_operations() {
+    fn a_folder_offers_new_cd_terminal_and_the_file_operations() {
         assert_eq!(
             labels(&row_menu(true, false, true)),
             [
@@ -515,7 +515,7 @@ mod tests {
                 "New folder…",
                 "-",
                 "cd here",
-                "Open in new tab",
+                "New terminal here",
                 "Reveal in Explorer",
                 "-",
                 "Rename…",
@@ -530,11 +530,11 @@ mod tests {
     }
 
     #[test]
-    fn a_file_offers_its_changes_and_no_tab() {
+    fn a_file_offers_its_changes_and_no_new_terminal() {
         let got = labels(&row_menu(false, true, true));
         assert_eq!(got[0], "Show changes");
         assert!(got.contains(&"cd to its folder".to_string()));
-        assert!(!got.iter().any(|l| l.contains("new tab")));
+        assert!(!got.iter().any(|l| l.contains("New terminal")));
         assert!(!labels(&row_menu(false, false, true)).contains(&"Show changes".to_string()));
     }
 
@@ -561,8 +561,8 @@ mod tests {
             TreeEvent::NewFile(dir.clone())
         );
         assert_eq!(
-            menu_event(MenuAction::OpenTab, &dir, true, root),
-            TreeEvent::OpenTab(dir)
+            menu_event(MenuAction::NewTerminal, &dir, true, root),
+            TreeEvent::NewTerminal(dir)
         );
     }
 

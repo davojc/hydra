@@ -7,17 +7,10 @@ use gpui::{Action, DummyKeyboardMapper, KeyBinding, Keystroke};
 gpui::actions!(
     hydraui,
     [
-        NewTab,
         NewTerminal,
         NextTerminal,
         PreviousTerminal,
         ClosePane,
-        SplitRight,
-        SplitDown,
-        FocusLeft,
-        FocusRight,
-        FocusUp,
-        FocusDown,
         NextTab,
         PreviousTab,
         CopyText,

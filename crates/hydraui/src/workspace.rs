@@ -1,15 +1,16 @@
-//! The window's content (spec §7.1, §7.5, §7.6): the tab strip, the active tab's split panes
-//! with draggable dividers, the status bar, and the commands bound to keys.
+//! The window's content (spec §7.1, §7.5, §7.6; env-tabs design §2): one tab per environment,
+//! the selected environment's shown terminal beside its file pane, the status bar, and the
+//! commands bound to keys.
 mod accounts;
 mod busy;
 mod finder;
 mod launcher;
-mod sets;
+mod layout_file;
 mod start_page;
 mod title_bar;
 mod tree_ops;
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -20,35 +21,33 @@ use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase, Entity,
     FocusHandle, Focusable, Hsla, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point,
-    SharedString, Subscription, Task, Window, canvas, div, px, relative, rgb, transparent_black,
+    Subscription, Task, Window, canvas, div, px, relative, rgb, transparent_black,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandItem, CommandState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, IconName, Selectable, Sizable, WindowExt, h_flex, v_flex};
-use hydraui_sets::LoadedSets;
+use hydraui_sets::layout::Layout;
 
 use hydraui_term::PromptState;
 
 use crate::config::UiConfig;
+use crate::envs::{EnvTab, EnvTabs, PaneId, new_terminal_cwd};
 use crate::file_pane::{FilePane, FilePaneEvent};
 use crate::file_tree::{cd_command, editor_command, quote_path};
 use crate::file_tree_view::{FileTreeView, TreeEvent};
 use crate::git_status;
 use crate::hydra::{Borrowing, Hydra, PaneRequest, STATUS_TTL, StatusCache, account_marks};
 use crate::keys::{
-    ClosePane, FileTree, FocusDown, FocusLeft, FocusRight, FocusUp, NewTerminal, NextTab,
-    PreviousTab, SplitDown, SplitRight, TestDialog,
+    ClosePane, FileTree, NewTerminal, NextTab, NextTerminal, PreviousTab, PreviousTerminal,
+    TestDialog,
 };
-use crate::open_files::{last_terminal_closes_tab, terminal_for};
 use crate::pane_view::{PaneEvent, PaneView, TermStyle};
-use crate::split::{Axis, Dir, PaneId, Tree};
-use crate::tabs::{Closed, TabId, Tabs};
+use crate::split::{MAX_RATIO, MIN_RATIO};
 use busy::PaneActivity;
 use tree_ops::NameFor;
 
-/// A divider being dragged: the split's path in the active tab's tree.
 /// The file tree's width: it starts at the default, can't be dragged narrower than the
 /// minimum, and always leaves the panes at least `MIN_PANES_WIDTH`.
 const DEFAULT_TREE_WIDTH: f32 = 260.0;
@@ -65,11 +64,6 @@ fn tree_width_at(x: f32, window_width: f32) -> f32 {
     x.clamp(MIN_TREE_WIDTH, max)
 }
 
-struct Drag {
-    path: Vec<usize>,
-    axis: Axis,
-}
-
 /// What a new window shows first (spec §7.12).
 pub enum StartWith {
     /// The start page.
@@ -82,14 +76,15 @@ pub struct Workspace {
     hydra: Arc<Hydra>,
     ui: UiConfig,
     style: Arc<TermStyle>,
-    tabs: Tabs,
+    /// The environments' tabs, their terminals and file panes (env-tabs design §2).
+    envs: EnvTabs,
     panes: HashMap<PaneId, Entity<PaneView>>,
-    /// File panes (spec §7.8), at most one per tab; leaves of the same split trees.
+    /// File panes (spec §7.8), at most one per environment.
     files: HashMap<PaneId, Entity<FilePane>>,
     file_subs: HashMap<PaneId, Subscription>,
-    /// Each tab's last focused terminal, which stands for the tab while its file pane has
-    /// the focus.
-    last_terminal: HashMap<TabId, PaneId>,
+    /// Terminals started by a layout file's hand-written `command`, which is kept when the
+    /// layout is saved again (env-tabs design §3).
+    commands: HashMap<PaneId, String>,
     tints: HashMap<String, u32>,
     next_pane: PaneId,
     status: StatusCache,
@@ -103,13 +98,10 @@ pub struct Workspace {
     git_busy: bool,
     git_again: bool,
     _git_watch: Task<()>,
-    drag: Option<Drag>,
-    loaded: LoadedSets,
-    /// Loaded sets whose file changed since loading.
-    changed_sets: HashSet<String>,
-    /// Set groups folded away in the tab strip.
-    collapsed: HashSet<String>,
-    _set_watch: Task<()>,
+    /// The divider between the shown terminal and the file pane is being dragged.
+    files_drag: bool,
+    /// The middle's bounds at the last paint while a file pane shows, for that drag.
+    middle_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     tree: Option<Entity<FileTreeView>>,
     tree_sub: Option<Subscription>,
     tree_width: f32,
@@ -117,8 +109,6 @@ pub struct Workspace {
     tree_drag: bool,
     /// The tree panel's bounds at the last paint, for the drag.
     tree_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    /// Each split's on-screen bounds at the last paint, by path, for divider drags.
-    split_bounds: Rc<RefCell<HashMap<Vec<usize>, Bounds<Pixels>>>>,
     focus: FocusHandle,
     title: String,
     subs: HashMap<PaneId, Subscription>,
@@ -141,8 +131,9 @@ pub struct Workspace {
     layout: Option<PathBuf>,
     /// This window's hold on `layout`, so no other window writes it.
     claim: Option<crate::claim::Claim>,
-    /// The layout's sets and Loose tabs that didn't open, kept in what autosave writes.
-    unopened: hydraui_sets::Session,
+    /// The layout's environments and terminals that didn't open, kept in what autosave
+    /// writes.
+    unopened: Layout,
     /// A layout is opening: autosave waits (the file already holds it).
     opening: bool,
     /// The start page, while it shows (spec §7.12).
@@ -202,7 +193,6 @@ impl Workspace {
                 }
             }
         });
-        // A loaded set's file edited or deleted: offer a reload (spec §5.4).
         // Picks up edits made outside the terminal (an editor saving, another tool).
         let git_watch = cx.spawn(async move |this, cx| {
             loop {
@@ -210,16 +200,6 @@ impl Workspace {
                     .timer(std::time::Duration::from_secs(15))
                     .await;
                 if this.update(cx, |ws, cx| ws.refresh_git(cx)).is_err() {
-                    break;
-                }
-            }
-        });
-        let set_watch = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(2))
-                    .await;
-                if this.update(cx, |ws, cx| ws.check_sets(cx)).is_err() {
                     break;
                 }
             }
@@ -233,11 +213,11 @@ impl Workspace {
             hydra,
             ui,
             style: Arc::new(style),
-            tabs: Tabs::default(),
+            envs: EnvTabs::default(),
             panes: HashMap::new(),
             files: HashMap::new(),
             file_subs: HashMap::new(),
-            last_terminal: HashMap::new(),
+            commands: HashMap::new(),
             tints: HashMap::new(),
             next_pane: 0,
             status: StatusCache::default(),
@@ -247,17 +227,13 @@ impl Workspace {
             git_busy: false,
             git_again: false,
             _git_watch: git_watch,
-            drag: None,
-            loaded: LoadedSets::default(),
-            changed_sets: HashSet::new(),
-            collapsed: HashSet::new(),
-            _set_watch: set_watch,
+            files_drag: false,
+            middle_bounds: Rc::default(),
             tree: None,
             tree_sub: None,
             tree_width: DEFAULT_TREE_WIDTH,
             tree_drag: false,
             tree_bounds: Rc::default(),
-            split_bounds: Rc::default(),
             focus: cx.focus_handle(),
             title: String::new(),
             subs: HashMap::new(),
@@ -279,7 +255,7 @@ impl Workspace {
         }
     }
 
-    /// Shows what was wrong with the settings, then opens the first tab in the home folder.
+    /// Shows what was wrong with the settings, then the start page or the layout given.
     fn startup(
         &mut self,
         problems: Vec<String>,
@@ -290,14 +266,6 @@ impl Workspace {
         self.start_update_checks(cx);
         for p in problems {
             window.push_notification(Notification::warning(p).title("hydraui settings"), cx);
-        }
-        // A session from before layouts were files becomes one, once (spec §7.12).
-        if let Some(moved) = hydraui_sets::migrate_session(&self.hydra.paths) {
-            let _ = hydraui_sets::touch_recent(
-                &self.hydra.paths,
-                &moved,
-                crate::window_layout::now_secs(),
-            );
         }
         // The page first: opening a file leaves it; a file that fails to open leaves the
         // page and its toast (§7.12 Command line); a file another window took meanwhile
@@ -334,21 +302,20 @@ impl Workspace {
         }
     }
 
-    /// A Loose tab in `cwd`: the folder's environment, else `default_env`, else ask.
-    fn new_tab_in(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        match self.hydra.adhoc_env(&cwd, self.ui.default_env.as_deref()) {
-            Some(env) => self.open_tab(env, cwd, window, cx),
-            None => self.pick_env(cwd, window, cx),
-        }
-    }
-
-    fn pick_env(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let envs = self.hydra.env_names();
-        if envs.is_empty() {
+    /// The environment picker behind **+** and Ctrl+T with no environment open (env-tabs
+    /// design §2.1): environments not in the window yet, then New environment…; the chosen
+    /// one gets its tab.
+    fn pick_env(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let all = self.hydra.env_names();
+        if all.is_empty() {
             self.new_env_dialog(window, cx);
             return;
         }
-        // Each environment with its colour, as on its tabs.
+        let envs: Vec<String> = all
+            .into_iter()
+            .filter(|e| self.envs.get(e).is_none())
+            .collect();
+        // Each environment with its colour, as on its tab.
         let swatches: Vec<(String, Hsla)> = envs
             .iter()
             .map(|e| (e.clone(), rgb(self.hydra.tint(e)).into()))
@@ -360,8 +327,8 @@ impl Workspace {
             if first.replace(false) {
                 state.update(cx, |s, cx| s.focus(window, cx));
             }
-            let (choices, workspace, cwd) = (envs.clone(), workspace.clone(), cwd.clone());
-            dialog.title("Open a tab in…").child(
+            let (choices, workspace) = (envs.clone(), workspace.clone());
+            dialog.title("Add an environment").child(
                 Command::new(&state)
                     .items(
                         swatches
@@ -373,8 +340,9 @@ impl Workspace {
                     .on_confirm(move |ix, window, cx| {
                         window.close_dialog(cx);
                         match choices.get(ix.row).cloned() {
-                            Some(env) => workspace
-                                .update(cx, |ws, cx| ws.open_tab(env, cwd.clone(), window, cx)),
+                            Some(env) => {
+                                workspace.update(cx, |ws, cx| ws.add_env(&env, window, cx))
+                            }
                             None => workspace.update(cx, |ws, cx| ws.new_env_dialog(window, cx)),
                         }
                     }),
@@ -382,25 +350,113 @@ impl Workspace {
         });
     }
 
-    fn open_tab(&mut self, env: String, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let shell = self.hydra.shell(self.ui.default_shell.as_deref());
-        self.open_request(PaneRequest::new(env, cwd, shell), window, cx);
+    /// The shell new terminals start: hydraui's `default_shell`, else hydra's, else pwsh.
+    fn shell(&self) -> hydra_platform::shell::ShellKind {
+        self.hydra.shell(self.ui.default_shell.as_deref())
     }
 
-    /// The focused pane's folder, else the user's home.
+    /// Where a new terminal in `env` starts: its shown terminal's folder, else its home, else
+    /// the user's home (env-tabs design §2.2).
+    fn env_cwd(&self, env: &str, cx: &App) -> PathBuf {
+        let shown = self
+            .envs
+            .get(env)
+            .and_then(|t| t.shown)
+            .and_then(|id| self.panes.get(&id))
+            .map(|v| v.read(cx).cwd().clone());
+        new_terminal_cwd(
+            shown.as_deref(),
+            self.hydra.env_home(env).as_deref(),
+            &self.hydra.user_home,
+        )
+    }
+
+    /// Adds `env`'s tab, without terminals, and selects it; only selects it when it is open.
+    /// True when the tab is new.
+    fn add_env_tab(&mut self, env: &str) -> bool {
+        if !self.tints.contains_key(env) {
+            self.tints.insert(env.to_string(), self.hydra.tint(env));
+        }
+        self.envs.add_env(env)
+    }
+
+    /// Adds `env`'s tab with one new terminal, in its home else the user's (env-tabs design
+    /// §2.1), or selects its tab when it is open already.
+    pub(super) fn add_env(&mut self, env: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.add_env_tab(env) {
+            self.shown_changed(window, cx);
+            return;
+        }
+        let cwd = new_terminal_cwd(
+            None,
+            self.hydra.env_home(env).as_deref(),
+            &self.hydra.user_home,
+        );
+        self.new_terminal(env, Some(cwd), window, cx);
+    }
+
+    /// A new terminal in `env`'s open tab, shown and focused; with `cwd` `None` it starts
+    /// where `env_cwd` says. `None` when `env` has no tab.
+    pub(super) fn new_terminal(
+        &mut self,
+        env: &str,
+        cwd: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<PaneId> {
+        self.envs.get(env)?;
+        let cwd = cwd.unwrap_or_else(|| self.env_cwd(env, cx));
+        let request = PaneRequest::new(env, cwd, self.shell());
+        Some(self.open_terminal(env, request, window, cx))
+    }
+
+    /// A terminal running `request` in `env`, adding `env`'s tab when it isn't open (sign-in,
+    /// the launcher); shown and focused.
+    pub(super) fn open_terminal(
+        &mut self,
+        env: &str,
+        request: PaneRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> PaneId {
+        self.add_env_tab(env);
+        let id = self.new_pane(request, window, cx);
+        self.envs.add_terminal(env, id);
+        self.focus_soon(id, window, cx);
+        self.sync_tree(cx);
+        self.autosave(window, cx);
+        cx.notify();
+        id
+    }
+
+    /// Shows terminal `id` in the middle, selecting its environment, and focuses it.
+    pub(super) fn show_terminal(
+        &mut self,
+        id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.envs.show(id) {
+            self.shown_changed(window, cx);
+        }
+    }
+
+    /// After the selected environment or its shown terminal changed: focus, tree, status and
+    /// git follow it, and the layout is saved.
+    fn shown_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_active(window, cx);
+        self.sync_tree(cx);
+        self.refresh_status(cx);
+        self.refresh_git(cx);
+        self.autosave(window, cx);
+        cx.notify();
+    }
+
+    /// The shown terminal's folder, else the user's home.
     fn focused_cwd(&self, cx: &App) -> PathBuf {
         self.focused()
             .map(|v| v.read(cx).cwd().clone())
             .unwrap_or_else(|| self.hydra.user_home.clone())
-    }
-
-    /// A Loose tab running `request`.
-    fn open_request(&mut self, request: PaneRequest, window: &mut Window, cx: &mut Context<Self>) {
-        let id = self.new_pane(request, window, cx);
-        self.tabs.add(None, id);
-        self.focus_soon(id, window, cx);
-        self.autosave(window, cx);
-        cx.notify();
     }
 
     fn new_pane(
@@ -435,17 +491,20 @@ impl Workspace {
                     return;
                 }
                 if *ev == PaneEvent::Focused {
-                    ws.tabs.focus_pane(id);
-                    if let Some(tab) = ws.tabs.tab_of(id) {
-                        ws.last_terminal.insert(tab, id);
+                    // A click in a terminal shows it and selects its environment.
+                    let before = ws.shown_place();
+                    ws.envs.show(id);
+                    if ws.shown_place() != before {
+                        ws.autosave(window, cx);
                     }
                     ws.refresh_status(cx);
                 }
-                // The focused pane's repository: on focus, on `cd`, and when a command finishes.
-                let focused = ws.tabs.active().is_some_and(|t| t.focused == id);
+                // The shown terminal's repository: on focus, on `cd`, and when a command
+                // finishes.
+                let shown = ws.envs.active().and_then(|t| t.shown) == Some(id);
                 let back_at_prompt = *ev == PaneEvent::PromptChanged
                     && view.read(cx).prompt() == Some(PromptState::AtPrompt);
-                if focused
+                if shown
                     && (matches!(ev, PaneEvent::Focused | PaneEvent::CwdChanged) || back_at_prompt)
                 {
                     ws.refresh_git(cx);
@@ -458,20 +517,15 @@ impl Workspace {
         self.panes.insert(id, view);
     }
 
-    /// The terminal standing for the active tab: the focused pane if it's a terminal, else
-    /// the tab's last focused terminal (spec §7.8).
-    fn focused(&self) -> Option<Entity<PaneView>> {
-        self.tab_terminal(self.tabs.active()?)
+    /// The selected environment and its shown terminal: what the layout saves as selected.
+    fn shown_place(&self) -> Option<(String, Option<PaneId>)> {
+        self.envs.active().map(|t| (t.env.clone(), t.shown))
     }
 
-    /// The terminal standing for `tab` (spec §7.8).
-    fn tab_terminal(&self, tab: &crate::tabs::Tab) -> Option<Entity<PaneView>> {
-        let id = terminal_for(
-            tab.focused,
-            self.last_terminal.get(&tab.id).copied(),
-            &tab.tree.panes(),
-            &|p| self.panes.contains_key(&p),
-        )?;
+    /// The selected environment's shown terminal, which stands for the window (status bar,
+    /// tree, git) also while the file pane has the focus.
+    fn focused(&self) -> Option<Entity<PaneView>> {
+        let id = self.envs.active()?.shown?;
         self.panes.get(&id).cloned()
     }
 
@@ -503,7 +557,11 @@ impl Workspace {
             window,
             move |ws, _, ev: &FilePaneEvent, window, cx| match ev {
                 FilePaneEvent::Focused => {
-                    ws.tabs.focus_pane(id);
+                    if let Some(env) = ws.envs.env_of(id).map(str::to_string)
+                        && let Some(tab) = ws.envs.get_mut(&env)
+                    {
+                        tab.files_focused = true;
+                    }
                     cx.notify();
                 }
                 FilePaneEvent::Changed => ws.autosave(window, cx),
@@ -515,8 +573,8 @@ impl Workspace {
         self.files.insert(id, view);
     }
 
-    /// Shows `path` in the active tab's file pane, splitting the tab's terminal to the right
-    /// first when the tab has none (spec §7.8).
+    /// Shows `path` in the selected environment's file pane, opening the pane beside the shown
+    /// terminal first when the environment has none (spec §7.8, env-tabs design §2.4).
     fn show_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.show_file_at(path, 0, 0, window, cx);
     }
@@ -531,15 +589,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.active() else {
+        let Some(tab) = self.envs.active() else {
             return;
         };
-        let existing = tab
-            .tree
-            .panes()
-            .into_iter()
-            .find(|p| self.files.contains_key(p));
-        let id = match existing {
+        let env = tab.env.clone();
+        let id = match tab.files.filter(|f| self.files.contains_key(f)) {
             Some(id) => {
                 if let Some(view) = self.files.get(&id).cloned() {
                     view.update(cx, |f, cx| {
@@ -550,13 +604,9 @@ impl Workspace {
                         }
                     });
                 }
-                self.tabs.focus_pane(id);
                 id
             }
             None => {
-                let Some(term) = self.focused().map(|v| v.read(cx).id) else {
-                    return;
-                };
                 self.next_pane += 1;
                 let id = self.next_pane;
                 self.create_files_pane(id, std::slice::from_ref(&path), 0, window, cx);
@@ -565,18 +615,21 @@ impl Workspace {
                 {
                     view.update(cx, |f, cx| f.open_at(path, line, column, window, cx));
                 }
-                self.tabs.split_pane(term, Axis::Row, id);
+                self.envs.set_files(&env, Some(id));
                 id
             }
         };
+        if let Some(tab) = self.envs.get_mut(&env) {
+            tab.files_focused = true;
+        }
         self.focus_pane(id, window, cx);
         self.autosave(window, cx);
         cx.notify();
     }
 
     fn remove_files_pane(&mut self, id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
-        if let Closed::Tab(tab) = self.tabs.close_pane(id) {
-            self.tab_gone(tab, window, cx);
+        if let Some(env) = self.envs.env_of(id).map(str::to_string) {
+            self.envs.set_files(&env, None);
         }
         self.files.remove(&id);
         self.file_subs.remove(&id);
@@ -677,41 +730,32 @@ impl Workspace {
         .detach();
     }
 
+    /// Focuses the selected environment's file pane when it had the focus, else its shown
+    /// terminal; with neither, the window.
     fn focus_active(&self, window: &mut Window, cx: &mut App) {
-        match self.tabs.active() {
-            Some(tab) => self.focus_pane(tab.focused, window, cx),
+        let target = self.envs.active().and_then(|t| match t.files {
+            Some(f) if t.files_focused => Some(f),
+            _ => t.shown,
+        });
+        match target {
+            Some(id) => self.focus_pane(id, window, cx),
             None => window.focus(&self.focus, cx),
         }
     }
 
-    fn new_tab(&mut self, _: &NewTerminal, window: &mut Window, cx: &mut Context<Self>) {
-        let cwd = self.focused_cwd(cx);
-        self.new_tab_in(cwd, window, cx);
-    }
-
-    /// The new pane gets the focused pane's environment and current folder (spec §7.6).
-    fn split(&mut self, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(from) = self.focused() else {
-            return;
-        };
-        let request = {
-            let v = from.read(cx);
-            PaneRequest::new(v.env(), v.cwd().clone(), v.request.shell)
-        };
-        let id = self.new_pane(request, window, cx);
-        let target = from.read(cx).id;
-        self.tabs.split_pane(target, axis, id);
-        self.focus_pane(id, window, cx);
-        self.autosave(window, cx);
-        cx.notify();
-    }
-
-    fn split_right(&mut self, _: &SplitRight, window: &mut Window, cx: &mut Context<Self>) {
-        self.split(Axis::Row, window, cx);
-    }
-
-    fn split_down(&mut self, _: &SplitDown, window: &mut Window, cx: &mut Context<Self>) {
-        self.split(Axis::Column, window, cx);
+    /// Ctrl+T: a terminal in the selected environment; with none open, the picker.
+    fn new_terminal_action(
+        &mut self,
+        _: &NewTerminal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.envs.active().map(|t| t.env.clone()) {
+            Some(env) => {
+                self.new_terminal(&env, None, window, cx);
+            }
+            None => self.pick_env(window, cx),
+        }
     }
 
     fn drop_pane(&mut self, id: PaneId) {
@@ -720,141 +764,140 @@ impl Workspace {
         self.subs.remove(&id);
         self.files.remove(&id);
         self.file_subs.remove(&id);
+        self.commands.remove(&id);
     }
 
+    /// Ctrl+W: the file pane when it has the focus, else the shown terminal.
     fn close_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.active() else {
+        let Some(tab) = self.envs.active() else {
             return;
         };
-        let (id, tab_id, panes) = (tab.focused, tab.id, tab.tree.panes());
-        if self.files.contains_key(&id) {
+        if tab.files_focused
+            && let Some(id) = tab.files
+        {
             self.confirm_unsaved(vec![id], window, cx, move |ws, w, cx| {
                 ws.remove_files_pane(id, w, cx)
             });
             return;
         }
-        // A tab's last terminal takes the tab, file pane and all (spec §7.8).
-        if last_terminal_closes_tab(&panes, id, &|p| self.panes.contains_key(&p)) {
-            self.close_tab(tab_id, window, cx);
-            return;
+        if let Some(id) = tab.shown {
+            self.close_terminal(id, window, cx);
         }
-        if let Closed::Tab(tab) = self.tabs.close_pane(id) {
-            self.tab_gone(tab, window, cx);
+    }
+
+    /// Closes one terminal; the next in its list shows, else the previous. The environment
+    /// keeps its tab when it was the last (env-tabs design §2.2).
+    pub(super) fn close_terminal(
+        &mut self,
+        id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.envs.close_terminal(id) {
+            return;
         }
         self.drop_pane(id);
-        self.focus_active(window, cx);
-        self.autosave(window, cx);
-        cx.notify();
+        self.shown_changed(window, cx);
     }
 
-    /// Closes a tab, asking first when its file pane has unsaved edits.
-    fn close_tab(&mut self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) {
-        let panes = self
-            .tabs
-            .get(tab)
-            .map(|t| t.tree.panes())
+    /// Closes an environment's tab, its terminals and its file pane, asking first about
+    /// unsaved edits and running commands (env-tabs design §2.1).
+    pub(super) fn close_env(&mut self, env: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let panes: Vec<PaneId> = self
+            .envs
+            .get(env)
+            .map(|t| t.terminals.iter().copied().chain(t.files).collect())
             .unwrap_or_default();
+        let env = env.to_string();
         self.confirm_unsaved(panes, window, cx, move |ws, w, cx| {
-            ws.close_tab_now(tab, w, cx)
+            let terminals = ws
+                .envs
+                .get(&env)
+                .map(|t| t.terminals.clone())
+                .unwrap_or_default();
+            let running = ws.running(&terminals, cx);
+            let closing = env.clone();
+            ws.ask_running("Close", &env, &running, w, cx, move |ws, w, cx| {
+                ws.close_env_now(&closing, w, cx)
+            });
         });
     }
 
-    fn close_tab_now(&mut self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) {
-        for id in self.tabs.close_tab(tab) {
+    fn close_env_now(&mut self, env: &str, window: &mut Window, cx: &mut Context<Self>) {
+        for id in self.envs.close_env(env) {
             self.drop_pane(id);
         }
-        self.tab_gone(tab, window, cx);
-        self.focus_active(window, cx);
-        self.autosave(window, cx);
-        cx.notify();
+        self.shown_changed(window, cx);
     }
 
-    /// Restarts a tab's terminals so an edited env.toml applies, asking first when commands
-    /// are running.
-    fn restart_tab(&mut self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) {
-        let name = self
-            .tabs
-            .get(tab)
-            .and_then(|t| {
-                t.title
-                    .clone()
-                    .or_else(|| self.tab_terminal(t).map(|v| v.read(cx).label()))
-            })
+    /// Restarts an environment's terminals so an edited env.toml applies, asking first when
+    /// commands are running (env-tabs design §2.1).
+    pub(super) fn restart_env(&mut self, env: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let terminals = self
+            .envs
+            .get(env)
+            .map(|t| t.terminals.clone())
             .unwrap_or_default();
-        let running = self.running(&[tab], cx);
-        let Some(question) = sets::unload_question(&name, &running) else {
-            self.restart_tab_now(tab, cx);
-            return;
-        };
-        let workspace = cx.entity();
-        window.open_dialog(cx, move |dialog, _, _| {
-            let ws = workspace.clone();
-            dialog
-                .title(format!("Restart {name}?"))
-                .child(v_flex().children(question.lines().map(|l| div().child(l.to_string()))))
-                .footer(
-                    h_flex()
-                        .gap_2()
-                        .justify_end()
-                        .child(
-                            Button::new("cancel")
-                                .label("Cancel")
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(Button::new("confirm").label("Restart").danger().on_click(
-                            move |_, window, cx| {
-                                window.close_dialog(cx);
-                                ws.update(cx, |ws, cx| ws.restart_tab_now(tab, cx));
-                            },
-                        )),
-                )
-        });
+        self.restart_asking(env, terminals, window, cx);
     }
 
-    fn restart_tab_now(&mut self, tab: TabId, cx: &mut Context<Self>) {
-        let Some(t) = self.tabs.get(tab) else {
+    /// Restarts one terminal, asking first when a command is running in it.
+    #[expect(dead_code, reason = "the terminal list's Restart, which comes next")]
+    pub(super) fn restart_terminal(
+        &mut self,
+        id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = self.panes.get(&id).map(|v| v.read(cx).label()) else {
             return;
         };
-        for id in t.tree.panes() {
-            if let Some(view) = self.panes.get(&id) {
-                view.update(cx, |v, cx| v.restart(cx));
+        self.restart_asking(&name, vec![id], window, cx);
+    }
+
+    fn restart_asking(
+        &mut self,
+        what: &str,
+        terminals: Vec<PaneId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let running = self.running(&terminals, cx);
+        self.ask_running("Restart", what, &running, window, cx, move |ws, _, cx| {
+            // Each keeps its place, name and folder; a startup command runs again.
+            for id in &terminals {
+                if let Some(view) = ws.panes.get(id) {
+                    view.update(cx, |v, cx| v.restart(cx));
+                }
             }
-        }
-    }
-
-    fn move_focus(&mut self, dir: Dir, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(id) = self.tabs.focus_dir(dir) {
-            self.focus_pane(id, window, cx);
-            cx.notify();
-        }
-    }
-
-    fn focus_left(&mut self, _: &FocusLeft, window: &mut Window, cx: &mut Context<Self>) {
-        self.move_focus(Dir::Left, window, cx);
-    }
-
-    fn focus_right(&mut self, _: &FocusRight, window: &mut Window, cx: &mut Context<Self>) {
-        self.move_focus(Dir::Right, window, cx);
-    }
-
-    fn focus_up(&mut self, _: &FocusUp, window: &mut Window, cx: &mut Context<Self>) {
-        self.move_focus(Dir::Up, window, cx);
-    }
-
-    fn focus_down(&mut self, _: &FocusDown, window: &mut Window, cx: &mut Context<Self>) {
-        self.move_focus(Dir::Down, window, cx);
+        });
     }
 
     fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
-        self.tabs.next();
-        self.focus_active(window, cx);
-        cx.notify();
+        self.envs.next();
+        self.shown_changed(window, cx);
     }
 
     fn previous_tab(&mut self, _: &PreviousTab, window: &mut Window, cx: &mut Context<Self>) {
-        self.tabs.previous();
-        self.focus_active(window, cx);
-        cx.notify();
+        self.envs.previous();
+        self.shown_changed(window, cx);
+    }
+
+    fn next_terminal(&mut self, _: &NextTerminal, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.envs.next_terminal() {
+            self.show_terminal(id, window, cx);
+        }
+    }
+
+    fn previous_terminal(
+        &mut self,
+        _: &PreviousTerminal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(id) = self.envs.previous_terminal() {
+            self.show_terminal(id, window, cx);
+        }
     }
 
     /// Checks the focused environment's accounts off the UI thread, at most once a minute.
@@ -979,16 +1022,18 @@ impl Workspace {
             TreeEvent::Copy(text) => {
                 return cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
             }
+            // A terminal in the selected environment, starting there (env-tabs design §2.5).
+            TreeEvent::NewTerminal(dir) => {
+                if let Some(env) = self.envs.active().map(|t| t.env.clone()) {
+                    self.new_terminal(&env, Some(dir.clone()), window, cx);
+                }
+                return;
+            }
             _ => {}
         }
         let Some(view) = self.focused() else {
             return;
         };
-        if let TreeEvent::OpenTab(dir) = ev {
-            let env = view.read(cx).env().to_string();
-            self.open_tab(env, dir.clone(), window, cx);
-            return;
-        }
         match ev {
             TreeEvent::Insert(path) => view.update(cx, |v, cx| {
                 let text = format!("{} ", quote_path(v.request.shell, path));
@@ -1005,7 +1050,7 @@ impl Workspace {
             // Handled above.
             TreeEvent::NewFile(_)
             | TreeEvent::NewFolder(_)
-            | TreeEvent::OpenTab(_)
+            | TreeEvent::NewTerminal(_)
             | TreeEvent::Reveal(_)
             | TreeEvent::Rename(_)
             | TreeEvent::Delete(_)
@@ -1015,7 +1060,7 @@ impl Workspace {
     }
 
     /// Diffs a file against git's last commit off the UI thread, then shows it beside the file
-    /// in the tab's file pane (spec §7.3).
+    /// in the environment's file pane (spec §7.3).
     fn show_changes(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let Some((root, rel, base)) = self.tree.as_ref().and_then(|t| t.read(cx).git_place(&path))
         else {
@@ -1027,12 +1072,11 @@ impl Workspace {
                 .await;
             let _ = this.update_in(cx, |ws, window, cx| {
                 ws.show_file(path.clone(), window, cx);
-                let pane = ws.tabs.active().and_then(|tab| {
-                    tab.tree
-                        .panes()
-                        .into_iter()
-                        .find_map(|p| ws.files.get(&p).cloned())
-                });
+                let pane = ws
+                    .envs
+                    .active()
+                    .and_then(|tab| tab.files)
+                    .and_then(|p| ws.files.get(&p).cloned());
                 if let Some(pane) = pane {
                     pane.update(cx, |f, cx| f.open_diff(path, patch, window, cx));
                 }
@@ -1075,19 +1119,17 @@ impl Workspace {
             }
             return;
         }
-        let Some(drag) = &self.drag else {
+        if !self.files_drag {
+            return;
+        }
+        let Some(b) = self.middle_bounds.get() else {
             return;
         };
-        let Some(b) = self.split_bounds.borrow().get(&drag.path).copied() else {
-            return;
-        };
-        let ratio = match drag.axis {
-            Axis::Row => (pos.x - b.origin.x) / b.size.width,
-            Axis::Column => (pos.y - b.origin.y) / b.size.height,
-        };
-        let path = drag.path.clone();
-        if let Some(tab) = self.tabs.active_mut() {
-            tab.tree.set_ratio(&path, ratio);
+        let ratio = (pos.x - b.origin.x) / b.size.width;
+        if let Some(tab) = self.envs.active_mut()
+            && ratio.is_finite()
+        {
+            tab.files_ratio = ratio.clamp(MIN_RATIO, MAX_RATIO);
         }
         cx.notify();
     }
@@ -1107,11 +1149,14 @@ impl Workspace {
                     }
                 });
                 let on_up = ws.clone();
-                window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
                     if phase == DispatchPhase::Bubble {
                         on_up.update(cx, |ws, cx| {
-                            ws.drag = None;
-                            ws.tree_drag = false;
+                            ws.files_drag = false;
+                            // The tree's width is saved in the layout.
+                            if std::mem::take(&mut ws.tree_drag) {
+                                ws.autosave(window, cx);
+                            }
                             cx.notify();
                         });
                     }
@@ -1124,125 +1169,103 @@ impl Workspace {
         .size_full()
     }
 
-    fn render_tree(
+    /// The middle (env-tabs design §2.3, §2.4): the environment's shown terminal outlined in its
+    /// colour, or a New terminal button when it has none; its file pane on the right, with a
+    /// draggable divider, outlined while it has the focus.
+    fn render_env(
         &self,
-        tree: &Tree,
-        path: Vec<usize>,
-        focused: PaneId,
-        current: Option<PaneId>,
+        tab: &EnvTab,
         border: Hsla,
+        muted: Hsla,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        match tree {
-            Tree::Leaf(id) => {
-                if let Some(view) = self.files.get(id) {
-                    let edge = if *id == focused {
-                        cx.theme().accent
-                    } else {
-                        transparent_black()
-                    };
-                    return div()
-                        .size_full()
-                        .border_1()
-                        .border_color(edge)
-                        .child(view.clone())
-                        .into_any_element();
-                }
-                let Some(view) = self.panes.get(id) else {
-                    return div().into_any_element();
-                };
-                // The tab's terminal keeps its outline while its file pane has the focus.
-                let edge = if *id == focused || Some(*id) == current {
-                    self.tint(view.read(cx).env())
-                } else {
-                    transparent_black()
-                };
-                div()
+        let tint = self.tint(&tab.env);
+        let terminal = match tab.shown.and_then(|id| self.panes.get(&id)) {
+            Some(view) => div()
+                .size_full()
+                .border_1()
+                .border_color(tint)
+                .child(view.clone())
+                .into_any_element(),
+            None => {
+                let env = tab.env.clone();
+                v_flex()
                     .size_full()
-                    .border_1()
-                    .border_color(edge)
-                    .child(view.clone())
+                    .gap_2()
+                    .items_center()
+                    .justify_center()
+                    .text_color(muted)
+                    .child(format!("No terminals in {env}."))
+                    .child(
+                        Button::new("empty-new-terminal")
+                            .label("New terminal")
+                            .primary()
+                            .small()
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                ws.new_terminal(&env, None, window, cx);
+                            })),
+                    )
                     .into_any_element()
             }
-            Tree::Split {
-                axis,
-                ratio,
-                first,
-                second,
-            } => {
-                let axis = *axis;
-                let row = axis == Axis::Row;
-                let child_path = |i: usize| {
-                    let mut p = path.clone();
-                    p.push(i);
-                    p
-                };
-                let store = self.split_bounds.clone();
-                let key = path.clone();
-                let drag_path = path.clone();
-                let divider = div()
-                    .id(SharedString::from(format!("divider-{path:?}")))
+        };
+        let Some(files) = tab.files.and_then(|id| self.files.get(&id)) else {
+            return terminal;
+        };
+        let edge = if tab.files_focused {
+            cx.theme().accent
+        } else {
+            transparent_black()
+        };
+        let store = self.middle_bounds.clone();
+        h_flex()
+            .size_full()
+            .relative()
+            .child(
+                canvas(move |bounds, _, _| store.set(Some(bounds)), |_, _, _, _| {})
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+            )
+            .child(
+                div()
+                    .h_full()
+                    .flex_none()
+                    .overflow_hidden()
+                    .w(relative(tab.files_ratio))
+                    .child(terminal),
+            )
+            .child(
+                div()
+                    .id("files-divider")
+                    .w(px(4.))
+                    .h_full()
                     .flex_none()
                     .bg(border)
-                    .map(|d| {
-                        if row {
-                            d.w(px(4.)).h_full().cursor(CursorStyle::ResizeLeftRight)
-                        } else {
-                            d.h(px(4.)).w_full().cursor(CursorStyle::ResizeUpDown)
-                        }
-                    })
+                    .cursor(CursorStyle::ResizeLeftRight)
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |ws, _, _, cx| {
-                            ws.drag = Some(Drag {
-                                path: drag_path.clone(),
-                                axis,
-                            });
+                        cx.listener(|ws, _, _, cx| {
+                            ws.files_drag = true;
                             cx.notify();
                         }),
-                    );
-                let one = div()
-                    .flex_none()
-                    .overflow_hidden()
-                    .map(|d| {
-                        if row {
-                            d.h_full().w(relative(*ratio))
-                        } else {
-                            d.w_full().h(relative(*ratio))
-                        }
-                    })
-                    .child(self.render_tree(first, child_path(0), focused, current, border, cx));
-                let two = div()
+                    ),
+            )
+            .child(
+                div()
                     .flex_1()
                     .min_w_0()
-                    .min_h_0()
+                    .h_full()
                     .overflow_hidden()
-                    .child(self.render_tree(second, child_path(1), focused, current, border, cx));
-                div()
-                    .size_full()
-                    .relative()
-                    .flex()
-                    .map(|d| if row { d.flex_row() } else { d.flex_col() })
-                    .child(
-                        canvas(
-                            move |bounds, _, _| {
-                                store.borrow_mut().insert(key, bounds);
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full(),
-                    )
-                    .child(one)
-                    .child(divider)
-                    .child(two)
-                    .into_any_element()
-            }
-        }
+                    .border_1()
+                    .border_color(edge)
+                    .child(files.clone()),
+            )
+            .into_any_element()
     }
 
+    /// One tab per environment, in the layout's order (env-tabs design §2.1): its colour, its
+    /// terminals' busiest activity, ×, and a right-click menu; **+** adds an environment.
     fn render_tab_strip(
         &self,
         bg: Hsla,
@@ -1250,7 +1273,7 @@ impl Workspace {
         muted: Hsla,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let active = self.tabs.active_id();
+        let active = self.envs.active().map(|t| t.env.clone());
         let mut strip = h_flex()
             .h(px(34.))
             .px_1()
@@ -1270,106 +1293,88 @@ impl Workspace {
                         cx.listener(|ws, _, window, cx| ws.toggle_tree(&FileTree, window, cx)),
                     ),
             );
-        // "Loose" only tells tabs apart from a set's, so it shows only beside one.
-        let has_sets = self.tabs.has_sets();
-        for (set, ids) in self.tabs.groups() {
-            strip = match &set {
-                Some(name) => strip.child(self.render_set_header(name, muted, cx)),
-                None if has_sets => {
-                    strip.child(div().px_2().text_sm().text_color(muted).child("Loose"))
-                }
-                None => strip,
-            };
-            if set.as_ref().is_some_and(|s| self.collapsed.contains(s)) {
-                continue;
-            }
-            for id in ids {
-                let Some(tab) = self.tabs.get(id) else {
-                    continue;
-                };
-                let (label, env) = self
-                    .tab_terminal(tab)
-                    .map(|v| {
-                        let v = v.read(cx);
-                        (v.label(), v.env().to_string())
+        for (i, tab) in self.envs.iter().enumerate() {
+            let env = tab.env.clone();
+            let tint = self.tint(&env);
+            let busy = self.tab_activity(&tab.terminals);
+            let dot = self.render_tab_dot(busy, tint, cx);
+            let (click_env, close_env) = (env.clone(), env.clone());
+            strip = strip.child(
+                h_flex()
+                    .id(("env-tab", i))
+                    .px_2()
+                    .py_1()
+                    .gap_2()
+                    .rounded_md()
+                    .when(active.as_deref() == Some(env.as_str()), |d| {
+                        d.bg(tint.opacity(0.25))
                     })
-                    .unwrap_or_default();
-                let tint = self.tint(&env);
-                let label = tab.title.clone().unwrap_or(label);
-                let busy = self.tab_activity(tab);
-                let dot = self.render_tab_dot(busy, tint, cx);
-                strip = strip.child(
-                    h_flex()
-                        .id(("tab", id))
-                        .px_2()
-                        .py_1()
-                        .gap_2()
-                        .rounded_md()
-                        .when(Some(id) == active, |d| d.bg(tint.opacity(0.25)))
-                        .hover(|d| d.bg(tint.opacity(0.15)))
-                        .on_click(cx.listener(move |ws, _, window, cx| {
-                            ws.tabs.activate(id);
-                            ws.focus_active(window, cx);
-                            cx.notify();
-                        }))
-                        .child(dot)
-                        .child(div().text_sm().child(label))
-                        .when_some(busy, |d, a| {
-                            d.tooltip(move |window, cx| {
-                                gpui_component::tooltip::Tooltip::new(busy::tooltip_text(a))
-                                    .build(window, cx)
-                            })
+                    .hover(|d| d.bg(tint.opacity(0.15)))
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.envs.activate(&click_env);
+                        ws.shown_changed(window, cx);
+                    }))
+                    .child(dot)
+                    .child(div().text_sm().child(env.clone()))
+                    .when_some(busy, |d, a| {
+                        d.tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(busy::tooltip_text(a))
+                                .build(window, cx)
                         })
-                        .context_menu({
-                            let ws = cx.entity();
-                            move |menu, _, _| {
-                                let (save_ws, close_ws) = (ws.clone(), ws.clone());
-                                let restart_ws = ws.clone();
-                                menu.item(PopupMenuItem::new("Restart terminals").on_click(
+                    })
+                    .context_menu({
+                        let ws = cx.entity();
+                        move |menu, _, _| {
+                            let (new_ws, restart_ws, close_ws) =
+                                (ws.clone(), ws.clone(), ws.clone());
+                            let (new_env, restart_env, close_env) =
+                                (env.clone(), env.clone(), env.clone());
+                            menu.item(PopupMenuItem::new("New terminal").on_click(
+                                move |_, window, cx| {
+                                    new_ws.update(cx, |ws, cx| {
+                                        ws.new_terminal(&new_env, None, window, cx);
+                                    });
+                                },
+                            ))
+                            .item(PopupMenuItem::new("Restart environment").on_click(
+                                move |_, window, cx| {
+                                    restart_ws.update(cx, |ws, cx| {
+                                        ws.restart_env(&restart_env, window, cx)
+                                    });
+                                },
+                            ))
+                            .item(
+                                PopupMenuItem::new("Close environment").on_click(
                                     move |_, window, cx| {
-                                        restart_ws
-                                            .update(cx, |ws, cx| ws.restart_tab(id, window, cx));
-                                    },
-                                ))
-                                .item(PopupMenuItem::new("Save tab as group…").on_click(
-                                    move |_, window, cx| {
-                                        save_ws.update(cx, |ws, cx| {
-                                            ws.save_tab_as_group(id, window, cx)
+                                        close_ws.update(cx, |ws, cx| {
+                                            ws.close_env(&close_env, window, cx)
                                         });
                                     },
-                                ))
-                                .item(
-                                    PopupMenuItem::new("Close tab").on_click(
-                                        move |_, window, cx| {
-                                            close_ws
-                                                .update(cx, |ws, cx| ws.close_tab(id, window, cx));
-                                        },
-                                    ),
-                                )
-                            }
-                        })
-                        .child(
-                            div()
-                                .id(("close", id))
-                                .px_1()
-                                .text_color(muted)
-                                .hover(|d| d.text_color(tint))
-                                .child("×")
-                                .on_click(cx.listener(move |ws, _, window, cx| {
-                                    cx.stop_propagation();
-                                    ws.close_tab(id, window, cx);
-                                })),
-                        ),
-                );
-            }
+                                ),
+                            )
+                        }
+                    })
+                    .child(
+                        div()
+                            .id(("env-close", i))
+                            .px_1()
+                            .text_color(muted)
+                            .hover(|d| d.text_color(tint))
+                            .child("×")
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                cx.stop_propagation();
+                                ws.close_env(&close_env, window, cx);
+                            })),
+                    ),
+            );
         }
         strip.child(
             div()
-                .id("new-tab")
+                .id("add-env")
                 .px_2()
                 .text_color(muted)
                 .child("+")
-                .on_click(cx.listener(|ws, _, window, cx| ws.new_tab(&NewTerminal, window, cx))),
+                .on_click(cx.listener(|ws, _, window, cx| ws.pick_env(window, cx))),
         )
     }
 
@@ -1423,7 +1428,6 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.split_bounds.borrow_mut().clear();
         self.keep_start_focus(window, cx);
         let title =
             crate::window_layout::window_title(self.layout.as_deref(), self.is_start_page());
@@ -1439,23 +1443,16 @@ impl Render for Workspace {
             theme.border,
             theme.tab_bar,
         );
-        let body = match self.tabs.active() {
+        let body = match self.envs.active() {
             _ if self.start.is_some() => self.render_start_page(cx),
-            Some(tab) => {
-                let current = self
-                    .files
-                    .contains_key(&tab.focused)
-                    .then(|| self.tab_terminal(tab).map(|v| v.read(cx).id))
-                    .flatten();
-                self.render_tree(&tab.tree, Vec::new(), tab.focused, current, border, cx)
-            }
+            Some(tab) => self.render_env(tab, border, muted, cx),
             None => div()
                 .size_full()
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_color(muted)
-                .child("No tabs open. Ctrl+T opens one.")
+                .child("No environments open. + adds one.")
                 .into_any_element(),
         };
         v_flex()
@@ -1464,16 +1461,12 @@ impl Render for Workspace {
             .text_color(fg)
             .track_focus(&self.focus)
             .key_context("Workspace")
-            .on_action(cx.listener(Self::new_tab))
+            .on_action(cx.listener(Self::new_terminal_action))
             .on_action(cx.listener(Self::close_pane))
-            .on_action(cx.listener(Self::split_right))
-            .on_action(cx.listener(Self::split_down))
-            .on_action(cx.listener(Self::focus_left))
-            .on_action(cx.listener(Self::focus_right))
-            .on_action(cx.listener(Self::focus_up))
-            .on_action(cx.listener(Self::focus_down))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
+            .on_action(cx.listener(Self::next_terminal))
+            .on_action(cx.listener(Self::previous_terminal))
             .on_action(cx.listener(Self::open_launcher))
             .on_action(cx.listener(Self::toggle_tree))
             .on_action(cx.listener(Self::open_file_action))
@@ -1528,7 +1521,7 @@ impl Render for Workspace {
                     .child(div().flex_1().min_w_0().h_full().child(body)),
             )
             .child(self.render_status(border, muted, cx))
-            .when(self.drag.is_some() || self.tree_drag, |d| {
+            .when(self.files_drag || self.tree_drag, |d| {
                 d.child(self.drag_listener(cx))
             })
     }

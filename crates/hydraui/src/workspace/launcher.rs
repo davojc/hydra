@@ -1,4 +1,4 @@
-//! The launcher (spec §7.4): Ctrl+Shift+P opens a palette over sets, environments, sign-in,
+//! The launcher (spec §7.4): Ctrl+Shift+P opens a palette over environments, sign-in,
 //! secrets and config, and Enter runs the entry's action.
 use std::cell::Cell;
 use std::collections::HashSet;
@@ -13,13 +13,12 @@ use gpui_component::command::{Command, CommandItem, CommandState};
 use gpui_component::input::{Input, InputState};
 use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, Disableable, Theme, ThemeMode, WindowExt, h_flex, v_flex};
-use hydraui_sets::{list_sets, load_set};
 
 use super::{Workspace, env_item};
 use crate::config::{self, ThemeChoice};
 use crate::hydra::Hydra;
 use crate::keys::Launcher;
-use crate::launcher::{Action, SetState, entries};
+use crate::launcher::{Action, entries};
 use crate::palette::Palette;
 use crate::pane_view::TermStyle;
 
@@ -30,22 +29,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let ctx = self.set_context();
-        let sets: Vec<(String, SetState)> = list_sets(&self.hydra.paths)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|name| {
-                let state = if self.loaded.get(&name).is_some() {
-                    SetState::Loaded
-                } else {
-                    match load_set(&ctx, &name) {
-                        Ok(_) => SetState::Unloaded,
-                        Err(e) => SetState::Invalid(e.to_string()),
-                    }
-                };
-                (name, state)
-            })
-            .collect();
         let envs = self.hydra.env_names();
         let sign_ins: Vec<(String, String)> = envs
             .iter()
@@ -60,7 +43,7 @@ impl Workspace {
             .iter()
             .flat_map(|e| self.hydra.missing_secrets(e))
             .collect();
-        let list = Rc::new(entries(&sets, &envs, &sign_ins, &secrets));
+        let list = Rc::new(entries(&envs, &sign_ins, &secrets));
         let state = cx.new(|cx| CommandState::new(window, cx));
         let workspace = cx.entity();
         let first = Cell::new(true);
@@ -75,7 +58,7 @@ impl Workspace {
                         list.iter()
                             .map(|e| CommandItem::new().label(e.label.clone())),
                     )
-                    .placeholder("Set, environment, sign in, secret…")
+                    .placeholder("Environment, sign in, secret…")
                     .on_confirm(move |ix, window, cx| {
                         if let Some(entry) = chosen.get(ix.row) {
                             let action = entry.action.clone();
@@ -89,14 +72,7 @@ impl Workspace {
 
     fn run(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
         match action {
-            Action::LoadSet(name) => {
-                self.load_set(&name, window, cx);
-            }
-            Action::UnloadSet(name) => self.unload_set(&name, false, window, cx),
-            Action::OpenEnv(env) => {
-                let cwd = self.focused_cwd(cx);
-                self.open_tab(env, cwd, window, cx);
-            }
+            Action::OpenEnv(env) => self.add_env(&env, window, cx),
             Action::EditEnv(env) => match hydra_core::name::EnvName::parse(&env) {
                 Ok(name) => self.show_file(self.hydra.paths.env_file(&name), window, cx),
                 Err(e) => window.push_notification(
@@ -104,14 +80,7 @@ impl Workspace {
                     cx,
                 ),
             },
-            Action::SignIn { env, tool } => {
-                let cwd = self.focused_cwd(cx);
-                let shell = self.hydra.shell(self.ui.default_shell.as_deref());
-                match self.hydra.sign_in_request(&env, &tool, cwd, shell) {
-                    Ok(request) => self.open_request(request, window, cx),
-                    Err(e) => window.push_notification(Notification::error(e).title("Sign in"), cx),
-                }
-            }
+            Action::SignIn { env, tool } => self.sign_in(&env, &tool, window, cx),
             Action::SetSecret(path) => self.secret_dialog(Some(path), window, cx),
             Action::NewSecret => self.secret_dialog(None, window, cx),
             Action::DeleteEnv => {
@@ -132,17 +101,30 @@ impl Workspace {
             Action::StartPage => {
                 let _ = crate::window_layout::spawn_hydraui(None);
             }
-            Action::OpenGroupFile => self.open_group_file_dialog(window, cx),
-            Action::SaveLooseAsGroup => self.save_loose_as_group(window, cx),
             Action::OpenConfigFolder => {
                 let dir = self.hydra.paths.root().join("hydraui");
                 let _ = std::fs::create_dir_all(&dir);
                 cx.open_with_system(&dir);
             }
             Action::ReloadConfig => self.reload_config(window, cx),
-            Action::Problem(message) => {
-                window.push_notification(Notification::error(message).title("hydraui"), cx)
+        }
+    }
+
+    /// Signs in to `tool` in a new terminal of `env`, adding its tab when it isn't open
+    /// (env-tabs design §5).
+    pub(super) fn sign_in(
+        &mut self,
+        env: &str,
+        tool: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cwd = self.env_cwd(env, cx);
+        match self.hydra.sign_in_request(env, tool, cwd, self.shell()) {
+            Ok(request) => {
+                self.open_terminal(env, request, window, cx);
             }
+            Err(e) => window.push_notification(Notification::error(e).title("Sign in"), cx),
         }
     }
 
@@ -386,7 +368,7 @@ impl Workspace {
         });
     }
 
-    /// Names and creates an environment, then opens a tab in it. The name is checked as it
+    /// Names and creates an environment, then adds its tab. The name is checked as it
     /// is typed; Create stays off until it is free and valid.
     pub(super) fn new_env_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, like work"));
@@ -447,8 +429,7 @@ impl Workspace {
             .title("New environment"),
             cx,
         );
-        let cwd = self.focused_cwd(cx);
-        self.open_tab(env, cwd, window, cx);
+        self.add_env(&env, window, cx);
     }
 
     /// Reads hydraui's and hydra's config.toml again: font, colours, theme, default

@@ -197,15 +197,11 @@ impl Workspace {
         });
     }
 
-    /// After a tool was turned on: its sign-in in a new tab when it has one, and a note.
+    /// After a tool was turned on: its sign-in in a new terminal of `env` when it has one,
+    /// and a note.
     fn added(&mut self, env: &str, tool: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.hydra.sign_ins(env).iter().any(|t| t == tool) {
-            let cwd = self.focused_cwd(cx);
-            let shell = self.hydra.shell(self.ui.default_shell.as_deref());
-            match self.hydra.sign_in_request(env, tool, cwd, shell) {
-                Ok(request) => self.open_request(request, window, cx),
-                Err(e) => window.push_notification(Notification::error(e).title("Sign in"), cx),
-            }
+            self.sign_in(env, tool, window, cx);
         }
         window.push_notification(
             Notification::info(format!("{tool} is on in {env}. {}", reopen(env)))

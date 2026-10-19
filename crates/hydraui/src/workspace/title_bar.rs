@@ -110,7 +110,7 @@ impl Workspace {
     /// of it, starts the new hydraui with it and closes this window (spec §7.11); unsaved
     /// edits are asked about first, as when closing.
     pub(super) fn restart(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.layout.is_none() && !self.tabs.is_empty() {
+        if self.layout.is_none() && !self.envs.is_empty() {
             let dir = hydraui_sets::layouts_dir(&self.hydra.paths);
             let path = hydraui_sets::free_path(&dir, "untitled");
             if !self.save_layout_to(path, window, cx) {

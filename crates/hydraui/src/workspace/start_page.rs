@@ -95,14 +95,18 @@ impl Workspace {
             cx.notify();
             return;
         }
-        self.open_layout_path(row.path, window, cx);
+        self.open_layout_from(row.path, true, window, cx);
     }
 
-    /// New window: one plain terminal in the home folder, untitled.
+    /// New window (env-tabs design §3): untitled, with one environment's tab and terminal; the
+    /// environment is the home folder's binding, else `default_env`, else the one picked.
     fn start_new_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.leave_start_page(window, cx);
         let home = self.hydra.user_home.clone();
-        self.new_tab_in(home, window, cx);
+        match self.hydra.adhoc_env(&home, self.ui.default_env.as_deref()) {
+            Some(env) => self.add_env(&env, window, cx),
+            None => self.pick_env(window, cx),
+        }
     }
 
     fn start_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {

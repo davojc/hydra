@@ -8,8 +8,7 @@ use gpui_component::ActiveTheme;
 
 use super::Workspace;
 use crate::activity::{Activity, busiest};
-use crate::split::PaneId;
-use crate::tabs::Tab;
+use crate::envs::PaneId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PaneActivity {
@@ -66,13 +65,12 @@ impl Workspace {
         }
     }
 
-    /// The tab's busiest terminal's activity, or `None` when all are idle.
-    pub(super) fn tab_activity(&self, tab: &Tab) -> Option<PaneActivity> {
-        let panes: Vec<PaneActivity> = tab
-            .tree
-            .panes()
-            .into_iter()
-            .filter_map(|p| self.activity.get(&p).copied())
+    /// The busiest activity among `panes` (an environment's terminals), or `None` when all
+    /// are idle.
+    pub(super) fn tab_activity(&self, panes: &[PaneId]) -> Option<PaneActivity> {
+        let panes: Vec<PaneActivity> = panes
+            .iter()
+            .filter_map(|p| self.activity.get(p).copied())
             .collect();
         let top = busiest(panes.iter().map(|a| a.state));
         (top != Activity::Idle)

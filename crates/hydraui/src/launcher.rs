@@ -1,20 +1,9 @@
-//! The launcher's entries (spec §7.4): sets, environments, sign-in, secrets and config, each
+//! The launcher's entries (spec §7.4): environments, sign-in, secrets and config, each
 //! with what Enter does. The palette filters them by substring.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SetState {
-    Loaded,
-    Unloaded,
-    /// Why the set file doesn't validate.
-    Invalid(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// Opens the set, or focuses it when it is already loaded.
-    LoadSet(String),
-    UnloadSet(String),
-    /// A Loose tab in the environment.
+    /// Adds the environment's tab, or selects it when it is open already.
     OpenEnv(String),
     /// The environment's env.toml in the file pane.
     EditEnv(String),
@@ -26,16 +15,12 @@ pub enum Action {
     OpenFile,
     /// Search in files (spec §7.10).
     SearchFiles,
-    /// Add a layout file's groups and tabs to the window (spec §7.9).
+    /// Open a layout file (spec §7.12).
     OpenLayout,
     /// Save the window to a layout file.
     SaveLayout,
     /// A new window showing the start page (spec §7.12).
     StartPage,
-    /// Open a group file as a group.
-    OpenGroupFile,
-    /// Save every Loose tab into one group file.
-    SaveLooseAsGroup,
     /// Delete an environment, picked in the dialog, as `hydra env rm` does.
     DeleteEnv,
     /// Set an environment's home folder, picked in the dialogs.
@@ -48,8 +33,6 @@ pub enum Action {
     NewSecret,
     OpenConfigFolder,
     ReloadConfig,
-    /// Says why the entry can't be used (an invalid set).
-    Problem(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,34 +41,11 @@ pub struct Entry {
     pub action: Action,
 }
 
-pub fn entries(
-    sets: &[(String, SetState)],
-    envs: &[String],
-    sign_ins: &[(String, String)],
-    secrets: &[String],
-) -> Vec<Entry> {
+pub fn entries(envs: &[String], sign_ins: &[(String, String)], secrets: &[String]) -> Vec<Entry> {
     let mut out = Vec::new();
     let mut add = |label: String, action: Action| out.push(Entry { label, action });
-    for (name, state) in sets {
-        match state {
-            SetState::Loaded => {
-                add(
-                    format!("Set: {name} (loaded)"),
-                    Action::LoadSet(name.clone()),
-                );
-                add(
-                    format!("Unload set: {name}"),
-                    Action::UnloadSet(name.clone()),
-                );
-            }
-            SetState::Unloaded => add(format!("Set: {name}"), Action::LoadSet(name.clone())),
-            SetState::Invalid(e) => {
-                add(format!("Set: {name} (invalid)"), Action::Problem(e.clone()))
-            }
-        }
-    }
     for env in envs {
-        add(format!("New tab: {env}"), Action::OpenEnv(env.clone()));
+        add(format!("Environment: {env}"), Action::OpenEnv(env.clone()));
         add(
             format!("Edit environment: {env}"),
             Action::EditEnv(env.clone()),
@@ -111,8 +71,6 @@ pub fn entries(
     add("Open layout file…".into(), Action::OpenLayout);
     add("Save layout as…".into(), Action::SaveLayout);
     add("Start page".into(), Action::StartPage);
-    add("Open group file…".into(), Action::OpenGroupFile);
-    add("Save Loose tabs as group…".into(), Action::SaveLooseAsGroup);
     add("Delete environment…".into(), Action::DeleteEnv);
     add("Set environment home…".into(), Action::SetEnvHome);
     add("New environment…".into(), Action::NewEnv);
@@ -127,17 +85,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn entries_cover_sets_environments_sign_in_secrets_and_config() {
-        let sets = [
-            ("client-a".to_string(), SetState::Loaded),
-            ("personal".to_string(), SetState::Unloaded),
-            (
-                "broken".to_string(),
-                SetState::Invalid("line 3: unknown field".into()),
-            ),
-        ];
+    fn entries_cover_environments_sign_in_secrets_and_config() {
         let got = entries(
-            &sets,
             &["work".to_string()],
             &[("work".to_string(), "github".to_string())],
             &["work/linear".to_string()],
@@ -146,11 +95,7 @@ mod tests {
         assert_eq!(
             labels,
             vec![
-                "Set: client-a (loaded)",
-                "Unload set: client-a",
-                "Set: personal",
-                "Set: broken (invalid)",
-                "New tab: work",
+                "Environment: work",
                 "Edit environment: work",
                 "Sign in: github in work",
                 "Set secret: work/linear",
@@ -159,8 +104,6 @@ mod tests {
                 "Open layout file…",
                 "Save layout as…",
                 "Start page",
-                "Open group file…",
-                "Save Loose tabs as group…",
                 "Delete environment…",
                 "Set environment home…",
                 "New environment…",
@@ -169,38 +112,32 @@ mod tests {
                 "Reload config",
             ]
         );
-        assert_eq!(got[0].action, Action::LoadSet("client-a".into()));
-        assert_eq!(got[1].action, Action::UnloadSet("client-a".into()));
+        assert!(!labels.iter().any(|l| l.starts_with("Set:")), "no sets");
+        assert!(!labels.iter().any(|l| l.contains("group")), "no groups");
+        assert_eq!(got[0].action, Action::OpenEnv("work".into()));
+        assert_eq!(got[1].action, Action::EditEnv("work".into()));
         assert_eq!(
-            got[3].action,
-            Action::Problem("line 3: unknown field".into())
-        );
-        assert_eq!(got[4].action, Action::OpenEnv("work".into()));
-        assert_eq!(got[5].action, Action::EditEnv("work".into()));
-        assert_eq!(
-            got[6].action,
+            got[2].action,
             Action::SignIn {
                 env: "work".into(),
                 tool: "github".into()
             }
         );
-        assert_eq!(got[7].action, Action::SetSecret("work/linear".into()));
-        assert_eq!(got[8].action, Action::OpenFile);
-        assert_eq!(got[9].action, Action::SearchFiles);
-        assert_eq!(got[10].action, Action::OpenLayout);
-        assert_eq!(got[11].action, Action::SaveLayout);
-        assert_eq!(got[12].action, Action::StartPage);
-        assert_eq!(got[13].action, Action::OpenGroupFile);
-        assert_eq!(got[14].action, Action::SaveLooseAsGroup);
-        assert_eq!(got[15].action, Action::DeleteEnv);
-        assert_eq!(got[16].action, Action::SetEnvHome);
-        assert_eq!(got[17].action, Action::NewEnv);
-        assert_eq!(got[18].action, Action::NewSecret);
+        assert_eq!(got[3].action, Action::SetSecret("work/linear".into()));
+        assert_eq!(got[4].action, Action::OpenFile);
+        assert_eq!(got[5].action, Action::SearchFiles);
+        assert_eq!(got[6].action, Action::OpenLayout);
+        assert_eq!(got[7].action, Action::SaveLayout);
+        assert_eq!(got[8].action, Action::StartPage);
+        assert_eq!(got[9].action, Action::DeleteEnv);
+        assert_eq!(got[10].action, Action::SetEnvHome);
+        assert_eq!(got[11].action, Action::NewEnv);
+        assert_eq!(got[12].action, Action::NewSecret);
     }
 
     #[test]
     fn with_nothing_configured_only_the_fixed_entries_remain() {
-        let got = entries(&[], &[], &[], &[]);
+        let got = entries(&[], &[], &[]);
         let labels: Vec<&str> = got.iter().map(|e| e.label.as_str()).collect();
         assert_eq!(
             labels,
@@ -210,8 +147,6 @@ mod tests {
                 "Open layout file…",
                 "Save layout as…",
                 "Start page",
-                "Open group file…",
-                "Save Loose tabs as group…",
                 "Delete environment…",
                 "Set environment home…",
                 "New environment…",
@@ -223,8 +158,8 @@ mod tests {
         assert_eq!(got[0].action, Action::OpenFile);
         assert_eq!(got[1].action, Action::SearchFiles);
         assert_eq!(got[4].action, Action::StartPage);
-        assert_eq!(got[7].action, Action::DeleteEnv);
-        assert_eq!(got[8].action, Action::SetEnvHome);
-        assert_eq!(got[9].action, Action::NewEnv);
+        assert_eq!(got[5].action, Action::DeleteEnv);
+        assert_eq!(got[6].action, Action::SetEnvHome);
+        assert_eq!(got[7].action, Action::NewEnv);
     }
 }

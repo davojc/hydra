@@ -7,6 +7,7 @@ mod finder;
 mod launcher;
 mod layout_file;
 mod start_page;
+mod terminal_list;
 mod title_bar;
 mod tree_ops;
 
@@ -21,7 +22,7 @@ use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase, Entity,
     FocusHandle, Focusable, Hsla, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point,
-    Subscription, Task, Window, canvas, div, px, relative, rgb, transparent_black,
+    SharedString, Subscription, Task, Window, canvas, div, px, relative, rgb, transparent_black,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandItem, CommandState};
@@ -54,14 +55,20 @@ const DEFAULT_TREE_WIDTH: f32 = 260.0;
 const MIN_TREE_WIDTH: f32 = 140.0;
 const MIN_PANES_WIDTH: f32 = 200.0;
 
-/// The tree's width with its divider dragged to `x` pixels from the tree's left edge, in a
-/// window `window_width` wide.
+/// The tree's width with its divider dragged to `x`, the tree on the right of a window
+/// `window_width` wide (env-tabs design §2.5).
 fn tree_width_at(x: f32, window_width: f32) -> f32 {
-    if !x.is_finite() {
+    clamp_tree_width(window_width - x, window_width)
+}
+
+/// `width` kept between the tree's minimum and what leaves the panes theirs, in a window
+/// `window_width` wide; the default when it isn't a number.
+fn clamp_tree_width(width: f32, window_width: f32) -> f32 {
+    if !width.is_finite() {
         return DEFAULT_TREE_WIDTH;
     }
     let max = (window_width - MIN_PANES_WIDTH).max(MIN_TREE_WIDTH);
-    x.clamp(MIN_TREE_WIDTH, max)
+    width.clamp(MIN_TREE_WIDTH, max)
 }
 
 /// What a new window shows first (spec §7.12).
@@ -105,10 +112,8 @@ pub struct Workspace {
     tree: Option<Entity<FileTreeView>>,
     tree_sub: Option<Subscription>,
     tree_width: f32,
-    /// The divider between the tree and the panes is being dragged.
+    /// The divider between the panes and the tree is being dragged.
     tree_drag: bool,
-    /// The tree panel's bounds at the last paint, for the drag.
-    tree_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     focus: FocusHandle,
     title: String,
     subs: HashMap<PaneId, Subscription>,
@@ -233,7 +238,6 @@ impl Workspace {
             tree_sub: None,
             tree_width: DEFAULT_TREE_WIDTH,
             tree_drag: false,
-            tree_bounds: Rc::default(),
             focus: cx.focus_handle(),
             title: String::new(),
             subs: HashMap::new(),
@@ -785,14 +789,25 @@ impl Workspace {
         }
     }
 
-    /// Closes one terminal; the next in its list shows, else the previous. The environment
-    /// keeps its tab when it was the last (env-tabs design §2.2).
+    /// Closes one terminal, asking first when a command is running in it; the next in its
+    /// list shows, else the previous. The environment keeps its tab when it was the last
+    /// (env-tabs design §2.2).
     pub(super) fn close_terminal(
         &mut self,
         id: PaneId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(name) = self.panes.get(&id).map(|v| v.read(cx).label()) else {
+            return;
+        };
+        let running = self.running(&[id], cx);
+        self.ask_running("Close", &name, &running, window, cx, move |ws, w, cx| {
+            ws.close_terminal_now(id, w, cx)
+        });
+    }
+
+    fn close_terminal_now(&mut self, id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
         if !self.envs.close_terminal(id) {
             return;
         }
@@ -827,6 +842,7 @@ impl Workspace {
         for id in self.envs.close_env(env) {
             self.drop_pane(id);
         }
+        crate::window_layout::forget_env(&mut self.unopened, env);
         self.shown_changed(window, cx);
     }
 
@@ -842,7 +858,6 @@ impl Workspace {
     }
 
     /// Restarts one terminal, asking first when a command is running in it.
-    #[expect(dead_code, reason = "the terminal list's Restart, which comes next")]
     pub(super) fn restart_terminal(
         &mut self,
         id: PaneId,
@@ -1112,11 +1127,10 @@ impl Workspace {
     }
 
     fn drag_to(&mut self, pos: Point<Pixels>, window_width: f32, cx: &mut Context<Self>) {
+        // The tree runs to the window's right edge, so its width is measured from there.
         if self.tree_drag {
-            if let Some(b) = self.tree_bounds.get() {
-                self.tree_width = tree_width_at(f32::from(pos.x - b.origin.x), window_width);
-                cx.notify();
-            }
+            self.tree_width = tree_width_at(f32::from(pos.x), window_width);
+            cx.notify();
             return;
         }
         if !self.files_drag {
@@ -1280,28 +1294,19 @@ impl Workspace {
             .gap_1()
             .bg(bg)
             .border_b_1()
-            .border_color(border)
-            // The file tree, as Ctrl+B; highlighted while it is open.
-            .child(
-                Button::new("toggle-file-tree")
-                    .icon(IconName::Folder)
-                    .ghost()
-                    .small()
-                    .selected(self.tree.is_some())
-                    .tooltip("File tree (Ctrl+B)")
-                    .on_click(
-                        cx.listener(|ws, _, window, cx| ws.toggle_tree(&FileTree, window, cx)),
-                    ),
-            );
-        for (i, tab) in self.envs.iter().enumerate() {
+            .border_color(border);
+        for tab in self.envs.iter() {
             let env = tab.env.clone();
             let tint = self.tint(&env);
             let busy = self.tab_activity(&tab.terminals);
             let dot = self.render_tab_dot(busy, tint, cx);
             let (click_env, close_env) = (env.clone(), env.clone());
+            let close_id = SharedString::from(format!("env-close-{env}"));
             strip = strip.child(
                 h_flex()
-                    .id(("env-tab", i))
+                    // Keyed by name, so element state stays with its environment when one
+                    // before it closes.
+                    .id(SharedString::from(format!("env-tab-{env}")))
                     .px_2()
                     .py_1()
                     .gap_2()
@@ -1356,7 +1361,7 @@ impl Workspace {
                     })
                     .child(
                         div()
-                            .id(("env-close", i))
+                            .id(close_id)
                             .px_1()
                             .text_color(muted)
                             .hover(|d| d.text_color(tint))
@@ -1368,14 +1373,28 @@ impl Workspace {
                     ),
             );
         }
-        strip.child(
-            div()
-                .id("add-env")
-                .px_2()
-                .text_color(muted)
-                .child("+")
-                .on_click(cx.listener(|ws, _, window, cx| ws.pick_env(window, cx))),
-        )
+        strip
+            .child(
+                div()
+                    .id("add-env")
+                    .px_2()
+                    .text_color(muted)
+                    .child("+")
+                    .on_click(cx.listener(|ws, _, window, cx| ws.pick_env(window, cx))),
+            )
+            .child(div().flex_1())
+            // The file tree, as Ctrl+B, at the end nearest the tree; highlighted while open.
+            .child(
+                Button::new("toggle-file-tree")
+                    .icon(IconName::Folder)
+                    .ghost()
+                    .small()
+                    .selected(self.tree.is_some())
+                    .tooltip("File tree (Ctrl+B)")
+                    .on_click(
+                        cx.listener(|ws, _, window, cx| ws.toggle_tree(&FileTree, window, cx)),
+                    ),
+            )
     }
 
     fn render_status(
@@ -1476,32 +1495,18 @@ impl Render for Workspace {
             .when(self.start.is_none(), |d| {
                 d.child(self.render_tab_strip(bar, border, muted, cx))
             })
+            // The terminal list, the middle, then the tree on the right (env-tabs design §2).
             .child(
                 h_flex()
                     .flex_1()
                     .min_h_0()
                     .items_start()
+                    .when(self.start.is_none() && self.envs.active().is_some(), |d| {
+                        d.child(self.render_terminal_list(cx))
+                    })
+                    .child(div().flex_1().min_w_0().h_full().child(body))
                     .when_some(self.tree.clone(), |d, tree| {
-                        let store = self.tree_bounds.clone();
                         d.child(
-                            div()
-                                .w(px(self.tree_width))
-                                .h_full()
-                                .flex_none()
-                                .relative()
-                                .child(
-                                    canvas(
-                                        move |bounds, _, _| store.set(Some(bounds)),
-                                        |_, _, _, _| {},
-                                    )
-                                    .absolute()
-                                    .top_0()
-                                    .left_0()
-                                    .size_full(),
-                                )
-                                .child(tree),
-                        )
-                        .child(
                             div()
                                 .id("tree-divider")
                                 .w(px(4.))
@@ -1517,8 +1522,14 @@ impl Render for Workspace {
                                     }),
                                 ),
                         )
-                    })
-                    .child(div().flex_1().min_w_0().h_full().child(body)),
+                        .child(
+                            div()
+                                .w(px(self.tree_width))
+                                .h_full()
+                                .flex_none()
+                                .child(tree),
+                        )
+                    }),
             )
             .child(self.render_status(border, muted, cx))
             .when(self.files_drag || self.tree_drag, |d| {
@@ -1582,11 +1593,20 @@ mod tests {
 
     #[test]
     fn the_tree_width_follows_the_pointer_within_limits() {
-        assert_eq!(tree_width_at(300.0, 1200.0), 300.0);
-        assert_eq!(tree_width_at(50.0, 1200.0), MIN_TREE_WIDTH);
-        assert_eq!(tree_width_at(1150.0, 1200.0), 1200.0 - MIN_PANES_WIDTH);
+        // The tree is on the right: its width runs from the pointer to the window's right edge.
+        assert_eq!(tree_width_at(900.0, 1200.0), 300.0);
+        assert_eq!(tree_width_at(1150.0, 1200.0), MIN_TREE_WIDTH);
+        assert_eq!(tree_width_at(100.0, 1200.0), 1200.0 - MIN_PANES_WIDTH);
         // A window too narrow for both keeps the tree at its minimum.
-        assert_eq!(tree_width_at(300.0, 250.0), MIN_TREE_WIDTH);
+        assert_eq!(tree_width_at(100.0, 250.0), MIN_TREE_WIDTH);
         assert_eq!(tree_width_at(f32::NAN, 1200.0), DEFAULT_TREE_WIDTH);
+    }
+
+    #[test]
+    fn a_saved_tree_width_is_kept_within_limits() {
+        assert_eq!(clamp_tree_width(300.0, 1200.0), 300.0);
+        assert_eq!(clamp_tree_width(50.0, 1200.0), MIN_TREE_WIDTH);
+        assert_eq!(clamp_tree_width(1150.0, 1200.0), 1200.0 - MIN_PANES_WIDTH);
+        assert_eq!(clamp_tree_width(f32::NAN, 1200.0), DEFAULT_TREE_WIDTH);
     }
 }

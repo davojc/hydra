@@ -15,7 +15,7 @@ use hydraui_sets::layout::{
 use hydraui_sets::{Context as LayoutContext, PaneSpec};
 use hydraui_term::PromptState;
 
-use super::{DEFAULT_TREE_WIDTH, Workspace, tree_width_at};
+use super::{DEFAULT_TREE_WIDTH, Workspace, clamp_tree_width};
 use crate::envs::PaneId;
 use crate::hydra::PaneRequest;
 use crate::keys::FileTree;
@@ -339,7 +339,7 @@ impl Workspace {
             && self.tree.is_none()
         {
             let width = f32::from(window.viewport_size().width);
-            self.tree_width = tree_width_at(tree.width.unwrap_or(DEFAULT_TREE_WIDTH), width);
+            self.tree_width = clamp_tree_width(tree.width.unwrap_or(DEFAULT_TREE_WIDTH), width);
             self.toggle_tree(&FileTree, window, cx);
         }
         if let Some(env) = plan.active_env {

@@ -37,6 +37,12 @@ pub fn with_unopened(mut current: Layout, unopened: &Layout) -> Layout {
     current
 }
 
+/// Forgets `env`'s entries that didn't open, once the user closes that environment, so the
+/// next save doesn't bring it back into the file.
+pub fn forget_env(unopened: &mut Layout, env: &str) {
+    unopened.envs.retain(|e| e.name != env);
+}
+
 /// Unix seconds, for the recent list.
 pub fn now_secs() -> u64 {
     std::time::SystemTime::now()
@@ -116,6 +122,24 @@ mod tests {
             saved.active_env.as_deref(),
             Some("work"),
             "the open window's own state stays"
+        );
+    }
+
+    #[test]
+    fn a_closed_environment_leaves_what_did_not_open() {
+        let mut unopened = Layout {
+            envs: vec![env("work", &["b"]), env("closed", &["c"])],
+            ..Default::default()
+        };
+        forget_env(&mut unopened, "closed");
+        let current = Layout {
+            envs: vec![env("work", &["a"])],
+            ..Default::default()
+        };
+        assert_eq!(
+            with_unopened(current, &unopened).envs,
+            vec![env("work", &["a", "b"])],
+            "the closed environment's skipped terminals don't bring it back"
         );
     }
 

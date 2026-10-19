@@ -9,8 +9,8 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::notification::Notification;
 use gpui_component::{WindowExt, h_flex, v_flex};
 use hydraui_sets::layout::{
-    EnvFile, FilesFile, LAYOUT_VERSION, Layout, LayoutError, ListFile, TerminalFile, TreeFile,
-    plan_layout, read_layout, write_layout,
+    EnvFile, FilesFile, LAYOUT_VERSION, Layout, LayoutError, ListFile, TasksTab, TerminalFile,
+    TreeFile, plan_layout, read_layout, write_layout,
 };
 use hydraui_sets::{Context as LayoutContext, PaneSpec};
 use hydraui_term::PromptState;
@@ -111,8 +111,8 @@ impl Workspace {
     }
 
     /// The window as a version 2 layout (env-tabs design §3): each environment in tab order
-    /// with its terminals (name, current folder, shell, and a hand-written command), the shown
-    /// one, its file pane, the selected environment and the tree.
+    /// with its terminals (name, current folder, shell, a hand-written command and its Tasks
+    /// tab), the shown one, its file pane, the selected environment and the tree.
     pub(super) fn current_layout(&self, cx: &App) -> Layout {
         let envs = self
             .envs
@@ -128,7 +128,13 @@ impl Workspace {
                             cwd: v.cwd().to_string_lossy().into_owned(),
                             shell: Some(v.request.shell.as_str().into()),
                             command: self.commands.get(id).cloned(),
-                            tasks: None,
+                            tasks: self.tasks_tabs.get(id).map(|&shown| {
+                                if shown {
+                                    TasksTab::Shown
+                                } else {
+                                    TasksTab::Open
+                                }
+                            }),
                         })
                     })
                     .collect();
@@ -333,6 +339,11 @@ impl Workspace {
                 }
                 self.envs.add_terminal(&env.name, id);
                 ids.push(id);
+                // Its Tasks tab; autosave waits while the layout opens.
+                if let Some(tasks) = t.tasks {
+                    self.open_tasks(id, window, cx);
+                    self.show_tasks(id, tasks == TasksTab::Shown, window, cx);
+                }
             }
             if let Some(&id) = env.shown.and_then(|i| ids.get(i)) {
                 self.envs.show(id);

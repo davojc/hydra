@@ -71,6 +71,11 @@ impl TaskBoardView {
         }
     }
 
+    /// The project board this view shows.
+    pub fn board(&self) -> &Entity<TaskBoard> {
+        &self.board
+    }
+
     pub fn is_editing(&self) -> bool {
         self.editing.is_some()
     }

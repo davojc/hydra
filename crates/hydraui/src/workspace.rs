@@ -7,6 +7,7 @@ mod finder;
 mod launcher;
 mod layout_file;
 mod start_page;
+mod tasks_tab;
 mod terminal_list;
 mod title_bar;
 mod tree_ops;
@@ -45,6 +46,8 @@ use crate::keys::{
     TestDialog,
 };
 use crate::pane_view::{PaneEvent, PaneView, TermStyle};
+use crate::task_board::TaskBoard;
+use crate::task_board_view::TaskBoardView;
 use busy::PaneActivity;
 use tree_ops::NameFor;
 
@@ -176,6 +179,15 @@ pub struct Workspace {
     opening: bool,
     /// The start page, while it shows (spec §7.12).
     start: Option<start_page::StartPage>,
+    /// Terminals with a Tasks tab, and whether it's the one shown (`true`) or the terminal
+    /// (task-board design §4).
+    tasks_tabs: HashMap<PaneId, bool>,
+    /// One board per project, shared by every Tasks tab on it; dropped when no tab uses it.
+    boards: HashMap<PathBuf, (Entity<TaskBoard>, Subscription)>,
+    /// One view per terminal's Tasks tab.
+    board_views: HashMap<PaneId, Entity<TaskBoardView>>,
+    /// Each board view's focus watch, which takes the focus from the file pane.
+    board_focus: HashMap<PaneId, Subscription>,
 }
 
 impl Workspace {
@@ -292,6 +304,10 @@ impl Workspace {
             unopened: Default::default(),
             opening: false,
             start: None,
+            tasks_tabs: HashMap::new(),
+            boards: HashMap::new(),
+            board_views: HashMap::new(),
+            board_focus: HashMap::new(),
         }
     }
 
@@ -318,6 +334,7 @@ impl Workspace {
         let ws = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             ws.update(cx, |ws, cx| {
+                ws.finish_board_edits(window, cx);
                 ws.autosave(window, cx);
                 // Unsaved edits: ask first, and close from the dialog (spec §7.8).
                 let all: Vec<PaneId> = ws.files.keys().copied().collect();
@@ -484,6 +501,7 @@ impl Workspace {
     /// After the selected environment or its shown terminal changed: focus, tree, status and
     /// git follow it, and the layout is saved.
     fn shown_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_boards(window, cx);
         self.focus_active(window, cx);
         self.sync_tree(cx);
         self.refresh_status(cx);
@@ -535,6 +553,7 @@ impl Workspace {
                     let before = ws.shown_place();
                     ws.envs.show(id);
                     if ws.shown_place() != before {
+                        ws.sync_boards(window, cx);
                         ws.autosave(window, cx);
                     }
                     ws.refresh_status(cx);
@@ -572,6 +591,12 @@ impl Workspace {
     fn focus_pane(&self, id: PaneId, window: &mut Window, cx: &mut App) {
         if let Some(view) = self.files.get(&id) {
             view.update(cx, |f, cx| f.focus_content(window, cx));
+            return;
+        }
+        // A terminal showing its Tasks tab: the board.
+        if let Some(board) = self.shown_board(id) {
+            let handle = board.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
             return;
         }
         match self.panes.get(&id) {
@@ -807,7 +832,8 @@ impl Workspace {
         self.commands.remove(&id);
     }
 
-    /// Ctrl+W: the file pane when it has the focus, else the shown terminal.
+    /// Ctrl+W: the file pane when it has the focus, else the shown terminal's Tasks tab when
+    /// it's selected, else the shown terminal.
     fn close_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.envs.active() else {
             return;
@@ -818,6 +844,10 @@ impl Workspace {
             self.confirm_unsaved(vec![id], window, cx, move |ws, w, cx| {
                 ws.remove_files_pane(id, w, cx)
             });
+            return;
+        }
+        if let Some(id) = self.visible_tasks() {
+            self.close_tasks(id, window, cx);
             return;
         }
         if let Some(id) = tab.shown {
@@ -847,6 +877,7 @@ impl Workspace {
         if !self.envs.close_terminal(id) {
             return;
         }
+        self.drop_tasks(id, window, cx);
         self.drop_pane(id);
         self.shown_changed(window, cx);
     }
@@ -876,6 +907,7 @@ impl Workspace {
 
     fn close_env_now(&mut self, env: &str, window: &mut Window, cx: &mut Context<Self>) {
         for id in self.envs.close_env(env) {
+            self.drop_tasks(id, window, cx);
             self.drop_pane(id);
         }
         crate::window_layout::forget_env(&mut self.unopened, env);
@@ -1276,8 +1308,28 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let tint = self.tint(&tab.env);
-        let terminal = match tab.shown.and_then(|id| self.panes.get(&id)) {
-            Some(view) => div()
+        let terminal = match tab.shown.and_then(|id| Some((id, self.panes.get(&id)?))) {
+            // With a Tasks tab: its strip above the terminal or its board (task-board §4).
+            Some((id, view)) if self.tasks_tabs.contains_key(&id) => {
+                let label = view.read(cx).label();
+                let content = match self.shown_board(id) {
+                    Some(board) => board.clone().into_any_element(),
+                    None => view.clone().into_any_element(),
+                };
+                v_flex()
+                    .size_full()
+                    .child(self.render_tasks_strip(id, label, tint, muted, border, cx))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .border_1()
+                            .border_color(tint)
+                            .child(content),
+                    )
+                    .into_any_element()
+            }
+            Some((_, view)) => div()
                 .size_full()
                 .border_1()
                 .border_color(tint)

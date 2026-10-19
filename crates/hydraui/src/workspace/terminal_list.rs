@@ -1,6 +1,6 @@
 //! The terminal list on the left (env-tabs design §2.2): **+ New**, then the selected
 //! environment's terminals in creation order, each with its activity dot, its name and × on
-//! hover; click shows one, right-click renames, restarts or closes it.
+//! hover; click shows one, right-click opens its Tasks tab, renames, restarts or closes it.
 use std::cell::Cell;
 
 use gpui::prelude::*;
@@ -71,13 +71,22 @@ impl Workspace {
                     .context_menu({
                         let ws = cx.entity();
                         move |menu, _, _| {
-                            let (rename_ws, restart_ws, close_ws) =
-                                (ws.clone(), ws.clone(), ws.clone());
-                            menu.item(PopupMenuItem::new("Rename…").on_click(
-                                move |_, window, cx| {
+                            let (tasks_ws, rename_ws, restart_ws, close_ws) =
+                                (ws.clone(), ws.clone(), ws.clone(), ws.clone());
+                            // Its project's board as a Tasks tab beside it (task-board §4).
+                            menu.item(PopupMenuItem::new("Tasks").on_click(move |_, window, cx| {
+                                tasks_ws.update(cx, |ws, cx| {
+                                    if ws.envs.active().and_then(|t| t.shown) != Some(id) {
+                                        ws.show_terminal(id, window, cx);
+                                    }
+                                    ws.open_tasks(id, window, cx);
+                                });
+                            }))
+                            .item(
+                                PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
                                     rename_ws.update(cx, |ws, cx| ws.rename_dialog(id, window, cx));
-                                },
-                            ))
+                                }),
+                            )
                             .item(
                                 PopupMenuItem::new("Restart").on_click(move |_, window, cx| {
                                     restart_ws

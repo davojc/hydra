@@ -5,6 +5,7 @@ pub mod activity;
 pub mod assets;
 pub mod claim;
 pub mod config;
+pub mod envs;
 pub mod file_doc;
 pub mod file_ops;
 pub mod file_pane;

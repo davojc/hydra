@@ -1,4 +1,4 @@
-//! Paths in terminal output (spec §7.10): the word under a Ctrl+click as a file, with the
+//! Paths and URLs in terminal output (spec §7.10): the word under a Ctrl+click as a file, with the
 //! line and column tools print after it. No UI.
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -90,6 +90,45 @@ pub fn wrapped_spans(rows: &[(String, bool)], row: usize, range: Range<usize>) -
         }
     }
     out
+}
+
+/// The `http://` or `https://` URL under `column` of `text`, printed as plain text, and the
+/// characters it covers.
+pub fn url_span_at(text: &str, column: usize) -> Option<(String, Range<usize>)> {
+    let chars: Vec<char> = text.chars().collect();
+    let ends = |c: &char| c.is_whitespace() || c.is_control() || "\"'`<>".contains(*c);
+    let mut i = 0;
+    while i <= column && i < chars.len() {
+        let rest: String = chars[i..chars.len().min(i + 8)].iter().collect();
+        let scheme = ["https://", "http://"]
+            .into_iter()
+            .find(|s| rest.to_ascii_lowercase().starts_with(s));
+        let Some(scheme) = scheme else {
+            i += 1;
+            continue;
+        };
+        let mut end = chars[i..]
+            .iter()
+            .position(ends)
+            .map_or(chars.len(), |n| i + n);
+        // Punctuation after a URL ends the sentence, and a closing bracket without its
+        // opening one belongs to the text around it.
+        loop {
+            let url = &chars[i..end];
+            let count = |c: char| url.iter().filter(|&&x| x == c).count();
+            match url.last() {
+                Some('.' | ',' | ';' | ':' | '!' | '?') => end -= 1,
+                Some(')') if count(')') > count('(') => end -= 1,
+                Some(']') if count(']') > count('[') => end -= 1,
+                _ => break,
+            }
+        }
+        if end > i + scheme.len() && column < end {
+            return Some((chars[i..end].iter().collect(), i..end));
+        }
+        i = end.max(i + 1);
+    }
+    None
 }
 
 /// The path under `column` of `text`, with `:L`, `:L:C` or `(L,C)` after it, when it names a
@@ -187,6 +226,84 @@ fn leading_number(s: &str) -> (Option<usize>, &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn urls_in_plain_text_are_found_under_the_mouse() {
+        let line = "Open https://github.com/login/device and enter the code";
+        let at = line.find("github").unwrap();
+        let start = line.find("https").unwrap();
+        assert_eq!(
+            url_span_at(line, at),
+            Some((
+                "https://github.com/login/device".to_string(),
+                start..start + 31
+            ))
+        );
+        // Off the URL: nothing.
+        assert_eq!(url_span_at(line, 0), None);
+        assert_eq!(url_span_at(line, line.len() - 1), None);
+    }
+
+    #[test]
+    fn a_url_keeps_its_query_but_not_the_punctuation_around_it() {
+        let url =
+            "https://claude.ai/oauth/authorize?code=true&client_id=9d1c&scope=a+b&state=x_Y-z";
+        for line in [
+            format!("Browser didn't open? Use the url below to sign in:{url}"),
+            format!("visit ({url})."),
+            format!("\"{url}\","),
+            format!("see <{url}>"),
+        ] {
+            let at = line.find("oauth").unwrap();
+            assert_eq!(
+                url_span_at(&line, at).map(|(u, _)| u),
+                Some(url.to_string()),
+                "{line}"
+            );
+        }
+        // Brackets that belong to the URL stay.
+        let wiki = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
+        assert_eq!(
+            url_span_at(wiki, 10).map(|(u, _)| u),
+            Some(wiki.to_string())
+        );
+    }
+
+    #[test]
+    fn only_web_urls_count() {
+        assert_eq!(url_span_at("ftp://example.com/x", 5), None);
+        assert_eq!(url_span_at("https://", 3), None);
+        assert_eq!(
+            url_span_at("http://localhost:8080/cb", 3).map(|(u, _)| u),
+            Some("http://localhost:8080/cb".to_string())
+        );
+    }
+
+    #[test]
+    fn a_url_wrapped_over_rows_is_one_link() {
+        let rows = vec![
+            ("go to https://example.com/very/".to_string(), true),
+            ("long/path?q=1 now".to_string(), false),
+        ];
+        let (text, at) = join_wrapped(&rows, 1, 3);
+        let (url, span) = url_span_at(&text, at).unwrap();
+        assert_eq!(url, "https://example.com/very/long/path?q=1");
+        assert_eq!(
+            wrapped_spans(&rows, 1, span),
+            vec![
+                Span {
+                    row: 0,
+                    start: 6,
+                    end: 31
+                },
+                Span {
+                    row: 1,
+                    start: 0,
+                    end: 13
+                },
+            ]
+        );
+    }
 
     fn exists_in(files: &'static [&'static str]) -> impl Fn(&Path) -> bool {
         move |p: &Path| {

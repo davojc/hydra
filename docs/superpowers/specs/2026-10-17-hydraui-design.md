@@ -666,7 +666,9 @@ user's home when there is none) and respect `.gitignore` as the tree does.
   `src\main.rs(42,7)` (MSVC / C#), absolute or relative to the terminal's
   folder. Only existing files count, so other words never become links; the
   path underlines while hovered with Ctrl held. OSC 8 links keep working as
-  before.
+  before, and so do `http://` and `https://` URLs printed as plain text
+  (sign-in links, for example): Ctrl+click opens them in the browser, across
+  wrapped rows, without the punctuation around them.
 - **Quick open** (`Ctrl+Shift+O`, rebindable as `open_file`): a picker of the
   folder's files (at most 50,000, with a note when cut off), fuzzy-matched as
   typed — consecutive letters, word starts and the file name rank higher, so

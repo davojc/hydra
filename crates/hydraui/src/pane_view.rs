@@ -429,6 +429,9 @@ impl PaneView {
                     }
                     return vec![Span { row, start, end }];
                 }
+                if let Some((_, span)) = crate::term_paths::url_span_at(&text, at) {
+                    return crate::term_paths::wrapped_spans(&rows, row, span);
+                }
                 crate::term_paths::path_span_at(&text, at, &cwd, &|p| p.is_file())
                     .map(|(_, span)| crate::term_paths::wrapped_spans(&rows, row, span))
                     .unwrap_or_default()
@@ -514,19 +517,32 @@ impl PaneView {
             return;
         };
         if ev.button == MouseButton::Left && ev.modifiers.control {
-            if let Some(url) = pane.with_term(|t| link_at(t, row, col)) {
-                cx.open_url(&url);
-            } else if let Some(hit) = pane.with_term(|t| {
-                // A long path may have wrapped onto the next row: read the whole line.
+            enum Hit {
+                Url(String),
+                Path(crate::term_paths::PathHit),
+            }
+            let hit = pane.with_term(|t| {
+                if let Some(url) = link_at(t, row, col) {
+                    return Some(Hit::Url(url));
+                }
+                // A long URL or path may have wrapped onto the next row: read the whole line.
                 let rows = visible_rows(t);
                 if row >= rows.len() {
                     return None;
                 }
                 let (text, at) = crate::term_paths::join_wrapped(&rows, row, col);
-                crate::term_paths::path_at(&text, at, &self.cwd, &|p| p.is_file())
-            }) {
+                if let Some((url, _)) = crate::term_paths::url_span_at(&text, at) {
+                    return Some(Hit::Url(url));
+                }
+                crate::term_paths::path_at(&text, at, &self.cwd, &|p| p.is_file()).map(Hit::Path)
+            });
+            match hit {
+                Some(Hit::Url(url)) => cx.open_url(&url),
                 // A path in the output: open it at its line (spec §7.10).
-                cx.emit(PaneEvent::OpenPath(hit.path, hit.line, hit.column));
+                Some(Hit::Path(hit)) => {
+                    cx.emit(PaneEvent::OpenPath(hit.path, hit.line, hit.column))
+                }
+                None => {}
             }
             return;
         }

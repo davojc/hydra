@@ -96,7 +96,7 @@ pub struct Workspace {
     refreshing: HashSet<String>,
     /// The focused pane's repository summary, for the folder it was read in; `None` text when
     /// that folder isn't in a repository.
-    git: Option<(PathBuf, Option<String>)>,
+    git: Option<(PathBuf, Option<git_status::Summary>)>,
     /// A `git status` is running; `git_again` asks for another once it finishes.
     git_busy: bool,
     git_again: bool,
@@ -833,7 +833,7 @@ impl Workspace {
                     ws.git_watch =
                         root.and_then(|r| crate::git_watch::GitWatch::new(r, ws.git_tx.clone()));
                 }
-                let line = status.as_ref().map(git_status::summary);
+                let line = status.as_ref().map(git_status::summary_parts);
                 ws.git = Some((cwd, line));
                 ws.git_busy = false;
                 if std::mem::take(&mut ws.git_again) {
@@ -1307,13 +1307,15 @@ impl Workspace {
             };
             // Only a summary read in this pane's current folder; a stale one would mislead.
             let git = match &self.git {
-                Some((dir, Some(line))) if dir == v.cwd() => Some(line.clone()),
+                Some((dir, Some(parts))) if dir == v.cwd() => {
+                    Some(git_summary(parts, muted, cx.theme()))
+                }
                 _ => None,
             };
             bar = bar
                 .child(env_name)
                 .child(div().flex_1().min_w_0().overflow_hidden().child(accounts))
-                .when_some(git, |b, line| b.child(div().flex_none().child(line)))
+                .when_some(git, |b, line| b.child(line))
                 .child(div().child(v.cwd().display().to_string()));
         }
         bar
@@ -1424,6 +1426,30 @@ impl Render for Workspace {
                 d.child(self.drag_listener(cx))
             })
     }
+}
+
+/// The status bar's git summary, each piece in its colour: the counts as the file tree
+/// colours its marks (staged and untracked green, modified amber, conflicts red),
+/// ahead/behind blue, the branch and separator muted, clean green.
+fn git_summary(
+    parts: &[(String, git_status::GitMark)],
+    muted: Hsla,
+    theme: &gpui_component::theme::ThemeColor,
+) -> gpui::Div {
+    use git_status::GitMark::*;
+    h_flex()
+        .flex_none()
+        .gap_1()
+        .children(parts.iter().map(|(text, mark)| {
+            let colour = match mark {
+                Branch | Separator => muted,
+                Ahead | Behind => theme.info,
+                Staged | Untracked | Clean => theme.success,
+                Modified => theme.warning,
+                Conflicts => theme.danger,
+            };
+            div().text_color(colour).child(text.clone())
+        }))
 }
 
 /// A row of the environment picker: a square in the environment's colour (`+` for the

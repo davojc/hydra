@@ -131,35 +131,66 @@ pub fn parse(text: &str) -> GitStatus {
     s
 }
 
-/// The status bar text: `⎇ main ↑2 ↓1 · +3 ~5 ?2 !1`, showing only what isn't zero, or
-/// `⎇ main ✓` when nothing changed.
-pub fn summary(s: &GitStatus) -> String {
-    let mut head = match (&s.branch, &s.detached) {
+/// The status bar's git summary in pieces, each with what it says.
+pub type Summary = Vec<(String, GitMark)>;
+
+/// What a piece of the status bar's git summary says, for its colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitMark {
+    Branch,
+    Ahead,
+    Behind,
+    Separator,
+    Staged,
+    Modified,
+    Untracked,
+    Conflicts,
+    Clean,
+}
+
+/// The status bar's git summary as pieces, each with what it says (for its colour): the
+/// branch, ahead/behind, then the counts that aren't zero after a `·`, or `✓` when nothing
+/// changed.
+pub fn summary_parts(s: &GitStatus) -> Summary {
+    let head = match (&s.branch, &s.detached) {
         (Some(b), _) => format!("⎇ {b}"),
         (None, Some(c)) => format!("⎇ detached {c}"),
         (None, None) => "⎇".to_string(),
     };
+    let mut parts = vec![(head, GitMark::Branch)];
     if s.ahead > 0 {
-        head.push_str(&format!(" ↑{}", s.ahead));
+        parts.push((format!("↑{}", s.ahead), GitMark::Ahead));
     }
     if s.behind > 0 {
-        head.push_str(&format!(" ↓{}", s.behind));
+        parts.push((format!("↓{}", s.behind), GitMark::Behind));
     }
-    let counts: Vec<String> = [
-        ('+', s.staged),
-        ('~', s.modified),
-        ('?', s.untracked),
-        ('!', s.conflicts),
+    let counts: Vec<(String, GitMark)> = [
+        ('+', s.staged, GitMark::Staged),
+        ('~', s.modified, GitMark::Modified),
+        ('?', s.untracked, GitMark::Untracked),
+        ('!', s.conflicts, GitMark::Conflicts),
     ]
-    .iter()
-    .filter(|(_, n)| *n > 0)
-    .map(|(mark, n)| format!("{mark}{n}"))
+    .into_iter()
+    .filter(|(_, n, _)| *n > 0)
+    .map(|(sign, n, mark)| (format!("{sign}{n}"), mark))
     .collect();
     if counts.is_empty() {
-        format!("{head} ✓")
+        parts.push(("✓".into(), GitMark::Clean));
     } else {
-        format!("{head} · {}", counts.join(" "))
+        parts.push(("·".into(), GitMark::Separator));
+        parts.extend(counts);
     }
+    parts
+}
+
+/// The status bar text: `⎇ main ↑2 ↓1 · +3 ~5 ?2 !1`, showing only what isn't zero, or
+/// `⎇ main ✓` when nothing changed.
+pub fn summary(s: &GitStatus) -> String {
+    summary_parts(s)
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The folders that hold changes (ignored files don't count), relative to the root.
@@ -294,6 +325,47 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc both.rs\n\
             }
         );
         assert_eq!(summary(&s), "⎇ main ↑2 ↓1 · +3 ~2 ?2 !1");
+    }
+
+    #[test]
+    fn the_summary_comes_in_marked_pieces() {
+        use GitMark::*;
+        let s = parse(
+            "# branch.oid abc\n# branch.head main\n# branch.ab +2 -1\n\
+             1 M. N... 100644 100644 100644 a a f1\n\
+             1 .M N... 100644 100644 100644 a a f2\n\
+             ? f3\n\
+             u UU N... 100644 100644 100644 100644 a a a f4\n",
+        );
+        let parts = summary_parts(&s);
+        let got: Vec<(&str, GitMark)> = parts.iter().map(|(t, m)| (t.as_str(), *m)).collect();
+        assert_eq!(
+            got,
+            [
+                ("⎇ main", Branch),
+                ("↑2", Ahead),
+                ("↓1", Behind),
+                ("·", Separator),
+                ("+1", Staged),
+                ("~1", Modified),
+                ("?1", Untracked),
+                ("!1", Conflicts),
+            ]
+        );
+        let clean = parse("# branch.oid abc\n# branch.head main\n");
+        assert_eq!(
+            summary_parts(&clean),
+            [("⎇ main".to_string(), Branch), ("✓".to_string(), Clean)]
+        );
+        // The plain text is the pieces joined, as before.
+        assert_eq!(
+            summary(&s),
+            parts
+                .iter()
+                .map(|(t, _)| t.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
     }
 
     #[test]

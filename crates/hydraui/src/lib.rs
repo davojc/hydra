@@ -27,6 +27,8 @@ pub mod quick_open;
 pub mod save_dialog;
 pub mod search;
 pub mod start_page;
+pub mod task_board;
+pub mod task_board_view;
 pub mod tasks;
 pub mod tasks_project;
 pub mod term_paths;

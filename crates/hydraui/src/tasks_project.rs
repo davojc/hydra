@@ -41,6 +41,16 @@ pub fn lock_path(project: &Path) -> PathBuf {
         .join(format!("{:x}.lock", Sha256::digest(key.as_bytes())))
 }
 
+/// Where `commit` locks. Tests lock inside their throwaway project instead, so a test run
+/// doesn't leave a lock file per temp folder in the temp folder's `hydraui-locks`.
+fn commit_lock(project: &Path) -> PathBuf {
+    if cfg!(test) {
+        project.join(".hydraui-test.lock")
+    } else {
+        lock_path(project)
+    }
+}
+
 pub struct Committed {
     pub board: Board,
     /// The exact text now on disk.
@@ -85,7 +95,7 @@ pub fn load(project: &Path) -> std::io::Result<(Board, String)> {
 /// An exclusive lock on `lock_path(project)` is held across the re-read and the write, so two
 /// writers (this window and the MCP server, or two windows) never lose each other's change.
 pub fn commit(project: &Path, change: &Change) -> Result<Committed, CommitError> {
-    let lock = lock_path(project);
+    let lock = commit_lock(project);
     if let Some(dir) = lock.parent() {
         std::fs::create_dir_all(dir)?;
     }

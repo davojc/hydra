@@ -18,13 +18,14 @@ as finished work. So:
 
 - hydraui always checks facts it can be sure of, including whether the user
   has left a draft in the input (§5.1);
-- then, when the session's environment has a key for **Jev** (TypeSafe's
-  decision model: yes/no answers with probabilities, fast and cheap), Jev
-  makes the final call on whether Claude is waiting for the user or finished
+- sessions that are clearly finished are free, with or without Jev: a new
+  session with no prompt yet, or one whose last turn moved its card to Verify
   (§5.2);
-- without Jev, only sessions that are clearly finished count: a new session
-  with no prompt yet, or one whose last turn moved its card to Verify (§5.3).
-  Nothing is guessed from wording.
+- for the other idle sessions there remains uncertainty, and only **Jev**
+  (TypeSafe's decision model: yes/no answers with probabilities, fast and
+  cheap), when hydraui has a key for it, can make the final call on whether
+  Claude is waiting for the user or finished (§5.3). Without Jev they don't
+  count. Nothing is guessed from wording.
 
 Claude Code's Channels feature (an MCP server pushing events into a session)
 was considered and set aside: it is a research preview, a custom channel needs
@@ -36,7 +37,8 @@ terminal, as the user would.
 ## 2. Goals, non-goals, anti-goals
 
 Goals
-- An environment can hold a Jev API key (§3), kept out of its terminals.
+- hydraui can hold a Jev API key (§3), one for the whole app, kept out of
+  terminals and out of plain-text files.
 - A card the user moves into Pickup is typed into one free Claude session of
   that project, which takes it with `tasks_take` and works as usual. When no
   session is free, the card stays in Pickup and a toast says so.
@@ -55,28 +57,24 @@ Anti-goals (a failure even if it works)
 - Sending one card to two sessions, or two cards to one session at once.
 - The Jev key reaching a terminal's environment (and so Claude or scripts).
 
-## 3. Part 1: a Jev key per environment
+## 3. Part 1: hydraui's Jev key
 
 Built first, as its own commit, so the user can add their key while the rest
-is built. It follows `[gemini] api_key` through each layer.
+is built. One key for hydraui as a whole, not per environment (the user's
+call).
 
-- **env.toml** (`hydra-core/src/config.rs`): a `[jev]` section with
-  `api_key`, which must be a secret reference (`api_key = "secret:work/jev"`);
-  a plain value is an error naming `[jev] api_key`, as for gemini.
-- **Adding it** (`hydra-core/src/envedit.rs`, `hydra-cli`): `jev` joins the
-  tools `hydra env add-tool` knows, with gemini's `--api-key-secret` flag:
-  `hydra env add-tool work jev --api-key-secret work/jev`.
-- **A tool with no variables** (new `hydra-providers/src/jev.rs`): unlike
-  gemini, it contributes **no** environment variable, so the key never reaches
-  a terminal. Its check reports whether the secret is stored (`jev ✓`, or
-  missing), so it shows in the environment's accounts/status view.
-- **hydraui setup** (`hydraui/src/accounts.rs`): `jev` in the add-tool choices
-  beside gemini, one field for the key; it stores the secret as `<env>/jev`
-  and writes the `[jev]` section.
-- **hydraui reads it** (`hydraui/src/hydra.rs`): a helper returning an
-  environment's Jev key from the secret store, or `None` (no section, or the
-  secret missing).
-- Docs: the website's tools section and hydra's env.toml reference.
+- **Stored** in the Windows credential store as hydraui's own entry (as
+  hydra's secrets are, via `hydra_platform`'s keyring), not in `config.toml`,
+  so it is never in a plain-text file. The entry's name is the builder's call
+  (e.g. target `hydraui/jev`); it must not collide with hydra's `<env>/<key>`
+  secrets.
+- **Launcher entries**: **Set Jev API key…** (a dialog with a masked field;
+  an empty value is refused) and **Remove Jev API key** (shown only when one is
+  set, asks first). A toast confirms each.
+- **Reading it**: a helper returning the key or `None`, read when Jev is
+  needed (so setting or removing applies at once, without a restart).
+- Never put into a terminal's environment or a log.
+- Docs: the website's launcher/settings section.
 
 ## 4. When a card is sent automatically
 
@@ -132,13 +130,30 @@ On arrival hydraui looks for a free session (§5).
      clears the flag only if it is empty; if it can't tell, the flag stays;
    - typing while Claude works sets it too: Claude Code keeps type-ahead.
 
-A candidate that passes all six goes on to §5.2 or §5.3, depending on whether
-its environment has a Jev key (§3).
+A candidate that passes all six is then either clearly finished (§5.2) or
+uncertain (§5.3).
 
-### 5.2 With Jev: Jev makes the final call
+### 5.2 Clearly finished: free, with or without Jev
 
-One call per candidate, with its environment's key, asking three yes/no
-("noul") questions about the terminal's screen:
+A candidate is clearly finished, and so free, when it is:
+- **fresh**: its Claude session started (`SessionStart`) and has had no prompt
+  since (no idle→working change); or
+- **just verified**: during its last turn it called `tasks_verify` (the MCP
+  server knows which terminal's token made the call), and no prompt has
+  started since (an idle→working change resets this).
+
+Jev is not asked about these: there is no uncertainty left.
+
+### 5.3 Uncertain: Jev makes the final call, if hydraui has a key
+
+Any other candidate (idle after a turn that didn't verify a card, which may
+have finished other work or may be asking the user something) is free only if
+Jev says so. Without a Jev key (§3) it is not free. A session that ended its
+turn by asking something hasn't verified a card, so without Jev it is always
+skipped; nothing is guessed from wording.
+
+One call per uncertain candidate, asking three yes/no ("noul") questions about
+the terminal's screen:
 
 - `waiting`: Is the assistant waiting for the user to answer a question, make a
   decision or give more information?
@@ -155,8 +170,7 @@ testing shows the screen isn't enough).
 
 A candidate is **free** when `finished ≥ 0.8`, `waiting ≤ 0.2` and
 `draft ≤ 0.2` (my call on the thresholds; constants, tuned during the hands-on
-check). A Jev error, timeout (~5 s) or unexpected reply means not free (no
-falling back to §5.3 for that session: Jev was meant to decide).
+check). A Jev error, timeout (~5 s) or unexpected reply means not free.
 
 Jev API (docs.typesafe.ai/api): `POST https://api.typesafe.ai/v1/systemone`,
 `Authorization: Bearer <key>`, body
@@ -164,23 +178,12 @@ Jev API (docs.typesafe.ai/api): `POST https://api.typesafe.ai/v1/systemone`,
 reply `{"answers": {"<id>": {"type": "noul", "noul": 0.93}}, ...}`. Jev is in
 early access; the model alias is a constant.
 
-### 5.3 Without Jev: only clearly finished sessions
-
-A candidate whose environment has no Jev key is free only when it is clearly
-finished:
-- **fresh**: its Claude session started (`SessionStart`) and has had no prompt
-  since (no idle→working change); or
-- **just verified**: during its last turn it called `tasks_verify` (the MCP
-  server knows which terminal's token made the call), and no prompt has
-  started since (an idle→working change resets this).
-
-A session that ended its turn by asking something hasn't verified a card, so it
-is skipped. Nothing is guessed from wording.
-
 ### 5.4 Picking
 
-Jev candidates are asked in parallel, off the UI thread. Among all free
-sessions, by either rule, one is picked at random.
+If any candidate is clearly finished (§5.2), one of those is picked at random
+and Jev is not called (my call: saves calls and time). Otherwise, with a Jev
+key, the uncertain candidates are asked in parallel, off the UI thread, and one
+of those Jev finds free is picked at random.
 
 ## 6. Sending
 

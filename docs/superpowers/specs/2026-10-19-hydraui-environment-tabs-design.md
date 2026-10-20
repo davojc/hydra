@@ -84,8 +84,8 @@ the right.
   title appears anywhere else, such as a row tooltip, is the builder's call.
 - Clicking a row shows that terminal in the middle and focuses it.
 - **+ New** at the top (and Ctrl+T) adds a terminal to the selected environment and shows it.
-  Its folder: the shown terminal's current folder (OSC 7), else the environment's home, else the
-  user's home.
+  Its folder: the environment's home (its root folder, from env.toml), else the shown terminal's
+  current folder (OSC 7), else the user's home.
 - Right-click a row: **Rename…** (sets the name, which is saved; an empty name goes back to the
   folder name), **Restart** (that terminal only, as Restart environment does for all; asks first
   when a command is running), **Close**.

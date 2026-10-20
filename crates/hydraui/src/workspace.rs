@@ -437,7 +437,7 @@ impl Workspace {
         self.hydra.shell(self.ui.default_shell.as_deref())
     }
 
-    /// Where a new terminal in `env` starts: its shown terminal's folder, else its home, else
+    /// Where a new terminal in `env` starts: its home, else its shown terminal's folder, else
     /// the user's home (env-tabs design §2.2).
     fn env_cwd(&self, env: &str, cx: &App) -> PathBuf {
         let shown = self
@@ -1113,7 +1113,9 @@ impl Workspace {
     fn tree_folder(&self, cx: &App) -> PathBuf {
         let shown = self.focused().map(|v| v.read(cx).cwd().clone());
         let home = self.envs.active().and_then(|t| self.hydra.env_home(&t.env));
-        crate::envs::new_terminal_cwd(shown.as_deref(), home.as_deref(), &self.hydra.user_home)
+        shown
+            .or(home)
+            .unwrap_or_else(|| self.hydra.user_home.clone())
     }
 
     /// Roots the tree at the focused pane's folder; `cd` only while it is at its prompt.

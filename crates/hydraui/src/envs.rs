@@ -196,14 +196,14 @@ impl EnvTabs {
     }
 }
 
-/// Where a new terminal starts: the shown terminal's folder, else the environment's home, else
-/// the user's home (spec §2.2).
+/// Where a new terminal starts: the environment's home (its root folder), else the shown
+/// terminal's folder, else the user's home (spec §2.2).
 pub fn new_terminal_cwd(
     shown: Option<&Path>,
     env_home: Option<&Path>,
     user_home: &Path,
 ) -> PathBuf {
-    shown.or(env_home).unwrap_or(user_home).to_path_buf()
+    env_home.or(shown).unwrap_or(user_home).to_path_buf()
 }
 
 #[cfg(test)]
@@ -364,9 +364,10 @@ mod tests {
     }
 
     #[test]
-    fn new_terminal_cwd_prefers_shown_then_env_home_then_user_home() {
+    fn new_terminal_cwd_prefers_env_home_then_shown_then_user_home() {
         let (s, e, u) = (Path::new("/s"), Path::new("/e"), Path::new("/u"));
-        assert_eq!(new_terminal_cwd(Some(s), Some(e), u), PathBuf::from("/s"));
+        assert_eq!(new_terminal_cwd(Some(s), Some(e), u), PathBuf::from("/e"));
+        assert_eq!(new_terminal_cwd(Some(s), None, u), PathBuf::from("/s"));
         assert_eq!(new_terminal_cwd(None, Some(e), u), PathBuf::from("/e"));
         assert_eq!(new_terminal_cwd(None, None, u), PathBuf::from("/u"));
     }

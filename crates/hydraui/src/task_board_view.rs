@@ -7,10 +7,10 @@ use gpui::{
     ScrollHandle, SharedString, Subscription, Window, div, hsla, point, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_kit_assets::IconName;
 use gpui_component::input::{Escape, InputEvent, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::{ActiveTheme, Disableable, Sizable, WindowExt, h_flex, v_flex};
+use gpui_kit_assets::IconName;
 
 use crate::task_board::{Applied, TaskBoard, drop_move};
 use crate::tasks::{CardRef, Change, Column};

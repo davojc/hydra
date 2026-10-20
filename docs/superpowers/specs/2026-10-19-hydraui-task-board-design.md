@@ -144,7 +144,7 @@ this work, but the file it will read is.
   near its edge; exact look is the builder's call.
 - Moving cards: drag a card within or between columns. Its right-click menu also offers **Move
   to** each other column (to the top of that column), **Move up** / **Move down**, and
-  **Delete**.
+  **Delete** (which asks first, as the delete icon does).
 - Every change is written to the file at once (no Save button).
 
 ## 6. Keeping in step with the file

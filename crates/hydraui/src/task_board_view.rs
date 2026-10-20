@@ -244,7 +244,8 @@ impl TaskBoardView {
         });
     }
 
-    /// "Delete this card?" then deletes it (§5): the card's delete icon asks first.
+    /// "Delete this card?" then deletes it (§5): the card's delete icon and its menu's Delete
+    /// ask first.
     fn confirm_delete(&mut self, card: CardRef, window: &mut Window, cx: &mut Context<Self>) {
         let board = self.board.clone();
         window.open_dialog(cx, move |dialog, _, _| {
@@ -388,6 +389,7 @@ impl TaskBoardView {
         let (badge_bg, badge_fg) = (theme.muted, theme.muted_foreground);
         let edge = accent(col, cx);
         let board = self.board.clone();
+        let view = cx.entity();
         div()
             .id(("task-card", i))
             .group("task-card")
@@ -445,10 +447,13 @@ impl TaskBoardView {
                                 .on_click(change(within(i + 1))),
                         )
                         .separator()
-                        .item(
-                            PopupMenuItem::new("Delete")
-                                .on_click(change(Change::Delete { card: card.clone() })),
-                        )
+                        .item(PopupMenuItem::new("Delete").on_click({
+                            // Asks first, as the delete icon does.
+                            let (view, card) = (view.clone(), card.clone());
+                            move |_, window, cx| {
+                                view.update(cx, |v, cx| v.confirm_delete(card.clone(), window, cx))
+                            }
+                        }))
                 }
             })
             .child(

@@ -16,6 +16,7 @@ pub mod git_status;
 pub mod git_watch;
 pub mod hydra;
 pub mod input;
+pub mod jev;
 pub mod keys;
 pub mod launcher;
 pub mod mcp;

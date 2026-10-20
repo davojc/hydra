@@ -17,6 +17,7 @@ use gpui_component::{ActiveTheme, Disableable, Theme, ThemeMode, WindowExt, h_fl
 use super::{Workspace, env_item};
 use crate::config::{self, ThemeChoice};
 use crate::hydra::Hydra;
+use crate::jev::JevKey;
 use crate::keys::Launcher;
 use crate::launcher::{Action, entries};
 use crate::palette::Palette;
@@ -43,7 +44,12 @@ impl Workspace {
             .iter()
             .flat_map(|e| self.hydra.missing_secrets(e))
             .collect();
-        let list = Rc::new(entries(&envs, &sign_ins, &secrets));
+        let list = Rc::new(entries(
+            &envs,
+            &sign_ins,
+            &secrets,
+            matches!(JevKey::app().get(), Ok(Some(_))),
+        ));
         let state = cx.new(|cx| CommandState::new(window, cx));
         let workspace = cx.entity();
         let first = Cell::new(true);
@@ -110,6 +116,8 @@ impl Workspace {
             Action::CheckForUpdates => self.check_for_updates(window, cx),
             Action::AllBoards => self.all_boards(window, cx),
             Action::Shortcuts => self.shortcuts(window, cx),
+            Action::SetJevKey => self.set_jev_key_dialog(window, cx),
+            Action::RemoveJevKey => self.remove_jev_key_dialog(window, cx),
         }
     }
 
@@ -193,6 +201,89 @@ impl Workspace {
                                         cx,
                                     ),
                                 }
+                            },
+                        )),
+                )
+        });
+    }
+
+    /// Asks for the Jev API key in a masked box and stores it in the credential store.
+    fn set_jev_key_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let key = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Jev API key")
+                .masked(true)
+        });
+        let first = Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first.replace(false) {
+                key.update(cx, |s, cx| s.focus(window, cx));
+            }
+            let k = key.clone();
+            dialog
+                .title("Jev API key")
+                .child(Input::new(&key).mask_toggle())
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(Button::new("save").label("Save").primary().on_click(
+                            move |_, window, cx| {
+                                let value = k.read(cx).value().to_string();
+                                match JevKey::app().set(&value) {
+                                    Ok(()) => {
+                                        window.close_dialog(cx);
+                                        window.push_notification(
+                                            Notification::success("Jev API key saved")
+                                                .title("Jev API key"),
+                                            cx,
+                                        );
+                                    }
+                                    Err(e) => window.push_notification(
+                                        Notification::error(e).title("Jev API key"),
+                                        cx,
+                                    ),
+                                }
+                            },
+                        )),
+                )
+        });
+    }
+
+    /// Asks before forgetting the stored Jev API key.
+    fn remove_jev_key_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.open_dialog(cx, move |dialog, _, _| {
+            dialog
+                .title("Jev API key")
+                .child("Remove the Jev API key?")
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(Button::new("remove").label("Remove").danger().on_click(
+                            |_, window, cx| match JevKey::app().remove() {
+                                Ok(_) => {
+                                    window.close_dialog(cx);
+                                    window.push_notification(
+                                        Notification::success("Jev API key removed")
+                                            .title("Jev API key"),
+                                        cx,
+                                    );
+                                }
+                                Err(e) => window.push_notification(
+                                    Notification::error(e).title("Jev API key"),
+                                    cx,
+                                ),
                             },
                         )),
                 )

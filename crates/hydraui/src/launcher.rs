@@ -39,6 +39,10 @@ pub enum Action {
     AllBoards,
     /// The list of every key hydraui answers to.
     Shortcuts,
+    /// Store the Jev API key, typed in the dialog.
+    SetJevKey,
+    /// Forget the stored Jev API key, after asking.
+    RemoveJevKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,7 +51,12 @@ pub struct Entry {
     pub action: Action,
 }
 
-pub fn entries(envs: &[String], sign_ins: &[(String, String)], secrets: &[String]) -> Vec<Entry> {
+pub fn entries(
+    envs: &[String],
+    sign_ins: &[(String, String)],
+    secrets: &[String],
+    jev_set: bool,
+) -> Vec<Entry> {
     let mut out = Vec::new();
     let mut add = |label: String, action: Action| out.push(Entry { label, action });
     for env in envs {
@@ -86,6 +95,10 @@ pub fn entries(envs: &[String], sign_ins: &[(String, String)], secrets: &[String
     add("Check for updates".into(), Action::CheckForUpdates);
     add("All boards".into(), Action::AllBoards);
     add("Keyboard shortcuts".into(), Action::Shortcuts);
+    add("Set Jev API key…".into(), Action::SetJevKey);
+    if jev_set {
+        add("Remove Jev API key".into(), Action::RemoveJevKey);
+    }
     out
 }
 
@@ -99,6 +112,7 @@ mod tests {
             &["work".to_string()],
             &[("work".to_string(), "github".to_string())],
             &["work/linear".to_string()],
+            false,
         );
         let labels: Vec<&str> = got.iter().map(|e| e.label.as_str()).collect();
         assert_eq!(
@@ -122,6 +136,7 @@ mod tests {
                 "Check for updates",
                 "All boards",
                 "Keyboard shortcuts",
+                "Set Jev API key…",
             ]
         );
         assert!(!labels.iter().any(|l| l.starts_with("Set:")), "no sets");
@@ -149,7 +164,7 @@ mod tests {
 
     #[test]
     fn with_nothing_configured_only_the_fixed_entries_remain() {
-        let got = entries(&[], &[], &[]);
+        let got = entries(&[], &[], &[], false);
         let labels: Vec<&str> = got.iter().map(|e| e.label.as_str()).collect();
         assert_eq!(
             labels,
@@ -167,7 +182,8 @@ mod tests {
                 "Reload config",
                 "Check for updates",
                 "All boards",
-                "Keyboard shortcuts"
+                "Keyboard shortcuts",
+                "Set Jev API key…"
             ]
         );
         assert_eq!(got[11].action, Action::CheckForUpdates);
@@ -179,5 +195,18 @@ mod tests {
         assert_eq!(got[5].action, Action::DeleteEnv);
         assert_eq!(got[6].action, Action::SetEnvHome);
         assert_eq!(got[7].action, Action::NewEnv);
+    }
+
+    #[test]
+    fn jev_entries_follow_whether_a_key_is_set() {
+        let labels = |set| {
+            entries(&[], &[], &[], set)
+                .into_iter()
+                .map(|e| e.label)
+                .collect::<Vec<_>>()
+        };
+        assert!(labels(false).contains(&"Set Jev API key…".to_string()));
+        assert!(!labels(false).contains(&"Remove Jev API key".to_string()));
+        assert!(labels(true).contains(&"Remove Jev API key".to_string()));
     }
 }

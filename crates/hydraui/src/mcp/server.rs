@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use serde_json::{Value, json};
 
-use super::registry::Registry;
+use super::registry::{Registry, Terminal};
 use super::tools::{INSTRUCTIONS, call, list};
 
 /// Largest request body read; a tool call is a few lines of JSON.
@@ -65,8 +65,7 @@ fn fail(id: &Value, code: i64, message: &str) -> Reply {
     json_reply(json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}))
 }
 
-/// One request, without any I/O: checks the path, Origin, token and method, then answers the
-/// JSON-RPC message in `body`.
+/// One request, without any I/O: `gate`, then `answer`.
 pub fn handle(
     registry: &Mutex<Registry>,
     method: &str,
@@ -75,21 +74,39 @@ pub fn handle(
     origin: Option<&str>,
     body: &str,
 ) -> (Reply, Option<McpEvent>) {
+    match gate(registry, method, path, auth, origin) {
+        Ok(terminal) => answer(&terminal, body),
+        Err(reply) => (reply, None),
+    }
+}
+
+/// Checks the path, Origin, token and method from the headers alone, so a stranger is refused
+/// before its body is read; the caller's terminal if it may go on.
+pub fn gate(
+    registry: &Mutex<Registry>,
+    method: &str,
+    path: &str,
+    auth: Option<&str>,
+    origin: Option<&str>,
+) -> Result<Terminal, Reply> {
     if path != "/mcp" {
-        return (status(404), None);
+        return Err(status(404));
     }
     if origin.is_some_and(|o| !local_origin(o)) {
-        return (status(403), None);
+        return Err(status(403));
     }
     let terminal = auth
         .and_then(|a| a.strip_prefix("Bearer "))
-        .and_then(|t| lock(registry).get(t));
-    let Some(terminal) = terminal else {
-        return (status(401), None);
-    };
+        .and_then(|t| lock(registry).get(t))
+        .ok_or(status(401))?;
     if method != "POST" {
-        return (status(405), None);
+        return Err(status(405));
     }
+    Ok(terminal)
+}
+
+/// Answers the JSON-RPC message in `body` for a terminal `gate` let through.
+pub fn answer(terminal: &Terminal, body: &str) -> (Reply, Option<McpEvent>) {
     let msg: Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(_) => return (fail(&Value::Null, -32700, "parse error"), None),
@@ -124,7 +141,7 @@ pub fn handle(
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let empty = json!({});
             let args = params.get("arguments").unwrap_or(&empty);
-            match call(&terminal, name, args) {
+            match call(terminal, name, args) {
                 None => (fail(id, -32602, "unknown tool"), None),
                 Some(out) => {
                     let result = json!({
@@ -195,39 +212,54 @@ impl Server {
         let (auth, origin) = (header("Authorization"), header("Origin"));
         let method = request.method().as_str().to_string();
         let path = request.url().split('?').next().unwrap_or("").to_string();
+        let gated = catch_unwind(AssertUnwindSafe(|| {
+            gate(
+                &self.registry,
+                &method,
+                &path,
+                auth.as_deref(),
+                origin.as_deref(),
+            )
+        }));
+        let terminal = match gated {
+            Ok(Ok(terminal)) => terminal,
+            Ok(Err(reply)) => return refuse(request, reply),
+            Err(_) => return refuse(request, status(500)),
+        };
         let mut body = String::new();
         let read = request.as_reader().take(MAX_BODY).read_to_string(&mut body);
-        let handled = if read.is_err() {
-            Some((status(400), None))
-        } else {
-            catch_unwind(AssertUnwindSafe(|| {
-                handle(
-                    &self.registry,
-                    &method,
-                    &path,
-                    auth.as_deref(),
-                    origin.as_deref(),
-                    &body,
-                )
-            }))
-            .ok()
+        let handled = match read {
+            Err(_) => Some((status(400), None)),
+            Ok(_) => catch_unwind(AssertUnwindSafe(|| answer(&terminal, &body))).ok(),
         };
         let (reply, event) = handled.unwrap_or_else(|| (status(500), None));
         if let Some(event) = event {
             lock(&self.events).retain(|tx| tx.unbounded_send(event.clone()).is_ok());
         }
-        let _ = match reply.body {
-            Some(text) => request.respond(
-                tiny_http::Response::from_string(text).with_header(
-                    tiny_http::Header::from_bytes("Content-Type", "application/json")
-                        .expect("a valid header"),
-                ),
-            ),
-            None => {
-                request.respond(tiny_http::Response::from_string("").with_status_code(reply.status))
-            }
-        };
+        respond(request, reply);
     }
+}
+
+/// Dropping a request reads the rest of its body, which a stranger may never send: refuse it on
+/// a thread of its own so the serving thread stays free.
+fn refuse(request: tiny_http::Request, reply: Reply) {
+    let _ = std::thread::Builder::new()
+        .name("hydraui-mcp-refuse".into())
+        .spawn(move || respond(request, reply));
+}
+
+fn respond(request: tiny_http::Request, reply: Reply) {
+    let _ = match reply.body {
+        Some(text) => request.respond(
+            tiny_http::Response::from_string(text).with_header(
+                tiny_http::Header::from_bytes("Content-Type", "application/json")
+                    .expect("a valid header"),
+            ),
+        ),
+        None => {
+            request.respond(tiny_http::Response::from_string("").with_status_code(reply.status))
+        }
+    };
 }
 
 static GLOBAL: OnceLock<Option<Arc<Server>>> = OnceLock::new();
@@ -361,6 +393,70 @@ mod tests {
     }
 
     #[test]
+    fn strangers_are_refused_before_the_body() {
+        let dir = repo();
+        let reg = Mutex::new(Registry::default());
+        let tok = format!(
+            "Bearer {}",
+            reg.lock().unwrap().register("c", dir.path().to_path_buf())
+        );
+        let refused = |auth: Option<&str>, origin: Option<&str>| {
+            gate(&reg, "POST", "/mcp", auth, origin)
+                .err()
+                .map(|r| r.status)
+        };
+        assert_eq!(refused(None, None), Some(401));
+        assert_eq!(refused(Some(&tok), Some("https://evil.example")), Some(403));
+        assert_eq!(refused(Some(&tok), None), None);
+    }
+
+    #[test]
+    fn a_tool_that_makes_a_board_says_so() {
+        let dir = repo();
+        let reg = Mutex::new(Registry::default());
+        let tok = format!(
+            "Bearer {}",
+            reg.lock().unwrap().register("c", dir.path().to_path_buf())
+        );
+        let add = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"tasks_add","arguments":{"text":"x"}}}"#;
+        let (reply, event) = handle(&reg, "POST", "/mcp", Some(&tok), None, add);
+        assert_eq!(reply.status, 200);
+        assert_eq!(
+            event,
+            Some(McpEvent::BoardCreated(dir.path().to_path_buf()))
+        );
+    }
+
+    #[test]
+    fn an_idle_stranger_does_not_stall_the_server() {
+        use std::io::Write;
+        let dir = repo();
+        let server = Server::start().unwrap();
+        let tok = server
+            .registry()
+            .lock()
+            .unwrap()
+            .register("c", dir.path().to_path_buf());
+        let addr = server
+            .url()
+            .trim_start_matches("http://")
+            .trim_end_matches("/mcp")
+            .to_string();
+        // Promises a body too big to be read up front, then never sends it.
+        let mut idle = std::net::TcpStream::connect(&addr).unwrap();
+        idle.write_all(b"POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Length: 2000\r\n\r\n")
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let resp = ureq::post(server.url())
+            .timeout(std::time::Duration::from_secs(5))
+            .set("Authorization", &format!("Bearer {tok}"))
+            .send_string(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#)
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        drop(idle);
+    }
+
+    #[test]
     fn serves_over_http() {
         let dir = repo();
         let server = Server::start().unwrap();
@@ -369,13 +465,30 @@ mod tests {
             .lock()
             .unwrap()
             .register("c", dir.path().to_path_buf());
-        let resp = ureq::post(server.url())
-            .set("Authorization", &format!("Bearer {tok}"))
-            .set("Content-Type", "application/json")
-            .send_string(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
-            .unwrap();
-        assert_eq!(resp.status(), 200);
-        assert!(resp.into_string().unwrap().contains("tasks_take"));
+        let rpc = |body: &str| -> Value {
+            let resp = ureq::post(server.url())
+                .set("Authorization", &format!("Bearer {tok}"))
+                .set("Content-Type", "application/json")
+                .send_string(body)
+                .unwrap();
+            assert_eq!(resp.status(), 200);
+            serde_json::from_str(&resp.into_string().unwrap()).unwrap()
+        };
+        let init = rpc(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+        );
+        assert_eq!(init["result"]["serverInfo"]["name"], "hydraui");
+        let list = rpc(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#);
+        assert!(list.to_string().contains("tasks_take"));
+        let mut events = server.subscribe();
+        let add = rpc(
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"tasks_add","arguments":{"text":"x"}}}"#,
+        );
+        assert_eq!(add["result"]["isError"], false);
+        assert_eq!(
+            events.try_recv().ok(),
+            Some(McpEvent::BoardCreated(dir.path().to_path_buf()))
+        );
         assert!(server.url().starts_with("http://127.0.0.1:") && server.url().ends_with("/mcp"));
     }
 }

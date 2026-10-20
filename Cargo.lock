@@ -2976,6 +2976,7 @@ dependencies = [
  "anyhow",
  "dirs 6.0.0",
  "futures",
+ "getrandom 0.3.4",
  "gpui-base",
  "gpui-component",
  "gpui-kit-assets",

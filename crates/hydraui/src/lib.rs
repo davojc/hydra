@@ -18,6 +18,7 @@ pub mod hydra;
 pub mod input;
 pub mod keys;
 pub mod launcher;
+pub mod mcp;
 pub mod open_files;
 pub mod openapi;
 pub mod openapi_view;

@@ -35,6 +35,7 @@ sha2.workspace = true
 raw-window-handle = "0.6"
 serde-saphyr = "1.3"
 serde_json.workspace = true
+getrandom.workspace = true
 
 [dev-dependencies]
 hydra-update = { workspace = true, features = ["fake"] }

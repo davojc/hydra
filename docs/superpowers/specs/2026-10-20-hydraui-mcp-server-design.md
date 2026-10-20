@@ -64,7 +64,9 @@ reaches the same server.
     renames the terminal, its name becomes the new title. `]` and line breaks in a name are
     replaced (`]` → `)`), so it always fits `[name]`. (Our call.)
   - its **project**: as the Tasks tab finds it (git work tree of the terminal's current folder,
-    else the folder; `tasks_project::project_root`).
+    else the folder; `tasks_project::project_root`). A git repository root is a folder whose `.git`
+    is a directory containing `HEAD`, or a file starting `gitdir:`; a `.git` folder of config files
+    isn't a repository.
 - The server's MCP `initialize` result includes `instructions` describing the workflow (§5), so
   Claude has it before it reads any tool.
 
@@ -72,7 +74,7 @@ reaches the same server.
 
 - Every terminal hydraui spawns gets two environment variables:
   - `HYDRA_MCP_URL` = `http://127.0.0.1:<port>/mcp`
-  - `HYDRA_MCP_TOKEN` = a random token for that terminal (≥128 bits, fresh each spawn).
+  - `HYDRA_MCP_TOKEN` = a random token for that terminal (≥128 bits). It is per terminal, not per spawn: kept across a hydraui restart so a resumed session still connects, and dropped when the terminal is closed.
 - A `claude` run in the terminal inherits them, including through `hydra claude` / `hydra shell`:
   check that hydra's environment handling (`hydra-core/src/resolve.rs`) passes them through, and
   that they are not treated as Claude session markers.
@@ -81,11 +83,7 @@ reaches the same server.
   writes into every environment's `.claude.json`, alongside those copied from `~/.claude.json`:
 
 ```json
-"hydraui": {
-  "type": "http",
-  "url": "${HYDRA_MCP_URL}",
-  "headers": { "Authorization": "Bearer ${HYDRA_MCP_TOKEN}" }
-}
+"hydraui": { "type": "stdio", "command": "hydra", "args": ["mcp"] }
 ```
 
   hydra's entry wins over one of the same name in `~/.claude.json`.
@@ -97,13 +95,13 @@ reaches the same server.
   (`mcp__hydraui__tasks_read`, `..._tasks_add`, `..._tasks_take`, `..._tasks_mine`), added to
   whatever allow list the user's settings already have. By name rather than the whole server, so
   a tool added later is asked about until it's added here too. (Our call.)
-- **Outside hydraui** (no variables set): the builder first checks how Claude Code treats an
-  unset `${VAR}` in a user-scope server: whether expansion works there at all, and whether an
-  unset variable shows as an error or a failed server. If it's noisy or unsupported, use a stdio
-  bridge instead: register `"command": "<hydra.exe>", "args": ["mcp"]`, where `hydra mcp` relays
-  stdio to `HYDRA_MCP_URL` with the token and, when the variables are unset, answers as a server
-  with no tools. Either way the server and tools are as described here. (Our call: try plain
-  HTTP first, bridge only if needed.)
+- **Outside hydraui** (no variables set): found by checking, an http entry with `${HYDRA_MCP_URL}` makes
+  Claude Code warn "Missing environment variables" when the variables are unset. So the
+  registration is the stdio bridge above, not an http entry: `hydra mcp` relays stdio to
+  `HYDRA_MCP_URL` with the token as a bearer header and, when the variables are unset, answers as a
+  server with no tools, so nothing is shown. The command is bare `hydra`, found on PATH, because the
+  config is also materialised from inside `hydraui.exe`, where the current exe isn't `hydra`.
+- `[claude] mcp.exclude = ["hydraui"]` opts an environment out of the registration.
 
 ## 4. The board file: who took a card
 

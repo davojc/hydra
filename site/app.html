@@ -117,6 +117,7 @@
 - Ctrl+K should open the launcher from anywhere, including the file pane.
 
 <span class="k">## InProgress</span>
+- [hydra] Add the terminal list dot for unread output.
 
 <span class="k">## Done</span>
 - Collapse button for the terminal list.</pre>
@@ -126,6 +127,9 @@
         <li>Order in a column is the order in the file, top first.</li>
         <li>Any other text in the file is kept, moved under a <code>## Notes</code> heading at the end of the file.</li>
       </ul>
+      <h3>Claude and the board</h3>
+      <p>In an environment with a <code>[claude]</code> section, a Claude session running in a hydraui terminal finds the board itself, through a <code>hydraui</code> tool server that hydra adds for you and whose four tools it pre-approves, so Claude doesn't ask permission. Claude can <strong>read</strong> the whole board, <strong>add</strong> an idea at the top of Backlog, <strong>take</strong> a card from Pickup (it moves to the top of InProgress) and list the cards it took. Everything else stays yours: only you move cards into Pickup or Done, move them back, edit, reorder or delete. Waking an idle session when a card lands in Pickup isn't done, so ask Claude to check the board; it is also told to look at Pickup after finishing a piece of work.</p>
+      <p>A card Claude takes is written <code>- [name] text</code>, and the Tasks tab shows the name as a small badge. The name is the terminal's title if you gave it one, else the name of the folder it started in, with <code>-2</code>, <code>-3</code> added if another terminal in the window has the same name. Renaming the terminal changes it; a <code>cd</code> doesn't. Moving a card back to Backlog or Pickup clears the name, and Done keeps it. The <code>[name]</code> prefix is only read in InProgress and Done. If a session creates the board file in a git repository, you get the same <strong>Keep tasks private?</strong> question. To leave an environment out, set <code>mcp.exclude = ["hydraui"]</code> in its <code>[claude]</code> section; outside hydraui the server quietly offers no tools.</p>
       <h3>Commit or keep private</h3>
       <p>In a git repository, the first card you save in a new project asks <strong>Keep tasks private?</strong>, unless the project's <code>.gitignore</code> already keeps the file out of git: <strong>Keep private</strong> adds <code>.hydra/tasks.md</code> to the project's <code>.gitignore</code>, and <strong>Commit tasks</strong> leaves things as they are so the file can be committed. You can change your mind later with the <strong>⋯</strong> menu at the right of the <strong>Done</strong> column's header, which offers the other choice. If another <code>.gitignore</code> rule already ignores the file, the menu says <strong>Ignored by another .gitignore rule</strong> instead. The menu, and the question, appear only in git repositories.</p>
     </section>

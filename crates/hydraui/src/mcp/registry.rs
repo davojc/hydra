@@ -16,18 +16,18 @@ pub struct Registry {
     terminals: HashMap<String, Terminal>,
 }
 
-/// A label made safe as a taker: whitespace runs become one space, `]` becomes `)`, and an
-/// empty result is `terminal`.
+/// A label made safe as a taker: whitespace runs become one space, `]` becomes `)`, an empty
+/// result is `terminal`, and `x` or `X` (a checkbox in the board file) gets `-term` added.
 pub fn clean_name(label: &str) -> String {
     let name = label
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .replace(']', ")");
-    if name.is_empty() {
-        "terminal".into()
-    } else {
-        name
+    match name.as_str() {
+        "" => "terminal".into(),
+        "x" | "X" => format!("{name}-term"),
+        _ => name,
     }
 }
 
@@ -112,5 +112,12 @@ mod tests {
         assert_eq!(r.get(&a).unwrap().name, "terminal");
         r.set_cwd(&a, "D:\\x".into());
         assert_eq!(r.get(&a).unwrap().cwd, PathBuf::from("D:\\x"));
+    }
+
+    #[test]
+    fn a_name_is_never_a_checkbox() {
+        assert_eq!(clean_name("x"), "x-term");
+        assert_eq!(clean_name(" X "), "X-term");
+        assert_eq!(clean_name("xy"), "xy");
     }
 }

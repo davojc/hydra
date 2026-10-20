@@ -181,6 +181,19 @@ fn split_taker(text: &str) -> (Option<String>, &str) {
     }
 }
 
+/// In InProgress and Done, a leading `\` before `[` (after any further `\`) marks the text as
+/// literal, not a taker (MCP server spec §4); the text without that one `\`.
+fn unescape(text: &str) -> Option<&str> {
+    text.strip_prefix('\\')
+        .filter(|rest| rest.trim_start_matches('\\').starts_with('['))
+}
+
+/// Whether a card without a taker in InProgress or Done must be written escaped so it reads
+/// back as the same text: it would read as a taker, a checkbox, or an escape.
+fn needs_escape(text: &str) -> bool {
+    split_taker(text).0.is_some() || strip_checkbox(text) != text || unescape(text).is_some()
+}
+
 /// Ends the card being read, if any, filing it under `column`.
 fn flush(board: &mut Board, column: Option<Column>, card: &mut Option<String>) {
     if let (Some(col), Some(text)) = (column, card.take()) {
@@ -189,7 +202,10 @@ fn flush(board: &mut Board, column: Option<Column>, card: &mut Option<String>) {
             return;
         }
         let (taker, text) = match col {
-            Column::InProgress | Column::Done => split_taker(&text),
+            Column::InProgress | Column::Done => match unescape(&text) {
+                Some(literal) => (None, literal),
+                None => split_taker(&text),
+            },
             _ => (None, text.as_str()),
         };
         board.columns[col as usize].push(Card {
@@ -274,9 +290,13 @@ pub fn write(board: &Board) -> String {
         out.push_str("\n## ");
         out.push_str(column.heading());
         out.push('\n');
+        let takes = matches!(column, Column::InProgress | Column::Done);
         for card in board.cards(column) {
             match &card.taker {
                 Some(taker) => write_card(&mut out, &format!("[{taker}] {}", card.text)),
+                None if takes && needs_escape(&card.text) => {
+                    write_card(&mut out, &format!("\\{}", card.text))
+                }
                 None => write_card(&mut out, &card.text),
             }
         }
@@ -659,5 +679,62 @@ wrapped "
         )
         .unwrap();
         assert_eq!(b.cards(Column::Done)[0].taker.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn text_that_looks_like_a_taker_is_escaped() {
+        let mut b = parse("## Backlog\n- [WIP] fix login\n");
+        let card = b.card_ref(Column::Backlog, 0).unwrap();
+        let to_inprogress = Change::Move {
+            card,
+            to: Column::InProgress,
+            index: 0,
+        };
+        apply(&mut b, &to_inprogress).unwrap();
+        let out = write(&b);
+        assert!(out.contains("\n- \\[WIP] fix login\n"), "{out}");
+        let mut b = parse(&out);
+        assert_eq!(b.cards(Column::InProgress), [Card::new("[WIP] fix login")]);
+        let card = b.card_ref(Column::InProgress, 0).unwrap();
+        let back = Change::Move {
+            card,
+            to: Column::Backlog,
+            index: 0,
+        };
+        apply(&mut b, &back).unwrap();
+        let out = write(&b);
+        assert!(out.contains("\n- [WIP] fix login\n"), "{out}");
+        assert_eq!(
+            parse(&out).cards(Column::Backlog),
+            [Card::new("[WIP] fix login")]
+        );
+    }
+
+    #[test]
+    fn escaped_text_reads_literally_in_inprogress_and_done() {
+        let b = parse(
+            r"## InProgress
+- [bob] [WIP] real
+- \[c] d
+## Done
+- \[x] y
+- \\[e] f
+",
+        );
+        assert_eq!(
+            b.cards(Column::InProgress),
+            [
+                Card {
+                    text: "[WIP] real".into(),
+                    taker: Some("bob".into())
+                },
+                Card::new("[c] d")
+            ]
+        );
+        assert_eq!(
+            b.cards(Column::Done),
+            [Card::new("[x] y"), Card::new(r"\[e] f")]
+        );
+        assert_eq!(parse(&write(&b)), b);
     }
 }

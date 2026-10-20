@@ -62,7 +62,8 @@ reaches the same server.
     shows for its start folder. If another live terminal in the window already has that name, a
     number is added (`hydra-2`, `hydra-3`), so names are unique within a window. When the user
     renames the terminal, its name becomes the new title. `]` and line breaks in a name are
-    replaced (`]` → `)`), so it always fits `[name]`. (Our call.)
+    replaced (`]` → `)`), so it always fits `[name]`; a name `x` or `X`, which would read as a
+    checkbox, becomes `x-term`. (Our call.)
   - its **project**: as the Tasks tab finds it (git work tree of the terminal's current folder,
     else the folder; `tasks_project::project_root`). A git repository root is a folder whose `.git`
     is a directory containing `HEAD`, or a file starting `gitdir:`; a `.git` folder of config files
@@ -113,6 +114,10 @@ reaches the same server.
 - Writing: a card with a taker is written `- [<taker>] <text>`; the taker is never part of the
   card's text, so card identity for merging (column, text, occurrence; task board §6) is
   unchanged.
+- Escaping: in those two columns, a card with no taker whose text would read back as a taker, a
+  checkbox or an escape (e.g. "[WIP] fix login" moved to InProgress) is written with a `\` before
+  it: `- \[WIP] fix login`. Reading there, a leading `\` before `[` is dropped and the rest is
+  ordinary text, so no taker is split off. Backlog and Pickup never write or read the `\`.
 - Moving in the Tasks tab: moving a taken card to Backlog or Pickup drops its taker; to Done keeps
   it; editing its text keeps it. Moves by drag and by the right-click menu behave the same.
 - The Tasks tab shows a taken card's taker as a small badge on the card (look: builder's call).

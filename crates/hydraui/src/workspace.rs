@@ -7,6 +7,7 @@ mod busy;
 mod finder;
 mod launcher;
 mod layout_file;
+mod pickup;
 mod shortcuts;
 mod start_page;
 mod tasks_tab;
@@ -201,6 +202,9 @@ pub struct Workspace {
     board_focus: HashMap<PaneId, Subscription>,
     /// Each Tasks tab's board view events (a commit to show).
     board_events: HashMap<PaneId, Subscription>,
+    /// Terminals a card was just sent to, and when: not candidates for another until their
+    /// next hook state, or 30 s (auto-pickup design §6).
+    reserved: HashMap<PaneId, Instant>,
     /// Listens for board files the MCP server's sessions create.
     _mcp_pump: Option<gpui::Task<()>>,
     /// Coming back to the window clears the alert of the terminal it shows.
@@ -359,6 +363,7 @@ impl Workspace {
             board_views: HashMap::new(),
             board_focus: HashMap::new(),
             board_events: HashMap::new(),
+            reserved: HashMap::new(),
             _mcp_pump: mcp_pump,
             _activation: activation,
         }

@@ -200,6 +200,9 @@ fn shows_jump_to_bottom(display_offset: usize) -> bool {
 /// How long the "Copied" label shows after a selection is copied.
 const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
 
+/// The pause between an auto-pickup prompt and its Enter.
+const ENTER_AFTER: std::time::Duration = std::time::Duration::from_millis(150);
+
 fn grid_point(display_offset: usize, row: usize, col: usize) -> GridPoint {
     viewport_to_point(display_offset, GridPoint::new(row, Column(col)))
 }
@@ -332,10 +335,23 @@ impl PaneView {
         }
     }
 
-    /// Types a prompt into the session for auto-pickup. It is not the user's draft, so it
-    /// leaves the readiness alone.
+    /// Types a prompt into the session for auto-pickup: the text as a paste (bracketed when the
+    /// program asked for that), then Enter on its own a moment later, so Claude submits it
+    /// rather than taking a newline into the paste. It is not the user's draft, so it leaves the
+    /// readiness alone.
     pub fn type_prompt(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.send(text.as_bytes(), cx);
+        let Some(mode) = self.mode() else {
+            return;
+        };
+        self.send(
+            &paste_bytes(text, mode.contains(TermMode::BRACKETED_PASTE)),
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(ENTER_AFTER).await;
+            let _ = this.update(cx, |v, cx| v.send(b"\r", cx));
+        })
+        .detach();
     }
 
     /// The terminal's name in the MCP server: what its Claude sessions write as a card's taker.

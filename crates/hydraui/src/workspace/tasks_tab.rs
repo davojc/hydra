@@ -181,6 +181,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let board = self.board_for(project, window, cx);
+        let targets_board = board.clone();
         let view = cx.new(|cx| TaskBoardView::new(board.clone(), window, cx));
         let events = cx.subscribe_in(
             &view,
@@ -195,10 +196,27 @@ impl Workspace {
                     let project = board.read(cx).project().to_path_buf();
                     ws.take_in_worktree(id, project, text.clone(), window, cx)
                 }
-                // Task 5 handles sending a card to a Claude session.
-                TaskBoardViewEvent::SendToFree(_) | TaskBoardViewEvent::SendTo { .. } => {}
+                TaskBoardViewEvent::SendToFree(text) => {
+                    let project = board.read(cx).project().to_path_buf();
+                    ws.offer_card(project, text.clone(), window, cx)
+                }
+                TaskBoardViewEvent::SendTo { text, pane } => {
+                    let project = board.read(cx).project().to_path_buf();
+                    ws.send_card_to(*pane, project, text.clone(), window, cx)
+                }
             },
         );
+        // The card menu's Send to lists the project's idle Claude sessions (auto-pickup §8).
+        let ws = cx.entity().downgrade();
+        view.update(cx, |v, _| {
+            v.set_send_targets(move |cx| {
+                let Some(ws) = ws.upgrade() else {
+                    return Vec::new();
+                };
+                let project = targets_board.read(cx).project().to_path_buf();
+                ws.read(cx).send_targets(&project, cx)
+            })
+        });
         let handle = view.read(cx).focus_handle(cx);
         let focus = cx.on_focus_in(&handle, window, move |ws, _, cx| {
             ws.leave_files(id);
@@ -259,8 +277,10 @@ impl Workspace {
                     let project = board.read(cx).project().to_path_buf();
                     ws.card_done(project, text.clone(), window, cx)
                 }
-                // Task 5 handles arrivals in Pickup.
-                TaskBoardEvent::ArrivedInPickup(_) => {}
+                TaskBoardEvent::ArrivedInPickup(text) => {
+                    let project = board.read(cx).project().to_path_buf();
+                    ws.offer_card(project, text.clone(), window, cx)
+                }
             },
         );
         self.boards.insert(project, (board.clone(), sub));

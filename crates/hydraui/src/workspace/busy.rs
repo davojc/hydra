@@ -99,6 +99,8 @@ impl Workspace {
             return;
         };
         let before = view.read(cx).claude();
+        // A card sent here has reached the session, or it moved on: no longer reserved.
+        self.reserved.remove(&id);
         view.update(cx, |v, cx| v.set_claude(state, cx));
         self.tick_activity(cx);
         if let Some(alert) = alert_for(before, state) {

@@ -2,6 +2,7 @@
 //! the selected environment's shown terminal beside its file pane, the status bar, and the
 //! commands bound to keys.
 mod accounts;
+mod all_boards;
 mod busy;
 mod finder;
 mod launcher;

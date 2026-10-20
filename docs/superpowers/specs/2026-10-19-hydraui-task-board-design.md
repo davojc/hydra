@@ -201,3 +201,11 @@ repository):
   branch, and says what it did. It refuses, changing nothing, when the worktree or the main work
   tree has uncommitted changes or the main work tree isn't on the base branch; a merge with
   conflicts is aborted. **Not now** leaves everything as it is.
+
+## 10. All boards
+
+The launcher's **All boards** opens one read-only look across projects: every project a terminal
+in the window is in (its project as §2 says), each with its **Pickup**, **InProgress** and
+**Verify** cards (and their takers), read from the board files when the dialog opens. Projects with
+none of those cards, and empty columns, are left out. Clicking a project's name shows a terminal in
+it (the shown one when it is in that project) and opens its Tasks tab.

@@ -35,6 +35,8 @@ pub enum Action {
     ReloadConfig,
     /// Ask GitHub for a newer hydra now (spec §7.11).
     CheckForUpdates,
+    /// Every open project's Pickup, InProgress and Verify cards (task board spec §10).
+    AllBoards,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +82,7 @@ pub fn entries(envs: &[String], sign_ins: &[(String, String)], secrets: &[String
     add("Open config folder".into(), Action::OpenConfigFolder);
     add("Reload config".into(), Action::ReloadConfig);
     add("Check for updates".into(), Action::CheckForUpdates);
+    add("All boards".into(), Action::AllBoards);
     out
 }
 
@@ -114,6 +117,7 @@ mod tests {
                 "Open config folder",
                 "Reload config",
                 "Check for updates",
+                "All boards",
             ]
         );
         assert!(!labels.iter().any(|l| l.starts_with("Set:")), "no sets");
@@ -157,10 +161,12 @@ mod tests {
                 "Set secret: other…",
                 "Open config folder",
                 "Reload config",
-                "Check for updates"
+                "Check for updates",
+                "All boards"
             ]
         );
         assert_eq!(got[11].action, Action::CheckForUpdates);
+        assert_eq!(got[12].action, Action::AllBoards);
         assert_eq!(got[0].action, Action::OpenFile);
         assert_eq!(got[1].action, Action::SearchFiles);
         assert_eq!(got[4].action, Action::StartPage);

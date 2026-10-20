@@ -25,7 +25,8 @@ const SCROLL_STEP: f32 = 12.;
 /// Each column's color, on its heading's dot and its cards' left edge: Backlog grey, Pickup
 /// blue, InProgress orange, Verify yellow, Done green. The theme has no orange, so it's fixed
 /// here.
-fn accent(col: Column, cx: &App) -> Hsla {
+/// A column's colour (§5).
+pub fn accent(col: Column, cx: &App) -> Hsla {
     let theme = cx.theme();
     match col {
         Column::Backlog => theme.muted_foreground,

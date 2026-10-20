@@ -117,6 +117,10 @@ pub enum Cmd {
     /// hooks, not by hand): working, waiting, idle or ended
     #[command(hide = true)]
     Hook { state: String },
+    /// Claude Code's status line in a hydraui terminal (run by Claude Code, not by hand): passes
+    /// the session's status to hydraui, then runs your own status line command, if given
+    #[command(hide = true)]
+    Statusline { command: Option<String> },
     /// Guard decisions for hydra's hooks (run by the hooks, not by hand)
     #[command(hide = true)]
     Guard {

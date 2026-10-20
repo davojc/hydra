@@ -229,6 +229,26 @@ A Windows notification-centre toast isn't posted yet: it needs hydraui to have a
 AppUserModelID, which its installer's shortcuts must carry too, or the taskbar shows the running
 window apart from a pinned shortcut.
 
+### 5.2 Claude usage
+
+Wherever the `hydraui` server is registered, hydra also sets the environment's status line to
+`"<hydra>" statusline`. A status line of the user's own (from `~/.claude/settings.json` or the
+environment's) is kept, wrapped: `"<hydra>" statusline '<their command>'`. Each time Claude Code
+refreshes the status line, `hydra statusline`:
+- reads Claude's status JSON from stdin and posts it to `$HYDRA_MCP_URL` as the notification
+  `hydraui/usage` (500 ms timeout; nothing outside hydraui, nothing on failure);
+- then prints a status line: the wrapped command's, run in Git Bash (Claude Code's
+  `CLAUDE_CODE_GIT_BASH_PATH`, else where hydra finds Git Bash, else `cmd /C`) with the same
+  JSON on stdin; without one, hydra's own `<model> · context N% · 5h N% · 7d N%`.
+
+hydraui keeps, per environment, the latest report that has `rate_limits` (the five-hour and
+seven-day windows, which Claude gives Pro and Max accounts after the first response; the limits
+are the account's, so any of the environment's sessions speaks for it). The status bar shows
+`claude 5h N% · 7d N%` after the account marks, muted, amber from 80%, red from 95%; its
+tooltip names the Claude account (from the accounts check) and when each window resets.
+Clicking it opens the environment's accounts, where each tool with a sign-in has **Switch
+account…**: it runs that tool's sign-in in a new terminal, as the launcher's Sign in does.
+
 ## 6. Testing
 
 Unit tests: parsing and writing the taker (InProgress/Done only, checkbox not mistaken, round

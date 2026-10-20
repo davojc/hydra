@@ -34,6 +34,47 @@ impl SessionState {
     }
 }
 
+/// One of Claude's rate-limit windows, as its status line reports it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Limit {
+    /// Percent of the window used.
+    pub used: f64,
+    /// When the window resets, in Unix seconds.
+    pub resets_at: Option<i64>,
+}
+
+/// What a Claude session's status line said about its account's usage (`hydra statusline`):
+/// the five-hour and seven-day windows (Pro and Max accounts only) and how full its context is.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Usage {
+    pub five_hour: Option<Limit>,
+    pub seven_day: Option<Limit>,
+    pub context: Option<f64>,
+}
+
+impl Usage {
+    /// Reads Claude Code's status JSON; missing or null fields are `None`.
+    pub fn parse(status: &serde_json::Value) -> Usage {
+        let limit = |key: &str| {
+            let w = &status["rate_limits"][key];
+            w["used_percentage"].as_f64().map(|used| Limit {
+                used,
+                resets_at: w["resets_at"].as_i64(),
+            })
+        };
+        Usage {
+            five_hour: limit("five_hour"),
+            seven_day: limit("seven_day"),
+            context: status["context_window"]["used_percentage"].as_f64(),
+        }
+    }
+
+    /// Whether it says anything about the account's limits.
+    pub fn has_limits(&self) -> bool {
+        self.five_hour.is_some() || self.seven_day.is_some()
+    }
+}
+
 /// Why a session's change of state calls for you.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Alert {
@@ -117,6 +158,24 @@ impl Drop for McpTerminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_reads_the_limits_claude_gave() {
+        let u = Usage::parse(&serde_json::json!({
+            "rate_limits": {"five_hour": {"used_percentage": 42.5, "resets_at": 1700000000}},
+            "context_window": {"used_percentage": null},
+        }));
+        assert_eq!(
+            u.five_hour,
+            Some(Limit {
+                used: 42.5,
+                resets_at: Some(1700000000)
+            })
+        );
+        assert_eq!((u.seven_day, u.context), (None, None));
+        assert!(u.has_limits());
+        assert!(!Usage::parse(&serde_json::json!({})).has_limits());
+    }
 
     #[test]
     fn only_waiting_and_finishing_alert() {

@@ -160,6 +160,61 @@ pub fn add_guard_hook(settings_json: &str, command: &str) -> Result<String, Stri
     Ok(text)
 }
 
+/// `s` as one bash word: single-quoted, any `'` written `'\''`.
+fn bash_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// For a status line command that is hydra's (`<hydra> statusline [<their command>]`), the
+/// user's own command it wraps, if any: `Some(None)` for hydra's alone, `None` when the command
+/// isn't hydra's.
+fn wrapped_status_line(command: &str) -> Option<Option<String>> {
+    let (exe, rest) = command.split_once(" statusline")?;
+    let exe = exe.trim_matches('"').to_ascii_lowercase();
+    if !(exe.ends_with("hydra") || exe.ends_with("hydra.exe")) {
+        return None;
+    }
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Some(None);
+    }
+    let inner = rest.strip_prefix('\'')?.strip_suffix('\'')?;
+    Some(Some(inner.replace(r"'\''", "'")))
+}
+
+/// Sets the settings JSON's status line to `<hydra> statusline`, which passes each session's
+/// status (rate limits, context) to hydraui. A status line of the user's own stays: hydra's
+/// runs it, as `<hydra> statusline '<their command>'`, and shows its output. Idempotent, and an
+/// older hydra's wrapper is re-made with `hydra`.
+pub fn add_status_line(settings_json: &str, hydra: &str) -> Result<String, String> {
+    let mut root: Value = serde_json::from_str(settings_json).map_err(|e| e.to_string())?;
+    let obj = root
+        .as_object_mut()
+        .ok_or("settings.json isn't a JSON object")?;
+    let line = obj
+        .entry("statusLine")
+        .or_insert_with(|| serde_json::json!({"type": "command"}));
+    let line = line
+        .as_object_mut()
+        .ok_or("settings.json: \"statusLine\" isn't an object")?;
+    let theirs = match line.get("command").and_then(Value::as_str) {
+        None => None,
+        Some(c) => match wrapped_status_line(c) {
+            Some(inner) => inner,
+            None => Some(c.to_string()),
+        },
+    };
+    let command = match theirs {
+        Some(c) => format!("{hydra} statusline {}", bash_quote(&c)),
+        None => format!("{hydra} statusline"),
+    };
+    line.insert("type".into(), Value::String("command".into()));
+    line.insert("command".into(), Value::String(command));
+    let mut text = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    text.push('\n');
+    Ok(text)
+}
+
 /// The hooks that tell hydraui what a session is doing: each Claude Code event, its matcher
 /// (`None`: every time) and the state `hydra hook` reports.
 pub const STATUS_HOOKS: [(&str, Option<&str>, &str); 7] = [
@@ -397,6 +452,41 @@ mod tests {
                 .unwrap()
                 .contains("mcp__hydraui__tasks_take")
         );
+    }
+
+    #[test]
+    fn the_status_line_feeds_hydraui_and_keeps_the_users_own() {
+        let none = add_status_line("{}", "hydra").unwrap();
+        let v: Value = serde_json::from_str(&none).unwrap();
+        assert_eq!(
+            v["statusLine"],
+            json!({"type": "command", "command": "hydra statusline"})
+        );
+        let user = r#"{"statusLine":{"type":"command","command":"npx -y ccstatusline@latest","padding":0}}"#;
+        let wrapped = add_status_line(user, "\"C:/h/hydra.exe\"").unwrap();
+        let v: Value = serde_json::from_str(&wrapped).unwrap();
+        assert_eq!(
+            v["statusLine"],
+            json!({"type": "command", "command": "\"C:/h/hydra.exe\" statusline 'npx -y ccstatusline@latest'", "padding": 0})
+        );
+        // Again, or from another hydra: wrapped once, theirs kept.
+        let again = add_status_line(&wrapped, "hydra").unwrap();
+        let v: Value = serde_json::from_str(&again).unwrap();
+        assert_eq!(
+            v["statusLine"]["command"],
+            "hydra statusline 'npx -y ccstatusline@latest'"
+        );
+        assert_eq!(add_status_line(&again, "hydra").unwrap(), again);
+        // A quote in their command survives the round trip.
+        let quoted = r#"{"statusLine":{"command":"echo 'hi'"}}"#;
+        let w = add_status_line(quoted, "hydra").unwrap();
+        let v: Value = serde_json::from_str(&w).unwrap();
+        let cmd = v["statusLine"]["command"].as_str().unwrap();
+        assert_eq!(
+            wrapped_status_line(cmd),
+            Some(Some("echo 'hi'".to_string()))
+        );
+        assert_eq!(wrapped_status_line("npx ccstatusline"), None);
     }
 
     #[test]

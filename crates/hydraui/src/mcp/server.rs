@@ -9,21 +9,24 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use serde_json::{Value, json};
 
-use super::SessionState;
 use super::registry::{Registry, Terminal};
 use super::tools::{INSTRUCTIONS, call, list};
+use super::{SessionState, Usage};
 
 /// Largest request body read; a tool call is a few lines of JSON.
 const MAX_BODY: u64 = 1 << 20;
 
 /// Something the server did that the app should show.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum McpEvent {
     /// A terminal made a project's task board; carries the project folder.
     BoardCreated(PathBuf),
     /// A Claude session's hook (`hydra hook <state>`) said what it is doing: the terminal's
     /// token and the state.
     Session(String, SessionState),
+    /// A Claude session's status line (`hydra statusline`) said how much of its account's
+    /// limits are used: the terminal's token and the usage.
+    Usage(String, Usage),
 }
 
 /// What `handle` answers: an HTTP status and, for 200, the JSON body.
@@ -130,12 +133,17 @@ pub fn answer(terminal: &Terminal, token: &str, body: &str) -> (Reply, Option<Mc
     };
     let params = obj.get("params").unwrap_or(&Value::Null);
     let Some(id) = obj.get("id") else {
-        // A notification; hydra's Claude hooks send `hydraui/status` with the session's state.
-        let event = (obj.get("method").and_then(Value::as_str) == Some("hydraui/status"))
-            .then(|| params.get("state").and_then(Value::as_str))
-            .flatten()
-            .and_then(SessionState::parse)
-            .map(|state| McpEvent::Session(token.to_string(), state));
+        // A notification. hydra's Claude hooks send `hydraui/status` with the session's state,
+        // its status line `hydraui/usage` with Claude's status JSON.
+        let event = match obj.get("method").and_then(Value::as_str) {
+            Some("hydraui/status") => params
+                .get("state")
+                .and_then(Value::as_str)
+                .and_then(SessionState::parse)
+                .map(|state| McpEvent::Session(token.to_string(), state)),
+            Some("hydraui/usage") => Some(McpEvent::Usage(token.to_string(), Usage::parse(params))),
+            _ => None,
+        };
         return (status(202), event);
     };
     match obj.get("method").and_then(Value::as_str) {
@@ -397,6 +405,16 @@ mod tests {
         assert_eq!(event, None, "an unknown state");
         let (_, event) = send(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
         assert_eq!(event, None);
+        let (_, event) = send(
+            r#"{"jsonrpc":"2.0","method":"hydraui/usage","params":{"rate_limits":{"seven_day":{"used_percentage":80}}}}"#,
+        );
+        let Some(McpEvent::Usage(t, u)) = event else {
+            panic!("a usage event: {event:?}");
+        };
+        assert_eq!(
+            (t, u.seven_day.map(|l| l.used)),
+            (token.clone(), Some(80.0))
+        );
         let (reply, event) = handle(
             &reg,
             "POST",

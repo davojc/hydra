@@ -6,6 +6,7 @@ mod hook;
 mod init;
 pub mod launch;
 mod secret;
+mod statusline;
 mod tools;
 pub mod update;
 mod whoami;
@@ -29,6 +30,9 @@ pub fn run(cmd: Cmd) -> anyhow::Result<i32> {
     if let Cmd::Hook { state } = cmd {
         hook::run(&state);
         return Ok(0);
+    }
+    if let Cmd::Statusline { command } = cmd {
+        return Ok(statusline::run(command.as_deref()));
     }
     if let Cmd::Allow { command } = cmd {
         return guard::allow(&command);
@@ -81,7 +85,11 @@ pub fn run(cmd: Cmd) -> anyhow::Result<i32> {
         Cmd::Whoami { env } => whoami::run(&app, env),
         Cmd::Bind { args, file, list } => bind::bind(&app, args, file, list),
         Cmd::Unbind { path } => bind::unbind(&app, path),
-        Cmd::Update { .. } | Cmd::Guard { .. } | Cmd::Allow { .. } | Cmd::Hook { .. } => {
+        Cmd::Update { .. }
+        | Cmd::Guard { .. }
+        | Cmd::Allow { .. }
+        | Cmd::Hook { .. }
+        | Cmd::Statusline { .. } => {
             unreachable!("handled above")
         }
     }

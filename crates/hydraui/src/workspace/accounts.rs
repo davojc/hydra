@@ -320,6 +320,8 @@ fn accounts_list(
     let found = w.status.get(env).map(rows);
     let checking = w.refreshing.contains(env);
     let borrowing = w.borrowing.get(env).cloned().unwrap_or_default();
+    // Tools with a sign-in: signing in again switches the environment to another account.
+    let sign_ins = w.hydra.sign_ins(env);
     let recheck = (ws.clone(), env.to_string());
     let add = (ws.clone(), env.to_string());
     let header = h_flex()
@@ -373,6 +375,21 @@ fn accounts_list(
                         .child(r.provider.clone()),
                 )
                 .child(div().flex_1().min_w_0().child(r.detail))
+                .when(sign_ins.contains(&r.provider), |row| {
+                    let (ws, env, tool) = (ws.clone(), env.to_string(), r.provider.clone());
+                    row.child(
+                        Button::new(SharedString::from(format!("switch-{tool}")))
+                            .label("Switch account…")
+                            .ghost()
+                            .xsmall()
+                            .on_click(move |_, window, cx| {
+                                ws.update(cx, |ws, cx| {
+                                    ws.accounts_open = false;
+                                    ws.sign_in(&env, &tool, window, cx)
+                                });
+                            }),
+                    )
+                })
                 .when_some(borrowing.from.get(&r.provider).cloned(), |row, owner| {
                     row.child(
                         div()

@@ -9,8 +9,8 @@ use hydra_core::provider::{
 use hydra_platform::links::{is_link, link_dir, points_at, unlink};
 
 use crate::claude_files::{
-    HYDRAUI_SERVER, add_guard_hook, add_hydraui_allow, add_status_hooks, drop_excluded,
-    guard_hook_command, merge_settings, render_claude_md, sync_mcp,
+    HYDRAUI_SERVER, add_guard_hook, add_hydraui_allow, add_status_hooks, add_status_line,
+    drop_excluded, guard_hook_command, merge_settings, render_claude_md, sync_mcp,
 };
 use crate::report::report;
 
@@ -522,11 +522,22 @@ fn hydra_for_hooks() -> String {
 /// Adds the hooks that tell hydraui what the session is doing. Skipped with a warning when the
 /// settings can't take them.
 fn with_status_hooks(text: String, warnings: &Warnings) -> String {
-    match add_status_hooks(&text, &hydra_for_hooks()) {
+    let hydra = hydra_for_hooks();
+    let text = match add_status_hooks(&text, &hydra) {
         Ok(with_hooks) => with_hooks,
         Err(e) => {
             warnings.push(format!(
                 "hydra: claude: hydraui status hooks not added ({e})"
+            ));
+            text
+        }
+    };
+    // The status line that passes the session's usage to hydraui, running the user's own.
+    match add_status_line(&text, &hydra) {
+        Ok(with_line) => with_line,
+        Err(e) => {
+            warnings.push(format!(
+                "hydra: claude: hydraui status line not added ({e})"
             ));
             text
         }

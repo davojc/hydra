@@ -11,6 +11,7 @@ mod tasks_tab;
 mod terminal_list;
 mod title_bar;
 mod tree_ops;
+mod usage;
 mod worktree;
 
 use std::cell::Cell;
@@ -169,6 +170,8 @@ pub struct Workspace {
     _activity_tick: Task<()>,
     /// Whether the status bar's accounts popover is open.
     accounts_open: bool,
+    /// Each environment's latest Claude usage, from its sessions' status lines.
+    usage: HashMap<String, crate::mcp::Usage>,
     /// The title bar's Update button (spec §7.11).
     update: crate::updater::UpdateState,
     _update_checks: Option<Task<()>>,
@@ -285,6 +288,7 @@ impl Workspace {
                         McpEvent::Session(token, state) => {
                             ws.session_state(&token, state, window, cx)
                         }
+                        McpEvent::Usage(token, usage) => ws.usage_reported(&token, usage, cx),
                     });
                     if alive.is_err() {
                         break;
@@ -336,6 +340,7 @@ impl Workspace {
             blink: true,
             _activity_tick: activity_tick,
             accounts_open: false,
+            usage: HashMap::new(),
             update: Default::default(),
             _update_checks: None,
             layout: None,
@@ -1662,6 +1667,7 @@ impl Workspace {
         if let Some(view) = self.focused().filter(|_| self.start.is_none()) {
             let env = view.read(cx).env().to_string();
             let env_name = self.render_env_accounts(env.clone(), self.tint(&env), cx);
+            let usage = self.render_usage(&env, cx);
             let v = view.read(cx);
             let (ok, bad) = (cx.theme().success, cx.theme().danger);
             let accounts = match self.status.get(&env).map(account_marks) {
@@ -1686,6 +1692,7 @@ impl Workspace {
             bar = bar
                 .child(env_name)
                 .child(div().flex_1().min_w_0().overflow_hidden().child(accounts))
+                .when_some(usage, |b, u| b.child(u))
                 .when_some(git, |b, line| b.child(line))
                 .child(div().child(v.cwd().display().to_string()));
         }

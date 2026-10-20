@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use hydra_core::git::is_repo_root;
+use sha2::{Digest, Sha256};
 
 use crate::git_watch::ignore_rules;
 use crate::tasks::{Board, Change, apply, parse, write};
@@ -29,6 +30,15 @@ pub fn is_repo(project: &Path) -> bool {
 
 pub fn tasks_path(project: &Path) -> PathBuf {
     project.join(".hydra").join("tasks.md")
+}
+
+/// The lock file serialising writers of `project`'s board: in the temp folder, keyed by the
+/// project path (lowercased, `\` separators), so it never appears in the work tree.
+pub fn lock_path(project: &Path) -> PathBuf {
+    let key = project.to_string_lossy().replace('/', "\\").to_lowercase();
+    std::env::temp_dir()
+        .join("hydraui-locks")
+        .join(format!("{:x}.lock", Sha256::digest(key.as_bytes())))
 }
 
 pub struct Committed {
@@ -71,7 +81,21 @@ pub fn load(project: &Path) -> std::io::Result<(Board, String)> {
 /// `.hydra`), unless the board comes out as it was read: then nothing is written, so an empty
 /// Add on a missing file creates nothing. The board returned is the written text read back, so
 /// it is what a reload of the file would show.
+///
+/// An exclusive lock on `lock_path(project)` is held across the re-read and the write, so two
+/// writers (this window and the MCP server, or two windows) never lose each other's change.
 pub fn commit(project: &Path, change: &Change) -> Result<Committed, CommitError> {
+    let lock = lock_path(project);
+    if let Some(dir) = lock.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    // The open file is the guard: dropped (and unlocked) when `commit` returns.
+    let guard = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock)?;
+    guard.lock()?;
     let existing = read_if_present(&tasks_path(project))?;
     let before = parse(existing.as_deref().unwrap_or_default());
     let mut board = before.clone();
@@ -221,6 +245,38 @@ mod tests {
             assert_eq!(root, d.path());
         }
         assert!(!is_repo(d.path()));
+    }
+
+    #[test]
+    fn commits_from_many_threads_lose_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let project = d.path().to_path_buf();
+        let threads: Vec<_> = (0..8)
+            .map(|i| {
+                let p = project.clone();
+                std::thread::spawn(move || {
+                    for j in 0..10 {
+                        commit(
+                            &p,
+                            &Change::Add {
+                                text: format!("t{i}-{j}"),
+                            },
+                        )
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        threads.into_iter().for_each(|t| t.join().unwrap());
+        assert_eq!(load(&project).unwrap().0.cards(Column::Backlog).len(), 80);
+    }
+
+    #[test]
+    fn the_lock_lives_outside_the_project() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(!lock_path(d.path()).starts_with(d.path()));
+        assert_eq!(lock_path(d.path()), lock_path(d.path()));
+        assert_ne!(lock_path(d.path()), lock_path(&d.path().join("other")));
     }
 
     #[test]

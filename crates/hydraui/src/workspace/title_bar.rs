@@ -1,5 +1,5 @@
-//! hydraui's own title bar (spec §7.11): the layout's name and its menu, the Update button,
-//! and the window controls gpui-component draws.
+//! hydraui's own title bar (spec §7.11): the layout's name and its menu, the Shortcuts and
+//! Update buttons, and the window controls gpui-component draws.
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -205,6 +205,19 @@ impl Workspace {
                 .child(
                     h_flex()
                         .gap_2()
+                        // Occluded, as the Update button below, so a click isn't a drag.
+                        .child(
+                            div().occlude().child(
+                                Button::new("shortcuts")
+                                    .label("Shortcuts")
+                                    .ghost()
+                                    .xsmall()
+                                    .tooltip("Every key hydraui answers to")
+                                    .on_click(
+                                        cx.listener(|ws, _, window, cx| ws.shortcuts(window, cx)),
+                                    ),
+                            ),
+                        )
                         // The running version, muted, beside where the Update button appears.
                         .child(
                             div()

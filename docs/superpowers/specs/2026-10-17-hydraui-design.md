@@ -311,7 +311,7 @@ disabled.
 
 ```
 ┌───────────────────────────────────────────────────────────┐
-│ ⑂ client-a ▾  hydra 0.6.18 [Update hydra 0.7.0]  _  □  ✕  │  title bar (§7.11)
+│ ⑂ client-a ▾  Shortcuts hydra 0.6.18 [Update 0.7.0] _ □ ✕ │  title bar (§7.11)
 ├───────────────────────────────────────────────────────────┤
 │ [client-a ▾] api● infra●  │ [personal ▾] blog●  │ Loose: +│  tab strip, grouped by set
 ├────────────┬──────────────────────────────────────────────┤
@@ -720,6 +720,12 @@ reads `hydraui` and the name is hidden.
 compile time in release builds, else `<Cargo version>-dev`. The title bar
 shows it on the right, muted, as `hydra <version>`, just left of where the
 Update button appears.
+
+**Shortcuts.** Left of the version, a **Shortcuts** button (also the
+launcher's **Keyboard shortcuts**) opens a dialog listing every key: the
+§7.6 commands with the keys bound at startup (so `[keys]` overrides show),
+then the keys `[keys]` can't change (Ctrl+S in a file pane, Tab/Shift+Tab in
+a terminal, Ctrl+click on terminal output and in the file tree).
 
 **Checking.** At start and then every hour, off the UI thread, hydraui
 asks GitHub for the latest release (the same request as `hydra update`,

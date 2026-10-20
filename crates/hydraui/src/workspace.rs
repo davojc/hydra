@@ -7,6 +7,7 @@ mod busy;
 mod finder;
 mod launcher;
 mod layout_file;
+mod shortcuts;
 mod start_page;
 mod tasks_tab;
 mod terminal_list;
@@ -176,6 +177,8 @@ pub struct Workspace {
     /// The title bar's Update button (spec §7.11).
     update: crate::updater::UpdateState,
     _update_checks: Option<Task<()>>,
+    /// The keys bound at startup, for the shortcuts list ([keys] changes wait for a restart).
+    keymap: Vec<(crate::keys::Command, String)>,
     /// The layout file this window keeps saved (spec §7.12); `None` while untitled.
     layout: Option<PathBuf>,
     /// This window's hold on `layout`, so no other window writes it.
@@ -304,6 +307,7 @@ impl Workspace {
         .detach();
         Self {
             hydra,
+            keymap: crate::keys::keymap(&ui.keys).0,
             ui,
             style: Arc::new(style),
             envs: EnvTabs::default(),
@@ -402,12 +406,13 @@ impl Workspace {
     }
 
     /// Smoke tests and screenshots can't press Ctrl+Shift: in debug builds F12 opens the dialog
-    /// named by HYDRAUI_TEST_DIALOG (open_file, search, launcher).
+    /// named by HYDRAUI_TEST_DIALOG (open_file, search, launcher, shortcuts).
     fn test_dialog(&mut self, _: &TestDialog, window: &mut Window, cx: &mut Context<Self>) {
         match std::env::var("HYDRAUI_TEST_DIALOG").as_deref() {
             Ok("open_file") => self.open_file_finder(window, cx),
             Ok("search") => self.search_dialog(window, cx),
             Ok("launcher") => self.open_launcher(&crate::keys::Launcher, window, cx),
+            Ok("shortcuts") => self.shortcuts(window, cx),
             _ => {}
         }
     }

@@ -37,6 +37,8 @@ pub enum Action {
     CheckForUpdates,
     /// Every open project's Pickup, InProgress and Verify cards (task board spec §10).
     AllBoards,
+    /// The list of every key hydraui answers to.
+    Shortcuts,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +85,7 @@ pub fn entries(envs: &[String], sign_ins: &[(String, String)], secrets: &[String
     add("Reload config".into(), Action::ReloadConfig);
     add("Check for updates".into(), Action::CheckForUpdates);
     add("All boards".into(), Action::AllBoards);
+    add("Keyboard shortcuts".into(), Action::Shortcuts);
     out
 }
 
@@ -118,6 +121,7 @@ mod tests {
                 "Reload config",
                 "Check for updates",
                 "All boards",
+                "Keyboard shortcuts",
             ]
         );
         assert!(!labels.iter().any(|l| l.starts_with("Set:")), "no sets");
@@ -162,11 +166,13 @@ mod tests {
                 "Open config folder",
                 "Reload config",
                 "Check for updates",
-                "All boards"
+                "All boards",
+                "Keyboard shortcuts"
             ]
         );
         assert_eq!(got[11].action, Action::CheckForUpdates);
         assert_eq!(got[12].action, Action::AllBoards);
+        assert_eq!(got[13].action, Action::Shortcuts);
         assert_eq!(got[0].action, Action::OpenFile);
         assert_eq!(got[1].action, Action::SearchFiles);
         assert_eq!(got[4].action, Action::StartPage);

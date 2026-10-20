@@ -122,6 +122,25 @@ impl Command {
         }
     }
 
+    /// What the command does, for the shortcuts list.
+    pub fn label(self) -> &'static str {
+        match self {
+            Command::NewTerminal => "New terminal",
+            Command::ClosePane => "Close terminal or file",
+            Command::NextTerminal => "Next terminal",
+            Command::PreviousTerminal => "Previous terminal",
+            Command::NextTab => "Next environment tab",
+            Command::PreviousTab => "Previous environment tab",
+            Command::Copy => "Copy",
+            Command::Paste => "Paste",
+            Command::Find => "Find in terminal",
+            Command::Launcher => "Launcher",
+            Command::FileTree => "Show or hide the file tree",
+            Command::OpenFile => "Open file…",
+            Command::Search => "Search in files…",
+        }
+    }
+
     pub fn action(self) -> Box<dyn Action> {
         match self {
             Command::NewTerminal => Box::new(NewTerminal),
@@ -202,6 +221,42 @@ pub fn bindings(keys: &[(Command, String)]) -> Vec<KeyBinding> {
             KeyBinding::load(k, c.action(), None, false, None, &DummyKeyboardMapper).ok()
         })
         .collect()
+}
+
+/// Keys that aren't commands, so `[keys]` can't change them: (keys, what they do).
+pub const FIXED: [(&str, &str); 4] = [
+    ("Ctrl+S", "Save the file (in a file pane)"),
+    ("Tab / Shift+Tab", "Completion in the shell (in a terminal)"),
+    ("Ctrl+click", "Open a path or link in terminal output"),
+    ("Ctrl+click", "Insert a file's path (in the file tree)"),
+];
+
+/// `keys` as people write them: "ctrl-shift-p" → "Ctrl+Shift+P", a chord's steps spaced.
+pub fn display(keys: &str) -> String {
+    keys.split_whitespace()
+        .map(|step| {
+            step.split('-')
+                .map(|part| match part {
+                    "ctrl" => "Ctrl".to_string(),
+                    "shift" => "Shift".to_string(),
+                    "alt" => "Alt".to_string(),
+                    "cmd" | "win" | "super" => "Win".to_string(),
+                    "pagedown" => "PgDn".to_string(),
+                    "pageup" => "PgUp".to_string(),
+                    "" => "-".to_string(),
+                    p => {
+                        let mut c = p.chars();
+                        match c.next() {
+                            Some(f) => f.to_uppercase().chain(c).collect(),
+                            None => String::new(),
+                        }
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("+")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -317,6 +372,15 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn keys_display_as_people_write_them() {
+        assert_eq!(display("ctrl-shift-p"), "Ctrl+Shift+P");
+        assert_eq!(display("ctrl-pagedown"), "Ctrl+PgDn");
+        assert_eq!(display("ctrl-tab"), "Ctrl+Tab");
+        assert_eq!(display("ctrl-k ctrl-s"), "Ctrl+K Ctrl+S");
+        assert_eq!(display("f5"), "F5");
     }
 
     #[test]

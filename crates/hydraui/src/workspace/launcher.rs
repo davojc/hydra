@@ -109,6 +109,7 @@ impl Workspace {
             Action::ReloadConfig => self.reload_config(window, cx),
             Action::CheckForUpdates => self.check_for_updates(window, cx),
             Action::AllBoards => self.all_boards(window, cx),
+            Action::Shortcuts => self.shortcuts(window, cx),
         }
     }
 

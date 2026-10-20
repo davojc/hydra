@@ -1,6 +1,7 @@
 //! The terminal list on the left (env-tabs design §2.2): **+ New**, then the selected
-//! environment's terminals in creation order, each with its activity dot, its name and × on
-//! hover; click shows one, right-click opens its Tasks tab, renames, restarts or closes it.
+//! environment's terminals in creation order, grouped by project under a heading when they are
+//! in more than one, each with its activity dot, its name and × on hover; click shows one,
+//! right-click opens its Tasks tab, renames, restarts or closes it.
 use std::cell::Cell;
 
 use gpui::prelude::*;
@@ -15,7 +16,59 @@ use crate::activity::Activity;
 use crate::envs::PaneId;
 use crate::pane_view::label_for;
 
+/// `terminals` (each with its project) grouped by project: groups in the order their first
+/// terminal came, terminals in their order within each.
+fn by_project<P: PartialEq + Clone>(terminals: &[(PaneId, P)]) -> Vec<(P, Vec<PaneId>)> {
+    let mut groups: Vec<(P, Vec<PaneId>)> = Vec::new();
+    for (id, project) in terminals {
+        match groups.iter_mut().find(|(p, _)| p == project) {
+            Some((_, ids)) => ids.push(*id),
+            None => groups.push((project.clone(), vec![*id])),
+        }
+    }
+    groups
+}
+
+/// The terminal `by` steps from `shown` in `order`, wrapping; the first when `shown` isn't in it.
+fn step(order: &[PaneId], shown: Option<PaneId>, by: isize) -> Option<PaneId> {
+    let at = shown
+        .and_then(|s| order.iter().position(|&t| t == s))
+        .unwrap_or(0) as isize;
+    let len = order.len().max(1) as isize;
+    order.get((at + by).rem_euclid(len) as usize).copied()
+}
+
 impl Workspace {
+    /// The selected environment's terminals grouped by project (worktrees of one repository
+    /// included), in the order the list shows them.
+    fn grouped_terminals(&self, cx: &gpui::App) -> Vec<(std::path::PathBuf, Vec<PaneId>)> {
+        let Some(tab) = self.envs.active() else {
+            return Vec::new();
+        };
+        let projects: Vec<(PaneId, std::path::PathBuf)> = tab
+            .terminals
+            .iter()
+            .filter_map(|id| {
+                let cwd = self.panes.get(id)?.read(cx).cwd().clone();
+                Some((*id, crate::tasks_project::project_root(&cwd)))
+            })
+            .collect();
+        by_project(&projects)
+    }
+
+    /// Ctrl+PageDown / Ctrl+PageUp: the next or previous terminal down the list, wrapping.
+    pub(super) fn step_terminal(&mut self, by: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let order: Vec<PaneId> = self
+            .grouped_terminals(cx)
+            .into_iter()
+            .flat_map(|(_, ids)| ids)
+            .collect();
+        let shown = self.envs.active().and_then(|t| t.shown);
+        if let Some(id) = step(&order, shown, by) {
+            self.show_terminal(id, window, cx);
+        }
+    }
+
     /// The selected environment's terminals, the shown one highlighted in the environment's
     /// colour; a row's tooltip is the title its program set, when it set one.
     pub(super) fn render_terminal_list(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -42,7 +95,34 @@ impl Workspace {
                     ws.new_terminal(&env, None, window, cx);
                 })),
         );
-        for &id in &tab.terminals {
+        // Terminals in the same project sit together, under the project's name once there is
+        // more than one project.
+        let groups = self.grouped_terminals(cx);
+        let headed = groups.len() > 1;
+        let rows: Vec<(Option<String>, PaneId)> = groups
+            .into_iter()
+            .flat_map(|(project, ids)| {
+                let name = project
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| project.display().to_string());
+                ids.into_iter()
+                    .enumerate()
+                    .map(move |(i, id)| ((headed && i == 0).then(|| name.clone()), id))
+            })
+            .collect();
+        for (heading, id) in rows {
+            if let Some(name) = heading {
+                list = list.child(
+                    div()
+                        .px_2()
+                        .pt_2()
+                        .text_xs()
+                        .text_color(muted)
+                        .truncate()
+                        .child(name),
+                );
+            }
             let Some(view) = self.panes.get(&id) else {
                 continue;
             };
@@ -220,5 +300,36 @@ impl Workspace {
             self.focus_soon(shown, window, cx);
         }
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminals_group_by_project_in_first_seen_order() {
+        let got = by_project(&[
+            (1, "api"),
+            (2, "blog"),
+            (3, "api"),
+            (4, "site"),
+            (5, "blog"),
+        ]);
+        assert_eq!(
+            got,
+            [("api", vec![1, 3]), ("blog", vec![2, 5]), ("site", vec![4])]
+        );
+        assert!(by_project::<&str>(&[]).is_empty());
+    }
+
+    #[test]
+    fn stepping_follows_the_list_and_wraps() {
+        let order = [1, 3, 2];
+        assert_eq!(step(&order, Some(1), 1), Some(3));
+        assert_eq!(step(&order, Some(2), 1), Some(1));
+        assert_eq!(step(&order, Some(1), -1), Some(2));
+        assert_eq!(step(&order, None, 1), Some(3));
+        assert_eq!(step(&[], Some(1), 1), None);
     }
 }

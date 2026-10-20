@@ -1026,9 +1026,7 @@ impl Workspace {
     }
 
     fn next_terminal(&mut self, _: &NextTerminal, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(id) = self.envs.next_terminal() {
-            self.show_terminal(id, window, cx);
-        }
+        self.step_terminal(1, window, cx);
     }
 
     fn previous_terminal(
@@ -1037,9 +1035,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(id) = self.envs.previous_terminal() {
-            self.show_terminal(id, window, cx);
-        }
+        self.step_terminal(-1, window, cx);
     }
 
     /// Checks the focused environment's accounts off the UI thread, at most once a minute.

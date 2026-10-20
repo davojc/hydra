@@ -31,6 +31,9 @@ pub enum TaskBoardEvent {
     Problem(String),
     /// The user moved the card with this text to Done (worktrees: offer to merge its branch).
     MovedToDone(String),
+    /// The user moved the card with this text into Pickup from another column (a reload never
+    /// says this): auto-pickup types it into a free Claude session.
+    ArrivedInPickup(String),
 }
 
 /// What became of a change.
@@ -86,6 +89,18 @@ pub fn rescue(change: &Change) -> Option<Change> {
     };
     let text = normalise(text);
     (!text.is_empty() && text != card.text).then_some(Change::Add { text })
+}
+
+/// The text of the card `change` moves into Pickup from another column, else `None`.
+pub fn arrived(change: &Change) -> Option<String> {
+    match change {
+        Change::Move {
+            card,
+            to: Column::Pickup,
+            ..
+        } if card.column != Column::Pickup => Some(card.text.clone()),
+        _ => None,
+    }
 }
 
 /// The move a drop makes: `card` dropped before the card at `before` in `to`, or at the end
@@ -201,6 +216,9 @@ impl TaskBoard {
                 {
                     cx.emit(TaskBoardEvent::MovedToDone(card.text.clone()));
                 }
+                if let Some(text) = arrived(&change) {
+                    cx.emit(TaskBoardEvent::ArrivedInPickup(text));
+                }
                 if done.created
                     && tasks_project::is_repo(&self.project)
                     && tasks_project::privacy(&self.project) == Privacy::Committed
@@ -311,6 +329,44 @@ mod tests {
                 card,
                 to: Column::Done,
                 index: 0
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn moving_a_card_into_pickup_says_it_arrived() {
+        let card = CardRef {
+            column: Column::Backlog,
+            text: "idea".into(),
+            nth: 0,
+        };
+        let mv = Change::Move {
+            card,
+            to: Column::Pickup,
+            index: 0,
+        };
+        assert_eq!(arrived(&mv), Some("idea".to_string()));
+    }
+
+    #[test]
+    fn moves_within_pickup_or_elsewhere_say_nothing() {
+        let card = |column| CardRef {
+            column,
+            text: "idea".into(),
+            nth: 0,
+        };
+        let mv = |from, to| Change::Move {
+            card: card(from),
+            to,
+            index: 0,
+        };
+        assert_eq!(arrived(&mv(Column::Pickup, Column::Pickup)), None);
+        assert_eq!(arrived(&mv(Column::Backlog, Column::Done)), None);
+        assert_eq!(arrived(&mv(Column::Pickup, Column::Backlog)), None);
+        assert_eq!(
+            arrived(&Change::Add {
+                text: "idea".into()
             }),
             None
         );

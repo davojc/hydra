@@ -2,6 +2,8 @@
 //! §5): four equal columns of cards that scroll on their own; a card shows its first lines until
 //! clicked, double-click edits it in place, drag it or use its right-click menu to move it.
 //! Every change goes straight to the file.
+use std::rc::Rc;
+
 use gpui::prelude::*;
 use gpui::{
     App, Context, DragMoveEvent, Entity, FocusHandle, Focusable, FontWeight, Hsla, MouseButton,
@@ -15,6 +17,7 @@ use gpui_component::tooltip::Tooltip;
 use gpui_component::{ActiveTheme, Disableable, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit_assets::IconName;
 
+use crate::envs::PaneId;
 use crate::task_board::{Applied, TaskBoard, drop_move};
 use crate::tasks::{CardRef, Change, Column};
 use crate::tasks_project::{self, Privacy};
@@ -90,7 +93,21 @@ pub enum TaskBoardViewEvent {
     ShowTaker(String),
     /// "Take in new worktree" on the Pickup card with this text.
     TakeInWorktree(String),
+    /// "Send to a free session" on the Pickup card with this text.
+    SendToFree(String),
+    /// "Send to" a named session on the Pickup card with this text.
+    SendTo { text: String, pane: PaneId },
 }
+
+/// A Claude session a Pickup card can be sent to, listed in the card menu's "Send to" submenu.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SendTarget {
+    pub pane: PaneId,
+    pub label: String,
+}
+
+/// Lists the sessions a card can be sent to, asked when a card menu is built.
+type SendTargets = Rc<dyn Fn(&App) -> Vec<SendTarget>>;
 
 pub struct TaskBoardView {
     board: Entity<TaskBoard>,
@@ -100,6 +117,8 @@ pub struct TaskBoardView {
     /// One per column, so a dragged card can scroll the column it's over.
     scroll: [ScrollHandle; 5],
     focus: FocusHandle,
+    /// The sessions the "Send to" submenu offers; none set means none.
+    send_targets: Option<SendTargets>,
     _observe: Subscription,
 }
 
@@ -112,8 +131,14 @@ impl TaskBoardView {
             expanded: Vec::new(),
             scroll: std::array::from_fn(|_| ScrollHandle::new()),
             focus: cx.focus_handle(),
+            send_targets: None,
             _observe: observe,
         }
+    }
+
+    /// Sets how the card menu finds the sessions it can send a Pickup card to.
+    pub fn set_send_targets(&mut self, f: impl Fn(&App) -> Vec<SendTarget> + 'static) {
+        self.send_targets = Some(Rc::new(f));
     }
 
     /// The project board this view shows.
@@ -424,6 +449,7 @@ impl TaskBoardView {
         let board = self.board.clone();
         let view = cx.entity();
         let in_repo = crate::tasks_project::is_repo(self.board.read(cx).project());
+        let send_targets = self.send_targets.clone();
         let open = self.expanded.contains(&card);
         div()
             .id(("task-card", i))
@@ -452,7 +478,7 @@ impl TaskBoardView {
             })
             .context_menu({
                 let card = card.clone();
-                move |menu, _, _| {
+                move |menu, window, cx| {
                     let change = |change: Change| {
                         let board = board.clone();
                         move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
@@ -460,18 +486,54 @@ impl TaskBoardView {
                         }
                     };
                     let mut menu = menu;
-                    // Its own branch and worktree, with a Claude terminal there (§8).
-                    if col == Column::Pickup && in_repo {
-                        let (view, text) = (view.clone(), card.text.clone());
+                    if col == Column::Pickup {
+                        // Typed into a Claude session that is waiting for work.
+                        let (free_view, text) = (view.clone(), card.text.clone());
+                        let targets = send_targets.as_ref().map(|f| f(cx)).unwrap_or_default();
+                        let (sub_view, sub_text) = (view.clone(), card.text.clone());
                         menu = menu
-                            .item(PopupMenuItem::new("Take in new worktree").on_click(
+                            .item(PopupMenuItem::new("Send to a free session").on_click(
                                 move |_, _, cx| {
-                                    view.update(cx, |_, cx| {
-                                        cx.emit(TaskBoardViewEvent::TakeInWorktree(text.clone()))
+                                    free_view.update(cx, |_, cx| {
+                                        cx.emit(TaskBoardViewEvent::SendToFree(text.clone()))
                                     })
                                 },
                             ))
-                            .separator();
+                            .submenu("Send to", window, cx, move |sub, _, _| {
+                                if targets.is_empty() {
+                                    return sub.item(
+                                        PopupMenuItem::new("No idle Claude session").disabled(true),
+                                    );
+                                }
+                                targets.iter().fold(sub, |sub, t| {
+                                    let (view, text, pane) =
+                                        (sub_view.clone(), sub_text.clone(), t.pane);
+                                    sub.item(PopupMenuItem::new(t.label.clone()).on_click(
+                                        move |_, _, cx| {
+                                            view.update(cx, |_, cx| {
+                                                cx.emit(TaskBoardViewEvent::SendTo {
+                                                    text: text.clone(),
+                                                    pane,
+                                                })
+                                            })
+                                        },
+                                    ))
+                                })
+                            });
+                    }
+                    // Its own branch and worktree, with a Claude terminal there (§8).
+                    if col == Column::Pickup && in_repo {
+                        let (view, text) = (view.clone(), card.text.clone());
+                        menu = menu.item(PopupMenuItem::new("Take in new worktree").on_click(
+                            move |_, _, cx| {
+                                view.update(cx, |_, cx| {
+                                    cx.emit(TaskBoardViewEvent::TakeInWorktree(text.clone()))
+                                })
+                            },
+                        ));
+                    }
+                    if col == Column::Pickup {
+                        menu = menu.separator();
                     }
                     for to in Column::ALL.into_iter().filter(|c| *c != col) {
                         let mv = Change::Move {

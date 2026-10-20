@@ -195,6 +195,8 @@ impl Workspace {
                     let project = board.read(cx).project().to_path_buf();
                     ws.take_in_worktree(id, project, text.clone(), window, cx)
                 }
+                // Task 5 handles sending a card to a Claude session.
+                TaskBoardViewEvent::SendToFree(_) | TaskBoardViewEvent::SendTo { .. } => {}
             },
         );
         let handle = view.read(cx).focus_handle(cx);
@@ -257,6 +259,8 @@ impl Workspace {
                     let project = board.read(cx).project().to_path_buf();
                     ws.card_done(project, text.clone(), window, cx)
                 }
+                // Task 5 handles arrivals in Pickup.
+                TaskBoardEvent::ArrivedInPickup(_) => {}
             },
         );
         self.boards.insert(project, (board.clone(), sub));

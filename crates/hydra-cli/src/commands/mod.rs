@@ -4,6 +4,7 @@ mod env;
 pub mod guard;
 mod init;
 pub mod launch;
+pub mod mcp;
 mod secret;
 mod tools;
 pub mod update;
@@ -23,6 +24,9 @@ pub fn run(cmd: Cmd) -> anyhow::Result<i32> {
             GuardCmd::Git { hook, args } => guard::git(&hook, &args),
             GuardCmd::Claude => guard::claude(),
         };
+    }
+    if let Cmd::Mcp = cmd {
+        return mcp::run();
     }
     if let Cmd::Allow { command } = cmd {
         return guard::allow(&command);
@@ -75,6 +79,8 @@ pub fn run(cmd: Cmd) -> anyhow::Result<i32> {
         Cmd::Whoami { env } => whoami::run(&app, env),
         Cmd::Bind { args, file, list } => bind::bind(&app, args, file, list),
         Cmd::Unbind { path } => bind::unbind(&app, path),
-        Cmd::Update { .. } | Cmd::Guard { .. } | Cmd::Allow { .. } => unreachable!("handled above"),
+        Cmd::Update { .. } | Cmd::Guard { .. } | Cmd::Allow { .. } | Cmd::Mcp => {
+            unreachable!("handled above")
+        }
     }
 }

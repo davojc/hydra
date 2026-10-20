@@ -3,7 +3,7 @@
 use hydraui_term::alacritty_terminal::Term;
 use hydraui_term::alacritty_terminal::event::EventListener;
 use hydraui_term::alacritty_terminal::grid::Dimensions;
-use hydraui_term::alacritty_terminal::index::{Boundary, Column, Direction, Point};
+use hydraui_term::alacritty_terminal::index::{Boundary, Column, Direction, Line, Point};
 use hydraui_term::alacritty_terminal::term::cell::Flags;
 use hydraui_term::alacritty_terminal::term::search::{Match, RegexSearch};
 use hydraui_term::alacritty_terminal::term::viewport_to_point;
@@ -266,6 +266,37 @@ pub fn visible_rows<T>(term: &Term<T>) -> Vec<(String, bool)> {
         .collect()
 }
 
+/// The last `rows` lines of the terminal, scrollback included, whatever the view is scrolled
+/// to: trailing spaces trimmed, joined with newlines.
+pub fn last_lines<T>(term: &Term<T>, rows: usize) -> String {
+    let grid = term.grid();
+    let (top, bottom) = (grid.topmost_line().0, grid.bottommost_line().0);
+    let first = (bottom + 1 - rows.min(i32::MAX as usize) as i32).max(top);
+    (first..=bottom)
+        .map(|line| {
+            let row = &grid[Line(line)];
+            let text: String = (0..term.columns()).map(|col| row[Column(col)].c).collect();
+            text.trim_end_matches(' ').to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The live screen's rows (not the scrolled view) as `(char, dim)` cells.
+pub fn screen_cells<T>(term: &Term<T>) -> Vec<Vec<(char, bool)>> {
+    (0..term.screen_lines() as i32)
+        .map(|line| {
+            let row = &term.grid()[Line(line)];
+            (0..term.columns())
+                .map(|col| {
+                    let cell = &row[Column(col)];
+                    (cell.c, cell.flags.contains(Flags::DIM))
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// `query` as a pattern that matches it literally: people type text, not regexes.
 pub fn literal(query: &str) -> String {
     let mut out = String::with_capacity(query.len());
@@ -304,7 +335,7 @@ mod tests {
     use hydraui_term::GridSize;
     use hydraui_term::alacritty_terminal::event::VoidListener;
     use hydraui_term::alacritty_terminal::grid::Scroll;
-    use hydraui_term::alacritty_terminal::index::{Line, Side};
+    use hydraui_term::alacritty_terminal::index::Side;
     use hydraui_term::alacritty_terminal::selection::{Selection, SelectionType};
     use hydraui_term::alacritty_terminal::term::Config;
     use hydraui_term::alacritty_terminal::vte::ansi::Processor;
@@ -321,6 +352,28 @@ mod tests {
 
     fn frame(t: &Term<VoidListener>) -> Frame {
         build_frame(t, &Palette::default(), true)
+    }
+
+    #[test]
+    fn the_last_lines_reach_into_the_scrollback() {
+        let mut t = term(6, 2, b"one\r\ntwo  \r\nthree");
+        t.scroll_display(Scroll::Delta(1));
+        assert_eq!(last_lines(&t, 2), "two\nthree");
+        assert_eq!(last_lines(&t, 3), "one\ntwo\nthree");
+        assert_eq!(last_lines(&t, 10), "one\ntwo\nthree");
+        assert_eq!(last_lines(&t, 0), "");
+    }
+
+    #[test]
+    fn screen_cells_say_which_are_dim() {
+        let mut t = term(4, 2, b"a\x1b[2mb\x1b[0m\r\n\r\nc");
+        t.scroll_display(Scroll::Delta(1));
+        let cells = screen_cells(&t);
+        assert_eq!(cells.len(), 2, "the live screen, not the scrolled view");
+        assert_eq!(cells[0][0], (' ', false));
+        assert_eq!(cells[1][0], ('c', false));
+        let t = term(4, 2, b"a\x1b[2mb");
+        assert_eq!(screen_cells(&t)[0][..2], [('a', false), ('b', true)]);
     }
 
     #[test]

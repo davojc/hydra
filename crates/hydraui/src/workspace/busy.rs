@@ -106,6 +106,19 @@ impl Workspace {
         }
     }
 
+    /// The Claude session in the terminal holding `token` moved a card to Verify: its turn is
+    /// clearly finished.
+    pub(super) fn session_verified(&mut self, token: &str, cx: &mut Context<Self>) {
+        if let Some(view) = self
+            .panes
+            .values()
+            .find(|v| v.read(cx).mcp_token() == Some(token))
+            .cloned()
+        {
+            view.update(cx, |v, _| v.verified());
+        }
+    }
+
     /// Whether terminal `id` is in front of you: the window is active and the terminal is the
     /// selected environment's shown one, not behind its Tasks tab.
     fn in_sight(&self, id: PaneId, window: &Window) -> bool {

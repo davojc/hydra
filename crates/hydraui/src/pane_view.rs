@@ -28,7 +28,8 @@ use hydraui_term::{GridSize, Pane, PromptState, TermEvent};
 
 use crate::envs::PaneId;
 use crate::frame::{
-    CursorKind, Frame, Span, Style, build_frame, find_next, link_at, underline_cells, visible_rows,
+    CursorKind, Frame, Span, Style, build_frame, find_next, last_lines, link_at, screen_cells,
+    underline_cells, visible_rows,
 };
 use crate::hydra::{Hydra, PaneRequest, Started};
 use crate::input::{
@@ -37,6 +38,7 @@ use crate::input::{
 use crate::keys::{CopyText, Find, PasteText, TerminalBackTab, TerminalTab};
 use crate::mcp::{McpTerminal, SessionState};
 use crate::palette::Palette;
+use crate::readiness::{Draft, Readiness, claude_input_empty};
 
 /// The font and colours every pane draws with.
 pub struct TermStyle {
@@ -86,6 +88,8 @@ pub struct PaneView {
     /// What the Claude session running here last said it is doing (its hooks); cleared when
     /// the session or its command ends.
     claude: Option<SessionState>,
+    /// Whether that session has a draft in its input and has clearly finished its turn.
+    readiness: Readiness,
     /// The user's name for this terminal (Rename, a layout's `title`); none: the folder's.
     name: Option<String>,
     /// The title the program set, kept for a tooltip; it never names the terminal.
@@ -224,6 +228,7 @@ impl PaneView {
             warnings,
             prompt: None,
             claude: None,
+            readiness: Readiness::default(),
             name: None,
             title: None,
             focus,
@@ -292,8 +297,45 @@ impl PaneView {
 
     /// A Claude hook in this terminal reported `state`; `Ended` forgets the session.
     pub fn set_claude(&mut self, state: SessionState, cx: &mut Context<Self>) {
+        self.readiness.state(self.claude, state);
         self.claude = (state != SessionState::Ended).then_some(state);
         cx.notify();
+    }
+
+    /// Whether the Claude session here has a draft and has clearly finished its turn.
+    pub fn readiness(&self) -> &Readiness {
+        &self.readiness
+    }
+
+    /// The Claude session here moved a card to Verify: its turn is clearly finished.
+    pub fn verified(&mut self) {
+        self.readiness.verified();
+    }
+
+    /// Whether the session's input may hold a draft. A draft that may have been cleared
+    /// (Esc Esc, Ctrl+C) is settled by reading the input line on screen.
+    pub fn check_draft(&mut self) -> bool {
+        if self.readiness.draft == Draft::MaybeCleared
+            && let Slot::Running(pane) = &self.slot
+        {
+            let empty = pane.with_term(|t| claude_input_empty(&screen_cells(t)));
+            self.readiness.screen_says_empty(empty);
+        }
+        self.readiness.has_draft()
+    }
+
+    /// The last `rows` lines of the terminal, scrollback included, trailing spaces trimmed.
+    pub fn screen_text(&self, rows: usize) -> String {
+        match &self.slot {
+            Slot::Running(pane) => pane.with_term(|t| last_lines(t, rows)),
+            _ => String::new(),
+        }
+    }
+
+    /// Types a prompt into the session for auto-pickup. It is not the user's draft, so it
+    /// leaves the readiness alone.
+    pub fn type_prompt(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.send(text.as_bytes(), cx);
     }
 
     /// The terminal's name in the MCP server: what its Claude sessions write as a card's taker.
@@ -353,6 +395,13 @@ impl PaneView {
         self.slot = Slot::Starting;
         self.prompt = None;
         self.claude = None;
+        // Layout restore resumes Claude's last conversation, which may end in a question.
+        self.readiness =
+            if self.request.command.as_deref() == Some(hydraui_sets::layout::RESUME_CLAUDE) {
+                Readiness::resumed()
+            } else {
+                Readiness::default()
+            };
         self.generation += 1;
         let generation = self.generation;
         // A restart is the same terminal: it keeps its token.
@@ -571,6 +620,15 @@ impl PaneView {
             return;
         };
         if let Some(bytes) = key_bytes(&k.key, k.key_char.as_deref(), mods(k.modifiers), mode) {
+            if k.key == "enter" && !k.modifiers.modified() {
+                self.readiness.enter();
+            } else if k.key == "escape" {
+                self.readiness.escape(std::time::Instant::now());
+            } else if bytes == [0x03] {
+                self.readiness.ctrl_c();
+            } else {
+                self.readiness.typed();
+            }
             self.send(&bytes, cx);
             // Also stops Windows turning the key into text for the input handler.
             cx.stop_propagation();
@@ -805,6 +863,7 @@ impl PaneView {
         let Some(mode) = self.mode() else {
             return;
         };
+        self.readiness.typed();
         self.send(
             &paste_bytes(&text, mode.contains(TermMode::BRACKETED_PASTE)),
             cx,
@@ -1101,6 +1160,7 @@ impl EntityInputHandler for PaneView {
         cx: &mut Context<Self>,
     ) {
         if !text.is_empty() {
+            self.readiness.typed();
             self.send(text.as_bytes(), cx);
         }
     }

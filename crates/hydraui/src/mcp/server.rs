@@ -27,6 +27,9 @@ pub enum McpEvent {
     /// A Claude session's status line (`hydra statusline`) said how much of its account's
     /// limits are used: the terminal's token and the usage.
     Usage(String, Usage),
+    /// A Claude session moved a card to Verify (`tasks_verify`), so its turn is finished: the
+    /// terminal's token.
+    Verified(String),
 }
 
 /// What `handle` answers: an HTTP status and, for 200, the JSON body.
@@ -194,7 +197,13 @@ pub fn answer(
                         "content": [{"type": "text", "text": out.text}],
                         "isError": out.is_error,
                     });
-                    (ok(id, result), out.created.map(McpEvent::BoardCreated))
+                    // Only tasks_add makes a board, and only tasks_verify verifies.
+                    let event = if out.verified {
+                        Some(McpEvent::Verified(token.to_string()))
+                    } else {
+                        out.created.map(McpEvent::BoardCreated)
+                    };
+                    (ok(id, result), event)
                 }
             }
         }
@@ -543,6 +552,44 @@ mod tests {
             event,
             Some(McpEvent::BoardCreated(dir.path().to_path_buf()))
         );
+    }
+
+    #[test]
+    fn a_verified_card_names_its_terminal() {
+        let d = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(d.path())
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .is_ok_and(|o| o.status.success())
+        };
+        if !git(&["init", "-q"]) {
+            eprintln!("skipped: git isn't installed");
+            return;
+        }
+        std::fs::write(d.path().join("a.txt"), "one\n").unwrap();
+        assert!(git(&["add", "a.txt"]) && git(&["commit", "-q", "-m", "x"]));
+        std::fs::create_dir(d.path().join(".hydra")).unwrap();
+        std::fs::write(d.path().join(".hydra/tasks.md"), "## InProgress\n- [c] x\n").unwrap();
+        let reg = Mutex::new(Registry::default());
+        let token = reg.lock().unwrap().register("c", d.path().to_path_buf());
+        let auth = format!("Bearer {token}");
+        let verify = |commit: &str| {
+            let body = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"tasks_verify","arguments":{{"text":"x","commit":"{commit}"}}}}}}"#
+            );
+            handle(&reg, "POST", "/mcp", Some(&auth), None, &body)
+        };
+        let (reply, event) = verify("deadbeef");
+        assert!(reply.body.unwrap().contains(r#""isError":true"#));
+        assert_eq!(event, None, "an unknown commit");
+        let (reply, event) = verify("HEAD");
+        assert!(reply.body.unwrap().contains(r#""isError":false"#));
+        assert_eq!(event, Some(McpEvent::Verified(token.clone())));
     }
 
     #[test]

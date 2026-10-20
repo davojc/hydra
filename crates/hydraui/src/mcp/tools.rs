@@ -102,6 +102,8 @@ pub struct Outcome {
     pub is_error: bool,
     /// The project whose board file this call created.
     pub created: Option<PathBuf>,
+    /// The call moved a card to Verify.
+    pub verified: bool,
 }
 
 impl Outcome {
@@ -110,6 +112,7 @@ impl Outcome {
             text,
             is_error: false,
             created: None,
+            verified: false,
         }
     }
 
@@ -118,6 +121,7 @@ impl Outcome {
             text: text.into(),
             is_error: true,
             created: None,
+            verified: false,
         }
     }
 }
@@ -246,6 +250,7 @@ pub fn call_with(terminal: &Terminal, peers: &[Peer], name: &str, args: &Value) 
                     text: said.into(),
                     is_error: false,
                     created: done.created.then_some(project),
+                    verified: name == "tasks_verify",
                 },
                 Err(CommitError::Missing) => Outcome::err(missing),
                 Err(CommitError::Io(e)) => Outcome::err(format!("can't write the board: {e}")),

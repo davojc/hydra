@@ -293,6 +293,7 @@ impl Workspace {
                             ws.session_state(&token, state, window, cx)
                         }
                         McpEvent::Usage(token, usage) => ws.usage_reported(&token, usage, cx),
+                        McpEvent::Verified(token) => ws.session_verified(&token, cx),
                     });
                     if alive.is_err() {
                         break;

@@ -437,8 +437,8 @@ impl Workspace {
         self.hydra.shell(self.ui.default_shell.as_deref())
     }
 
-    /// Where a new terminal in `env` starts: its home, else its shown terminal's folder, else
-    /// the user's home (env-tabs design §2.2).
+    /// Where a new terminal in `env` starts: its root folder, else its shown terminal's folder,
+    /// else the user's home (env-tabs design §2.2).
     fn env_cwd(&self, env: &str, cx: &App) -> PathBuf {
         let shown = self
             .envs

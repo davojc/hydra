@@ -249,11 +249,32 @@ impl Hydra {
         env_tint(env, rgb)
     }
 
-    /// `env`'s `home` from env.toml (with `~`), when that folder exists.
+    /// `env`'s root folder: its `home` from env.toml (with `~`), else the folder a binding rule
+    /// in config.toml gives it (`"E:/work/**" = "env"`, the first such in pattern order), when
+    /// that folder exists.
     pub fn env_home(&self, env: &str) -> Option<PathBuf> {
         let cfg = load_env(&self.paths, &EnvName::parse(env).ok()?).ok()?;
-        let home = expand_tilde(cfg.home.as_deref()?, &self.user_home);
-        home.is_dir().then_some(home)
+        let home = cfg
+            .home
+            .as_deref()
+            .map(|h| expand_tilde(h, &self.user_home))
+            .filter(|h| h.is_dir());
+        home.or_else(|| self.bound_folder(env))
+    }
+
+    /// The first folder a binding rule names for `env`: the rule's pattern without a trailing
+    /// `/**`, when no wildcard is left and the folder exists.
+    fn bound_folder(&self, env: &str) -> Option<PathBuf> {
+        self.global
+            .bindings
+            .iter()
+            .filter(|(_, e)| e.as_str() == env)
+            .filter_map(|(pattern, _)| {
+                let p = pattern.replace('\\', "/");
+                let dir = p.strip_suffix("/**").unwrap_or(&p);
+                (!dir.contains(['*', '?'])).then(|| PathBuf::from(dir))
+            })
+            .find(|d| d.is_dir())
     }
 
     /// `prepare` for a pane: guards off (spec §4.1), plus a sign-in's dropped variables and
@@ -1156,6 +1177,26 @@ email = \"p@example.com\"
         );
         assert_eq!(f.hydra.env_home("work"), None);
         assert_eq!(f.hydra.env_home("personal"), None);
+    }
+
+    #[test]
+    fn env_home_falls_back_to_the_folder_bound_to_the_env() {
+        let f = fx(&format!(
+            "{BOUND}\"E:/somewhere/*/x\" = \"work\"\n\"/no/such/folder/**\" = \"gh\"\n"
+        ));
+        assert_eq!(f.hydra.env_home("personal"), Some(f.bound.clone()));
+        // A pattern with wildcards before its end names no single folder; a missing folder
+        // isn't one either.
+        assert_eq!(f.hydra.env_home("work"), None);
+        assert_eq!(f.hydra.env_home("gh"), None);
+        // env.toml's home wins over the binding.
+        let n = EnvName::parse("personal").unwrap();
+        std::fs::write(
+            f.hydra.paths.env_file(&n),
+            format!("home = {:?}\n", f.free.to_string_lossy()),
+        )
+        .unwrap();
+        assert_eq!(f.hydra.env_home("personal"), Some(f.free.clone()));
     }
 
     #[test]

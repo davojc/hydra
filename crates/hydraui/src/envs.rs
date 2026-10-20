@@ -196,7 +196,7 @@ impl EnvTabs {
     }
 }
 
-/// Where a new terminal starts: the environment's home (its root folder), else the shown
+/// Where a new terminal starts: the environment's root folder (`Hydra::env_home`), else the shown
 /// terminal's folder, else the user's home (spec §2.2).
 pub fn new_terminal_cwd(
     shown: Option<&Path>,

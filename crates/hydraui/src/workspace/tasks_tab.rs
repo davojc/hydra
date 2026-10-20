@@ -347,6 +347,12 @@ mod tests {
         let sub = repo.join("src").join("deep");
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::create_dir(repo.join(".git")).unwrap();
+        std::fs::write(
+            repo.join(".git/HEAD"),
+            "ref: refs/heads/main
+",
+        )
+        .unwrap();
         assert_eq!(tasks_project(&sub), repo);
         assert_eq!(tasks_project(&repo), repo);
     }

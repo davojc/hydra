@@ -5,24 +5,26 @@
 
 use std::path::{Path, PathBuf};
 
+use hydra_core::git::is_repo_root;
+
 use crate::git_watch::ignore_rules;
 use crate::tasks::{Board, Change, apply, parse, write};
 
 /// The `.gitignore` line that keeps the board out of git.
 pub const IGNORE_LINE: &str = ".hydra/tasks.md";
 
-/// The git work tree containing `dir` (nearest ancestor-or-self with a `.git` dir or file),
+/// The git work tree containing `dir` (nearest ancestor-or-self that is a git repository root),
 /// else `dir` itself.
 pub fn project_root(dir: &Path) -> PathBuf {
     dir.ancestors()
-        .find(|d| d.join(".git").exists())
+        .find(|d| is_repo_root(d))
         .unwrap_or(dir)
         .to_path_buf()
 }
 
-/// Whether `project` is a git work tree (has `.git` itself).
+/// Whether `project` is a git work tree (a repository root itself).
 pub fn is_repo(project: &Path) -> bool {
-    project.join(".git").exists()
+    is_repo_root(project)
 }
 
 pub fn tasks_path(project: &Path) -> PathBuf {
@@ -163,19 +165,45 @@ mod tests {
     use super::*;
     use crate::tasks::{Card, Column};
 
+    fn fake_repo(dir: &Path) {
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(
+            dir.join(".git/HEAD"),
+            "ref: refs/heads/main
+",
+        )
+        .unwrap();
+    }
+
     #[test]
     fn a_repo_subfolder_belongs_to_the_repo() {
         let d = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(d.path().join(".git")).unwrap();
+        fake_repo(d.path());
         std::fs::create_dir_all(d.path().join("a/b")).unwrap();
         assert_eq!(project_root(&d.path().join("a/b")), d.path());
         assert!(is_repo(d.path()));
     }
 
     #[test]
+    fn a_git_folder_of_config_files_is_not_a_repo() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join(".git/info")).unwrap();
+        std::fs::write(
+            d.path().join(".git/.gitconfig"),
+            "[user]
+",
+        )
+        .unwrap();
+        let sub = d.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        assert_eq!(project_root(&sub), sub);
+        assert!(!is_repo(d.path()));
+    }
+
+    #[test]
     fn a_linked_worktree_is_its_own_project() {
         let d = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(d.path().join(".git")).unwrap();
+        fake_repo(d.path());
         let wt = d.path().join("wt");
         std::fs::create_dir_all(wt.join("src")).unwrap();
         std::fs::write(wt.join(".git"), "gitdir: ../.git/worktrees/wt\n").unwrap();
@@ -187,7 +215,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         // The temp dir may itself sit inside someone's repo (a git-tracked home folder).
         let root = project_root(d.path());
-        if d.path().ancestors().any(|a| a.join(".git").exists()) {
+        if d.path().ancestors().any(is_repo_root) {
             assert!(is_repo(&root));
         } else {
             assert_eq!(root, d.path());
@@ -289,7 +317,7 @@ mod tests {
     #[test]
     fn keep_private_appends_on_its_own_line() {
         let d = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(d.path().join(".git")).unwrap();
+        fake_repo(d.path());
         std::fs::write(d.path().join(".gitignore"), "target").unwrap();
         keep_private(d.path()).unwrap();
         keep_private(d.path()).unwrap();
@@ -303,7 +331,7 @@ mod tests {
     #[test]
     fn keep_private_creates_gitignore() {
         let d = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(d.path().join(".git")).unwrap();
+        fake_repo(d.path());
         keep_private(d.path()).unwrap();
         assert_eq!(
             std::fs::read_to_string(d.path().join(".gitignore")).unwrap(),
@@ -314,7 +342,7 @@ mod tests {
     #[test]
     fn commit_tasks_removes_only_our_line() {
         let d = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(d.path().join(".git")).unwrap();
+        fake_repo(d.path());
         std::fs::write(
             d.path().join(".gitignore"),
             "target\n.hydra/tasks.md\n# keep\n",
@@ -331,7 +359,7 @@ mod tests {
     #[test]
     fn another_rule_counts_as_ignored_elsewhere() {
         let d = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(d.path().join(".git")).unwrap();
+        fake_repo(d.path());
         std::fs::write(d.path().join(".gitignore"), ".hydra/\n").unwrap();
         assert_eq!(privacy(d.path()), Privacy::IgnoredElsewhere);
     }

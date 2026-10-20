@@ -111,8 +111,8 @@ fn exclude_in_git_below(dir: &Path, ceilings: &[PathBuf]) -> std::io::Result<boo
     let Some(git) = dir
         .ancestors()
         .take_while(|d| !ceilings.iter().any(|c| same_folder(c, d)))
+        .find(|d| crate::git::is_repo_root(d))
         .map(|d| d.join(".git"))
-        .find(|g| g.exists())
     else {
         return Ok(false);
     };
@@ -291,6 +291,17 @@ color = \"#111111\"
         let inside = d.path().join("x");
         std::fs::create_dir_all(&inside).unwrap();
         assert!(!exclude_in_git_below(&inside, &[ceiling]).unwrap());
+    }
+
+    #[test]
+    fn a_config_only_git_folder_is_not_written_to() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join(".git/info")).unwrap();
+        let sub = d.path().join("a");
+        std::fs::create_dir(&sub).unwrap();
+        let ceiling = d.path().parent().unwrap().to_path_buf();
+        assert!(!exclude_in_git_below(&sub, &[ceiling]).unwrap());
+        assert!(!d.path().join(".git/info/exclude").exists());
     }
 
     #[test]

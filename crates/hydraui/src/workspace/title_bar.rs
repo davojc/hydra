@@ -202,10 +202,21 @@ impl Workspace {
                         .child(img(ICON.clone()).size(px(18.)))
                         .children(self.render_layout_name(muted, cx)),
                 )
-                // The title bar's drag area covers its children, and Windows turns a click there
-                // into a window drag before the button sees it: occluding stops the hit test at
-                // the button, so its clicks stay clicks.
-                .children(button.map(|b| div().occlude().child(b))),
+                .child(
+                    h_flex()
+                        .gap_2()
+                        // The running version, muted, beside where the Update button appears.
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(format!("hydra {}", crate::version::VERSION)),
+                        )
+                        // The title bar's drag area covers its children, and Windows turns a
+                        // click there into a window drag before the button sees it: occluding
+                        // stops the hit test at the button, so its clicks stay clicks.
+                        .children(button.map(|b| div().occlude().child(b))),
+                ),
         )
     }
 

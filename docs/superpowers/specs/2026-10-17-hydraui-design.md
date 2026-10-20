@@ -311,7 +311,7 @@ disabled.
 
 ```
 ┌───────────────────────────────────────────────────────────┐
-│ ⑂ client-a ▾               [Update hydra 0.7.0]  _  □  ✕  │  title bar (§7.11)
+│ ⑂ client-a ▾  hydra 0.6.18 [Update hydra 0.7.0]  _  □  ✕  │  title bar (§7.11)
 ├───────────────────────────────────────────────────────────┤
 │ [client-a ▾] api● infra●  │ [personal ▾] blog●  │ Loose: +│  tab strip, grouped by set
 ├────────────┬──────────────────────────────────────────────┤
@@ -717,7 +717,9 @@ to keep this window". Clicking the name opens a menu: **Save layout as…**,
 reads `hydraui` and the name is hidden.
 
 **Version.** hydraui knows its version as hydra does: `HYDRA_VERSION` at
-compile time in release builds, else `<Cargo version>-dev`.
+compile time in release builds, else `<Cargo version>-dev`. The title bar
+shows it on the right, muted, as `hydra <version>`, just left of where the
+Update button appears.
 
 **Checking.** At start and then every hour, off the UI thread, hydraui
 asks GitHub for the latest release (the same request as `hydra update`,

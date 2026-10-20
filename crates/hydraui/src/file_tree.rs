@@ -1,5 +1,5 @@
 //! The file tree's model (spec §7.3): folders read one level at a time when first shown,
-//! `.gitignore` respected, and the shell text for inserting a path or changing folder.
+//! ignored files included (the view mutes them), and the shell text for inserting a path or changing folder.
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -12,22 +12,20 @@ pub struct Entry {
     pub is_dir: bool,
 }
 
-/// A folder's entries: folders first, then by name ignoring case; without what `.gitignore`
-/// files in the folder or above it exclude (repository or not), and without `.git`. One level
-/// only, so a big folder costs nothing until it is opened.
+/// A folder's entries: folders first, then by name ignoring case; everything but `.git`,
+/// what `.gitignore` excludes included. One level only, so a big folder costs nothing until
+/// it is opened.
 pub fn list_dir(dir: &Path) -> Vec<Entry> {
-    let mut out: Vec<Entry> = ignore::WalkBuilder::new(dir)
-        .max_depth(Some(1))
-        .hidden(false)
-        .require_git(false)
-        .filter_entry(|e| e.file_name() != ".git")
-        .build()
+    let mut out: Vec<Entry> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
         .filter_map(Result::ok)
-        .filter(|e| e.depth() == 1)
+        .filter(|e| e.file_name() != ".git")
         .map(|e| Entry {
-            is_dir: e.file_type().is_some_and(|t| t.is_dir()),
+            // Follows links, so a linked folder opens like a folder.
+            is_dir: e.path().is_dir(),
             name: e.file_name().to_string_lossy().into_owned(),
-            path: e.into_path(),
+            path: e.path(),
         })
         .collect();
     out.sort_by(|a, b| {
@@ -162,7 +160,7 @@ pub fn cd_command(shell: ShellKind, dir: &Path) -> String {
 mod tests {
     use super::*;
 
-    /// src/ (with inner.rs), target/ (ignored), Zeta/, .git/, and files.
+    /// src/ (with inner.rs), target/ (ignored), Zeta/, .git/, and files (x.log ignored).
     fn project() -> tempfile::TempDir {
         let d = tempfile::tempdir().unwrap();
         let p = d.path();
@@ -188,14 +186,23 @@ mod tests {
     }
 
     #[test]
-    fn a_listing_is_one_level_folders_first_without_ignored_files() {
+    fn a_listing_is_one_level_folders_first_with_ignored_files_but_not_git() {
         let d = project();
         let entries = list_dir(d.path());
         assert_eq!(
             names(&entries),
-            vec!["src", "Zeta", ".env", ".gitignore", "A.md", "b.txt"]
+            vec![
+                "src",
+                "target",
+                "Zeta",
+                ".env",
+                ".gitignore",
+                "A.md",
+                "b.txt",
+                "x.log"
+            ]
         );
-        assert!(entries[0].is_dir && !entries[2].is_dir);
+        assert!(entries[0].is_dir && !entries[3].is_dir);
         assert_eq!(entries[0].path, d.path().join("src"));
     }
 
@@ -203,7 +210,7 @@ mod tests {
     fn open_folders_show_their_entries_below_them() {
         let d = project();
         let mut tree = FileTree::new(d.path().to_path_buf());
-        assert_eq!(tree.rows().len(), 6);
+        assert_eq!(tree.rows().len(), 8);
         tree.toggle(&d.path().join("src"));
         let rows = tree.rows();
         assert_eq!(rows[0].entry.name, "src");
@@ -214,18 +221,18 @@ mod tests {
         );
         assert_eq!(tree.open_dirs().count(), 1);
         tree.toggle(&d.path().join("src"));
-        assert_eq!(tree.rows().len(), 6);
+        assert_eq!(tree.rows().len(), 8);
     }
 
     #[test]
     fn listings_are_kept_until_refreshed() {
         let d = project();
         let mut tree = FileTree::new(d.path().to_path_buf());
-        assert_eq!(tree.rows().len(), 6);
+        assert_eq!(tree.rows().len(), 8);
         std::fs::write(d.path().join("new.txt"), "").unwrap();
-        assert_eq!(tree.rows().len(), 6);
+        assert_eq!(tree.rows().len(), 8);
         tree.refresh(d.path());
-        assert_eq!(tree.rows().len(), 7);
+        assert_eq!(tree.rows().len(), 9);
     }
 
     #[test]

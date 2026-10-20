@@ -373,8 +373,9 @@ built-in default theme.
 ### 7.3 File tree
 
 Toggled with `Ctrl+B`. Rooted at the focused pane's last OSC 7 folder (before
-any OSC 7, the pane's start cwd). Folders load lazily; `.gitignore` is
-respected; `notify` keeps it current. Each row has an icon: an open or closed
+any OSC 7, the pane's start cwd). Folders load lazily; every entry but
+`.git` is listed, with what `.gitignore` excludes shown muted; `notify` keeps it
+current. Each row has an icon: an open or closed
 folder, or a file icon by extension (`{ }` for JSON, text, config, code,
 script, image, lock, else a plain page).
 

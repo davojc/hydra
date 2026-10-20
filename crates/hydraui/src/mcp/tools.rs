@@ -4,7 +4,8 @@ use std::path::PathBuf;
 
 use serde_json::{Value, json};
 
-use super::registry::Terminal;
+use super::SessionState;
+use super::registry::{Peer, Terminal};
 use crate::git_status::short_commit;
 use crate::tasks::{Change, Column, normalise};
 use crate::tasks_project::{CommitError, commit, load, project_root};
@@ -23,6 +24,11 @@ hash, and tell the user. Until it is committed, leave it in InProgress. Only the
 from Verify to Done: never claim on the board that a card is done.
 - Ideas or follow-ups worth keeping go to Backlog with tasks_add, never into Pickup.
 - Use tasks_mine to recall which cards this session is working on.
+- tasks_read lists the other Claude sessions working in this project (other_sessions). If there \
+are any, and you are not already in a worktree of your own, do your card's work in a git worktree \
+so you don't change files under them: `git worktree add ../<repo>-worktrees/<slug> -b \
+task/<slug>`, work and commit there (the board is shared, so tasks_verify still finds your card), \
+and tell the user the branch to merge.
 - You cannot move cards into Pickup or Done, edit, reorder or delete them: those are the user's.";
 
 /// The `tools` array of `tools/list`.
@@ -39,9 +45,11 @@ pub fn list() -> Value {
         {
             "name": "tasks_read",
             "description": "Read this project's task board: every column's cards in order, with \
-                who took each InProgress, Verify or Done card, plus your own name. The board is the \
-                user's to-do list; Pickup holds work they approved. Check it when the user asks \
-                and after you finish a piece of work.",
+                who took each InProgress, Verify or Done card, plus your own name and the other \
+                Claude sessions working in this project. The board is the user's to-do list; \
+                Pickup holds work they approved. Check it when the user asks and after you finish \
+                a piece of work. If other sessions are working here, do your work in a git \
+                worktree of your own.",
             "inputSchema": none,
         },
         {
@@ -114,8 +122,33 @@ impl Outcome {
     }
 }
 
-/// Runs a tool for `terminal`; `None` for a name that isn't one of ours.
+/// Runs a tool for `terminal`, alone; `None` for a name that isn't one of ours.
 pub fn call(terminal: &Terminal, name: &str, args: &Value) -> Option<Outcome> {
+    call_with(terminal, &[], name, args)
+}
+
+/// The other Claude sessions in `project`, for `tasks_read`: each one's name, what it is doing,
+/// and whether it works in a worktree of its own.
+fn others(project: &std::path::Path, peers: &[Peer]) -> Vec<Value> {
+    peers
+        .iter()
+        .filter(|p| project_root(&p.cwd) == project)
+        .map(|p| {
+            let state = match p.state {
+                SessionState::Working => "working",
+                SessionState::Waiting => "waiting for the user",
+                SessionState::Idle => "idle",
+                SessionState::Ended => "ended",
+            };
+            let own = crate::tasks_project::git_root(&p.cwd).is_some_and(|r| r != project);
+            json!({ "name": p.name, "state": state, "in_own_worktree": own })
+        })
+        .collect()
+}
+
+/// Runs a tool for `terminal`, with `peers` the other terminals running Claude; `None` for a
+/// name that isn't one of ours.
+pub fn call_with(terminal: &Terminal, peers: &[Peer], name: &str, args: &Value) -> Option<Outcome> {
     let project = project_root(&terminal.cwd);
     Some(match name {
         "tasks_read" => match load(&project) {
@@ -143,6 +176,7 @@ pub fn call(terminal: &Terminal, name: &str, args: &Value) -> Option<Outcome> {
                     "you": terminal.name,
                     "project": project.display().to_string(),
                     "columns": columns,
+                    "other_sessions": others(&project, peers),
                 });
                 Outcome::ok(serde_json::to_string_pretty(&doc).expect("json serialises"))
             }
@@ -415,6 +449,52 @@ mod tests {
                 .created,
             None
         );
+    }
+
+    #[test]
+    fn read_names_the_other_sessions_in_the_project() {
+        let d = repo();
+        let me = Terminal {
+            name: "me".into(),
+            cwd: d.path().into(),
+        };
+        // A linked worktree of the same repository, and another project.
+        std::fs::create_dir_all(d.path().join(".git/worktrees/wt")).unwrap();
+        let wt = tempfile::tempdir().unwrap();
+        let gitdir = d.path().join(".git").join("worktrees").join("wt");
+        std::fs::write(
+            wt.path().join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .unwrap();
+        let elsewhere = repo();
+        let peer = |name: &str, cwd: &std::path::Path, state| Peer {
+            name: name.into(),
+            cwd: cwd.into(),
+            state,
+        };
+        let peers = [
+            peer("api", &d.path().join("src"), SessionState::Working),
+            peer("side", wt.path(), SessionState::Waiting),
+            peer("blog", elsewhere.path(), SessionState::Idle),
+        ];
+        let read: Value = serde_json::from_str(
+            &call_with(&me, &peers, "tasks_read", &json!({}))
+                .unwrap()
+                .text,
+        )
+        .unwrap();
+        assert_eq!(
+            read["other_sessions"],
+            json!([
+                {"name": "api", "state": "working", "in_own_worktree": false},
+                {"name": "side", "state": "waiting for the user", "in_own_worktree": true}
+            ])
+        );
+        let alone: Value =
+            serde_json::from_str(&call(&me, "tasks_read", &json!({})).unwrap().text).unwrap();
+        assert_eq!(alone["other_sessions"], json!([]));
+        assert!(INSTRUCTIONS.contains("other_sessions") && INSTRUCTIONS.contains("worktree"));
     }
 
     #[test]

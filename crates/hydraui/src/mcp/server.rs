@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use serde_json::{Value, json};
 
-use super::registry::{Registry, Terminal};
-use super::tools::{INSTRUCTIONS, call, list};
+use super::registry::{Peer, Registry, Terminal};
+use super::tools::{INSTRUCTIONS, call_with, list};
 use super::{SessionState, Usage};
 
 /// Largest request body read; a tool call is a few lines of JSON.
@@ -83,9 +83,25 @@ pub fn handle(
     body: &str,
 ) -> (Reply, Option<McpEvent>) {
     match gate(registry, method, path, auth, origin) {
-        Ok(terminal) => answer(&terminal, bearer(auth), body),
+        Ok(terminal) => reply_to(registry, &terminal, bearer(auth), body),
         Err(reply) => (reply, None),
     }
+}
+
+/// `answer`s the message from the terminal holding `token`, with the other Claude sessions it
+/// may ask about, and keeps the registry's record of what each session is doing.
+fn reply_to(
+    registry: &Mutex<Registry>,
+    terminal: &Terminal,
+    token: &str,
+    body: &str,
+) -> (Reply, Option<McpEvent>) {
+    let peers = lock(registry).peers(token);
+    let (reply, event) = answer(terminal, token, &peers, body);
+    if let Some(McpEvent::Session(token, state)) = &event {
+        lock(registry).set_session(token, *state);
+    }
+    (reply, event)
 }
 
 /// The token in an `Authorization: Bearer <token>` header; empty without one.
@@ -120,7 +136,12 @@ pub fn gate(
 
 /// Answers the JSON-RPC message in `body` for a terminal `gate` let through, whose token is
 /// `token`.
-pub fn answer(terminal: &Terminal, token: &str, body: &str) -> (Reply, Option<McpEvent>) {
+pub fn answer(
+    terminal: &Terminal,
+    token: &str,
+    peers: &[Peer],
+    body: &str,
+) -> (Reply, Option<McpEvent>) {
     let msg: Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(_) => return (fail(&Value::Null, -32700, "parse error"), None),
@@ -166,7 +187,7 @@ pub fn answer(terminal: &Terminal, token: &str, body: &str) -> (Reply, Option<Mc
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let empty = json!({});
             let args = params.get("arguments").unwrap_or(&empty);
-            match call(terminal, name, args) {
+            match call_with(terminal, peers, name, args) {
                 None => (fail(id, -32602, "unknown tool"), None),
                 Some(out) => {
                     let result = json!({
@@ -256,7 +277,7 @@ impl Server {
         let handled = match read {
             Err(_) => Some((status(400), None)),
             Ok(_) => catch_unwind(AssertUnwindSafe(|| {
-                answer(&terminal, bearer(auth.as_deref()), &body)
+                reply_to(&self.registry, &terminal, bearer(auth.as_deref()), &body)
             }))
             .ok(),
         };
@@ -384,6 +405,35 @@ mod tests {
             handle(&reg, "POST", "/mcp", Some(&ok), None, init).0.status,
             401
         );
+    }
+
+    #[test]
+    fn a_session_sees_the_others_that_said_they_run() {
+        let dir = repo();
+        let reg = Mutex::new(Registry::default());
+        let me = reg.lock().unwrap().register("me", dir.path().to_path_buf());
+        let other = reg
+            .lock()
+            .unwrap()
+            .register("other", dir.path().join("src"));
+        let auth = |t: &str| format!("Bearer {t}");
+        let status = r#"{"jsonrpc":"2.0","method":"hydraui/status","params":{"state":"working"}}"#;
+        handle(&reg, "POST", "/mcp", Some(&auth(&other)), None, status);
+        let read = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"tasks_read","arguments":{}}}"#;
+        let others = |token: &str| -> Value {
+            let reply = handle(&reg, "POST", "/mcp", Some(&auth(token)), None, read).0;
+            let msg: Value = serde_json::from_str(&reply.body.unwrap()).unwrap();
+            let text = msg["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            serde_json::from_str::<Value>(&text).unwrap()["other_sessions"].clone()
+        };
+        assert_eq!(others(&me)[0]["name"], "other");
+        assert_eq!(others(&other), serde_json::json!([]), "not itself");
+        let ended = r#"{"jsonrpc":"2.0","method":"hydraui/status","params":{"state":"ended"}}"#;
+        handle(&reg, "POST", "/mcp", Some(&auth(&other)), None, ended);
+        assert_eq!(others(&me), serde_json::json!([]));
     }
 
     #[test]

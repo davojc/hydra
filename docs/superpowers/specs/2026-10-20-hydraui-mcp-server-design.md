@@ -156,7 +156,11 @@ server; otherwise the file is created and the question waits for the next change
 Names below are a suggestion (builder's call); descriptions must carry the workflow.
 
 - **`tasks_read`**: the whole board: each column's cards in order, each with its text, taker and
-  commit (if any), plus the caller's own name and project folder. Read-only.
+  commit (if any), plus `other_sessions`: the other terminals in this project (worktrees of the
+  same repository included, §2 of the task board spec) whose Claude session's status hooks (§5.1)
+  say it is running, each with its name, state (working, waiting for the user, idle) and
+  `in_own_worktree`. The server keeps the last state each terminal's hooks reported, forgotten
+  when the session ends or the terminal closes. Plus the caller's own name and project folder. Read-only.
 - **`tasks_add(text)`**: adds a card at the top of **Backlog**. Text is normalised as the tab does
   (one paragraph); empty is refused.
 - **`tasks_take(text)`**: moves the Pickup card with exactly this text to the top of
@@ -184,6 +188,10 @@ from Verify to Done.
   until then it stays in InProgress. The user checks it and moves it to Done. Never claim a card
   is done on the board.
 - Ideas or follow-ups worth keeping go to Backlog with `tasks_add`, not into Pickup.
+- If `tasks_read` shows other sessions in the project and this one isn't already in a worktree of
+  its own, do the card's work in a new git worktree (`git worktree add ../<repo>-worktrees/<slug>
+  -b task/<slug>`), commit there (the board is shared, so `tasks_verify` still finds the card) and
+  tell the user the branch to merge.
 - Use `tasks_mine` to recall what this session is working on.
 
 ### 5.1 Session status

@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use super::SessionState;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Terminal {
     /// Unique among registered terminals, and fits `[name]` in the board file.
@@ -11,9 +13,19 @@ pub struct Terminal {
     pub cwd: PathBuf,
 }
 
+/// Another terminal with a Claude session running, as `tasks_read` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Peer {
+    pub name: String,
+    pub cwd: PathBuf,
+    pub state: SessionState,
+}
+
 #[derive(Default)]
 pub struct Registry {
     terminals: HashMap<String, Terminal>,
+    /// What each terminal's Claude session last said it is doing (its status hooks).
+    sessions: HashMap<String, SessionState>,
 }
 
 /// A label made safe as a taker: whitespace runs become one space, `]` becomes `)`, an empty
@@ -74,6 +86,35 @@ impl Registry {
 
     pub fn revoke(&mut self, token: &str) {
         self.terminals.remove(token);
+        self.sessions.remove(token);
+    }
+
+    /// The Claude session in `token`'s terminal is in `state`; `Ended` forgets it.
+    pub fn set_session(&mut self, token: &str, state: SessionState) {
+        if state == SessionState::Ended || !self.terminals.contains_key(token) {
+            self.sessions.remove(token);
+        } else {
+            self.sessions.insert(token.to_string(), state);
+        }
+    }
+
+    /// The terminals other than `token`'s with a Claude session running, by name.
+    pub fn peers(&self, token: &str) -> Vec<Peer> {
+        let mut peers: Vec<Peer> = self
+            .sessions
+            .iter()
+            .filter(|(t, _)| t.as_str() != token)
+            .filter_map(|(t, state)| {
+                let term = self.terminals.get(t)?;
+                Some(Peer {
+                    name: term.name.clone(),
+                    cwd: term.cwd.clone(),
+                    state: *state,
+                })
+            })
+            .collect();
+        peers.sort_by(|a, b| a.name.cmp(&b.name));
+        peers
     }
 
     pub fn get(&self, token: &str) -> Option<Terminal> {
@@ -112,6 +153,23 @@ mod tests {
         assert_eq!(r.get(&a).unwrap().name, "terminal");
         r.set_cwd(&a, "D:\\x".into());
         assert_eq!(r.get(&a).unwrap().cwd, PathBuf::from("D:\\x"));
+    }
+
+    #[test]
+    fn peers_are_the_other_terminals_running_claude() {
+        let mut r = Registry::default();
+        let a = r.register("a", "C:/w".into());
+        let b = r.register("b", "C:/w".into());
+        let c = r.register("c", "C:/w".into());
+        r.set_session(&b, SessionState::Working);
+        r.set_session(&c, SessionState::Idle);
+        r.set_session("stranger", SessionState::Working);
+        let names: Vec<String> = r.peers(&a).into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["b", "c"]);
+        assert_eq!(r.peers(&b).len(), 1, "not itself");
+        r.set_session(&c, SessionState::Ended);
+        r.revoke(&b);
+        assert!(r.peers(&a).is_empty());
     }
 
     #[test]

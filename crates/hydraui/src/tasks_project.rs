@@ -18,8 +18,18 @@ pub const IGNORE_LINE: &str = ".hydra/tasks.md";
 /// else `dir` itself. A linked worktree's project is its repository's main work tree, so every
 /// worktree of a repository shares one board.
 pub fn project_root(dir: &Path) -> PathBuf {
-    let root = dir.ancestors().find(|d| is_repo_root(d)).unwrap_or(dir);
-    main_work_tree(root).unwrap_or_else(|| root.to_path_buf())
+    match git_root(dir) {
+        Some(root) => main_work_tree(&root).unwrap_or(root),
+        None => dir.to_path_buf(),
+    }
+}
+
+/// The git work tree `dir` is in, a linked worktree being its own: the nearest folder at or above
+/// `dir` that is a repository root.
+pub fn git_root(dir: &Path) -> Option<PathBuf> {
+    dir.ancestors()
+        .find(|d| is_repo_root(d))
+        .map(Path::to_path_buf)
 }
 
 /// For a linked worktree (its `.git` file says `gitdir: <repo>/.git/worktrees/<name>`), the

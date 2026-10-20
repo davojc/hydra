@@ -5,55 +5,55 @@ pub mod server;
 pub mod tools;
 
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::pane_view::label_for;
 
 /// A terminal's entry in the server's registry (§2): its token lives as long as this does.
 pub struct McpTerminal {
+    server: Arc<server::Server>,
     token: String,
+    /// The folder the terminal started in, which names it when the user hasn't (§2).
+    start: PathBuf,
 }
 
 impl McpTerminal {
-    /// Registers a terminal; `None` when the server isn't running.
-    pub fn register(label: &str, cwd: PathBuf) -> Option<McpTerminal> {
-        let server = server::get()?;
-        let token = server.registry().lock().ok()?.register(label, cwd);
-        Some(McpTerminal { token })
+    /// Registers a terminal started in `cwd`; `None` when the server isn't running.
+    pub fn register(cwd: PathBuf) -> Option<McpTerminal> {
+        Some(McpTerminal::register_on(server::get()?.clone(), cwd))
+    }
+
+    fn register_on(server: Arc<server::Server>, cwd: PathBuf) -> McpTerminal {
+        let token = server::lock(server.registry()).register(&label_for(None, &cwd), cwd.clone());
+        McpTerminal {
+            server,
+            token,
+            start: cwd,
+        }
     }
 
     /// The variables the terminal's shell gets.
     pub fn env(&self) -> Vec<(String, String)> {
-        let url = server::get()
-            .map(|s| s.url().to_string())
-            .unwrap_or_default();
         vec![
-            ("HYDRA_MCP_URL".into(), url),
+            ("HYDRA_MCP_URL".into(), self.server.url().to_string()),
             ("HYDRA_MCP_TOKEN".into(), self.token.clone()),
         ]
     }
 
     pub fn set_cwd(&self, cwd: PathBuf) {
-        if let Some(server) = server::get()
-            && let Ok(mut r) = server.registry().lock()
-        {
-            r.set_cwd(&self.token, cwd);
-        }
+        server::lock(self.server.registry()).set_cwd(&self.token, cwd);
     }
 
-    pub fn rename(&self, label: &str) {
-        if let Some(server) = server::get()
-            && let Ok(mut r) = server.registry().lock()
-        {
-            r.rename(&self.token, label);
-        }
+    /// Names the terminal after the user's name for it, else its start folder: a `cd` never
+    /// renames it (§2).
+    pub fn rename(&self, name: Option<&str>) {
+        server::lock(self.server.registry()).rename(&self.token, &label_for(name, &self.start));
     }
 }
 
 impl Drop for McpTerminal {
     fn drop(&mut self) {
-        if let Some(server) = server::get()
-            && let Ok(mut r) = server.registry().lock()
-        {
-            r.revoke(&self.token);
-        }
+        server::lock(self.server.registry()).revoke(&self.token);
     }
 }
 
@@ -64,7 +64,7 @@ mod tests {
     #[test]
     fn a_terminal_gets_the_servers_address_and_a_token_that_dies_with_it() {
         let server = server::init().expect("server starts");
-        let term = McpTerminal::register("work", PathBuf::from("C:/w")).unwrap();
+        let term = McpTerminal::register(PathBuf::from("C:/w/work")).unwrap();
         let env = term.env();
         assert_eq!(
             env[0],
@@ -72,8 +72,9 @@ mod tests {
         );
         assert_eq!(env[1].0, "HYDRA_MCP_TOKEN");
         let token = env[1].1.clone();
-        assert!(server.registry().lock().unwrap().get(&token).is_some());
-        term.rename("api");
+        let t = server.registry().lock().unwrap().get(&token).unwrap();
+        assert_eq!(t.name, "work");
+        term.rename(Some("api"));
         term.set_cwd(PathBuf::from("C:/x"));
         let t = server.registry().lock().unwrap().get(&token).unwrap();
         assert_eq!(t.cwd, PathBuf::from("C:/x"));
@@ -81,5 +82,34 @@ mod tests {
         assert_eq!(t.name, "api");
         drop(term);
         assert!(server.registry().lock().unwrap().get(&token).is_none());
+    }
+
+    #[test]
+    fn clearing_the_name_goes_back_to_the_start_folders() {
+        let server = server::Server::start().unwrap();
+        let term = McpTerminal::register_on(server.clone(), PathBuf::from("C:/w/web"));
+        term.rename(Some("api"));
+        term.set_cwd(PathBuf::from("C:/w/other"));
+        term.rename(None);
+        let token = term.env()[1].1.clone();
+        let t = server.registry().lock().unwrap().get(&token).unwrap();
+        assert_eq!(t.name, "web");
+    }
+
+    #[test]
+    fn a_closed_terminals_token_dies_even_after_a_panic() {
+        let server = server::Server::start().unwrap();
+        let term = McpTerminal::register_on(server.clone(), PathBuf::from("C:/w/web"));
+        let token = term.env()[1].1.clone();
+        let poisoner = server.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.registry().lock();
+            panic!("poison the registry");
+        })
+        .join();
+        assert!(server.registry().is_poisoned());
+        drop(term);
+        let registry = server.registry().lock().unwrap_or_else(|e| e.into_inner());
+        assert!(registry.get(&token).is_none());
     }
 }

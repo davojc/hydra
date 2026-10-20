@@ -33,7 +33,8 @@ fn status(status: u16) -> Reply {
     Reply { status, body: None }
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+/// Locks `m`, even after a panic poisoned it: the registry stays usable (and revocable).
+pub(super) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 

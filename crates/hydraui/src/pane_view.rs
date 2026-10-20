@@ -209,7 +209,7 @@ impl PaneView {
         let focus = cx.focus_handle();
         let on_focus = cx.on_focus(&focus, window, |_, _, cx| cx.emit(PaneEvent::Focused));
         let warnings: Vec<String> = request.note.iter().cloned().collect();
-        let mcp = McpTerminal::register(&label_for(None, &request.cwd), request.cwd.clone());
+        let mcp = McpTerminal::register(request.cwd.clone());
         let mut view = Self {
             id,
             cwd: request.cwd.clone(),
@@ -278,7 +278,7 @@ impl PaneView {
     pub fn set_name(&mut self, name: Option<String>, cx: &mut Context<Self>) {
         self.name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
         if let Some(mcp) = &self.mcp {
-            mcp.rename(&self.label());
+            mcp.rename(self.name.as_deref());
         }
         cx.emit(PaneEvent::TitleChanged);
     }

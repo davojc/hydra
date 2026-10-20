@@ -415,7 +415,8 @@ impl TaskBoardView {
                     .bg(bg)
                     .hover(|s| s.bg(hover))
                     .text_sm()
-                    // Who took the card (§ task board), above its text; the editor edits only the text.
+                    // Who took the card (MCP server spec §4), above its text; the editor edits
+                    // only the text.
                     .children(taker.map(|name| {
                         // A row, so the badge hugs its text instead of spanning the card.
                         div().flex().mb_1().child(

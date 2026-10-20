@@ -75,7 +75,10 @@ reaches the same server.
 
 - Every terminal hydraui spawns gets two environment variables:
   - `HYDRA_MCP_URL` = `http://127.0.0.1:<port>/mcp`
-  - `HYDRA_MCP_TOKEN` = a random token for that terminal (≥128 bits). It is per terminal, not per spawn: kept across a hydraui restart so a resumed session still connects, and dropped when the terminal is closed.
+  - `HYDRA_MCP_TOKEN` = a random token for that terminal (≥128 bits). It is per terminal, not
+    per spawn: kept when the terminal's shell is restarted, and dropped when the terminal is
+    closed. Tokens live only in hydraui's memory and the port is new each run, so a terminal in
+    a restarted hydraui gets a new address and token.
 - A `claude` run in the terminal inherits them, including through `hydra claude` / `hydra shell`:
   check that hydra's environment handling (`hydra-core/src/resolve.rs`) passes them through, and
   that they are not treated as Claude session markers.

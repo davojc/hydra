@@ -1,5 +1,5 @@
 //! A project's task board file (spec: docs/superpowers/specs/2026-10-19-hydraui-task-board-design.md
-//! §2): `<project>/.hydra/tasks.md`, four headed lists of one-line cards, parsed forgivingly and
+//! §2): `<project>/.hydra/tasks.md`, five headed lists of one-line cards, parsed forgivingly and
 //! written back in one canonical shape. Anything that isn't a card is kept verbatim in `extra`.
 
 /// Written lines wrap so none is longer than this many columns.
@@ -10,28 +10,37 @@ pub enum Column {
     Backlog,
     Pickup,
     InProgress,
+    /// Work committed and waiting for the user to check it.
+    Verify,
     Done,
 }
 
 impl Column {
-    pub const ALL: [Column; 4] = [
+    pub const ALL: [Column; 5] = [
         Column::Backlog,
         Column::Pickup,
         Column::InProgress,
+        Column::Verify,
         Column::Done,
     ];
+
+    /// Whether this column's cards record who took them (MCP server spec §4).
+    pub fn has_takers(self) -> bool {
+        matches!(self, Column::InProgress | Column::Verify | Column::Done)
+    }
 
     pub fn heading(self) -> &'static str {
         match self {
             Column::Backlog => "Backlog",
             Column::Pickup => "Pickup",
             Column::InProgress => "InProgress",
+            Column::Verify => "Verify",
             Column::Done => "Done",
         }
     }
 }
 
-/// One card: its text and, in InProgress and Done, the terminal that took it (MCP server spec §4).
+/// One card: its text and, in InProgress, Verify and Done, the terminal that took it (MCP server spec §4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Card {
     pub text: String,
@@ -50,7 +59,7 @@ impl Card {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Board {
     /// Cards per column, indexed by `Column as usize`, top first.
-    pub columns: [Vec<Card>; 4],
+    pub columns: [Vec<Card>; 5],
     /// Everything that isn't a card under a known column, verbatim, in original order.
     pub extra: String,
 }
@@ -114,6 +123,11 @@ pub enum Change {
     },
     /// The first Pickup card with this text goes to the top of InProgress, taken by `taker`.
     Take {
+        text: String,
+        taker: String,
+    },
+    /// The first InProgress card with this text that `taker` took goes to the top of Verify.
+    Verify {
         text: String,
         taker: String,
     },
@@ -181,14 +195,14 @@ fn split_taker(text: &str) -> (Option<String>, &str) {
     }
 }
 
-/// In InProgress and Done, a leading `\` before `[` (after any further `\`) marks the text as
+/// In InProgress, Verify and Done, a leading `\` before `[` (after any further `\`) marks the text as
 /// literal, not a taker (MCP server spec §4); the text without that one `\`.
 fn unescape(text: &str) -> Option<&str> {
     text.strip_prefix('\\')
         .filter(|rest| rest.trim_start_matches('\\').starts_with('['))
 }
 
-/// Whether a card without a taker in InProgress or Done must be written escaped so it reads
+/// Whether a card without a taker in InProgress, Verify or Done must be written escaped so it reads
 /// back as the same text: it would read as a taker, a checkbox, or an escape.
 fn needs_escape(text: &str) -> bool {
     split_taker(text).0.is_some() || strip_checkbox(text) != text || unescape(text).is_some()
@@ -201,12 +215,13 @@ fn flush(board: &mut Board, column: Option<Column>, card: &mut Option<String>) {
         if text.is_empty() {
             return;
         }
-        let (taker, text) = match col {
-            Column::InProgress | Column::Done => match unescape(&text) {
+        let (taker, text) = if col.has_takers() {
+            match unescape(&text) {
                 Some(literal) => (None, literal),
                 None => split_taker(&text),
-            },
-            _ => (None, text.as_str()),
+            }
+        } else {
+            (None, text.as_str())
         };
         board.columns[col as usize].push(Card {
             text: text.to_string(),
@@ -290,7 +305,7 @@ pub fn write(board: &Board) -> String {
         out.push_str("\n## ");
         out.push_str(column.heading());
         out.push('\n');
-        let takes = matches!(column, Column::InProgress | Column::Done);
+        let takes = column.has_takers();
         for card in board.cards(column) {
             match &card.taker {
                 Some(taker) => write_card(&mut out, &format!("[{taker}] {}", card.text)),
@@ -356,6 +371,16 @@ pub fn apply(board: &mut Board, change: &Change) -> Result<(), Missing> {
             card.taker = Some(taker.clone());
             board.columns[Column::InProgress as usize].insert(0, card);
         }
+        Change::Verify { text, taker } => {
+            let text = normalise(text);
+            let doing = &mut board.columns[Column::InProgress as usize];
+            let at = doing
+                .iter()
+                .position(|c| c.text == text && c.taker.as_deref() == Some(taker.as_str()))
+                .ok_or(Missing)?;
+            let card = doing.remove(at);
+            board.columns[Column::Verify as usize].insert(0, card);
+        }
         Change::Delete { card } => {
             let at = board.find(card).ok_or(Missing)?;
             board.columns[card.column as usize].remove(at);
@@ -369,7 +394,7 @@ pub fn apply(board: &mut Board, change: &Change) -> Result<(), Missing> {
 mod tests {
     use super::*;
 
-    const CANONICAL: &str = "# Tasks\n\n## Backlog\n- Let the terminal list show unread output.\n\n## Pickup\n- Ctrl+K opens the launcher.\n\n## InProgress\n\n## Done\n- Collapse button.\n";
+    const CANONICAL: &str = "# Tasks\n\n## Backlog\n- Let the terminal list show unread output.\n\n## Pickup\n- Ctrl+K opens the launcher.\n\n## InProgress\n\n## Verify\n\n## Done\n- Collapse button.\n";
 
     #[test]
     fn canonical_file_parses() {
@@ -393,11 +418,49 @@ mod tests {
     }
 
     #[test]
-    fn empty_board_writes_all_four_columns() {
+    fn empty_board_writes_all_five_columns() {
         assert_eq!(
             write(&Board::default()),
-            "# Tasks\n\n## Backlog\n\n## Pickup\n\n## InProgress\n\n## Done\n"
+            "# Tasks\n\n## Backlog\n\n## Pickup\n\n## InProgress\n\n## Verify\n\n## Done\n"
         );
+    }
+
+    #[test]
+    fn a_board_from_before_verify_gains_the_column() {
+        let old = "# Tasks\n\n## Backlog\n\n## Pickup\n\n## InProgress\n- [c] a\n\n## Done\n- b\n";
+        let b = parse(old);
+        assert!(b.cards(Column::Verify).is_empty());
+        assert_eq!(b.cards(Column::Done), [Card::new("b")]);
+        assert!(write(&b).contains("- [c] a\n\n## Verify\n\n## Done\n- b\n"));
+    }
+
+    #[test]
+    fn verify_moves_only_the_takers_own_card_and_keeps_its_name() {
+        let mut b = parse("## InProgress\n- [bob] same\n- [c] same\n- [c] other\n");
+        let verify = |text: &str, taker: &str| Change::Verify {
+            text: text.into(),
+            taker: taker.into(),
+        };
+        apply(&mut b, &verify("same", "c")).unwrap();
+        assert_eq!(
+            b.cards(Column::InProgress),
+            [
+                Card {
+                    text: "same".into(),
+                    taker: Some("bob".into())
+                },
+                Card {
+                    text: "other".into(),
+                    taker: Some("c".into())
+                }
+            ]
+        );
+        assert_eq!(b.cards(Column::Verify)[0].taker.as_deref(), Some("c"));
+        assert_eq!(apply(&mut b, &verify("same", "c")), Err(Missing), "bob's");
+        assert_eq!(apply(&mut b, &verify("gone", "c")), Err(Missing));
+        let out = write(&b);
+        assert!(out.contains("## Verify\n- [c] same\n"), "{out}");
+        assert_eq!(parse(&out), b);
     }
 
     #[test]
@@ -597,6 +660,8 @@ mod tests {
 
 ## InProgress
 - [my term] doing it
+
+## Verify
 
 ## Done
 ";

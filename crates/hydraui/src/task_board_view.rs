@@ -22,13 +22,15 @@ const SCROLL_EDGE: f32 = 32.;
 const SCROLL_STEP: f32 = 12.;
 
 /// Each column's color, on its heading's dot and its cards' left edge: Backlog grey, Pickup
-/// blue, InProgress orange, Done green. The theme has no orange, so it's fixed here.
+/// blue, InProgress orange, Verify yellow, Done green. The theme has no orange, so it's fixed
+/// here.
 fn accent(col: Column, cx: &App) -> Hsla {
     let theme = cx.theme();
     match col {
         Column::Backlog => theme.muted_foreground,
         Column::Pickup => theme.blue,
         Column::InProgress => hsla(28. / 360., 0.9, 0.55, 1.),
+        Column::Verify => theme.yellow,
         Column::Done => theme.green,
     }
 }
@@ -67,7 +69,7 @@ pub struct TaskBoardView {
     board: Entity<TaskBoard>,
     editing: Option<Editing>,
     /// One per column, so a dragged card can scroll the column it's over.
-    scroll: [ScrollHandle; 4],
+    scroll: [ScrollHandle; 5],
     focus: FocusHandle,
     _observe: Subscription,
 }

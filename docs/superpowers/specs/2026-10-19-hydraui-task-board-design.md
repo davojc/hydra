@@ -13,7 +13,8 @@ this work, but the file it will read is.
 
 ### Goals
 
-- A board per project, columns fixed: **Backlog**, **Pickup**, **InProgress**, **Done**.
+- A board per project, columns fixed: **Backlog**, **Pickup**, **InProgress**, **Verify**,
+  **Done**. Verify holds committed work waiting for the user to check it.
 - A card is a short paragraph describing an idea, explored later with Claude. No title.
 - Stored in one markdown file in the project, readable and editable by hand (and by Claude).
 - Opened from a terminal row's right-click menu as a **Tasks** tab beside that terminal.
@@ -55,6 +56,8 @@ this work, but the file it will read is.
 
 ## InProgress
 
+## Verify
+
 ## Done
 - Collapse button for the terminal list.
 ```
@@ -62,16 +65,17 @@ this work, but the file it will read is.
 - Order within a column is the order in the file, top first.
 - Reading is forgiving, because Claude and people edit this file by hand:
   - A **card** is a top-level list item (`- `, `* ` or `+ `, optionally with a `[ ]` / `[x]`
-    checkbox, which is dropped) under one of the four column headings, plus its indented
+    checkbox, which is dropped) under one of the five column headings, plus its indented
     continuation lines and any nested list items, all joined into one paragraph. Written back as
     `- ` with two-space continuation.
   - Anything else (text before the first column, unknown headings and everything under them,
     non-list text under a column) is kept and written back under a `## Notes` heading after the
-    four columns, in its original order. A list item under an unknown heading is not a card and
+    five columns, in its original order. A list item under an unknown heading is not a card and
     is kept there.
   - The file is never refused; never drop a card. Heading match ignores case and
-  spaces, so `## In Progress` is InProgress. A missing column is an empty one.
-- Writing always produces the canonical form above for the four columns.
+  spaces, so `## In Progress` is InProgress. A missing column is an empty one (so a file from
+  before Verify reads as it did, and gains `## Verify` the next time it's written).
+- Writing always produces the canonical form above for the five columns.
 - A card's text is plain text with soft wraps; hydraui doesn't render markdown in cards (our
   call). Blank lines inside a card aren't supported: a card is one paragraph.
 
@@ -124,9 +128,9 @@ this work, but the file it will read is.
 
 ## 5. The board
 
-- Four columns, equal width, each with its heading and card count. Columns scroll on their own.
+- Five columns, equal width, each with its heading and card count. Columns scroll on their own.
 - Each column has a color, shown as a dot before its heading and a strip down its cards' left
-  edge: Backlog grey, Pickup blue, InProgress orange, Done green.
+  edge: Backlog grey, Pickup blue, InProgress orange, Verify yellow, Done green.
 - **Backlog** has a **+** that adds an empty card at its top, already being edited.
 - **Done** has a **Clear** button that removes all its cards (asks first, showing how many).
 - A card shows its whole paragraph, wrapped. Clicking it edits it in place (multi-line input);

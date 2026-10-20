@@ -100,8 +100,9 @@ Accepted (the user's decision): Claude sessions outside hydraui show the server 
   writes the user's own `~/.claude.json`, so a terminal whose environment has no `[claude]` runs
   Claude without it. The variables are still set there; nothing reads them.
 - hydra pre-approves the tools (the user's decision): the `settings.json` it generates for each
-  environment (`merge_settings`) gains `permissions.allow` entries for the four tools by name
-  (`mcp__hydraui__tasks_read`, `..._tasks_add`, `..._tasks_take`, `..._tasks_mine`), added to
+  environment (`merge_settings`) gains `permissions.allow` entries for the five tools by name
+  (`mcp__hydraui__tasks_read`, `..._tasks_add`, `..._tasks_take`, `..._tasks_verify`,
+  `..._tasks_mine`), added to
   whatever allow list the user's settings already have. By name rather than the whole server, so
   a tool added later is asked about until it's added here too. (Our call.)
 - Claude Code expands `${HYDRA_MCP_URL}` and `${HYDRA_MCP_TOKEN}` from the session's environment,
@@ -114,20 +115,20 @@ Accepted (the user's decision): Claude sessions outside hydraui show the server 
 
 ## 4. The board file: who took a card
 
-- A card in **InProgress** or **Done** may start with a name in square brackets:
+- A card in **InProgress**, **Verify** or **Done** may start with a name in square brackets:
   `- [claude] Ctrl+K should open the launcher from anywhere.` The name is who took it.
-- Reading: in those two columns only, a leading `[name] ` (name non-empty, no `]`, not a checkbox
+- Reading: in those three columns only, a leading `[name] ` (name non-empty, no `]`, not a checkbox
   `[ ]`/`[x]`/`[X]`) is the card's **taker**, not part of its text. In Backlog and Pickup a leading
   `[...]` is ordinary text, so a hand-written "[WIP] ..." there stays as typed.
 - Writing: a card with a taker is written `- [<taker>] <text>`; the taker is never part of the
   card's text, so card identity for merging (column, text, occurrence; task board §6) is
   unchanged.
-- Escaping: in those two columns, a card with no taker whose text would read back as a taker, a
+- Escaping: in those three columns, a card with no taker whose text would read back as a taker, a
   checkbox or an escape (e.g. "[WIP] fix login" moved to InProgress) is written with a `\` before
   it: `- \[WIP] fix login`. Reading there, a leading `\` before `[` is dropped and the rest is
   ordinary text, so no taker is split off. Backlog and Pickup never write or read the `\`.
-- Moving in the Tasks tab: moving a taken card to Backlog or Pickup drops its taker; to Done keeps
-  it; editing its text keeps it. Moves by drag and by the right-click menu behave the same.
+- Moving in the Tasks tab: moving a taken card to Backlog or Pickup drops its taker; to Verify or
+  Done keeps it; editing its text keeps it. Moves by drag and by the right-click menu behave the same.
 - The Tasks tab shows a taken card's taker as a small badge on the card (look: builder's call).
   The taker isn't editable in the tab; editing the file by hand can change it.
 
@@ -153,18 +154,24 @@ Names below are a suggestion (builder's call); descriptions must carry the workf
 - **`tasks_take(text)`**: moves the Pickup card with exactly this text to the top of
   **InProgress**, with the caller's name as taker. If several Pickup cards have that text, the first.
   If none (already taken, moved or edited), an error saying so and suggesting `tasks_read`.
+- **`tasks_verify(text)`**: once the card's work is committed, moves the caller's own InProgress
+  card with exactly this text (taker = the caller's name) to the top of **Verify**, keeping the
+  taker. If none, an error saying so and suggesting `tasks_mine`. Another session's card can't be
+  moved.
 - **`tasks_mine`**: the InProgress cards whose taker is the caller's current name. Read-only. (A
   renamed terminal no longer matches its older cards; accepted.)
 
-There are no tools to move a card into Pickup or Done, back out of InProgress, edit, reorder or
-delete. Those are the user's.
+There are no tools to move a card into Pickup or Done, out of Verify, back out of InProgress
+other than to Verify, edit, reorder or delete. Those are the user's: only the user moves a card
+from Verify to Done.
 
 **What the instructions and descriptions tell Claude** (wording: builder's call):
 - The board is the user's to-do list for this project; Pickup holds work the user has approved.
 - Check Pickup when the user asks, and after finishing a piece of work.
 - Take one card at a time with `tasks_take`, then do the work it describes.
-- When done, tell the user and leave the card in InProgress: the user reviews it and moves it to
-  Done. Never claim a card is done on the board.
+- Once the card's work is committed, move it to Verify with `tasks_verify` and tell the user;
+  until then it stays in InProgress. The user checks it and moves it to Done. Never claim a card
+  is done on the board.
 - Ideas or follow-ups worth keeping go to Backlog with `tasks_add`, not into Pickup.
 - Use `tasks_mine` to recall what this session is working on.
 
@@ -174,7 +181,7 @@ Unit tests: parsing and writing the taker (InProgress/Done only, checkbox not mi
 trip, merge identity ignoring the taker); the tab's moves dropping or keeping it; each tool's
 effect on a board file, including take when the card is gone and two takes of one card (one wins);
 refused requests (no token, unknown token, closed terminal's token, foreign `Origin`); `sync_mcp`
-adding the `hydraui` entry; `merge_settings` adding the four allow rules without dropping the
+adding the `hydraui` entry; `merge_settings` adding the five allow rules without dropping the
 user's own; taker names made unique and bracket-safe; the board lock held across the
 re-read/apply/write. An end-to-end test that drives the HTTP endpoint with JSON-RPC
 (`initialize`, `tools/list`, `tools/call`). Checked by hand: a real `claude` in a hydraui terminal

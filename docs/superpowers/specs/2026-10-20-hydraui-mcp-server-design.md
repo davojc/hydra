@@ -41,7 +41,8 @@ reaches the same server.
 - Losing a card or an edit: the server's writes follow the board's existing merge-on-write rules,
   so it never overwrites a change made in the Tasks tab or by hand, and vice versa.
 - Another program on the machine using the server: it listens on loopback only and needs a token.
-- Noise for Claude sessions outside hydraui (see §3, last point).
+
+Accepted (the user's decision): Claude sessions outside hydraui show the server as failed (§3).
 
 ## 2. The server
 
@@ -87,7 +88,11 @@ reaches the same server.
   writes into every environment's `.claude.json`, alongside those copied from `~/.claude.json`:
 
 ```json
-"hydraui": { "type": "stdio", "command": "hydra", "args": ["mcp"] }
+"hydraui": {
+  "type": "http",
+  "url": "${HYDRA_MCP_URL}",
+  "headers": { "Authorization": "Bearer ${HYDRA_MCP_TOKEN}" }
+}
 ```
 
   hydra's entry wins over one of the same name in `~/.claude.json`.
@@ -99,12 +104,12 @@ reaches the same server.
   (`mcp__hydraui__tasks_read`, `..._tasks_add`, `..._tasks_take`, `..._tasks_mine`), added to
   whatever allow list the user's settings already have. By name rather than the whole server, so
   a tool added later is asked about until it's added here too. (Our call.)
-- **Outside hydraui** (no variables set): found by checking, an http entry with `${HYDRA_MCP_URL}` makes
-  Claude Code warn "Missing environment variables" when the variables are unset. So the
-  registration is the stdio bridge above, not an http entry: `hydra mcp` relays stdio to
-  `HYDRA_MCP_URL` with the token as a bearer header and, when the variables are unset, answers as a
-  server with no tools, so nothing is shown. The command is bare `hydra`, found on PATH, because the
-  config is also materialised from inside `hydraui.exe`, where the current exe isn't `hydra`.
+- Claude Code expands `${HYDRA_MCP_URL}` and `${HYDRA_MCP_TOKEN}` from the session's environment,
+  so a session in a hydraui terminal talks straight to that terminal's endpoint; there is no
+  bridge process.
+- **Outside hydraui** (no variables set): Claude Code warns "Missing environment variables:
+  HYDRA_MCP_URL, HYDRA_MCP_TOKEN" and lists `hydraui` as failed. Accepted (the user's decision):
+  one transport, no stdio bridge.
 - `[claude] mcp.exclude = ["hydraui"]` opts an environment out of the registration.
 
 ## 4. The board file: who took a card

@@ -119,9 +119,6 @@ pub enum Cmd {
         #[command(subcommand)]
         command: GuardCmd,
     },
-    /// The stdio MCP server Claude Code runs (run by Claude, not by hand)
-    #[command(hide = true)]
-    Mcp,
 }
 
 #[derive(Subcommand)]

@@ -642,7 +642,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             state["mcpServers"],
-            serde_json::json!({"codegraph": {"command": "cg"}, "hydraui": {"type": "stdio", "command": "hydra", "args": ["mcp"]}})
+            serde_json::json!({"codegraph": {"command": "cg"}, "hydraui": {"type": "http", "url": "${HYDRA_MCP_URL}", "headers": {"Authorization": "Bearer ${HYDRA_MCP_TOKEN}"}}})
         );
         assert!(
             state.get("oauthAccount").is_none(),

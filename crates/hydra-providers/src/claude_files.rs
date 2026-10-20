@@ -243,7 +243,11 @@ pub fn sync_mcp(
     };
     servers.insert(
         HYDRAUI_SERVER.to_string(),
-        serde_json::json!({"type": "stdio", "command": "hydra", "args": ["mcp"]}),
+        serde_json::json!({
+            "type": "http",
+            "url": "${HYDRA_MCP_URL}",
+            "headers": {"Authorization": "Bearer ${HYDRA_MCP_TOKEN}"},
+        }),
     );
     drop_excluded(&mut servers, exclude);
     let mut state = match state_json {
@@ -276,7 +280,7 @@ mod tests {
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(
             v["mcpServers"]["hydraui"],
-            json!({"type": "stdio", "command": "hydra", "args": ["mcp"]})
+            json!({"type": "http", "url": "${HYDRA_MCP_URL}", "headers": {"Authorization": "Bearer ${HYDRA_MCP_TOKEN}"}})
         );
         let base = r#"{"mcpServers":{"hydraui":{"command":"old"},"codegraph":{}}}"#;
         let v: Value = serde_json::from_str(
@@ -285,7 +289,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(v["mcpServers"]["hydraui"]["command"], "hydra");
+        assert_eq!(v["mcpServers"]["hydraui"]["type"], "http");
         assert!(v["mcpServers"]["codegraph"].is_object());
         assert_eq!(sync_mcp(None, None, &["hydraui".into()]).unwrap(), None);
     }
@@ -517,13 +521,13 @@ mod tests {
         assert_eq!(v["projects"]["E:/x"]["k"], 1);
         assert_eq!(
             v["mcpServers"],
-            serde_json::json!({"codegraph": {"command": "cg"}, "hydraui": {"type": "stdio", "command": "hydra", "args": ["mcp"]}})
+            serde_json::json!({"codegraph": {"command": "cg"}, "hydraui": {"type": "http", "url": "${HYDRA_MCP_URL}", "headers": {"Authorization": "Bearer ${HYDRA_MCP_TOKEN}"}}})
         );
     }
 
     #[test]
     fn sync_is_a_no_op_when_already_in_sync() {
-        let state = r#"{"mcpServers":{"codegraph":{"command":"cg"},"hydraui":{"type":"stdio","command":"hydra","args":["mcp"]}}}"#;
+        let state = r#"{"mcpServers":{"codegraph":{"command":"cg"},"hydraui":{"type":"http","url":"${HYDRA_MCP_URL}","headers":{"Authorization":"Bearer ${HYDRA_MCP_TOKEN}"}}}}"#;
         let base = r#"{"mcpServers":{"codegraph":{"command":"cg"}}}"#;
         assert_eq!(sync(Some(state), Some(base), &[]).unwrap(), None);
     }
@@ -534,7 +538,7 @@ mod tests {
         let out = sync(None, Some(base), &[]).unwrap().unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&out).unwrap(),
-            serde_json::json!({"mcpServers": {"dash": {}, "hydraui": {"type": "stdio", "command": "hydra", "args": ["mcp"]}}})
+            serde_json::json!({"mcpServers": {"dash": {}, "hydraui": {"type": "http", "url": "${HYDRA_MCP_URL}", "headers": {"Authorization": "Bearer ${HYDRA_MCP_TOKEN}"}}}})
         );
         assert_eq!(
             sync(None, None, &["hydraui".to_string()]).unwrap(),

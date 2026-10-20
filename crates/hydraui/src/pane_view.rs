@@ -364,8 +364,6 @@ impl PaneView {
                 self.cwd = p;
                 if let Some(mcp) = &self.mcp {
                     mcp.set_cwd(self.cwd.clone());
-                    // An unnamed terminal is named for its folder.
-                    mcp.rename(&self.label());
                 }
                 cx.emit(PaneEvent::CwdChanged);
             }

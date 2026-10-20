@@ -16,6 +16,14 @@ pub const MISSING: &str = "That card changed in the file; your change wasn't app
 /// The toast when an edit's card is gone and its text was added to Backlog instead (§6).
 pub const RESCUED: &str = "That card changed in the file; your text was added to Backlog.";
 
+/// The toast when the privacy choice can't be written to `.gitignore` (§3).
+pub fn privacy_problem(project: &std::path::Path, e: &std::io::Error) -> String {
+    format!(
+        "Couldn't update {}: {e}",
+        project.join(".gitignore").display()
+    )
+}
+
 pub enum TaskBoardEvent {
     /// The first card was just written to a new file in a git repository: ask commit/private.
     AskGit,
@@ -224,10 +232,7 @@ impl TaskBoard {
             tasks_project::commit_tasks(&self.project)
         };
         if let Err(e) = done {
-            cx.emit(TaskBoardEvent::Problem(format!(
-                "Couldn't update {}: {e}",
-                self.project.join(".gitignore").display()
-            )));
+            cx.emit(TaskBoardEvent::Problem(privacy_problem(&self.project, &e)));
         }
     }
 }

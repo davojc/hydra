@@ -280,10 +280,7 @@ impl Workspace {
                                 .on_click(move |_, window, cx| {
                                     window.close_dialog(cx);
                                     if let Err(e) = crate::tasks_project::keep_private(&project) {
-                                        let text = format!(
-                                            "Couldn't update {}: {e}",
-                                            project.join(".gitignore").display()
-                                        );
+                                        let text = crate::task_board::privacy_problem(&project, &e);
                                         window.push_notification(
                                             Notification::warning(text).title("Tasks"),
                                             cx,

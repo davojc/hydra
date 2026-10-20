@@ -77,6 +77,8 @@ mod tests {
         term.set_cwd(PathBuf::from("C:/x"));
         let t = server.registry().lock().unwrap().get(&token).unwrap();
         assert_eq!(t.cwd, PathBuf::from("C:/x"));
+        // A folder change moves the terminal but keeps its name.
+        assert_eq!(t.name, "api");
         drop(term);
         assert!(server.registry().lock().unwrap().get(&token).is_none());
     }

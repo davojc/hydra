@@ -134,6 +134,8 @@ this work, but the file it will read is.
   switching to the terminal tab, another terminal or environment saves too. If the write fails the
   card stays open and its Tasks tab won't close until it succeeds.
   Saving an empty card deletes it.
+- While the pointer is over a card it shows a delete icon; clicking it asks "Delete this card?"
+  (showing the card's text) before deleting.
 - Drag shows where the card will land (an insertion line) and scrolls a column when dragged
   near its edge; exact look is the builder's call.
 - Moving cards: drag a card within or between columns. Its right-click menu also offers **Move

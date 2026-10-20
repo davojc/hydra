@@ -1,5 +1,5 @@
-//! The app's assets: gpui-component's default icons, plus the file tree's file-type icons,
-//! which the default set leaves out.
+//! The app's assets: gpui-component's default icons, plus the ones the default set leaves out:
+//! the file tree's file-type icons and the task board's delete icon.
 use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};
@@ -16,7 +16,8 @@ gpui_kit_assets::icon_assets!(
         FileCode,
         FileTerminal,
         FileImage,
-        FileLock
+        FileLock,
+        Trash
     ]
 );
 

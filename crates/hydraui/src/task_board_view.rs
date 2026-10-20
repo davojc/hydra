@@ -7,6 +7,7 @@ use gpui::{
     ScrollHandle, SharedString, Subscription, Window, div, hsla, point, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_kit_assets::IconName;
 use gpui_component::input::{Escape, InputEvent, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::{ActiveTheme, Disableable, Sizable, WindowExt, h_flex, v_flex};
@@ -241,6 +242,34 @@ impl TaskBoardView {
         });
     }
 
+    /// "Delete this card?" then deletes it (§5): the card's delete icon asks first.
+    fn confirm_delete(&mut self, card: CardRef, window: &mut Window, cx: &mut Context<Self>) {
+        let board = self.board.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (board, card) = (board.clone(), card.clone());
+            dialog
+                .title("Delete this card?")
+                .child(div().text_sm().child(SharedString::from(card.text.clone())))
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(Button::new("confirm").label("Delete").danger().on_click(
+                            move |_, window, cx| {
+                                window.close_dialog(cx);
+                                let card = card.clone();
+                                board.update(cx, |b, cx| b.change(Change::Delete { card }, cx));
+                            },
+                        )),
+                )
+        });
+    }
+
     /// The board's `⋯` menu (§3): the privacy choice the file doesn't have yet.
     fn render_menu(&self) -> impl IntoElement + use<> {
         let board = self.board.clone();
@@ -359,6 +388,7 @@ impl TaskBoardView {
         let board = self.board.clone();
         div()
             .id(("task-card", i))
+            .group("task-card")
             .pt_1()
             .border_t_2()
             .border_color(gpui::transparent_black())
@@ -452,7 +482,28 @@ impl TaskBoardView {
                                         .child(SharedString::from(name)),
                                 )
                             }))
-                            .child(SharedString::from(card.text)),
+                            .child(SharedString::from(card.text.clone())),
+                    )
+                    // Delete, shown while the pointer is over the card; it asks first.
+                    .child(
+                        div()
+                            .flex_none()
+                            .pt_1()
+                            .pr_1()
+                            .invisible()
+                            .group_hover("task-card", |s| s.visible())
+                            .child(
+                                Button::new(("task-delete", i))
+                                    .icon(IconName::Trash)
+                                    .ghost()
+                                    .xsmall()
+                                    .tooltip("Delete card")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        // The click is the button's, not the card's (which edits).
+                                        cx.stop_propagation();
+                                        this.confirm_delete(card.clone(), window, cx)
+                                    })),
+                            ),
                     ),
             )
     }

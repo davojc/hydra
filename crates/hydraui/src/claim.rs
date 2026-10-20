@@ -11,7 +11,8 @@ use windows_sys::Win32::System::Threading::{
     CreateMutexW, GetExitCodeProcess, OpenMutexW, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetWindowThreadProcessId, IsIconic, IsWindow, SW_RESTORE, SetForegroundWindow, ShowWindow,
+    FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx, GetWindowThreadProcessId, IsIconic,
+    IsWindow, SW_RESTORE, SetForegroundWindow, ShowWindow,
 };
 
 const STILL_ACTIVE: u32 = 259;
@@ -177,6 +178,22 @@ pub fn bring_forward(hwnd: isize) {
         }
         SetForegroundWindow(hwnd);
     }
+}
+
+/// Flashes `hwnd`'s taskbar button until the window comes to the front.
+pub fn flash(hwnd: isize) {
+    if hwnd == 0 {
+        return;
+    }
+    let info = FLASHWINFO {
+        cbSize: size_of::<FLASHWINFO>() as u32,
+        hwnd: hwnd as HWND,
+        dwFlags: FLASHW_TRAY | FLASHW_TIMERNOFG,
+        uCount: 0,
+        dwTimeout: 0,
+    };
+    // SAFETY: `info` is a filled FLASHWINFO; a stale handle makes the call fail harmlessly.
+    unsafe { FlashWindowEx(&info) };
 }
 
 /// The window's HWND, 0 when it can't be had.

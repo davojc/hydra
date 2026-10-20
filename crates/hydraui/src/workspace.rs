@@ -160,6 +160,9 @@ pub struct Workspace {
     _git_pump: Task<()>,
     /// Each terminal's busy state for the tab strip, checked every second.
     activity: HashMap<PaneId, PaneActivity>,
+    /// Terminals whose Claude session finished or asked for you while out of sight: their
+    /// environment tab is badged until they are shown.
+    attention: HashSet<PaneId>,
     /// The working dot's phase, flipped each second.
     blink: bool,
     _activity_tick: Task<()>,
@@ -192,6 +195,8 @@ pub struct Workspace {
     board_events: HashMap<PaneId, Subscription>,
     /// Listens for board files the MCP server's sessions create.
     _mcp_pump: Option<gpui::Task<()>>,
+    /// Coming back to the window clears the alert of the terminal it shows.
+    _activation: Subscription,
 }
 
 impl Workspace {
@@ -260,6 +265,14 @@ impl Workspace {
         });
         // A session created a board file (spec §5): ask the same question the Tasks tab does. A
         // Claude hook said what its session is doing: the terminal's dot shows it.
+        let activation = cx.observe_window_activation(window, |ws: &mut Self, window, cx| {
+            if window.is_window_active()
+                && let Some(id) = ws.envs.active().and_then(|t| t.shown)
+                && ws.attention.remove(&id)
+            {
+                cx.notify();
+            }
+        });
         let mcp_pump = crate::mcp::server::get().map(|server| {
             let mut rx = server.subscribe();
             cx.spawn_in(window, async move |this, cx| {
@@ -268,7 +281,9 @@ impl Workspace {
                 while let Some(event) = rx.next().await {
                     let alive = this.update_in(cx, |ws, window, cx| match event {
                         McpEvent::BoardCreated(project) => ws.board_created(project, window, cx),
-                        McpEvent::Session(token, state) => ws.session_state(&token, state, cx),
+                        McpEvent::Session(token, state) => {
+                            ws.session_state(&token, state, window, cx)
+                        }
                     });
                     if alive.is_err() {
                         break;
@@ -316,6 +331,7 @@ impl Workspace {
             git_tx,
             _git_pump: git_pump,
             activity: HashMap::new(),
+            attention: HashSet::new(),
             blink: true,
             _activity_tick: activity_tick,
             accounts_open: false,
@@ -332,6 +348,7 @@ impl Workspace {
             board_focus: HashMap::new(),
             board_events: HashMap::new(),
             _mcp_pump: mcp_pump,
+            _activation: activation,
         }
     }
 
@@ -532,6 +549,9 @@ impl Workspace {
     /// After the selected environment or its shown terminal changed: focus, tree, status and
     /// git follow it, and the layout is saved.
     fn shown_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.envs.active().and_then(|t| t.shown) {
+            self.attention.remove(&id);
+        }
         self.sync_boards(window, cx);
         self.focus_active(window, cx);
         self.sync_tree(cx);
@@ -861,6 +881,7 @@ impl Workspace {
         self.files.remove(&id);
         self.file_subs.remove(&id);
         self.commands.remove(&id);
+        self.attention.remove(&id);
     }
 
     /// Ctrl+W: the file pane when it has the focus, else the shown terminal's Tasks tab when
@@ -1542,6 +1563,11 @@ impl Workspace {
                     }))
                     .child(dot)
                     .child(div().text_sm().child(env.clone()))
+                    // A Claude session here finished or needs you, out of sight.
+                    .when(
+                        tab.terminals.iter().any(|t| self.attention.contains(t)),
+                        |d| d.child(div().size(px(7.)).rounded_full().bg(cx.theme().warning)),
+                    )
                     .when_some(busy, |d, a| {
                         d.tooltip(move |window, cx| {
                             gpui_component::tooltip::Tooltip::new(busy::tooltip_text(a))

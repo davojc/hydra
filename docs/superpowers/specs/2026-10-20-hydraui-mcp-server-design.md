@@ -213,6 +213,20 @@ you` (amber) or `idle` beside the name, and the environment tab's tooltip says "
 working", "Claude needs you" or "Claude finished". The state is forgotten when the session ends,
 when the shell is back at its prompt, or when the terminal restarts.
 
+**Alerts.** When a session starts asking for you (waiting) or finishes a turn it was working on
+(working → idle), and its terminal is out of sight (the window isn't active, or the terminal
+isn't the selected environment's shown one, or its Tasks tab is in front), hydraui:
+- badges the terminal's environment tab and its row in the terminal list with an amber dot,
+  until the terminal is shown (or the window comes back with it already showing);
+- flashes the window's taskbar button while the window is in the background;
+- shows a toast, "Claude needs you" (stays until closed) or "Claude finished", naming the
+  terminal and environment; clicking it shows that terminal. A newer alert for the same terminal
+  replaces its toast.
+
+A Windows notification-centre toast isn't posted yet: it needs hydraui to have an
+AppUserModelID, which its installer's shortcuts must carry too, or the taskbar shows the running
+window apart from a pinned shortcut.
+
 ## 6. Testing
 
 Unit tests: parsing and writing the taker (InProgress/Done only, checkbox not mistaken, round

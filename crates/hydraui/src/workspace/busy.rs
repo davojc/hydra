@@ -3,12 +3,17 @@
 use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, Hsla, div, px};
-use gpui_component::ActiveTheme;
+use gpui::{AnyElement, Context, Hsla, SharedString, Window, div, px};
+use gpui_component::notification::Notification;
+use gpui_component::{ActiveTheme, WindowExt};
 
 use super::Workspace;
 use crate::activity::{Activity, busiest};
 use crate::envs::PaneId;
+use crate::mcp::{Alert, SessionState, alert_for};
+
+/// Keys the Claude alerts' toasts, one per terminal, so a newer one replaces the last.
+struct ClaudeAlert;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PaneActivity {
@@ -76,22 +81,72 @@ impl Workspace {
         }
     }
 
-    /// A Claude hook in the terminal holding `token` said its session is in `state`.
+    /// A Claude hook in the terminal holding `token` said its session is in `state`. When it
+    /// starts asking for you, or finishes, out of sight, you are told (see `alert`).
     pub(super) fn session_state(
         &mut self,
         token: &str,
-        state: crate::mcp::SessionState,
+        state: SessionState,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let view = self
+        let found = self
             .panes
-            .values()
-            .find(|v| v.read(cx).mcp_token() == Some(token))
-            .cloned();
-        if let Some(view) = view {
-            view.update(cx, |v, cx| v.set_claude(state, cx));
-            self.tick_activity(cx);
+            .iter()
+            .find(|(_, v)| v.read(cx).mcp_token() == Some(token))
+            .map(|(id, v)| (*id, v.clone()));
+        let Some((id, view)) = found else {
+            return;
+        };
+        let before = view.read(cx).claude();
+        view.update(cx, |v, cx| v.set_claude(state, cx));
+        self.tick_activity(cx);
+        if let Some(alert) = alert_for(before, state) {
+            self.alert(id, alert, window, cx);
         }
+    }
+
+    /// Whether terminal `id` is in front of you: the window is active and the terminal is the
+    /// selected environment's shown one, not behind its Tasks tab.
+    fn in_sight(&self, id: PaneId, window: &Window) -> bool {
+        window.is_window_active()
+            && self.envs.active().and_then(|t| t.shown) == Some(id)
+            && self.tasks_tabs.get(&id) != Some(&true)
+    }
+
+    /// Tells you a terminal out of sight needs you: its environment tab gets a badge until it
+    /// is shown, the taskbar button flashes while the window is in the background, and a toast
+    /// names it; clicking the toast shows the terminal.
+    fn alert(&mut self, id: PaneId, alert: Alert, window: &mut Window, cx: &mut Context<Self>) {
+        if self.in_sight(id, window) {
+            return;
+        }
+        self.attention.insert(id);
+        if !window.is_window_active() {
+            crate::claim::flash(crate::claim::hwnd_of(window));
+        }
+        let Some(view) = self.panes.get(&id) else {
+            return;
+        };
+        let place = format!(
+            "{} in {}",
+            view.read(cx).label(),
+            self.envs.env_of(id).unwrap_or("?")
+        );
+        let ws = cx.entity();
+        let note = match alert {
+            Alert::NeedsYou => Notification::warning(place)
+                .title("Claude needs you")
+                .autohide(false),
+            Alert::Finished => Notification::info(place).title("Claude finished"),
+        };
+        let note = note
+            .id1::<ClaudeAlert>(SharedString::from(format!("claude-{id}")))
+            .on_click(move |_, window, cx| {
+                ws.update(cx, |ws, cx| ws.show_terminal(id, window, cx));
+            });
+        window.push_notification(note, cx);
+        cx.notify();
     }
 
     /// The busiest activity among `panes` (an environment's terminals), or `None` when all

@@ -34,6 +34,26 @@ impl SessionState {
     }
 }
 
+/// Why a session's change of state calls for you.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Alert {
+    /// It started asking you something.
+    NeedsYou,
+    /// It finished a turn it was working on.
+    Finished,
+}
+
+/// The alert, if any, for a session going from `before` to `now`: starting to wait, or going
+/// idle after working (a fresh session starting idle isn't news).
+pub fn alert_for(before: Option<SessionState>, now: SessionState) -> Option<Alert> {
+    match (before, now) {
+        (Some(SessionState::Waiting), SessionState::Waiting) => None,
+        (_, SessionState::Waiting) => Some(Alert::NeedsYou),
+        (Some(SessionState::Working), SessionState::Idle) => Some(Alert::Finished),
+        _ => None,
+    }
+}
+
 /// A terminal's entry in the server's registry (§2): its token lives as long as this does.
 pub struct McpTerminal {
     server: Arc<server::Server>,
@@ -90,6 +110,19 @@ impl Drop for McpTerminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_waiting_and_finishing_alert() {
+        use SessionState::*;
+        assert_eq!(alert_for(Some(Working), Waiting), Some(Alert::NeedsYou));
+        assert_eq!(alert_for(None, Waiting), Some(Alert::NeedsYou));
+        assert_eq!(alert_for(Some(Waiting), Waiting), None, "already said");
+        assert_eq!(alert_for(Some(Working), Idle), Some(Alert::Finished));
+        assert_eq!(alert_for(Some(Waiting), Idle), None);
+        assert_eq!(alert_for(None, Idle), None, "a session starting");
+        assert_eq!(alert_for(Some(Idle), Working), None);
+        assert_eq!(alert_for(Some(Working), Ended), None);
+    }
 
     #[test]
     fn a_terminal_gets_the_servers_address_and_a_token_that_dies_with_it() {

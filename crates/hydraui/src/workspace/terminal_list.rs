@@ -113,6 +113,16 @@ impl Workspace {
                     .children(claude.map(|(text, color)| {
                         div().flex_none().text_xs().text_color(color).child(text)
                     }))
+                    // Out of sight when its Claude session finished or asked for you.
+                    .when(self.attention.contains(&id), |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .size(px(7.))
+                                .rounded_full()
+                                .bg(cx.theme().warning),
+                        )
+                    })
                     .child(
                         div()
                             .id(SharedString::from(format!("terminal-close-{id}")))

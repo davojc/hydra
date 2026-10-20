@@ -162,15 +162,37 @@ mod tests {
         assert!(r["id"].is_null());
     }
 
-    /// A one-shot local HTTP server answering `status`; its URL.
+    /// A one-shot local HTTP server answering `status`; its URL. It reads the whole request
+    /// first: closing with the body unread makes Windows reset the connection, and the client
+    /// then sees a transport error instead of the status.
     fn answer_once(status: &'static str) -> String {
         use std::io::Read;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/mcp", listener.local_addr().unwrap());
         std::thread::spawn(move || {
             let (mut sock, _) = listener.accept().unwrap();
+            let mut req = Vec::new();
             let mut buf = [0u8; 4096];
-            let _ = sock.read(&mut buf);
+            loop {
+                let text = String::from_utf8_lossy(&req);
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let length = text[..end]
+                        .lines()
+                        .find_map(|l| {
+                            let (k, v) = l.split_once(':')?;
+                            k.eq_ignore_ascii_case("content-length")
+                                .then(|| v.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    if req.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+                match sock.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => req.extend_from_slice(&buf[..n]),
+                }
+            }
             let reply =
                 format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
             sock.write_all(reply.as_bytes()).unwrap();

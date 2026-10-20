@@ -161,7 +161,7 @@ pub fn commit_tasks(project: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tasks::Column;
+    use crate::tasks::{Card, Column};
 
     #[test]
     fn a_repo_subfolder_belongs_to_the_repo() {
@@ -215,7 +215,7 @@ mod tests {
             std::fs::read_to_string(tasks_path(d.path())).unwrap(),
             c.text
         );
-        assert_eq!(c.board.cards(Column::Backlog), ["idea"]);
+        assert_eq!(c.board.cards(Column::Backlog), [Card::new("idea")]);
     }
 
     #[test]
@@ -243,8 +243,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(c.board.cards(Column::Backlog), ["mine, edited"]);
-        assert_eq!(c.board.cards(Column::Pickup), ["claude's"]);
+        assert_eq!(c.board.cards(Column::Backlog), [Card::new("mine, edited")]);
+        assert_eq!(c.board.cards(Column::Pickup), [Card::new("claude's")]);
     }
 
     #[test]
@@ -260,7 +260,7 @@ mod tests {
         let (loaded, text) = load(d.path()).unwrap();
         assert_eq!(c.text, text);
         assert_eq!(c.board, loaded);
-        assert_eq!(c.board.cards(Column::Backlog), ["foo"]);
+        assert_eq!(c.board.cards(Column::Backlog), [Card::new("foo")]);
     }
 
     #[test]

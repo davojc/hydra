@@ -31,10 +31,26 @@ impl Column {
     }
 }
 
+/// One card: its text and, in InProgress and Done, the terminal that took it (MCP server spec §4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Card {
+    pub text: String,
+    pub taker: Option<String>,
+}
+
+impl Card {
+    pub fn new(text: impl Into<String>) -> Card {
+        Card {
+            text: text.into(),
+            taker: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Board {
     /// Cards per column, indexed by `Column as usize`, top first.
-    pub columns: [Vec<String>; 4],
+    pub columns: [Vec<Card>; 4],
     /// Everything that isn't a card under a known column, verbatim, in original order.
     pub extra: String,
 }
@@ -48,15 +64,15 @@ pub struct CardRef {
 }
 
 impl Board {
-    pub fn cards(&self, column: Column) -> &[String] {
+    pub fn cards(&self, column: Column) -> &[Card] {
         &self.columns[column as usize]
     }
 
     pub fn card_ref(&self, column: Column, index: usize) -> Option<CardRef> {
-        let text = self.cards(column).get(index)?;
+        let text = &self.cards(column).get(index)?.text;
         let nth = self.cards(column)[..index]
             .iter()
-            .filter(|t| *t == text)
+            .filter(|c| c.text == *text)
             .count();
         Some(CardRef {
             column,
@@ -71,7 +87,7 @@ impl Board {
         self.cards(card.column)
             .iter()
             .enumerate()
-            .filter(|(_, t)| **t == card.text)
+            .filter(|(_, c)| c.text == card.text)
             .nth(card.nth)
             .map(|(i, _)| i)
     }
@@ -95,6 +111,11 @@ pub enum Change {
     },
     Delete {
         card: CardRef,
+    },
+    /// The first Pickup card with this text goes to the top of InProgress, taken by `taker`.
+    Take {
+        text: String,
+        taker: String,
     },
     ClearDone,
 }
@@ -141,13 +162,40 @@ pub fn normalise(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// A leading `[name] ` and the text after it. `[x]`, `[X]` and `[ ]` are checkboxes, not names,
+/// and a name needs text after it; otherwise the whole text is the card.
+fn split_taker(text: &str) -> (Option<String>, &str) {
+    let Some(rest) = text.strip_prefix('[') else {
+        return (None, text);
+    };
+    match rest.split_once("] ") {
+        Some((name, card))
+            if !name.is_empty()
+                && !name.contains(']')
+                && !["x", "X", " "].contains(&name)
+                && !card.trim().is_empty() =>
+        {
+            (Some(name.to_string()), card.trim())
+        }
+        _ => (None, text),
+    }
+}
+
 /// Ends the card being read, if any, filing it under `column`.
 fn flush(board: &mut Board, column: Option<Column>, card: &mut Option<String>) {
     if let (Some(col), Some(text)) = (column, card.take()) {
         let text = normalise(&text);
-        if !text.is_empty() {
-            board.columns[col as usize].push(text);
+        if text.is_empty() {
+            return;
         }
+        let (taker, text) = match col {
+            Column::InProgress | Column::Done => split_taker(&text),
+            _ => (None, text.as_str()),
+        };
+        board.columns[col as usize].push(Card {
+            text: text.to_string(),
+            taker,
+        });
     }
 }
 
@@ -227,7 +275,10 @@ pub fn write(board: &Board) -> String {
         out.push_str(column.heading());
         out.push('\n');
         for card in board.cards(column) {
-            write_card(&mut out, card);
+            match &card.taker {
+                Some(taker) => write_card(&mut out, &format!("[{taker}] {}", card.text)),
+                None => write_card(&mut out, &card.text),
+            }
         }
     }
     if !board.extra.is_empty() {
@@ -255,7 +306,7 @@ pub fn apply(board: &mut Board, change: &Change) -> Result<(), Missing> {
         Change::Add { text } => {
             let text = normalise(text);
             if !text.is_empty() {
-                board.columns[Column::Backlog as usize].insert(0, text);
+                board.columns[Column::Backlog as usize].insert(0, Card::new(text));
             }
         }
         Change::Edit { card, text } => {
@@ -265,14 +316,25 @@ pub fn apply(board: &mut Board, change: &Change) -> Result<(), Missing> {
             if text.is_empty() {
                 cards.remove(at);
             } else {
-                cards[at] = text;
+                cards[at].text = text;
             }
         }
         Change::Move { card, to, index } => {
             let at = board.find(card).ok_or(Missing)?;
-            let text = board.columns[card.column as usize].remove(at);
+            let mut moved = board.columns[card.column as usize].remove(at);
+            if matches!(to, Column::Backlog | Column::Pickup) {
+                moved.taker = None;
+            }
             let target = &mut board.columns[*to as usize];
-            target.insert((*index).min(target.len()), text);
+            target.insert((*index).min(target.len()), moved);
+        }
+        Change::Take { text, taker } => {
+            let text = normalise(text);
+            let pickup = &mut board.columns[Column::Pickup as usize];
+            let at = pickup.iter().position(|c| c.text == text).ok_or(Missing)?;
+            let mut card = pickup.remove(at);
+            card.taker = Some(taker.clone());
+            board.columns[Column::InProgress as usize].insert(0, card);
         }
         Change::Delete { card } => {
             let at = board.find(card).ok_or(Missing)?;
@@ -294,11 +356,14 @@ mod tests {
         let b = parse(CANONICAL);
         assert_eq!(
             b.cards(Column::Backlog),
-            ["Let the terminal list show unread output."]
+            [Card::new("Let the terminal list show unread output.")]
         );
-        assert_eq!(b.cards(Column::Pickup), ["Ctrl+K opens the launcher."]);
+        assert_eq!(
+            b.cards(Column::Pickup),
+            [Card::new("Ctrl+K opens the launcher.")]
+        );
         assert!(b.cards(Column::InProgress).is_empty());
-        assert_eq!(b.cards(Column::Done), ["Collapse button."]);
+        assert_eq!(b.cards(Column::Done), [Card::new("Collapse button.")]);
         assert_eq!(b.extra, "");
     }
 
@@ -319,11 +384,11 @@ mod tests {
     fn long_cards_wrap_at_100_columns_with_two_space_continuation() {
         let mut b = Board::default();
         let text = "word ".repeat(40).trim().to_string();
-        b.columns[0].push(text.clone());
+        b.columns[0].push(Card::new(text.clone()));
         let out = write(&b);
         assert!(out.lines().all(|l| l.chars().count() <= 100));
         assert!(out.lines().any(|l| l.starts_with("  word")));
-        assert_eq!(parse(&out).cards(Column::Backlog), [text]);
+        assert_eq!(parse(&out).cards(Column::Backlog), [Card::new(text)]);
     }
 
     #[test]
@@ -333,14 +398,17 @@ mod tests {
         assert_eq!(
             b.cards(Column::Backlog),
             [
-                "wrapped over two lines",
-                "star idea",
-                "plus idea",
-                "box idea",
-                "done box"
+                Card::new("wrapped over two lines"),
+                Card::new("star idea"),
+                Card::new("plus idea"),
+                Card::new("box idea"),
+                Card::new("done box")
             ]
         );
-        assert_eq!(b.cards(Column::InProgress), ["parent nested child"]);
+        assert_eq!(
+            b.cards(Column::InProgress),
+            [Card::new("parent nested child")]
+        );
         assert!(b.cards(Column::Pickup).is_empty());
     }
 
@@ -348,7 +416,7 @@ mod tests {
     fn extra_text_survives_a_round_trip() {
         let text = "Intro line\n\n## Backlog\n- a\nloose prose\n## Notes\n- not a card\n";
         let b = parse(text);
-        assert_eq!(b.cards(Column::Backlog), ["a"]);
+        assert_eq!(b.cards(Column::Backlog), [Card::new("a")]);
         assert!(b.extra.contains("Intro line") && b.extra.contains("loose prose"));
         assert!(b.extra.contains("## Notes\n- not a card"));
         let again = parse(&write(&b));
@@ -368,7 +436,7 @@ mod tests {
             assert!(!b.extra.is_empty());
             let b2 = parse(&write(&b));
             assert!(b2.cards(Column::Done).is_empty(), "{text:?}");
-            assert_eq!(b2.cards(Column::Backlog).first().unwrap(), "a");
+            assert_eq!(b2.cards(Column::Backlog).first().unwrap().text, "a");
             assert_eq!(parse(&write(&b2)), b2);
         }
     }
@@ -387,8 +455,11 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(b.cards(Column::Backlog), ["same", "other"]);
-        assert_eq!(b.cards(Column::Done), ["same"]);
+        assert_eq!(
+            b.cards(Column::Backlog),
+            [Card::new("same"), Card::new("other")]
+        );
+        assert_eq!(b.cards(Column::Done), [Card::new("same")]);
     }
 
     #[test]
@@ -401,7 +472,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(b.cards(Column::Backlog)[0], "new idea");
+        assert_eq!(b.cards(Column::Backlog)[0].text, "new idea");
         let r = b.card_ref(Column::Pickup, 0).unwrap();
         apply(
             &mut b,
@@ -411,7 +482,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(b.cards(Column::Pickup), ["edited"]);
+        assert_eq!(b.cards(Column::Pickup), [Card::new("edited")]);
         let r = b.card_ref(Column::Pickup, 0).unwrap();
         apply(
             &mut b,
@@ -432,7 +503,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(b.cards(Column::Backlog).last().unwrap(), "new idea");
+        assert_eq!(b.cards(Column::Backlog).last().unwrap().text, "new idea");
         apply(&mut b, &Change::ClearDone).unwrap();
         assert!(b.cards(Column::Done).is_empty());
         apply(&mut b, &Change::Add { text: "".into() }).unwrap();
@@ -454,10 +525,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(fresh.cards(Column::Pickup), ["from claude"]);
+        assert_eq!(fresh.cards(Column::Pickup), [Card::new("from claude")]);
         assert_eq!(
             fresh.cards(Column::InProgress),
-            ["Ctrl+K opens the launcher."]
+            [Card::new("Ctrl+K opens the launcher.")]
         );
     }
 
@@ -467,5 +538,126 @@ mod tests {
         let card = seen.card_ref(Column::Done, 0).unwrap();
         let mut fresh = parse("## Done\n");
         assert_eq!(apply(&mut fresh, &Change::Delete { card }), Err(Missing));
+    }
+
+    #[test]
+    fn takers_are_read_in_inprogress_and_done_only() {
+        let b = parse(
+            "## Backlog
+- [WIP] still text
+## Pickup
+- [x] boxed
+## InProgress
+- [claude] doing it
+- [ ] boxed too
+## Done
+- [api-2] did it
+",
+        );
+        assert_eq!(b.cards(Column::Backlog), [Card::new("[WIP] still text")]);
+        assert_eq!(b.cards(Column::Pickup), [Card::new("boxed")]);
+        assert_eq!(
+            b.cards(Column::InProgress)[0],
+            Card {
+                text: "doing it".into(),
+                taker: Some("claude".into())
+            }
+        );
+        assert_eq!(b.cards(Column::InProgress)[1], Card::new("boxed too"));
+        assert_eq!(b.cards(Column::Done)[0].taker.as_deref(), Some("api-2"));
+    }
+
+    #[test]
+    fn takers_round_trip() {
+        let text = "# Tasks
+
+## Backlog
+
+## Pickup
+
+## InProgress
+- [my term] doing it
+
+## Done
+";
+        assert_eq!(write(&parse(text)), text);
+    }
+
+    #[test]
+    fn take_moves_the_first_match_to_the_top_of_inprogress() {
+        let mut b = parse(
+            "## Pickup
+- a
+- the  card
+  wrapped
+- the card wrapped
+## InProgress
+- [x1] old
+",
+        );
+        apply(
+            &mut b,
+            &Change::Take {
+                text: "the card
+wrapped "
+                    .into(),
+                taker: "claude".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            b.cards(Column::Pickup),
+            [Card::new("a"), Card::new("the card wrapped")]
+        );
+        assert_eq!(
+            b.cards(Column::InProgress)[0],
+            Card {
+                text: "the card wrapped".into(),
+                taker: Some("claude".into())
+            }
+        );
+        assert_eq!(
+            apply(
+                &mut b,
+                &Change::Take {
+                    text: "gone".into(),
+                    taker: "c".into()
+                }
+            ),
+            Err(Missing)
+        );
+    }
+
+    #[test]
+    fn moving_back_drops_the_taker_and_done_keeps_it() {
+        let mut b = parse(
+            "## InProgress
+- [c] one
+- [c] two
+",
+        );
+        let one = b.card_ref(Column::InProgress, 0).unwrap();
+        apply(
+            &mut b,
+            &Change::Move {
+                card: one,
+                to: Column::Pickup,
+                index: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(b.cards(Column::Pickup), [Card::new("one")]);
+        let two = b.card_ref(Column::InProgress, 0).unwrap();
+        assert_eq!(two.text, "two");
+        apply(
+            &mut b,
+            &Change::Move {
+                card: two,
+                to: Column::Done,
+                index: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(b.cards(Column::Done)[0].taker.as_deref(), Some("c"));
     }
 }

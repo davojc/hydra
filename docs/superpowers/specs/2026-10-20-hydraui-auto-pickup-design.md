@@ -11,12 +11,20 @@ to a Claude terminal and types "check Pickup". The user wants an open Claude
 session in that project that has finished its work to take the card on its
 own.
 
-Whether a session is ready for new work is decided by a model, not guessed
-from keystrokes or wording. The user has an API key for **Jev**, TypeSafe's
-decision model (yes/no answers with probabilities, fast and cheap). Jev makes
-the call; without Jev nothing is sent automatically. The user would rather
-have a reliable decision model than heuristics about what may or may not be
-typed.
+The user wants a reliable decision on whether a session is ready for new
+work, not guesses from wording. Claude's hooks can't make it: a turn that ends
+with a plain-text question ("Should I go ahead?") fires `Stop`, the same idle
+as finished work. So:
+
+- hydraui always checks facts it can be sure of, including whether the user
+  has left a draft in the input (§5.1);
+- then, when the session's environment has a key for **Jev** (TypeSafe's
+  decision model: yes/no answers with probabilities, fast and cheap), Jev
+  makes the final call on whether Claude is waiting for the user or finished
+  (§5.2);
+- without Jev, only sessions that are clearly finished count: a new session
+  with no prompt yet, or one whose last turn moved its card to Verify (§5.3).
+  Nothing is guessed from wording.
 
 Claude Code's Channels feature (an MCP server pushing events into a session)
 was considered and set aside: it is a research preview, a custom channel needs
@@ -29,16 +37,17 @@ terminal, as the user would.
 
 Goals
 - An environment can hold a Jev API key (§3), kept out of its terminals.
-- With Jev, a card the user moves into Pickup is typed into one free Claude
-  session of that project, which takes it with `tasks_take` and works as
-  usual. When no session is free, the card stays in Pickup and a toast says so.
+- A card the user moves into Pickup is typed into one free Claude session of
+  that project, which takes it with `tasks_take` and works as usual. When no
+  session is free, the card stays in Pickup and a toast says so.
 - A card's right-click menu can send it by hand (§8), with or without Jev.
 
 Non-goals
 - Channels. Negotiation between sessions over who takes a card (random choice
   for now). Starting a new Claude session when none is free. Retrying or
   queueing a card until a session frees up. Terminals in other hydraui windows.
-- Any automatic sending without Jev.
+- Telling, without Jev, a session that finished other work (not a card) from
+  one that asked a question: it doesn't count as free until Jev is set up.
 
 Anti-goals (a failure even if it works)
 - Typing into a session that is asking the user something, or where the user
@@ -85,14 +94,13 @@ that way, and cards already in Pickup when hydraui starts, are sent by hand
 Since a move happens on an open Tasks tab, the board and its project are
 loaded when a card arrives.
 
-On arrival hydraui looks for a free session (§5) among the candidates whose
-environment has a Jev key. If none of the candidates' environments has one,
-nothing happens: no toast (my call; the user hasn't turned the feature on for
-these sessions).
+On arrival hydraui looks for a free session (§5).
 
 ## 5. Which sessions are free
 
-**Candidates** (facts, checked first and cheaply):
+### 5.1 Facts, always checked
+
+**Candidates**, checked first and cheaply:
 1. In this hydraui window, running Claude (it has reported through the status
    hooks).
 2. In the board's project's main work tree: `tasks_project::git_root(cwd)` is
@@ -106,16 +114,38 @@ these sessions).
 4. Not the focused terminal while the hydraui window is active (my call: the
    user may be typing there right now; it costs nothing to skip).
 5. Not reserved by a card sent in the last moments (§6).
+6. **No draft** in its input. hydraui keeps a per-terminal flag from the input
+   the user sends it:
+   - typing sets it: printable keys, text from the input handler (IME/AltGr),
+     paste, Backspace/Delete and other editing keys. Mouse reports, focus
+     events and hydraui's own injected text do not;
+   - **Enter** (unmodified) clears it;
+   - a change of hook state from *idle* to *working* clears it: while idle,
+     only `UserPromptSubmit` reports *working*, so the input was just
+     submitted (my call). hydraui sees only state names, and *working* also
+     comes from `PostToolUse` and *idle* from `Stop`, which must not clear
+     type-ahead, so no other state change clears it and the hook protocol
+     stays as it is;
+   - **Esc Esc** (two in a row) and **Ctrl+C** may have cleared Claude's input
+     but don't always (a single Esc never does; in menus they mean other
+     things). After one, hydraui reads Claude's input line from the grid and
+     clears the flag only if it is empty; if it can't tell, the flag stays;
+   - typing while Claude works sets it too: Claude Code keeps type-ahead.
 
-**Jev decides** for each candidate whose environment has a Jev key. One call
-per candidate, with that environment's key, asking three yes/no ("noul")
-questions about the terminal's screen:
+A candidate that passes all six goes on to §5.2 or §5.3, depending on whether
+its environment has a Jev key (§3).
+
+### 5.2 With Jev: Jev makes the final call
+
+One call per candidate, with its environment's key, asking three yes/no
+("noul") questions about the terminal's screen:
 
 - `waiting`: Is the assistant waiting for the user to answer a question, make a
   decision or give more information?
 - `finished`: Has the assistant finished its work and is it ready for a new,
   unrelated task?
-- `draft`: Is there unsent text typed in the input box at the bottom?
+- `draft`: Is there unsent text typed in the input box at the bottom? (A
+  second check on §5.1.6, from the screen.)
 
 The **state** sent is the text of the terminal's last ~60 rows (screen plus
 the end of scrollback), as hydraui's grid holds it: that shows the end of
@@ -125,16 +155,32 @@ testing shows the screen isn't enough).
 
 A candidate is **free** when `finished ≥ 0.8`, `waiting ≤ 0.2` and
 `draft ≤ 0.2` (my call on the thresholds; constants, tuned during the hands-on
-check). A Jev error, timeout (~5 s) or unexpected reply means not free.
-
-Candidates are asked in parallel, off the UI thread. Among the free ones, one
-is picked at random.
+check). A Jev error, timeout (~5 s) or unexpected reply means not free (no
+falling back to §5.3 for that session: Jev was meant to decide).
 
 Jev API (docs.typesafe.ai/api): `POST https://api.typesafe.ai/v1/systemone`,
 `Authorization: Bearer <key>`, body
 `{"model": "jev-latest", "state": "...", "questions": {"<id>": {"type": "noul", "instructions": "..."}}}`,
 reply `{"answers": {"<id>": {"type": "noul", "noul": 0.93}}, ...}`. Jev is in
 early access; the model alias is a constant.
+
+### 5.3 Without Jev: only clearly finished sessions
+
+A candidate whose environment has no Jev key is free only when it is clearly
+finished:
+- **fresh**: its Claude session started (`SessionStart`) and has had no prompt
+  since (no idle→working change); or
+- **just verified**: during its last turn it called `tasks_verify` (the MCP
+  server knows which terminal's token made the call), and no prompt has
+  started since (an idle→working change resets this).
+
+A session that ended its turn by asking something hasn't verified a card, so it
+is skipped. Nothing is guessed from wording.
+
+### 5.4 Picking
+
+Jev candidates are asked in parallel, off the UI thread. Among all free
+sessions, by either rule, one is picked at random.
 
 ## 6. Sending
 
@@ -178,11 +224,11 @@ themselves.
 
 Pickup cards' right-click menu, next to Take in new worktree:
 
-- **Send to a free session**: shown when some candidate's environment has a
-  Jev key. Picks and sends as §5 and §6, or shows §7's toast.
-- **Send to ▸**: a submenu of the project's candidate terminals (§5.1–5.3,
-  idle Claude sessions in the main work tree), by name and environment. The
-  user picks; no Jev call. Works with or without Jev (my call). Disabled
+- **Send to a free session**: picks and sends as §5 and §6, or shows §7's
+  toast.
+- **Send to ▸**: a submenu of the project's idle Claude sessions in the main
+  work tree (§5.1 items 1–3), by name and environment. The user picks; no
+  draft, Jev or finished check (my call: the user is deciding). Disabled
   (greyed) when there are none.
 
 Both send as §6, reservation and toast included.
@@ -195,9 +241,13 @@ Both send as §6, reservation and toast included.
 - The HTTP client for Jev (the crate already makes HTTPS calls to GitHub for
   updates) and the request/response types.
 - Reading the terminal's rows as text for the state.
+- Where the draft flag and the fresh/just-verified state live (likely
+  `PaneView`, beside its Claude state) and how injected text skips the draft
+  flag.
 - Tests: the `[jev]` config and add-tool, the jev tool contributing no
-  variables, the candidate filter, the free decision from Jev answers
-  (thresholds, errors), the prompt text, arrival only on moves into Pickup.
+  variables, draft flag transitions, fresh/just-verified transitions, the
+  candidate filter, the free decision from Jev answers (thresholds, errors),
+  the prompt text, arrival only on moves into Pickup.
   A hands-on check in a real Claude session that the prompt submits and Claude
   takes the card, and that Jev's answers look right on a few real screens (a
   finished session, one asking a question, one with a draft).

@@ -2,6 +2,7 @@ mod auth;
 mod bind;
 mod env;
 pub mod guard;
+mod hook;
 mod init;
 pub mod launch;
 mod secret;
@@ -23,6 +24,11 @@ pub fn run(cmd: Cmd) -> anyhow::Result<i32> {
             GuardCmd::Git { hook, args } => guard::git(&hook, &args),
             GuardCmd::Claude => guard::claude(),
         };
+    }
+    // Run by Claude Code's hooks: never fails, never slows the session.
+    if let Cmd::Hook { state } = cmd {
+        hook::run(&state);
+        return Ok(0);
     }
     if let Cmd::Allow { command } = cmd {
         return guard::allow(&command);
@@ -75,7 +81,7 @@ pub fn run(cmd: Cmd) -> anyhow::Result<i32> {
         Cmd::Whoami { env } => whoami::run(&app, env),
         Cmd::Bind { args, file, list } => bind::bind(&app, args, file, list),
         Cmd::Unbind { path } => bind::unbind(&app, path),
-        Cmd::Update { .. } | Cmd::Guard { .. } | Cmd::Allow { .. } => {
+        Cmd::Update { .. } | Cmd::Guard { .. } | Cmd::Allow { .. } | Cmd::Hook { .. } => {
             unreachable!("handled above")
         }
     }

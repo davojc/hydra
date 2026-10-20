@@ -35,7 +35,7 @@ use crate::input::{
     Mods, MouseKind, ReportButton, Wheel, key_bytes, mouse_report, paste_bytes, wheel,
 };
 use crate::keys::{CopyText, Find, PasteText, TerminalBackTab, TerminalTab};
-use crate::mcp::McpTerminal;
+use crate::mcp::{McpTerminal, SessionState};
 use crate::palette::Palette;
 
 /// The font and colours every pane draws with.
@@ -83,6 +83,9 @@ pub struct PaneView {
     warnings: Vec<String>,
     cwd: PathBuf,
     prompt: Option<PromptState>,
+    /// What the Claude session running here last said it is doing (its hooks); cleared when
+    /// the session or its command ends.
+    claude: Option<SessionState>,
     /// The user's name for this terminal (Rename, a layout's `title`); none: the folder's.
     name: Option<String>,
     /// The title the program set, kept for a tooltip; it never names the terminal.
@@ -220,6 +223,7 @@ impl PaneView {
             slot: Slot::Starting,
             warnings,
             prompt: None,
+            claude: None,
             name: None,
             title: None,
             focus,
@@ -270,7 +274,31 @@ impl PaneView {
             Slot::Running(pane) => (true, pane.last_output()),
             _ => (false, None),
         };
+        if running && let Some(state) = self.claude {
+            // The session's own word beats guessing from its output.
+            return match state {
+                SessionState::Working => crate::activity::Activity::Working,
+                SessionState::Waiting => crate::activity::Activity::Waiting,
+                SessionState::Idle | SessionState::Ended => crate::activity::Activity::Idle,
+            };
+        }
         crate::activity::activity(running, self.prompt, last, now)
+    }
+
+    /// What the Claude session here last said it is doing, if one is running.
+    pub fn claude(&self) -> Option<SessionState> {
+        self.claude
+    }
+
+    /// A Claude hook in this terminal reported `state`; `Ended` forgets the session.
+    pub fn set_claude(&mut self, state: SessionState, cx: &mut Context<Self>) {
+        self.claude = (state != SessionState::Ended).then_some(state);
+        cx.notify();
+    }
+
+    /// The terminal's token in the MCP server, which its Claude hooks report under.
+    pub fn mcp_token(&self) -> Option<&str> {
+        self.mcp.as_ref().map(McpTerminal::token)
     }
 
     /// The terminal's name: the user's, else its folder's (spec §2.2 of the env-tabs design).
@@ -319,6 +347,7 @@ impl PaneView {
     fn start(&mut self, cx: &mut Context<Self>) {
         self.slot = Slot::Starting;
         self.prompt = None;
+        self.claude = None;
         self.generation += 1;
         let generation = self.generation;
         // A restart is the same terminal: it keeps its token.
@@ -377,6 +406,10 @@ impl PaneView {
             }
             TermEvent::Prompt(p) => {
                 self.prompt = Some(p);
+                // Back at the prompt: whatever ran (Claude too) has ended.
+                if p != PromptState::CommandRunning {
+                    self.claude = None;
+                }
                 cx.emit(PaneEvent::PromptChanged);
             }
             TermEvent::Title(t) => {
@@ -387,6 +420,7 @@ impl PaneView {
             TermEvent::Exited(code) => {
                 self.slot = Slot::Exited(code);
                 self.prompt = None;
+                self.claude = None;
                 self.finder = None;
                 cx.emit(PaneEvent::Exited);
                 cx.notify();

@@ -9,8 +9,8 @@ use hydra_core::provider::{
 use hydra_platform::links::{is_link, link_dir, points_at, unlink};
 
 use crate::claude_files::{
-    HYDRAUI_SERVER, add_guard_hook, add_hydraui_allow, drop_excluded, guard_hook_command,
-    merge_settings, render_claude_md, sync_mcp,
+    HYDRAUI_SERVER, add_guard_hook, add_hydraui_allow, add_status_hooks, drop_excluded,
+    guard_hook_command, merge_settings, render_claude_md, sync_mcp,
 };
 use crate::report::report;
 
@@ -382,7 +382,7 @@ impl Provider for Claude {
             ));
         }
         let allowed = if hydraui_registered(&exclude) {
-            with_hydraui_allow(merged.text, ctx.warnings)
+            with_status_hooks(with_hydraui_allow(merged.text, ctx.warnings), ctx.warnings)
         } else {
             merged.text
         };
@@ -493,6 +493,40 @@ fn with_hydraui_allow(text: String, warnings: &Warnings) -> String {
         Err(e) => {
             warnings.push(format!(
                 "hydra: claude: hydraui tools not pre-approved ({e})"
+            ));
+            text
+        }
+    }
+}
+
+/// hydra's own exe for hooks, quoted with forward slashes: this program when it is hydra, else
+/// the hydra next to it (hydraui runs this code too), else `hydra` on the PATH.
+fn hydra_for_hooks() -> String {
+    let me = std::env::current_exe().ok();
+    let exe = me.and_then(|me| {
+        if me
+            .file_stem()
+            .is_some_and(|s| s.eq_ignore_ascii_case("hydra"))
+        {
+            return Some(me);
+        }
+        let sibling = me.with_file_name(format!("hydra{}", std::env::consts::EXE_SUFFIX));
+        sibling.is_file().then_some(sibling)
+    });
+    match exe {
+        Some(exe) => format!("\"{}\"", exe.to_string_lossy().replace('\\', "/")),
+        None => "hydra".to_string(),
+    }
+}
+
+/// Adds the hooks that tell hydraui what the session is doing. Skipped with a warning when the
+/// settings can't take them.
+fn with_status_hooks(text: String, warnings: &Warnings) -> String {
+    match add_status_hooks(&text, &hydra_for_hooks()) {
+        Ok(with_hooks) => with_hooks,
+        Err(e) => {
+            warnings.push(format!(
+                "hydra: claude: hydraui status hooks not added ({e})"
             ));
             text
         }
@@ -853,6 +887,21 @@ mod tests {
     }
 
     #[test]
+    fn hydraui_status_hooks_come_with_the_hydraui_server() {
+        let f = Fixture::new("[claude]\n");
+        Claude.materialise(&f.ctx()).unwrap();
+        let text = std::fs::read_to_string(cfg_dir(&f).join("settings.json")).unwrap();
+        assert!(
+            text.contains(" hook working") && text.contains("SessionEnd"),
+            "{text}"
+        );
+        let f = Fixture::new("[claude]\nmcp.exclude = [\"hydraui\"]\n");
+        Claude.materialise(&f.ctx()).unwrap();
+        let text = std::fs::read_to_string(cfg_dir(&f).join("settings.json")).unwrap();
+        assert!(!text.contains(" hook working"), "{text}");
+    }
+
+    #[test]
     fn without_guards_a_fresh_environment_gets_no_guard_hook() {
         let mut f = Fixture::new("[claude]\n");
         f.guards = false;
@@ -970,12 +1019,15 @@ mod tests {
         )
         .unwrap();
         let next = with_guard_hook(
-            add_hydraui_allow(
-                &merge_settings(Some((Path::new("x"), r#"{"model":"haiku"}"#)), None, &[])
-                    .unwrap()
-                    .text,
-            )
-            .unwrap(),
+            with_status_hooks(
+                add_hydraui_allow(
+                    &merge_settings(Some((Path::new("x"), r#"{"model":"haiku"}"#)), None, &[])
+                        .unwrap()
+                        .text,
+                )
+                .unwrap(),
+                &Warnings::default(),
+            ),
             &Warnings::default(),
         );
         std::fs::write(dir.join("settings.json"), &next).unwrap();
@@ -1058,7 +1110,10 @@ mod tests {
         assert!(dir.is_dir());
         assert_eq!(
             std::fs::read_to_string(dir.join("settings.json")).unwrap(),
-            with_guard_hook(add_hydraui_allow("{}").unwrap(), &Warnings::default())
+            with_guard_hook(
+                with_status_hooks(add_hydraui_allow("{}").unwrap(), &Warnings::default()),
+                &Warnings::default()
+            )
         );
         assert!(!dir.join("CLAUDE.md").exists());
     }

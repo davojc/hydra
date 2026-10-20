@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use serde_json::{Value, json};
 
+use super::SessionState;
 use super::registry::{Registry, Terminal};
 use super::tools::{INSTRUCTIONS, call, list};
 
@@ -20,6 +21,9 @@ const MAX_BODY: u64 = 1 << 20;
 pub enum McpEvent {
     /// A terminal made a project's task board; carries the project folder.
     BoardCreated(PathBuf),
+    /// A Claude session's hook (`hydra hook <state>`) said what it is doing: the terminal's
+    /// token and the state.
+    Session(String, SessionState),
 }
 
 /// What `handle` answers: an HTTP status and, for 200, the JSON body.
@@ -76,9 +80,14 @@ pub fn handle(
     body: &str,
 ) -> (Reply, Option<McpEvent>) {
     match gate(registry, method, path, auth, origin) {
-        Ok(terminal) => answer(&terminal, body),
+        Ok(terminal) => answer(&terminal, bearer(auth), body),
         Err(reply) => (reply, None),
     }
+}
+
+/// The token in an `Authorization: Bearer <token>` header; empty without one.
+fn bearer(auth: Option<&str>) -> &str {
+    auth.and_then(|a| a.strip_prefix("Bearer ")).unwrap_or("")
 }
 
 /// Checks the path, Origin, token and method from the headers alone, so a stranger is refused
@@ -96,8 +105,8 @@ pub fn gate(
     if origin.is_some_and(|o| !local_origin(o)) {
         return Err(status(403));
     }
-    let terminal = auth
-        .and_then(|a| a.strip_prefix("Bearer "))
+    let terminal = Some(bearer(auth))
+        .filter(|t| !t.is_empty())
         .and_then(|t| lock(registry).get(t))
         .ok_or(status(401))?;
     if method != "POST" {
@@ -106,8 +115,9 @@ pub fn gate(
     Ok(terminal)
 }
 
-/// Answers the JSON-RPC message in `body` for a terminal `gate` let through.
-pub fn answer(terminal: &Terminal, body: &str) -> (Reply, Option<McpEvent>) {
+/// Answers the JSON-RPC message in `body` for a terminal `gate` let through, whose token is
+/// `token`.
+pub fn answer(terminal: &Terminal, token: &str, body: &str) -> (Reply, Option<McpEvent>) {
     let msg: Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(_) => return (fail(&Value::Null, -32700, "parse error"), None),
@@ -118,10 +128,16 @@ pub fn answer(terminal: &Terminal, body: &str) -> (Reply, Option<McpEvent>) {
             None,
         );
     };
-    let Some(id) = obj.get("id") else {
-        return (status(202), None);
-    };
     let params = obj.get("params").unwrap_or(&Value::Null);
+    let Some(id) = obj.get("id") else {
+        // A notification; hydra's Claude hooks send `hydraui/status` with the session's state.
+        let event = (obj.get("method").and_then(Value::as_str) == Some("hydraui/status"))
+            .then(|| params.get("state").and_then(Value::as_str))
+            .flatten()
+            .and_then(SessionState::parse)
+            .map(|state| McpEvent::Session(token.to_string(), state));
+        return (status(202), event);
+    };
     match obj.get("method").and_then(Value::as_str) {
         Some("initialize") => {
             let version = params
@@ -231,7 +247,10 @@ impl Server {
         let read = request.as_reader().take(MAX_BODY).read_to_string(&mut body);
         let handled = match read {
             Err(_) => Some((status(400), None)),
-            Ok(_) => catch_unwind(AssertUnwindSafe(|| answer(&terminal, &body))).ok(),
+            Ok(_) => catch_unwind(AssertUnwindSafe(|| {
+                answer(&terminal, bearer(auth.as_deref()), &body)
+            }))
+            .ok(),
         };
         let (reply, event) = handled.unwrap_or_else(|| (status(500), None));
         if let Some(event) = event {
@@ -357,6 +376,36 @@ mod tests {
             handle(&reg, "POST", "/mcp", Some(&ok), None, init).0.status,
             401
         );
+    }
+
+    #[test]
+    fn a_hooks_status_names_its_terminal() {
+        let dir = repo();
+        let reg = Mutex::new(Registry::default());
+        let token = reg.lock().unwrap().register("c", dir.path().to_path_buf());
+        let auth = format!("Bearer {token}");
+        let send = |body: &str| handle(&reg, "POST", "/mcp", Some(&auth), None, body);
+        let (reply, event) =
+            send(r#"{"jsonrpc":"2.0","method":"hydraui/status","params":{"state":"waiting"}}"#);
+        assert_eq!(reply.status, 202);
+        assert_eq!(
+            event,
+            Some(McpEvent::Session(token.clone(), SessionState::Waiting))
+        );
+        let (_, event) =
+            send(r#"{"jsonrpc":"2.0","method":"hydraui/status","params":{"state":"asleep"}}"#);
+        assert_eq!(event, None, "an unknown state");
+        let (_, event) = send(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
+        assert_eq!(event, None);
+        let (reply, event) = handle(
+            &reg,
+            "POST",
+            "/mcp",
+            Some("Bearer nope"),
+            None,
+            r#"{"jsonrpc":"2.0","method":"hydraui/status","params":{"state":"idle"}}"#,
+        );
+        assert_eq!((reply.status, event), (401, None), "a stranger");
     }
 
     #[test]

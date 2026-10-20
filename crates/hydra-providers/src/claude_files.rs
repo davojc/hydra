@@ -160,6 +160,79 @@ pub fn add_guard_hook(settings_json: &str, command: &str) -> Result<String, Stri
     Ok(text)
 }
 
+/// The hooks that tell hydraui what a session is doing: each Claude Code event, its matcher
+/// (`None`: every time) and the state `hydra hook` reports.
+pub const STATUS_HOOKS: [(&str, Option<&str>, &str); 7] = [
+    ("SessionStart", None, "idle"),
+    ("UserPromptSubmit", None, "working"),
+    // Asking the user a question or to approve a plan.
+    (
+        "PreToolUse",
+        Some("AskUserQuestion|ExitPlanMode"),
+        "waiting",
+    ),
+    // A tool ran: any question or permission before it has been answered.
+    ("PostToolUse", Some("*"), "working"),
+    (
+        "Notification",
+        Some("permission_prompt|elicitation_dialog"),
+        "waiting",
+    ),
+    ("Stop", None, "idle"),
+    ("SessionEnd", None, "ended"),
+];
+
+/// Whether a hook command is one of hydra's status hooks (`<hydra> hook <state>`).
+fn is_status_hook(command: &str) -> bool {
+    command
+        .rsplit_once(" hook ")
+        .is_some_and(|(_, state)| STATUS_HOOKS.iter().any(|(_, _, s)| *s == state))
+}
+
+/// Adds hydra's status hooks (`STATUS_HOOKS`, each running `<hydra> hook <state>`, `hydra`
+/// being the quoted path or name in `hydra`) to the settings JSON, keeping every other hook.
+/// Idempotent: status hooks already there, from any hydra, are replaced.
+pub fn add_status_hooks(settings_json: &str, hydra: &str) -> Result<String, String> {
+    let mut root: Value = serde_json::from_str(settings_json).map_err(|e| e.to_string())?;
+    let obj = root
+        .as_object_mut()
+        .ok_or("settings.json isn't a JSON object")?;
+    let hooks = obj
+        .entry("hooks")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or("settings.json: \"hooks\" isn't an object")?;
+    let ours = |entry: &Value| {
+        entry["hooks"].as_array().is_some_and(|hs| {
+            hs.iter()
+                .any(|h| h["command"].as_str().is_some_and(is_status_hook))
+        })
+    };
+    for (event, _, _) in STATUS_HOOKS {
+        let list = hooks
+            .entry(event)
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .ok_or_else(|| format!("settings.json: hooks.{event} isn't a list"))?;
+        list.retain(|e| !ours(e));
+    }
+    for (event, matcher, state) in STATUS_HOOKS {
+        let mut entry = serde_json::json!({
+            "hooks": [{"type": "command", "command": format!("{hydra} hook {state}")}],
+        });
+        if let Some(m) = matcher {
+            entry["matcher"] = Value::String(m.to_string());
+        }
+        hooks[event]
+            .as_array_mut()
+            .expect("made a list above")
+            .push(entry);
+    }
+    let mut text = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    text.push('\n');
+    Ok(text)
+}
+
 /// The command of the guard hook already in the settings JSON, if any.
 pub fn guard_hook_command(settings_json: &str) -> Option<String> {
     let root: Value = serde_json::from_str(settings_json).ok()?;
@@ -324,6 +397,36 @@ mod tests {
                 .unwrap()
                 .contains("mcp__hydraui__tasks_take")
         );
+    }
+
+    #[test]
+    fn status_hooks_are_added_once_keeping_other_hooks() {
+        let user = r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"notify-me"}]}]}}"#;
+        let once = add_status_hooks(user, "\"C:/h/hydra.exe\"").unwrap();
+        // Another hydra's path replaces the old hooks rather than adding more.
+        let again = add_status_hooks(&once, "hydra").unwrap();
+        let v: Value = serde_json::from_str(&again).unwrap();
+        assert_eq!(
+            v["hooks"]["Stop"],
+            json!([
+                {"hooks": [{"type": "command", "command": "notify-me"}]},
+                {"hooks": [{"type": "command", "command": "hydra hook idle"}]}
+            ])
+        );
+        assert_eq!(
+            v["hooks"]["Notification"],
+            json!([{
+                "matcher": "permission_prompt|elicitation_dialog",
+                "hooks": [{"type": "command", "command": "hydra hook waiting"}]
+            }])
+        );
+        assert_eq!(add_status_hooks(&again, "hydra").unwrap(), again);
+        for (event, _, state) in STATUS_HOOKS {
+            let cmd = &v["hooks"][event].as_array().unwrap().last().unwrap()["hooks"][0]["command"];
+            assert_eq!(cmd, &json!(format!("hydra hook {state}")), "{event}");
+        }
+        assert!(!is_status_hook("hydra hook later"));
+        assert!(!is_status_hook("\"C:/h/hydra.exe\" guard claude"));
     }
 
     #[test]

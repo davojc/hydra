@@ -9,6 +9,31 @@ use std::sync::Arc;
 
 use crate::pane_view::label_for;
 
+/// What a Claude session in a terminal is doing, as its hooks report it (`hydra hook <state>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionState {
+    /// Working on a prompt.
+    Working,
+    /// Asking you something: a permission, a question, a plan to approve.
+    Waiting,
+    /// Finished its turn, waiting for your next prompt.
+    Idle,
+    /// The session ended.
+    Ended,
+}
+
+impl SessionState {
+    pub fn parse(s: &str) -> Option<SessionState> {
+        match s {
+            "working" => Some(SessionState::Working),
+            "waiting" => Some(SessionState::Waiting),
+            "idle" => Some(SessionState::Idle),
+            "ended" => Some(SessionState::Ended),
+            _ => None,
+        }
+    }
+}
+
 /// A terminal's entry in the server's registry (§2): its token lives as long as this does.
 pub struct McpTerminal {
     server: Arc<server::Server>,
@@ -38,6 +63,11 @@ impl McpTerminal {
             ("HYDRA_MCP_URL".into(), self.server.url().to_string()),
             ("HYDRA_MCP_TOKEN".into(), self.token.clone()),
         ]
+    }
+
+    /// The terminal's token, which names it in the server's events.
+    pub fn token(&self) -> &str {
+        &self.token
     }
 
     pub fn set_cwd(&self, cwd: PathBuf) {

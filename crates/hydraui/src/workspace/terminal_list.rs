@@ -11,6 +11,7 @@ use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
 
 use super::Workspace;
+use crate::activity::Activity;
 use crate::envs::PaneId;
 use crate::pane_view::label_for;
 
@@ -47,7 +48,14 @@ impl Workspace {
             };
             let v = view.read(cx);
             let (label, program) = (v.label(), v.program_title().map(str::to_string));
-            let dot = self.render_tab_dot(self.activity.get(&id).copied(), tint, cx);
+            let activity = self.activity.get(&id).copied();
+            let dot = self.render_tab_dot(activity, tint, cx);
+            // What a Claude session here says it is doing (its hooks), beside its name.
+            let claude = activity.filter(|a| a.claude).map(|a| match a.state {
+                Activity::Working => ("working", muted),
+                Activity::Waiting => ("needs you", cx.theme().warning),
+                Activity::Idle => ("idle", muted),
+            });
             // Keyed by the terminal, so element state stays with it when another closes.
             let group = SharedString::from(format!("terminal-row-{id}"));
             list = list.child(
@@ -102,6 +110,9 @@ impl Workspace {
                     })
                     .child(dot)
                     .child(div().flex_1().min_w_0().text_sm().truncate().child(label))
+                    .children(claude.map(|(text, color)| {
+                        div().flex_none().text_xs().text_color(color).child(text)
+                    }))
                     .child(
                         div()
                             .id(SharedString::from(format!("terminal-close-{id}")))

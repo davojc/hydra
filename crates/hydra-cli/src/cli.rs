@@ -113,6 +113,10 @@ pub enum Cmd {
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
+    /// Tells hydraui what the Claude session in its terminal is doing (run by Claude Code's
+    /// hooks, not by hand): working, waiting, idle or ended
+    #[command(hide = true)]
+    Hook { state: String },
     /// Guard decisions for hydra's hooks (run by the hooks, not by hand)
     #[command(hide = true)]
     Guard {

@@ -258,18 +258,19 @@ impl Workspace {
                 }
             }
         });
-        // A session created a board file (spec §5): ask the same question the Tasks tab does.
+        // A session created a board file (spec §5): ask the same question the Tasks tab does. A
+        // Claude hook said what its session is doing: the terminal's dot shows it.
         let mcp_pump = crate::mcp::server::get().map(|server| {
             let mut rx = server.subscribe();
             cx.spawn_in(window, async move |this, cx| {
+                use crate::mcp::server::McpEvent;
                 use futures::StreamExt;
-                while let Some(crate::mcp::server::McpEvent::BoardCreated(project)) =
-                    rx.next().await
-                {
-                    if this
-                        .update_in(cx, |ws, window, cx| ws.board_created(project, window, cx))
-                        .is_err()
-                    {
+                while let Some(event) = rx.next().await {
+                    let alive = this.update_in(cx, |ws, window, cx| match event {
+                        McpEvent::BoardCreated(project) => ws.board_created(project, window, cx),
+                        McpEvent::Session(token, state) => ws.session_state(&token, state, cx),
+                    });
+                    if alive.is_err() {
                         break;
                     }
                 }

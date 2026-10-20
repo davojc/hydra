@@ -184,6 +184,35 @@ from Verify to Done.
 - Ideas or follow-ups worth keeping go to Backlog with `tasks_add`, not into Pickup.
 - Use `tasks_mine` to recall what this session is working on.
 
+### 5.1 Session status
+
+Claude Code's hooks tell hydraui what each session is doing, so the terminal list can show it.
+Wherever the `hydraui` server is registered (§3), hydra also adds these hooks to the environment's
+generated `settings.json`, each running `"<hydra>" hook <state>` (hydra's own exe when it is
+hydra, else the hydra beside hydraui, else `hydra` on the PATH), keeping the user's own hooks and
+replacing older status hooks:
+
+| Event | Matcher | State |
+|---|---|---|
+| SessionStart | | idle |
+| UserPromptSubmit | | working |
+| PreToolUse | `AskUserQuestion\|ExitPlanMode` | waiting |
+| PostToolUse | `*` | working |
+| Notification | `permission_prompt\|elicitation_dialog` | waiting |
+| Stop | | idle |
+| SessionEnd | | ended |
+
+`hydra hook <state>` posts the JSON-RPC notification `hydraui/status` with `{"state": ...}` to
+`$HYDRA_MCP_URL` with the terminal's bearer token (500 ms timeout). Outside hydraui (no
+`HYDRA_MCP_URL`) and on any failure it does nothing and exits 0, so a hook never gets in the
+session's way. The server passes the token and state to the window holding that terminal.
+
+The terminal's activity dot then follows the session rather than its output: working blinks,
+waiting ("needs you") gets the amber ring, idle is steady. The row also says `working`, `needs
+you` (amber) or `idle` beside the name, and the environment tab's tooltip says "Claude is
+working", "Claude needs you" or "Claude finished". The state is forgotten when the session ends,
+when the shell is back at its prompt, or when the terminal restarts.
+
 ## 6. Testing
 
 Unit tests: parsing and writing the taker (InProgress/Done only, checkbox not mistaken, round

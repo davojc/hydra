@@ -76,7 +76,9 @@ the right.
 ### 2.2 Terminal list (left)
 
 - The selected environment's terminals, in the order they were created. Each row: the activity
-  dot, the terminal's name, and a close button on hover. The shown terminal is highlighted.
+  dot, the terminal's name, and a close button on hover. The shown terminal is highlighted. A
+  terminal running Claude shows what the session says it is doing (working, needs you, idle)
+  beside its name, and its dot follows that (MCP server spec §5.1).
 - **A terminal's name is the user's.** It is the name given with Rename (or `title` in the layout
   file), else the terminal's current folder name. Titles a program sets through escape codes
   (`TermEvent::Title`; Claude Code changes it constantly) are **not** used for the name and never

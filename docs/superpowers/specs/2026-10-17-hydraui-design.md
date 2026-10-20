@@ -429,6 +429,7 @@ script, image, lock, else a plain page).
   environment's home (new terminals open there) and is bound to it, as
   `hydra env new --home` does.
 - Open config folder; Reload config.
+- Check for updates (§7.11).
 
 ### 7.5 Errors
 
@@ -718,12 +719,18 @@ reads `hydraui` and the name is hidden.
 **Version.** hydraui knows its version as hydra does: `HYDRA_VERSION` at
 compile time in release builds, else `<Cargo version>-dev`.
 
-**Checking.** At start and then every 6 hours, off the UI thread, hydraui
+**Checking.** At start and then every hour, off the UI thread, hydraui
 asks GitHub for the latest release (the same request as `hydra update`,
 honouring `HYDRA_UPDATE_API`). When it is newer than the running version, the
-title bar shows **Update hydra <version>** just left of the window controls.
+title bar shows **Update hydra <version>** just left of the window controls;
+a still newer release found later replaces the version on the button.
 A `-dev` build never shows it. No network, or an answer it can't read, shows
 nothing and says nothing.
+
+The launcher's **Check for updates** asks at once and says what it found in a
+notification: the latest version is running, a version is available (and on
+the button), an update is installing or waiting for a restart, or GitHub
+couldn't be reached.
 
 **Updating.** Clicking the button:
 

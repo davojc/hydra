@@ -23,10 +23,11 @@ static ICON: LazyLock<Arc<Image>> = LazyLock::new(|| {
 });
 
 /// How often to ask GitHub again.
-const EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+const EVERY: Duration = Duration::from_secs(60 * 60);
 
 impl Workspace {
-    /// Asks GitHub now and every 6 hours, off the UI thread; failures say nothing.
+    /// Asks GitHub now and every hour, off the UI thread; failures say nothing. A newer
+    /// release replaces an older one on the button.
     pub(super) fn start_update_checks(&mut self, cx: &mut Context<Self>) {
         self._update_checks = Some(cx.spawn(async move |this, cx| {
             loop {
@@ -35,9 +36,8 @@ impl Workspace {
                     .await;
                 let alive = this.update(cx, |ws, cx| {
                     if let Ok(Some(version)) = found
-                        && ws.update == UpdateState::Idle
+                        && ws.update.found(version)
                     {
-                        ws.update = UpdateState::Offered(version);
                         cx.notify();
                     }
                 });
@@ -47,6 +47,30 @@ impl Workspace {
                 cx.background_executor().timer(EVERY).await;
             }
         }));
+    }
+
+    /// "Check for updates": asks GitHub now and says what it found; a release found shows
+    /// on the Update button as the hourly check's would.
+    pub(super) fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            let found = cx
+                .background_spawn(async { updater::check(&hydra_update::latest_url()) })
+                .await;
+            let _ = this.update_in(cx, |ws, window, cx| {
+                let note = match found {
+                    Ok(found) => {
+                        if let Some(version) = found {
+                            ws.update.found(version);
+                        }
+                        Notification::info(ws.update.note(crate::version::VERSION))
+                    }
+                    Err(e) => Notification::error(format!("can't reach GitHub: {e:#}")),
+                };
+                window.push_notification(note.title("Check for updates"), cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Updates both exes off the UI thread; the button shows the progress.

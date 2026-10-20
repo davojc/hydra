@@ -33,6 +33,8 @@ pub enum Action {
     NewSecret,
     OpenConfigFolder,
     ReloadConfig,
+    /// Ask GitHub for a newer hydra now (spec §7.11).
+    CheckForUpdates,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +79,7 @@ pub fn entries(envs: &[String], sign_ins: &[(String, String)], secrets: &[String
     add("Set secret: other…".into(), Action::NewSecret);
     add("Open config folder".into(), Action::OpenConfigFolder);
     add("Reload config".into(), Action::ReloadConfig);
+    add("Check for updates".into(), Action::CheckForUpdates);
     out
 }
 
@@ -110,6 +113,7 @@ mod tests {
                 "Set secret: other…",
                 "Open config folder",
                 "Reload config",
+                "Check for updates",
             ]
         );
         assert!(!labels.iter().any(|l| l.starts_with("Set:")), "no sets");
@@ -152,9 +156,11 @@ mod tests {
                 "New environment…",
                 "Set secret: other…",
                 "Open config folder",
-                "Reload config"
+                "Reload config",
+                "Check for updates"
             ]
         );
+        assert_eq!(got[11].action, Action::CheckForUpdates);
         assert_eq!(got[0].action, Action::OpenFile);
         assert_eq!(got[1].action, Action::SearchFiles);
         assert_eq!(got[4].action, Action::StartPage);

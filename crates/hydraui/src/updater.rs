@@ -214,6 +214,36 @@ impl UpdateState {
     pub fn can_start(&self) -> bool {
         matches!(self, UpdateState::Offered(_))
     }
+
+    /// A check found `latest` to offer: it's offered when nothing is, or replaces an older
+    /// offer; an install under way or done is left alone. True when the state changed.
+    pub fn found(&mut self, latest: Version) -> bool {
+        let take = match self {
+            UpdateState::Idle => true,
+            UpdateState::Offered(v) => latest > *v,
+            UpdateState::Updating(_) | UpdateState::Ready(_) => false,
+        };
+        if take {
+            *self = UpdateState::Offered(latest);
+        }
+        take
+    }
+
+    /// What "Check for updates" says once the check has been applied, for a build at
+    /// `current`.
+    pub fn note(&self, current: &str) -> String {
+        match self {
+            UpdateState::Idle if Version::parse(current).is_ok_and(|v| v.pre.is_empty()) => {
+                format!("hydra {current} is the latest version")
+            }
+            UpdateState::Idle => format!("hydra {current} is a development build: no updates"),
+            UpdateState::Offered(v) => {
+                format!("hydra {v} is available: click Update in the title bar")
+            }
+            UpdateState::Updating(v) => format!("hydra {v} is being installed"),
+            UpdateState::Ready(v) => format!("hydra {v} is installed: restart to finish"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -450,5 +480,44 @@ mod tests {
         assert!(!UpdateState::Idle.can_start());
         assert!(!UpdateState::Updating(v("0.7.0")).can_start());
         assert!(!UpdateState::Ready(v("0.7.0")).can_start());
+    }
+
+    #[test]
+    fn a_newer_find_replaces_an_older_offer_but_not_an_install() {
+        let mut s = UpdateState::Idle;
+        assert!(s.found(v("0.7.0")));
+        assert_eq!(s, UpdateState::Offered(v("0.7.0")));
+        assert!(!s.found(v("0.7.0")), "the same version changes nothing");
+        assert!(s.found(v("0.8.0")));
+        assert_eq!(s, UpdateState::Offered(v("0.8.0")));
+        assert!(!s.found(v("0.7.5")), "never an older one");
+        let mut s = UpdateState::Updating(v("0.7.0"));
+        assert!(!s.found(v("0.8.0")));
+        let mut s = UpdateState::Ready(v("0.7.0"));
+        assert!(!s.found(v("0.8.0")));
+        assert_eq!(s, UpdateState::Ready(v("0.7.0")));
+    }
+
+    #[test]
+    fn the_check_note_says_where_things_stand() {
+        assert_eq!(
+            UpdateState::Idle.note("0.6.0"),
+            "hydra 0.6.0 is the latest version"
+        );
+        assert!(
+            UpdateState::Idle
+                .note("0.6.0-dev")
+                .contains("development build")
+        );
+        assert!(
+            UpdateState::Offered(v("0.7.0"))
+                .note("0.6.0")
+                .contains("0.7.0 is available")
+        );
+        assert!(
+            UpdateState::Ready(v("0.7.0"))
+                .note("0.6.0")
+                .contains("restart")
+        );
     }
 }

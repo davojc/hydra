@@ -107,6 +107,7 @@ impl Workspace {
                 cx.open_with_system(&dir);
             }
             Action::ReloadConfig => self.reload_config(window, cx),
+            Action::CheckForUpdates => self.check_for_updates(window, cx),
         }
     }
 

@@ -8,11 +8,13 @@ use futures::channel::mpsc::UnboundedSender;
 use gpui::{Context, EventEmitter, Task};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
-use crate::tasks::{Board, CardRef, Change, Column};
-use crate::tasks_project::{self, CommitError};
+use crate::tasks::{Board, CardRef, Change, Column, normalise};
+use crate::tasks_project::{self, CommitError, Privacy};
 
 /// The toast when a change names a card the file no longer has (§6).
 pub const MISSING: &str = "That card changed in the file; your change wasn't applied.";
+/// The toast when an edit's card is gone and its text was added to Backlog instead (§6).
+pub const RESCUED: &str = "That card changed in the file; your text was added to Backlog.";
 
 pub enum TaskBoardEvent {
     /// The first card was just written to a new file in a git repository: ask commit/private.
@@ -26,7 +28,8 @@ pub enum TaskBoardEvent {
 pub enum Applied {
     /// It's in the file (or there was nothing to write).
     Written,
-    /// Its card isn't in the file any more: dropped (§6).
+    /// Its card isn't in the file any more: dropped, or an edit's new text added to Backlog
+    /// (§6).
     CardGone,
     /// The file couldn't be read or written.
     WriteFailed,
@@ -62,6 +65,17 @@ pub fn needs_reload(last: &str, now: &str) -> bool {
 pub fn concerns_board(project: &Path, paths: &[PathBuf]) -> bool {
     let file = tasks_project::tasks_path(project);
     paths.iter().any(|p| *p == file || p.as_path() == project)
+}
+
+/// What an edit whose card the file no longer has becomes (§6): its text as a new card at the
+/// top of Backlog, so a typed idea isn't lost (§1). `None` for any other change, or an edit
+/// that leaves the text as it was or empties it.
+pub fn rescue(change: &Change) -> Option<Change> {
+    let Change::Edit { card, text } = change else {
+        return None;
+    };
+    let text = normalise(text);
+    (!text.is_empty() && text != card.text).then_some(Change::Add { text })
 }
 
 /// The move a drop makes: `card` dropped before the card at `before` in `to`, or at the end
@@ -160,20 +174,33 @@ impl TaskBoard {
     }
 
     /// Commits `change` (applied to the file as it is now, §6) and shows the result. Emits
-    /// `AskGit` when this write created the file in a git repository (§3), `Problem` when the
-    /// card is gone (the board then reloads) or the write failed.
+    /// `AskGit` when this write created the file in a git repository that would commit it (§3),
+    /// `Problem` when the card is gone (the board then reloads; an edit's text is added to
+    /// Backlog, see `rescue`) or the write failed.
     pub fn change(&mut self, change: Change, cx: &mut Context<Self>) -> Applied {
         match tasks_project::commit(&self.project, &change) {
             Ok(done) => {
                 self.board = done.board;
                 self.last_text = done.text;
-                if done.created && tasks_project::is_repo(&self.project) {
+                if done.created
+                    && tasks_project::is_repo(&self.project)
+                    && tasks_project::privacy(&self.project) == Privacy::Committed
+                {
                     cx.emit(TaskBoardEvent::AskGit);
                 }
                 cx.notify();
                 Applied::Written
             }
             Err(CommitError::Missing) => {
+                if let Some(add) = rescue(&change) {
+                    // An add can't miss: it's written, or it failed and said why.
+                    let applied = self.change(add, cx);
+                    if applied == Applied::Written {
+                        cx.emit(TaskBoardEvent::Problem(RESCUED.to_string()));
+                        return Applied::CardGone;
+                    }
+                    return applied;
+                }
                 cx.emit(TaskBoardEvent::Problem(MISSING.to_string()));
                 self.reload(cx);
                 Applied::CardGone
@@ -239,6 +266,38 @@ mod tests {
             &[project.join("src").join("main.rs")]
         ));
         assert!(!concerns_board(project, &[project.join(".hydra")]));
+    }
+
+    #[test]
+    fn task_board_adds_a_gone_cards_edited_text_to_backlog() {
+        let card = CardRef {
+            column: Column::Pickup,
+            text: "old idea".into(),
+            nth: 0,
+        };
+        let edit = |text: &str| Change::Edit {
+            card: card.clone(),
+            text: text.into(),
+        };
+        assert_eq!(
+            rescue(&edit("  new\n idea ")),
+            Some(Change::Add {
+                text: "new idea".into()
+            })
+        );
+        // Unchanged or emptied: nothing to keep.
+        assert_eq!(rescue(&edit("old  idea")), None);
+        assert_eq!(rescue(&edit("  ")), None);
+        // Only edits are rescued.
+        assert_eq!(rescue(&Change::Delete { card: card.clone() }), None);
+        assert_eq!(
+            rescue(&Change::Move {
+                card,
+                to: Column::Done,
+                index: 0
+            }),
+            None
+        );
     }
 
     fn board() -> Board {

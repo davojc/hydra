@@ -86,7 +86,7 @@ this work, but the file it will read is.
   private** adds the line; **Commit tasks** removes the line hydraui added. If the file is
   ignored by some other rule, the menu says so rather than fighting it (builder's call on
   wording).
-- Outside a repository, no question is asked.
+- Outside a repository, no question is asked; nor when `.gitignore` already ignores the file.
 
 ## 4. The window
 
@@ -149,7 +149,9 @@ this work, but the file it will read is.
   by its column, its text and which occurrence of that text it is in the column (the 2nd
   identical card is the 2nd match). An add is inserted where it was made (top of Backlog);
   a move, edit or delete finds its card by that identity in the fresh file. If the card being edited or moved no longer
-  exists, the change is dropped with a toast. (Our call: simple, and no idea is lost.)
+  exists, the change is dropped with a toast, except an edit that changed the card's text: that
+  text is added as a new card at the top of Backlog instead, with a toast saying so, so the idea
+  typed isn't lost. (Our call: simple, and no idea is lost.)
 - A card being edited while the file changes keeps its edit; the rest of the board reloads.
 - Writes are atomic (temp file then rename, as layout files are written).
 

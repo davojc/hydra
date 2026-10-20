@@ -67,7 +67,8 @@ pub fn load(project: &Path) -> std::io::Result<(Board, String)> {
 
 /// Re-reads the file (absent = empty board), applies `change` and writes atomically (creating
 /// `.hydra`), unless the board comes out as it was read: then nothing is written, so an empty
-/// Add on a missing file creates nothing.
+/// Add on a missing file creates nothing. The board returned is the written text read back, so
+/// it is what a reload of the file would show.
 pub fn commit(project: &Path, change: &Change) -> Result<Committed, CommitError> {
     let existing = read_if_present(&tasks_path(project))?;
     let before = parse(existing.as_deref().unwrap_or_default());
@@ -83,7 +84,7 @@ pub fn commit(project: &Path, change: &Change) -> Result<Committed, CommitError>
     let text = write(&board);
     hydraui_sets::layout::write_atomic(&tasks_path(project), &text)?;
     Ok(Committed {
-        board,
+        board: parse(&text),
         text,
         created: existing.is_none(),
     })
@@ -244,6 +245,22 @@ mod tests {
         .unwrap();
         assert_eq!(c.board.cards(Column::Backlog), ["mine, edited"]);
         assert_eq!(c.board.cards(Column::Pickup), ["claude's"]);
+    }
+
+    #[test]
+    fn commit_returns_the_board_as_the_file_reads() {
+        let d = tempfile::tempdir().unwrap();
+        let c = commit(
+            d.path(),
+            &Change::Add {
+                text: "[x] foo".into(),
+            },
+        )
+        .unwrap();
+        let (loaded, text) = load(d.path()).unwrap();
+        assert_eq!(c.text, text);
+        assert_eq!(c.board, loaded);
+        assert_eq!(c.board.cards(Column::Backlog), ["foo"]);
     }
 
     #[test]

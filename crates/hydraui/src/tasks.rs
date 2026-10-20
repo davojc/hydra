@@ -137,7 +137,7 @@ fn strip_checkbox(text: &str) -> &str {
 }
 
 /// Trimmed, with whitespace runs (newlines included) collapsed to one space.
-fn normalise(text: &str) -> String {
+pub fn normalise(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 

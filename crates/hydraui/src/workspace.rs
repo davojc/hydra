@@ -334,8 +334,13 @@ impl Workspace {
         let ws = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             ws.update(cx, |ws, cx| {
-                ws.finish_board_edits(window, cx);
+                let saved = ws.finish_board_edits(window, cx);
                 ws.autosave(window, cx);
+                // A board edit whose save failed stays open, and so does the window; its toast
+                // has said why (task board spec §1).
+                if !saved {
+                    return false;
+                }
                 // Unsaved edits: ask first, and close from the dialog (spec §7.8).
                 let all: Vec<PaneId> = ws.files.keys().copied().collect();
                 if ws.unsaved_in(&all, cx).is_empty() {

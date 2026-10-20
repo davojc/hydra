@@ -82,7 +82,8 @@ impl TaskBoardView {
 
     /// Saves the card being edited, if any (§5: Enter and clicking away both save). Saving an
     /// empty card deletes it; an unchanged one writes nothing. When the write fails the editor
-    /// stays open with its text (`is_editing` still true), so the idea isn't lost.
+    /// stays open with its text (`is_editing` still true), so the idea isn't lost; when the
+    /// card has gone from the file, changed text is added to Backlog instead (§6).
     pub fn finish_edit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(editing) = self.editing.as_ref() else {
             return;

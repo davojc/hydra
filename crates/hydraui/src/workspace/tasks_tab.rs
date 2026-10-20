@@ -120,9 +120,15 @@ impl Workspace {
         }
     }
 
-    /// Saves every board's edit in progress, as the window closes.
-    pub(super) fn finish_board_edits(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Saves every board's edit in progress, as the window closes; `false` when one couldn't
+    /// be saved and is still open, so the window stays and the idea isn't lost (§1).
+    pub(super) fn finish_board_edits(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         self.finish_edits_except(None, window, cx);
+        !self.board_views.values().any(|v| v.read(cx).is_editing())
     }
 
     /// Saves the edit in progress of every board view but terminal `keep`'s.

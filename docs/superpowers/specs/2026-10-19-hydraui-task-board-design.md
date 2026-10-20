@@ -153,6 +153,10 @@ this work, but the file it will read is.
 - Moving cards: drag a card within or between columns. Its right-click menu also offers **Move
   to** each other column (to the top of that column), **Move up** / **Move down**, and
   **Delete** (which asks first, as the delete icon does).
+  A **Pickup** card's menu also offers **Send to a free session** (types the card into a free
+  Claude session of the project, as moving it into Pickup does) and a **Send to** submenu listing
+  the project's idle Claude sessions, draft or not, to pick one by hand. See the auto-pickup design
+  (`2026-10-20-hydraui-auto-pickup-design.md`).
 - Every change is written to the file at once (no Save button).
 
 ## 6. Keeping in step with the file

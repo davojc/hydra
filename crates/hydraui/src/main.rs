@@ -45,6 +45,8 @@ fn main() {
         Some(f) => hydraui::workspace::StartWith::File(f),
         None => hydraui::workspace::StartWith::Page,
     };
+    // Terminals get this server's address and a token (spec §2).
+    hydraui::mcp::server::init();
     // Init scripts left by earlier runs (spec §4.5).
     hydraui_term::clear_pane_inits(&hydra.paths);
     // Exes a previous update replaced (spec §7.11).

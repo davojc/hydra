@@ -35,6 +35,7 @@ use crate::input::{
     Mods, MouseKind, ReportButton, Wheel, key_bytes, mouse_report, paste_bytes, wheel,
 };
 use crate::keys::{CopyText, Find, PasteText, TerminalBackTab, TerminalTab};
+use crate::mcp::McpTerminal;
 use crate::palette::Palette;
 
 /// The font and colours every pane draws with.
@@ -74,6 +75,8 @@ struct Finder {
 pub struct PaneView {
     pub id: PaneId,
     pub request: PaneRequest,
+    /// The terminal's entry in the MCP server; its token dies with the terminal (spec §2).
+    mcp: Option<McpTerminal>,
     hydra: Arc<Hydra>,
     style: Arc<TermStyle>,
     slot: Slot,
@@ -206,10 +209,12 @@ impl PaneView {
         let focus = cx.focus_handle();
         let on_focus = cx.on_focus(&focus, window, |_, _, cx| cx.emit(PaneEvent::Focused));
         let warnings: Vec<String> = request.note.iter().cloned().collect();
+        let mcp = McpTerminal::register(&label_for(None, &request.cwd), request.cwd.clone());
         let mut view = Self {
             id,
             cwd: request.cwd.clone(),
             request,
+            mcp,
             hydra,
             style,
             slot: Slot::Starting,
@@ -272,6 +277,9 @@ impl PaneView {
     /// Names the terminal (trimmed; empty clears it back to the folder's name).
     pub fn set_name(&mut self, name: Option<String>, cx: &mut Context<Self>) {
         self.name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+        if let Some(mcp) = &self.mcp {
+            mcp.rename(&self.label());
+        }
         cx.emit(PaneEvent::TitleChanged);
     }
 
@@ -305,6 +313,8 @@ impl PaneView {
         self.prompt = None;
         self.generation += 1;
         let generation = self.generation;
+        // A restart is the same terminal: it keeps its token.
+        self.request.extra_env = self.mcp.as_ref().map(McpTerminal::env).unwrap_or_default();
         let (hydra, request, size) = (self.hydra.clone(), self.request.clone(), self.size);
         let task = cx.spawn(async move |this, cx| {
             let result = cx
@@ -352,6 +362,11 @@ impl PaneView {
             TermEvent::Wakeup => cx.notify(),
             TermEvent::CwdChanged(p) => {
                 self.cwd = p;
+                if let Some(mcp) = &self.mcp {
+                    mcp.set_cwd(self.cwd.clone());
+                    // An unnamed terminal is named for its folder.
+                    mcp.rename(&self.label());
+                }
                 cx.emit(PaneEvent::CwdChanged);
             }
             TermEvent::Prompt(p) => {

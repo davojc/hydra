@@ -188,6 +188,8 @@ pub struct Workspace {
     board_views: HashMap<PaneId, Entity<TaskBoardView>>,
     /// Each board view's focus watch, which takes the focus from the file pane.
     board_focus: HashMap<PaneId, Subscription>,
+    /// Listens for board files the MCP server's sessions create.
+    _mcp_pump: Option<gpui::Task<()>>,
 }
 
 impl Workspace {
@@ -254,6 +256,23 @@ impl Workspace {
                 }
             }
         });
+        // A session created a board file (spec §5): ask the same question the Tasks tab does.
+        let mcp_pump = crate::mcp::server::get().map(|server| {
+            let mut rx = server.subscribe();
+            cx.spawn_in(window, async move |this, cx| {
+                use futures::StreamExt;
+                while let Some(crate::mcp::server::McpEvent::BoardCreated(project)) =
+                    rx.next().await
+                {
+                    if this
+                        .update_in(cx, |ws, window, cx| ws.board_created(project, window, cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+        });
         // After the window's Root exists: toasts and dialogs live in it.
         cx.spawn_in(window, async move |this, cx| {
             let _ = this.update_in(cx, |ws, window, cx| ws.startup(problems, start, window, cx));
@@ -308,6 +327,7 @@ impl Workspace {
             boards: HashMap::new(),
             board_views: HashMap::new(),
             board_focus: HashMap::new(),
+            _mcp_pump: mcp_pump,
         }
     }
 

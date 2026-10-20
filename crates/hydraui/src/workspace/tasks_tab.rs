@@ -206,7 +206,10 @@ impl Workspace {
             &board,
             window,
             |ws, board, ev: &TaskBoardEvent, window, cx| match ev {
-                TaskBoardEvent::AskGit => ws.ask_git(board.clone(), window, cx),
+                TaskBoardEvent::AskGit => {
+                    let project = board.read(cx).project().to_path_buf();
+                    ws.ask_git(project, window, cx)
+                }
                 TaskBoardEvent::Problem(text) => {
                     window.push_notification(Notification::warning(text.clone()).title("Tasks"), cx)
                 }
@@ -228,16 +231,33 @@ impl Workspace {
         }
     }
 
+    /// A session made `project`'s board file: the same question as for a card made in the tab.
+    pub(super) fn board_created(
+        &mut self,
+        project: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::tasks_project::{Privacy, is_repo, privacy};
+        if is_repo(&project) && privacy(&project) == Privacy::Committed {
+            self.ask_git(project, window, cx);
+        }
+    }
+
     /// The first card was written to a new file in a repository: commit it, or keep it out of
     /// git (§3).
-    fn ask_git(&mut self, board: Entity<TaskBoard>, window: &mut Window, cx: &mut Context<Self>) {
-        let project = board.read(cx).project().to_path_buf();
+    pub(super) fn ask_git(
+        &mut self,
+        project: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let name = project
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| project.display().to_string());
         window.open_dialog(cx, move |dialog, _, _| {
-            let board = board.clone();
+            let project = project.clone();
             dialog
                 .title("Keep tasks private?")
                 .child(div().child(format!(
@@ -259,8 +279,16 @@ impl Workspace {
                                 .primary()
                                 .on_click(move |_, window, cx| {
                                     window.close_dialog(cx);
-                                    // A failure comes back as a Problem toast.
-                                    board.update(cx, |b, cx| b.set_private(true, cx));
+                                    if let Err(e) = crate::tasks_project::keep_private(&project) {
+                                        let text = format!(
+                                            "Couldn't update {}: {e}",
+                                            project.join(".gitignore").display()
+                                        );
+                                        window.push_notification(
+                                            Notification::warning(text).title("Tasks"),
+                                            cx,
+                                        );
+                                    }
                                 }),
                         ),
                 )

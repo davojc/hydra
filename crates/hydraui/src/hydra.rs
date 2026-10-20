@@ -50,6 +50,9 @@ pub struct PaneRequest {
     pub drop_vars: Vec<String>,
     /// Start even when a referenced secret isn't stored (signing in is how it gets stored).
     pub allow_missing_secrets: bool,
+    /// Variables added to the pane's environment after the inherited ones (the terminal's
+    /// MCP address and token).
+    pub extra_env: Vec<(String, String)>,
 }
 
 impl PaneRequest {
@@ -63,6 +66,7 @@ impl PaneRequest {
             note: None,
             drop_vars: Vec::new(),
             allow_missing_secrets: false,
+            extra_env: Vec::new(),
         }
     }
 }
@@ -314,7 +318,7 @@ impl Hydra {
             git_bash: self.global.git_bash.clone(),
             command: req.command.clone(),
             size,
-            inherited: inherited_env(std::env::vars_os()),
+            inherited: pane_inherited(req, std::env::vars_os()),
         };
         let (pane, events) = Pane::spawn(spec).map_err(|e| e.to_string())?;
         Ok(Started {
@@ -533,8 +537,31 @@ pub fn inherited_env(
     vars: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Vec<(OsString, OsString)> {
     vars.into_iter()
-        .filter(|(k, _)| !k.to_str().is_some_and(is_session_marker))
+        .filter(|(k, _)| {
+            !k.to_str()
+                .is_some_and(|k| is_session_marker(k) || is_mcp_var(k))
+        })
         .collect()
+}
+
+/// hydraui's own MCP address and token: a hydraui started from another one's terminal must
+/// not hand its terminals the parent's server. Names compare ignoring case, as Windows does.
+fn is_mcp_var(name: &str) -> bool {
+    name.eq_ignore_ascii_case("HYDRA_MCP_URL") || name.eq_ignore_ascii_case("HYDRA_MCP_TOKEN")
+}
+
+/// What `req`'s pane inherits: `inherited_env(vars)`, then the request's `extra_env`.
+pub fn pane_inherited(
+    req: &PaneRequest,
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Vec<(OsString, OsString)> {
+    let mut env = inherited_env(vars);
+    env.extend(
+        req.extra_env
+            .iter()
+            .map(|(k, v)| (OsString::from(k), OsString::from(v))),
+    );
+    env
 }
 
 /// `argv` as one command line for `shell`, every word quoted, so paths with spaces or
@@ -1395,5 +1422,38 @@ email = \"p@example.com\"
             .map(|(k, _)| k.to_string_lossy().into_owned())
             .collect();
         assert_eq!(kept, vec!["Path", "CLAUDE_CODE_OAUTH_TOKEN"]);
+    }
+
+    #[test]
+    fn extra_env_is_inherited_by_the_pane() {
+        let mut req = PaneRequest::new("work", PathBuf::from("C:/w"), ShellKind::Pwsh);
+        req.extra_env = vec![("HYDRA_MCP_TOKEN".into(), "t0k".into())];
+        let vars = pane_inherited(&req, [(OsString::from("HOME"), OsString::from("x"))]);
+        assert!(vars.contains(&("HYDRA_MCP_TOKEN".into(), "t0k".into())));
+        assert!(vars.contains(&("HOME".into(), "x".into())));
+    }
+
+    #[test]
+    fn a_parent_hydrauis_server_is_not_inherited() {
+        let mut req = PaneRequest::new("work", PathBuf::from("C:/w"), ShellKind::Pwsh);
+        req.extra_env = vec![("HYDRA_MCP_TOKEN".into(), "mine".into())];
+        let vars = pane_inherited(
+            &req,
+            [
+                (
+                    OsString::from("hydra_mcp_url"),
+                    OsString::from("http://parent"),
+                ),
+                (OsString::from("HYDRA_MCP_TOKEN"), OsString::from("theirs")),
+                (OsString::from("Path"), OsString::from("C:/x")),
+            ],
+        );
+        let tokens: Vec<_> = vars
+            .iter()
+            .filter(|(k, _)| k.to_string_lossy().to_uppercase().starts_with("HYDRA_MCP"))
+            .collect();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].1, "mine");
+        assert!(vars.iter().any(|(k, _)| k == "Path"));
     }
 }

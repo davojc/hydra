@@ -36,8 +36,10 @@ this work, but the file it will read is.
 
 - A terminal's **project** is the git work tree containing its current folder (OSC 7, else its
   start folder), i.e. the nearest folder at or above it holding `.git` (a directory or, for a
-  linked worktree or submodule, a file), so a linked worktree has its own board; outside a
-  repository, the folder itself. hydraui never writes outside the project folder. Terminals in the same project share one
+  linked worktree or submodule, a file); outside a repository, the folder itself. A linked
+  worktree's project is its repository's main work tree (its `.git` file names
+  `<repo>/.git/worktrees/<name>`), so every worktree of a repository shares one board (§9); a
+  submodule keeps its own. hydraui never writes outside the project folder. Terminals in the same project share one
   board.
 - The board lives in `<project>/.hydra/tasks.md`. The file and the `.hydra` folder are created on
   the first change to the board (adding a card), not on opening it.
@@ -177,3 +179,25 @@ only hydraui's line). The UI is checked by running the app.
 Marked "our call" above, plus: the project is the git work tree; the file is created on the
 first change; the commit/private question is asked once at that moment; Clear asks first;
 cards are plain text; Enter saves a card; the layout remembers each terminal's Tasks tab.
+
+## 9. A worktree per card
+
+So several Claude sessions can work on one repository without touching each other's files, a
+**Pickup** card's right-click menu offers **Take in new worktree** (only when the project is a git
+repository):
+- hydraui makes a branch `task/<slug>` from what the repository has checked out, in a worktree
+  beside it: `<repo>-worktrees/<slug>`. The slug is up to five words of the card, lowercase
+  letters and digits joined by `-`, at most 40 characters (`task` if none); `-2`, `-3`, ... when
+  the folder or branch is taken.
+- A terminal opens in the worktree, in the environment of the terminal whose Tasks tab was used,
+  running `claude` with a prompt naming the card and branch and asking it to commit there and
+  move the card to Verify with `tasks_verify`. The card is taken (Pickup → InProgress) for that
+  terminal, so its session finds it with `tasks_mine`.
+- Which card has which worktree (repository, card text, path, branch, base) is kept in
+  `<hydra home>/hydraui/worktrees.toml`, never in the repository.
+- When the user moves such a card to **Done** (drag or menu), hydraui asks "Merge
+  `task/<slug>`?". **Merge** closes the terminals in the worktree, merges the branch into its base
+  in the main work tree (`git merge --no-ff --no-edit`), removes the worktree and deletes the
+  branch, and says what it did. It refuses, changing nothing, when the worktree or the main work
+  tree has uncommitted changes or the main work tree isn't on the base branch; a merge with
+  conflicts is aborted. **Not now** leaves everything as it is.

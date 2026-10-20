@@ -29,6 +29,8 @@ pub enum TaskBoardEvent {
     AskGit,
     /// A change couldn't apply (card gone) or the write failed: toast this text.
     Problem(String),
+    /// The user moved the card with this text to Done (worktrees: offer to merge its branch).
+    MovedToDone(String),
 }
 
 /// What became of a change.
@@ -190,6 +192,15 @@ impl TaskBoard {
             Ok(done) => {
                 self.board = done.board;
                 self.last_text = done.text;
+                if let Change::Move {
+                    card,
+                    to: Column::Done,
+                    ..
+                } = &change
+                    && card.column != Column::Done
+                {
+                    cx.emit(TaskBoardEvent::MovedToDone(card.text.clone()));
+                }
                 if done.created
                     && tasks_project::is_repo(&self.project)
                     && tasks_project::privacy(&self.project) == Privacy::Committed

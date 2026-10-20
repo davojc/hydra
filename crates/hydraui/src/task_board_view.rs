@@ -72,6 +72,8 @@ pub enum TaskBoardViewEvent {
     ShowCommit(String),
     /// A card's taker was clicked: show the terminal of that name.
     ShowTaker(String),
+    /// "Take in new worktree" on the Pickup card with this text.
+    TakeInWorktree(String),
 }
 
 pub struct TaskBoardView {
@@ -401,6 +403,7 @@ impl TaskBoardView {
         let edge = accent(col, cx);
         let board = self.board.clone();
         let view = cx.entity();
+        let in_repo = crate::tasks_project::is_repo(self.board.read(cx).project());
         div()
             .id(("task-card", i))
             .group("task-card")
@@ -430,6 +433,19 @@ impl TaskBoardView {
                         }
                     };
                     let mut menu = menu;
+                    // Its own branch and worktree, with a Claude terminal there (§8).
+                    if col == Column::Pickup && in_repo {
+                        let (view, text) = (view.clone(), card.text.clone());
+                        menu = menu
+                            .item(PopupMenuItem::new("Take in new worktree").on_click(
+                                move |_, _, cx| {
+                                    view.update(cx, |_, cx| {
+                                        cx.emit(TaskBoardViewEvent::TakeInWorktree(text.clone()))
+                                    })
+                                },
+                            ))
+                            .separator();
+                    }
                     for to in Column::ALL.into_iter().filter(|c| *c != col) {
                         let mv = Change::Move {
                             card: card.clone(),

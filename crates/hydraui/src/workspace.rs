@@ -11,6 +11,7 @@ mod tasks_tab;
 mod terminal_list;
 mod title_bar;
 mod tree_ops;
+mod worktree;
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};

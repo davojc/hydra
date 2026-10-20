@@ -95,11 +95,11 @@
     <section id="tasks">
       <h2>Task board</h2>
       <p>While Claude is busy in a terminal you will think of what to do next. The task board is a place to jot those ideas down without interrupting it, then pick them up later. Right-click a terminal in the list and choose <strong>Tasks</strong>: that terminal gets a <strong>Tasks</strong> tab beside it, with the terminal and <strong>Tasks ✕</strong> in a small strip at the top. ✕ closes the tab, and the cards stay. Each terminal has its own tabs, so another terminal shows its own view, and the layout file remembers which terminals have a Tasks tab.</p>
-      <p>The board belongs to the terminal's <strong>project</strong>: the git repository its folder is in (a linked worktree has its own board), or, outside a repository, the folder itself. A folder inside a repository, including a home folder that is itself a repository, shares that repository's board, and terminals in the same project show the same cards.</p>
+      <p>The board belongs to the terminal's <strong>project</strong>: the git repository its folder is in (a linked worktree shares its repository's board), or, outside a repository, the folder itself. A folder inside a repository, including a home folder that is itself a repository, shares that repository's board, and terminals in the same project show the same cards.</p>
       <p>There are five columns, side by side, each with its own color on the dot before its heading and down the left edge of its cards:</p>
       <ul>
         <li><strong>Backlog</strong> (grey): ideas not yet picked up. Its <strong>+</strong> adds a new card at the top.</li>
-        <li><strong>Pickup</strong> (blue): what you want to explore with Claude next.</li>
+        <li><strong>Pickup</strong> (blue): what you want to explore with Claude next. Right-click a Pickup card and choose <strong>Take in new worktree</strong> to give it a branch of its own (<code>task/…</code>) in a worktree beside the repository, with a Claude terminal there already working on it; when you move the card to Done, hydraui offers to merge the branch and remove the worktree.</li>
         <li><strong>InProgress</strong> (orange): what is being worked on now.</li>
         <li><strong>Verify</strong> (yellow): work that is committed and waiting for you to check it.</li>
         <li><strong>Done</strong> (green): finished. Its <strong>Clear</strong> button removes every card in the column, after asking how many.</li>

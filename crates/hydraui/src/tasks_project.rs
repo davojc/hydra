@@ -15,12 +15,45 @@ use crate::tasks::{Board, Change, apply, parse, write};
 pub const IGNORE_LINE: &str = ".hydra/tasks.md";
 
 /// The git work tree containing `dir` (nearest ancestor-or-self that is a git repository root),
-/// else `dir` itself.
+/// else `dir` itself. A linked worktree's project is its repository's main work tree, so every
+/// worktree of a repository shares one board.
 pub fn project_root(dir: &Path) -> PathBuf {
-    dir.ancestors()
-        .find(|d| is_repo_root(d))
-        .unwrap_or(dir)
-        .to_path_buf()
+    let root = dir.ancestors().find(|d| is_repo_root(d)).unwrap_or(dir);
+    main_work_tree(root).unwrap_or_else(|| root.to_path_buf())
+}
+
+/// For a linked worktree (its `.git` file says `gitdir: <repo>/.git/worktrees/<name>`), the
+/// repository's main work tree, `<repo>`.
+pub fn main_work_tree(root: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(root.join(".git")).ok()?;
+    let gitdir = PathBuf::from(text.strip_prefix("gitdir:")?.trim());
+    let gitdir = if gitdir.is_absolute() {
+        gitdir
+    } else {
+        root.join(gitdir)
+    };
+    let worktrees = gitdir.parent()?;
+    let dot_git = worktrees.parent()?;
+    let named = |p: &Path, name: &str| p.file_name().is_some_and(|n| n == name);
+    if !(named(worktrees, "worktrees") && named(dot_git, ".git")) {
+        return None;
+    }
+    dot_git.parent().map(without_dots)
+}
+
+/// `p` with `.` and `..` parts folded away, without touching the disk.
+fn without_dots(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in p.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Whether `project` is a git work tree (a repository root itself).
@@ -235,13 +268,27 @@ mod tests {
     }
 
     #[test]
-    fn a_linked_worktree_is_its_own_project() {
+    fn a_linked_worktree_shares_its_repositorys_project() {
         let d = tempfile::tempdir().unwrap();
-        fake_repo(d.path());
-        let wt = d.path().join("wt");
+        let repo = d.path().join("repo");
+        fake_repo(&repo);
+        std::fs::create_dir_all(repo.join(".git/worktrees/wt")).unwrap();
+        // Beside the repository, as hydraui makes them, with git's absolute gitdir.
+        let wt = d.path().join("repo-worktrees").join("wt");
         std::fs::create_dir_all(wt.join("src")).unwrap();
-        std::fs::write(wt.join(".git"), "gitdir: ../.git/worktrees/wt\n").unwrap();
-        assert_eq!(project_root(&wt.join("src")), wt);
+        let gitdir = repo.join(".git").join("worktrees").join("wt");
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+        assert_eq!(project_root(&wt.join("src")), repo);
+        // A relative gitdir too.
+        let near = repo.join("near");
+        std::fs::create_dir_all(&near).unwrap();
+        std::fs::write(near.join(".git"), "gitdir: ../.git/worktrees/wt\n").unwrap();
+        assert_eq!(project_root(&near), repo);
+        // A submodule keeps its own board.
+        let sub = repo.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join(".git"), "gitdir: ../.git/modules/sub\n").unwrap();
+        assert_eq!(project_root(&sub), sub);
     }
 
     #[test]

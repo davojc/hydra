@@ -37,3 +37,4 @@ pub mod updater;
 pub mod version;
 pub mod window_layout;
 pub mod workspace;
+pub mod worktrees;

@@ -191,6 +191,10 @@ impl Workspace {
                     ws.show_commit(project, hash.clone(), window, cx)
                 }
                 TaskBoardViewEvent::ShowTaker(name) => ws.show_taker(name, window, cx),
+                TaskBoardViewEvent::TakeInWorktree(text) => {
+                    let project = board.read(cx).project().to_path_buf();
+                    ws.take_in_worktree(id, project, text.clone(), window, cx)
+                }
             },
         );
         let handle = view.read(cx).focus_handle(cx);
@@ -248,6 +252,10 @@ impl Workspace {
                 }
                 TaskBoardEvent::Problem(text) => {
                     window.push_notification(Notification::warning(text.clone()).title("Tasks"), cx)
+                }
+                TaskBoardEvent::MovedToDone(text) => {
+                    let project = board.read(cx).project().to_path_buf();
+                    ws.card_done(project, text.clone(), window, cx)
                 }
             },
         );

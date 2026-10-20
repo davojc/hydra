@@ -333,6 +333,7 @@ impl TaskBoardView {
         let b = self.board.read(cx).board();
         let len = b.cards(col).len();
         let card = b.card_ref(col, i).expect("rendering a card the board has");
+        let taker = b.cards(col)[i].taker.clone();
         let theme = cx.theme();
         let (border, bg, hover, line) = (
             theme.border,
@@ -340,6 +341,7 @@ impl TaskBoardView {
             theme.secondary_hover,
             theme.drag_border,
         );
+        let (badge_bg, badge_fg) = (theme.muted, theme.muted_foreground);
         let board = self.board.clone();
         div()
             .id(("task-card", i))
@@ -413,6 +415,19 @@ impl TaskBoardView {
                     .bg(bg)
                     .hover(|s| s.bg(hover))
                     .text_sm()
+                    // Who took the card (§ task board), above its text; the editor edits only the text.
+                    .children(taker.map(|name| {
+                        // A row, so the badge hugs its text instead of spanning the card.
+                        div().flex().mb_1().child(
+                            div()
+                                .px_1p5()
+                                .rounded_sm()
+                                .bg(badge_bg)
+                                .text_color(badge_fg)
+                                .text_xs()
+                                .child(SharedString::from(name)),
+                        )
+                    }))
                     .child(SharedString::from(card.text)),
             )
     }

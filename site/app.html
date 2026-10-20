@@ -59,8 +59,8 @@
     </header>
 
     <figure class="shot">
-      <img src="img/hydraui-window.png" width="1600" height="1013" alt="hydraui with tabs for the api, blog and site projects, a file tree on the left marking changed files, a terminal and a rendered README.">
-      <figcaption>The file tree marks what git sees changed; the README is rendered in the file pane beside the terminal. This screenshot predates environment tabs: the tabs are now environments, each with its terminals listed on the left, and the file tree sits on the right.</figcaption>
+      <img src="img/hydraui-window.png" width="1600" height="1013" alt="hydraui with tabs for the work, personal and client environments; work's terminals, api and server, listed on the left; git status in the api terminal; the project's README rendered in the file pane; and the file tree on the right.">
+      <figcaption>One tab per environment, with its terminals listed on the left. The shown terminal sits in the middle, the file pane beside it renders the README, and the file tree is on the right.</figcaption>
     </figure>
 
     <section id="start">
@@ -69,7 +69,7 @@
       <p>The first time, hydraui opens a terminal in your home folder. With no environments yet, it asks you to name one and creates it, as <code>hydra env new</code> does. From then on hydraui starts on a page of your recent <a href="#layouts">layouts</a>: pick one, or <strong>New window</strong> for a plain terminal. A window saved as a layout keeps its file up to date as you work (its environments, their terminals and folders, the file tree and the files in each file pane); an untitled window isn't kept when you close it.</p>
       <p>A new window's first environment is the one bound to the home folder, else <code>default_env</code> from the <a href="#settings">settings</a>, else you pick one:</p>
       <figure class="shot narrow">
-        <img src="img/hydraui-picker.png" width="598" height="325" alt="The environment picker as an earlier version showed it, titled Open a tab in…, listing the client, personal and work environments with their colours, and New environment…" loading="lazy">
+        <img src="img/hydraui-picker.png" width="448" height="247" alt="The Add an environment picker listing the client, personal and work environments with their colours, and New environment…" loading="lazy">
       </figure>
       <div class="note"><strong>No folder guard in the app.</strong> A hydraui terminal gets exactly the isolation <code>hydra shell</code> gives, with one exception: it skips the CLI's folder guard. A push to the wrong account fails on its credentials anyway. If a terminal's folder is bound to a different environment than the one it runs in, the pane shows a warning badge.</div>
     </section>
@@ -147,7 +147,7 @@
       </ul>
       <p>In a git repository, files show their status: <strong>M</strong> modified in yellow, <strong>A</strong> added and <strong>?</strong> untracked in green, <strong>D</strong> deleted in red, ignored files dimmed. A folder that holds changes gets a dot. Right-click a changed file and choose <strong>Show changes</strong> for a side-by-side diff against the last commit:</p>
       <figure class="shot">
-        <img src="img/hydraui-diff.png" width="1600" height="1013" alt="A side-by-side diff of src/routes.rs: removed lines on the left, added lines on the right." loading="lazy">
+        <img src="img/hydraui-diff.png" width="1600" height="1013" alt="A side-by-side diff of src/routes.rs in the file pane, removed lines on the left and added lines on the right, with the file tree marking routes.rs modified (M) and orders.rs untracked (?)." loading="lazy">
         <figcaption>The diff opens as its own tab in the file pane, next to the file itself. Renamed files are compared with their old name.</figcaption>
       </figure>
       <p>Right-click a file or folder for <strong>New file…</strong>, <strong>New folder…</strong>, <strong>cd here</strong>, <strong>New terminal here</strong> (folders), <strong>Reveal in Explorer</strong>, <strong>Rename…</strong>, <strong>Delete…</strong> (to the Recycle Bin, after asking), <strong>Copy path</strong> and <strong>Copy relative path</strong>. Open files follow a rename.</p>
@@ -201,7 +201,7 @@
       <h2>The launcher</h2>
       <p><kbd>Ctrl+Shift+P</kbd> opens the launcher: type to filter, Enter to run.</p>
       <figure class="shot narrow">
-        <img src="img/hydraui-launcher.png" width="598" height="531" alt="The launcher listing New tab entries for each environment, Sign in: github in work, Open file…, Search in files…, and layout entries (an earlier version: the entries are now Environment: name)." loading="lazy">
+        <img src="img/hydraui-launcher.png" width="448" height="398" alt="The launcher listing Environment and Edit environment entries for client, personal and work, then Open file… and Search in files…" loading="lazy">
       </figure>
       <div class="tbl">
         <table>

@@ -42,7 +42,7 @@ pub fn local_reply(line: &str) -> Option<String> {
 }
 
 /// Posts `line` to hydraui. `None` for a notification or a 202; an error reply when
-/// hydraui can't be reached or answers anything else.
+/// hydraui can't be reached, refuses the token (401), or answers anything else.
 fn relay_reply(agent: &ureq::Agent, url: &str, token: &str, line: &str) -> Option<String> {
     let Ok(msg) = serde_json::from_str::<Value>(line) else {
         return Some(parse_error());
@@ -54,10 +54,16 @@ fn relay_reply(agent: &ureq::Agent, url: &str, token: &str, line: &str) -> Optio
         .set("Accept", "application/json, text/event-stream")
         .set("Authorization", &format!("Bearer {token}"))
         .send_string(line);
+    let refused = matches!(sent, Err(ureq::Error::Status(401, _)));
     let body = match sent {
         Ok(resp) if resp.status() == 202 => return None,
         Ok(resp) if resp.status() == 200 => resp.into_string().ok(),
         _ => None,
+    };
+    let problem = if refused {
+        "this terminal's hydraui token isn't valid any more (terminal closed?)"
+    } else {
+        "hydraui isn't reachable (closed?)"
     };
     // Re-serialised so a newline inside the body can't break the line framing.
     let compact = body
@@ -65,7 +71,7 @@ fn relay_reply(agent: &ureq::Agent, url: &str, token: &str, line: &str) -> Optio
         .map(|v| v.to_string());
     match compact {
         Some(c) => Some(c),
-        None => id.map(|id| error_reply(id, -32000, "hydraui isn't reachable (closed?)")),
+        None => id.map(|id| error_reply(id, -32000, problem)),
     }
 }
 
@@ -154,5 +160,36 @@ mod tests {
         let r = v(&local_reply("{").unwrap());
         assert_eq!(r["error"]["code"], -32700);
         assert!(r["id"].is_null());
+    }
+
+    /// A one-shot local HTTP server answering `status`; its URL.
+    fn answer_once(status: &'static str) -> String {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf);
+            let reply =
+                format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            sock.write_all(reply.as_bytes()).unwrap();
+        });
+        url
+    }
+
+    #[test]
+    fn a_refused_token_says_so() {
+        let agent = ureq::AgentBuilder::new().build();
+        let url = answer_once("401 Unauthorized");
+        let r = v(&relay_reply(&agent, &url, "t", r#"{"id":1,"method":"ping"}"#).unwrap());
+        assert_eq!(r["error"]["code"], -32000);
+        assert!(
+            r["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("token isn't valid"),
+            "{r}"
+        );
     }
 }

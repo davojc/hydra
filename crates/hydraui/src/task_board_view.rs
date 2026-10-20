@@ -1,6 +1,7 @@
 //! The task board on screen (spec: docs/superpowers/specs/2026-10-19-hydraui-task-board-design.md
-//! §5): four equal columns of cards that scroll on their own; click a card to edit it in place,
-//! drag it or use its right-click menu to move it. Every change goes straight to the file.
+//! §5): four equal columns of cards that scroll on their own; a card shows its first lines until
+//! clicked, double-click edits it in place, drag it or use its right-click menu to move it.
+//! Every change goes straight to the file.
 use gpui::prelude::*;
 use gpui::{
     App, Context, DragMoveEvent, Entity, FocusHandle, Focusable, FontWeight, Hsla, MouseButton,
@@ -22,6 +23,19 @@ use crate::tasks_project::{self, Privacy};
 /// mouse move.
 const SCROLL_EDGE: f32 = 32.;
 const SCROLL_STEP: f32 = 12.;
+
+/// How many lines of its text a card shows until it's clicked open.
+const COLLAPSED_LINES: usize = 2;
+
+/// `expanded` with `card` opened, or closed if it was open.
+fn toggle(expanded: &mut Vec<CardRef>, card: &CardRef) {
+    match expanded.iter().position(|c| c == card) {
+        Some(at) => {
+            expanded.remove(at);
+        }
+        None => expanded.push(card.clone()),
+    }
+}
 
 /// Each column's color, on its heading's dot and its cards' left edge: Backlog grey, Pickup
 /// blue, InProgress orange, Verify yellow, Done green. The theme has no orange, so it's fixed
@@ -81,6 +95,8 @@ pub enum TaskBoardViewEvent {
 pub struct TaskBoardView {
     board: Entity<TaskBoard>,
     editing: Option<Editing>,
+    /// Cards clicked open to show all their text; the rest show `COLLAPSED_LINES`.
+    expanded: Vec<CardRef>,
     /// One per column, so a dragged card can scroll the column it's over.
     scroll: [ScrollHandle; 5],
     focus: FocusHandle,
@@ -93,6 +109,7 @@ impl TaskBoardView {
         Self {
             board,
             editing: None,
+            expanded: Vec::new(),
             scroll: std::array::from_fn(|_| ScrollHandle::new()),
             focus: cx.focus_handle(),
             _observe: observe,
@@ -381,7 +398,8 @@ impl TaskBoardView {
             .child(Textarea::new(input))
     }
 
-    /// Card `i` of `col`: click edits it, drag moves it, right-click offers moves and Delete.
+    /// Card `i` of `col`: click opens or closes its text, double-click edits it, drag moves it,
+    /// right-click offers moves and Delete.
     fn render_card(
         &self,
         col: Column,
@@ -406,6 +424,7 @@ impl TaskBoardView {
         let board = self.board.clone();
         let view = cx.entity();
         let in_repo = crate::tasks_project::is_repo(self.board.read(cx).project());
+        let open = self.expanded.contains(&card);
         div()
             .id(("task-card", i))
             .group("task-card")
@@ -421,8 +440,14 @@ impl TaskBoardView {
             })
             .on_click({
                 let card = card.clone();
-                cx.listener(move |this, _, window, cx| {
-                    this.start_edit(Some(card.clone()), window, cx)
+                cx.listener(move |this, ev: &gpui::ClickEvent, window, cx| {
+                    // A double-click's first click has opened or closed the card: undo that,
+                    // so the card looks as it did once the edit ends.
+                    toggle(&mut this.expanded, &card);
+                    if ev.click_count() >= 2 {
+                        this.start_edit(Some(card.clone()), window, cx);
+                    }
+                    cx.notify();
                 })
             })
             .context_menu({
@@ -556,7 +581,11 @@ impl TaskBoardView {
                                             }))
                                     }))
                             }))
-                            .child(SharedString::from(card.text.clone())),
+                            .child(
+                                div()
+                                    .when(!open, |d| d.line_clamp(COLLAPSED_LINES).text_ellipsis())
+                                    .child(SharedString::from(card.text.clone())),
+                            ),
                     )
                     // Delete, shown while the pointer is over the card; it asks first.
                     .child(
@@ -678,5 +707,25 @@ impl Render for TaskBoardView {
                 cx.listener(|this, _, window, cx| window.focus(&this.focus, cx)),
             )
             .children(Column::ALL.map(|col| self.render_column(col, cx)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_click_opens_a_card_and_another_closes_it() {
+        let card = |text: &str| CardRef {
+            column: Column::Pickup,
+            text: text.into(),
+            nth: 0,
+        };
+        let mut expanded = Vec::new();
+        toggle(&mut expanded, &card("a"));
+        toggle(&mut expanded, &card("b"));
+        assert_eq!(expanded, [card("a"), card("b")]);
+        toggle(&mut expanded, &card("a"));
+        assert_eq!(expanded, [card("b")]);
     }
 }

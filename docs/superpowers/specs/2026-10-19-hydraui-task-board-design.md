@@ -137,7 +137,9 @@ this work, but the file it will read is.
   edge: Backlog grey, Pickup blue, InProgress orange, Verify yellow, Done green.
 - **Backlog** has a **+** that adds an empty card at its top, already being edited.
 - **Done** has a **Clear** button that removes all its cards (asks first, showing how many).
-- A card shows its whole paragraph, wrapped. Clicking it edits it in place (multi-line input);
+- A card shows the first two lines of its paragraph, wrapped, ending in … when there is more;
+  clicking it shows the whole paragraph, and clicking again folds it back. Double-clicking it
+  edits it in place (multi-line input);
   Enter saves (a card is one paragraph, so no line breaks), Esc cancels, clicking away saves;
   switching to the terminal tab, another terminal or environment saves too. If the write fails the
   card stays open and its Tasks tab won't close until it succeeds.

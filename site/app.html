@@ -240,11 +240,12 @@
 <span class="k">command</span> = <span class="s">"claude"</span>                <span class="c"># optional, hand-written: runs whenever the layout opens</span>
 
 [[<span class="k">env</span>.<span class="k">terminal</span>]]
-<span class="k">cwd</span> = <span class="s">"~/blog"</span></pre>
+<span class="k">cwd</span> = <span class="s">"~/blog"</span>
+<span class="k">claude</span> = <span class="k">true</span>                     <span class="c"># written by hydraui: Claude was running here</span></pre>
       </div>
       <ul>
         <li>An environment that no longer exists, or a terminal whose folder is gone, is skipped with a message but kept in the file.</li>
-        <li>Scrollback, running programs and unsaved edits aren't saved.</li>
+        <li>Scrollback, running programs and unsaved edits aren't saved, with one exception: a terminal that had Claude Code running when the layout was saved (closing the window counts) starts it again with <code>claude --continue</code> when the layout reopens, picking up that folder's latest conversation.</li>
         <li>Layouts made by earlier versions of hydraui (without <code>version = 2</code>) aren't opened, and the file is left as it is. Sets and group files are gone; <code>~/.hydra/hydraui/sets</code> is no longer read.</li>
       </ul>
     </section>

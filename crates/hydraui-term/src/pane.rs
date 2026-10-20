@@ -179,6 +179,11 @@ impl Pane {
         self.output.last()
     }
 
+    /// The programs running in the pane: the shell and everything under it (`Job::programs`).
+    pub fn programs(&self) -> Vec<String> {
+        self.job.as_ref().map(Job::programs).unwrap_or_default()
+    }
+
     /// Sends input (keys, pasted text) to the shell.
     pub fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
         self.writer

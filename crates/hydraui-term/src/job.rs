@@ -4,8 +4,12 @@ use std::os::windows::io::{AsRawHandle, BorrowedHandle};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_BASIC_LIMIT_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JobObjectExtendedLimitInformation, SetInformationJobObject,
+    JOBOBJECT_BASIC_LIMIT_INFORMATION, JOBOBJECT_BASIC_PROCESS_ID_LIST,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicProcessIdList,
+    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+};
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 
 /// Dropping it kills every process in it. Processes a member starts join it too.
@@ -54,6 +58,55 @@ impl Job {
         }
         Ok(())
     }
+
+    /// The programs running in the job, as lowercase file names without `.exe` (`pwsh`,
+    /// `claude`). Processes that end or can't be opened meanwhile are left out.
+    pub fn programs(&self) -> Vec<String> {
+        // The header's two u32s fill the first usize; up to 255 ids follow.
+        let mut buf = vec![0usize; 256];
+        // SAFETY: `buf` is writable for its byte length and aligned for the list struct.
+        let ok = unsafe {
+            QueryInformationJobObject(
+                self.0,
+                JobObjectBasicProcessIdList,
+                buf.as_mut_ptr().cast(),
+                (buf.len() * size_of::<usize>()) as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Vec::new();
+        }
+        // SAFETY: the call filled the header, and `n` ids after it, within `buf`.
+        let list = unsafe { &*buf.as_ptr().cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>() };
+        let n = (list.NumberOfProcessIdsInList as usize).min(buf.len() - 1);
+        buf[1..=n]
+            .iter()
+            .filter_map(|&pid| program(pid as u32))
+            .collect()
+    }
+}
+
+/// Process `pid`'s program, as `Job::programs` names it.
+fn program(pid: u32) -> Option<String> {
+    // SAFETY: plain call; a null handle means it failed.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return None;
+    }
+    let mut name = [0u16; 1024];
+    let mut len = name.len() as u32;
+    // SAFETY: `name` holds `len` u16s; the handle is ours and closed once below.
+    let ok = unsafe {
+        QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, name.as_mut_ptr(), &mut len)
+    };
+    // SAFETY: as above.
+    unsafe { CloseHandle(process) };
+    if ok == 0 {
+        return None;
+    }
+    let path = std::path::PathBuf::from(String::from_utf16_lossy(&name[..len as usize]));
+    Some(path.file_stem()?.to_string_lossy().to_lowercase())
 }
 
 impl Drop for Job {
@@ -90,5 +143,23 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    #[test]
+    fn lists_the_programs_running_in_the_job() {
+        let mut child = Command::new("ping")
+            .args(["-n", "60", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let job = Job::new().unwrap();
+        job.assign(child.as_handle()).unwrap();
+        assert!(
+            job.programs().contains(&"ping".to_string()),
+            "{:?}",
+            job.programs()
+        );
+        drop(job);
+        let _ = child.wait();
     }
 }

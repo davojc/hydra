@@ -250,6 +250,14 @@ impl PaneView {
         &self.request.env
     }
 
+    /// Claude Code is running in the terminal, anywhere under its shell.
+    pub fn runs_claude(&self) -> bool {
+        match &self.slot {
+            Slot::Running(pane) => pane.programs().iter().any(|p| p == "claude"),
+            _ => false,
+        }
+    }
+
     /// Where the shell is (OSC 133); `None` when it doesn't say.
     pub fn prompt(&self) -> Option<PromptState> {
         self.prompt

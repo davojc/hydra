@@ -158,6 +158,7 @@ command = "claude"               # optional: run when the layout opens (hand-wri
 
 [[env.terminal]]
 cwd = "E:/work/api"
+claude = true                    # optional: Claude Code was running in it when saved
 
 [[env]]
 name = "personal"
@@ -173,6 +174,11 @@ cwd = "~/blog"
 - `command` is never written by hydraui for terminals it started itself; a hand-written one is
   kept when the layout is saved again, and runs again whenever the layout opens. (Our call: the
   user can still have "claude starts here" without sets.)
+- `claude = true` is written for a terminal with Claude Code (`claude.exe`) running anywhere
+  under its shell when the layout is saved, which includes closing the window and restarting
+  for an update. When the layout opens, that terminal runs `claude --continue` (the folder's
+  latest conversation) after its shell starts, unless it has a hand-written `command`. Our
+  call: two such terminals in one folder both resume the same conversation.
 - `cwd` accepts `~`; relative paths resolve against the user's home.
 - An environment that no longer exists, or a terminal whose folder is gone, is skipped with a
   toast but kept in what is written (as §7.12 does for sets that didn't open). If nothing opens,

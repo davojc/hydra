@@ -9,8 +9,8 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::notification::Notification;
 use gpui_component::{WindowExt, h_flex, v_flex};
 use hydraui_sets::layout::{
-    EnvFile, FilesFile, LAYOUT_VERSION, Layout, LayoutError, ListFile, TasksTab, TerminalFile,
-    TreeFile, plan_layout, read_layout, write_layout,
+    EnvFile, FilesFile, LAYOUT_VERSION, Layout, LayoutError, ListFile, RESUME_CLAUDE, TasksTab,
+    TerminalFile, TreeFile, plan_layout, read_layout, write_layout,
 };
 use hydraui_sets::{Context as LayoutContext, PaneSpec};
 use hydraui_term::PromptState;
@@ -135,6 +135,7 @@ impl Workspace {
                                     TasksTab::Open
                                 }
                             }),
+                            claude: v.runs_claude(),
                         })
                     })
                     .collect();
@@ -328,7 +329,11 @@ impl Workspace {
             self.add_env_tab(&env.name);
             let mut ids = Vec::new();
             for t in env.terminals {
-                let id = self.new_pane(pane_request(&t.spec), window, cx);
+                let mut request = pane_request(&t.spec);
+                if t.claude {
+                    request.command = Some(RESUME_CLAUDE.to_string());
+                }
+                let id = self.new_pane(request, window, cx);
                 if let Some(view) = self.panes.get(&id).cloned()
                     && t.title.is_some()
                 {

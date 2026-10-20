@@ -117,7 +117,15 @@ pub struct TerminalFile {
     /// The terminal's Tasks tab, when it had one open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tasks: Option<TasksTab>,
+    /// Claude Code was running in it: it starts again ([`RESUME_CLAUDE`]) when the layout
+    /// opens, unless `command` is written.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub claude: bool,
 }
+
+/// What a terminal saved with Claude running runs when its layout opens: Claude, resuming
+/// the folder's latest conversation.
+pub const RESUME_CLAUDE: &str = "claude --continue";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LayoutError {
@@ -216,6 +224,8 @@ pub struct PlannedTerminal {
     pub spec: PaneSpec,
     pub title: Option<String>,
     pub tasks: Option<TasksTab>,
+    /// Run [`RESUME_CLAUDE`] after the shell starts (`spec.command` is then `None`).
+    pub claude: bool,
 }
 
 /// An environment tab that will open.
@@ -358,6 +368,7 @@ fn plan_terminal(
         },
         title: t.title.clone(),
         tasks: t.tasks,
+        claude: t.claude && t.command.is_none(),
     })
 }
 
@@ -513,6 +524,12 @@ cwd = "~/blog"
                             shell: Some("pwsh".into()),
                             command: Some("claude".into()),
                             tasks: None,
+                            claude: false,
+                        },
+                        TerminalFile {
+                            cwd: "C:/c".into(),
+                            claude: true,
+                            ..Default::default()
                         },
                         TerminalFile {
                             cwd: "C:/b".into(),
@@ -663,6 +680,7 @@ cwd = "~/blog"
                     shell: Some("bash".into()),
                     command: Some("claude".into()),
                     tasks: Some(TasksTab::Open),
+                    claude: false,
                 },
                 term(&fx.dir("web")),
             ],
@@ -689,6 +707,28 @@ cwd = "~/blog"
         assert_eq!(t1.spec.shell, ShellKind::Pwsh);
         assert_eq!(t1.spec.command, None);
         assert_eq!(plan.envs[1].shown, Some(0));
+    }
+
+    #[test]
+    fn claude_resumes_only_where_no_command_is_written() {
+        let fx = Fx::new();
+        let resumes = TerminalFile {
+            claude: true,
+            ..term(&fx.dir("api"))
+        };
+        let written = TerminalFile {
+            command: Some("npm start".into()),
+            ..resumes.clone()
+        };
+        let l = layout(vec![env(
+            "work",
+            vec![resumes, written, term(&fx.dir("web"))],
+        )]);
+        let plan = plan_layout(&fx.ctx(), &l);
+        let claude: Vec<bool> = plan.envs[0].terminals.iter().map(|t| t.claude).collect();
+        assert_eq!(claude, [true, false, false]);
+        // The resume isn't a written command, so it isn't saved back as one.
+        assert_eq!(plan.envs[0].terminals[0].spec.command, None);
     }
 
     #[test]

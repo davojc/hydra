@@ -9,6 +9,7 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Escape, InputEvent, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{ActiveTheme, Disableable, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit_assets::IconName;
 
@@ -69,6 +70,8 @@ struct Editing {
 pub enum TaskBoardViewEvent {
     /// A Verify card's commit was clicked: show what it changed.
     ShowCommit(String),
+    /// A card's taker was clicked: show the terminal of that name.
+    ShowTaker(String),
 }
 
 pub struct TaskBoardView {
@@ -393,7 +396,8 @@ impl TaskBoardView {
             theme.secondary_hover,
             theme.drag_border,
         );
-        let (badge_bg, badge_fg) = (theme.muted, theme.muted_foreground);
+        let (badge_bg, badge_fg, badge_hover) =
+            (theme.muted, theme.muted_foreground, theme.foreground);
         let edge = accent(col, cx);
         let board = self.board.clone();
         let view = cx.entity();
@@ -491,13 +495,30 @@ impl TaskBoardView {
                                     .items_center()
                                     .gap_1()
                                     .mb_1()
+                                    // Clicking the taker shows the terminal that took the card.
                                     .child(
                                         div()
+                                            .id(("task-taker", i))
                                             .px_1p5()
                                             .rounded_sm()
                                             .bg(badge_bg)
                                             .text_color(badge_fg)
                                             .text_xs()
+                                            .cursor_pointer()
+                                            .hover(|s| s.text_color(badge_hover))
+                                            .tooltip(|window, cx| {
+                                                Tooltip::new("Show this terminal").build(window, cx)
+                                            })
+                                            .on_click({
+                                                let name = name.clone();
+                                                cx.listener(move |_, _, _, cx| {
+                                                    // The click is the badge's, not the card's.
+                                                    cx.stop_propagation();
+                                                    cx.emit(TaskBoardViewEvent::ShowTaker(
+                                                        name.clone(),
+                                                    ));
+                                                })
+                                            })
                                             .child(SharedString::from(name)),
                                     )
                                     // The commit the card's work is in (MCP server spec §5):

@@ -190,6 +190,7 @@ impl Workspace {
                     let project = board.read(cx).project().to_path_buf();
                     ws.show_commit(project, hash.clone(), window, cx)
                 }
+                TaskBoardViewEvent::ShowTaker(name) => ws.show_taker(name, window, cx),
             },
         );
         let handle = view.read(cx).focus_handle(cx);
@@ -200,6 +201,29 @@ impl Workspace {
         self.board_focus.insert(id, focus);
         self.board_events.insert(id, events);
         self.board_views.insert(id, view);
+    }
+
+    /// Shows the terminal whose sessions write `name` as a card's taker (MCP server spec §4),
+    /// or says it isn't open in this window.
+    fn show_taker(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self
+            .panes
+            .iter()
+            .find(|(_, v)| v.read(cx).taker_name().as_deref() == Some(name))
+            .map(|(id, _)| *id);
+        match id {
+            Some(id) => {
+                self.show_terminal(id, window, cx);
+                if self.tasks_tabs.get(&id) == Some(&true) {
+                    self.show_tasks(id, false, window, cx);
+                }
+            }
+            None => window.push_notification(
+                Notification::info(format!("No terminal named {name} is open in this window"))
+                    .title("Tasks"),
+                cx,
+            ),
+        }
     }
 
     /// `project`'s board, made the first time a Tasks tab needs it. One subscription per

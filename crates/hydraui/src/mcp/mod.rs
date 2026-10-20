@@ -85,6 +85,13 @@ impl McpTerminal {
         ]
     }
 
+    /// The terminal's name in the server: the taker its sessions write on cards (§4).
+    pub fn name(&self) -> Option<String> {
+        server::lock(self.server.registry())
+            .get(&self.token)
+            .map(|t| t.name)
+    }
+
     /// The terminal's token, which names it in the server's events.
     pub fn token(&self) -> &str {
         &self.token
@@ -138,6 +145,7 @@ mod tests {
         let t = server.registry().lock().unwrap().get(&token).unwrap();
         assert_eq!(t.name, "work");
         term.rename(Some("api"));
+        assert_eq!(term.name().as_deref(), Some("api"));
         term.set_cwd(PathBuf::from("C:/x"));
         let t = server.registry().lock().unwrap().get(&token).unwrap();
         assert_eq!(t.cwd, PathBuf::from("C:/x"));

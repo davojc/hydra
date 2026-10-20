@@ -296,6 +296,11 @@ impl PaneView {
         cx.notify();
     }
 
+    /// The terminal's name in the MCP server: what its Claude sessions write as a card's taker.
+    pub fn taker_name(&self) -> Option<String> {
+        self.mcp.as_ref().and_then(McpTerminal::name)
+    }
+
     /// The terminal's token in the MCP server, which its Claude hooks report under.
     pub fn mcp_token(&self) -> Option<&str> {
         self.mcp.as_ref().map(McpTerminal::token)

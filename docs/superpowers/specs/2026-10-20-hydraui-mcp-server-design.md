@@ -131,6 +131,8 @@ Accepted (the user's decision): Claude sessions outside hydraui show the server 
   Done keeps it; editing its text keeps it. Moves by drag and by the right-click menu behave the same.
 - The Tasks tab shows a taken card's taker as a small badge on the card (look: builder's call).
   The taker isn't editable in the tab; editing the file by hand can change it.
+- Clicking the taker badge shows the terminal of that name in the window (switching environment
+  if needed, and from its Tasks tab to the terminal); when none is open there, a toast says so.
 - **Commit.** A card `tasks_verify` moved records the commit holding its work after the taker:
   `- [claude @5e9a827] Ctrl+K should open the launcher.` Reading, a taker ending in ` @` and 4 to
   40 hex digits splits into the name and the commit; anything else after ` @` stays part of the

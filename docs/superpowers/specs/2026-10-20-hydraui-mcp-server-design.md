@@ -131,6 +131,12 @@ Accepted (the user's decision): Claude sessions outside hydraui show the server 
   Done keeps it; editing its text keeps it. Moves by drag and by the right-click menu behave the same.
 - The Tasks tab shows a taken card's taker as a small badge on the card (look: builder's call).
   The taker isn't editable in the tab; editing the file by hand can change it.
+- **Commit.** A card `tasks_verify` moved records the commit holding its work after the taker:
+  `- [claude @5e9a827] Ctrl+K should open the launcher.` Reading, a taker ending in ` @` and 4 to
+  40 hex digits splits into the name and the commit; anything else after ` @` stays part of the
+  name. Moving the card to Backlog or Pickup drops the commit with the taker. The Tasks tab shows
+  the commit beside the taker badge; clicking it opens what that commit changed (`git show`) as a
+  diff tab, `<hash> (diff)`, in the environment's file pane, opening the pane if needed.
 
 ## 5. The tools
 
@@ -147,17 +153,19 @@ server; otherwise the file is created and the question waits for the next change
 
 Names below are a suggestion (builder's call); descriptions must carry the workflow.
 
-- **`tasks_read`**: the whole board: each column's cards in order, each with its text and taker
-  (if any), plus the caller's own name and project folder. Read-only.
+- **`tasks_read`**: the whole board: each column's cards in order, each with its text, taker and
+  commit (if any), plus the caller's own name and project folder. Read-only.
 - **`tasks_add(text)`**: adds a card at the top of **Backlog**. Text is normalised as the tab does
   (one paragraph); empty is refused.
 - **`tasks_take(text)`**: moves the Pickup card with exactly this text to the top of
   **InProgress**, with the caller's name as taker. If several Pickup cards have that text, the first.
   If none (already taken, moved or edited), an error saying so and suggesting `tasks_read`.
-- **`tasks_verify(text)`**: once the card's work is committed, moves the caller's own InProgress
-  card with exactly this text (taker = the caller's name) to the top of **Verify**, keeping the
-  taker. If none, an error saying so and suggesting `tasks_mine`. Another session's card can't be
-  moved.
+- **`tasks_verify(text, commit)`**: once the card's work is committed, moves the caller's own
+  InProgress card with exactly this text (taker = the caller's name) to the top of **Verify**,
+  keeping the taker and recording `commit` (the last commit, if the work took several) as its short
+  hash. `commit` must name a commit in the project's repository (`git rev-parse`); otherwise an
+  error asks for the work to be committed first. If no card matches, an error saying so and
+  suggesting `tasks_mine`. Another session's card can't be moved.
 - **`tasks_mine`**: the InProgress cards whose taker is the caller's current name. Read-only. (A
   renamed terminal no longer matches its older cards; accepted.)
 
@@ -169,7 +177,8 @@ from Verify to Done.
 - The board is the user's to-do list for this project; Pickup holds work the user has approved.
 - Check Pickup when the user asks, and after finishing a piece of work.
 - Take one card at a time with `tasks_take`, then do the work it describes.
-- Once the card's work is committed, move it to Verify with `tasks_verify` and tell the user;
+- Once the card's work is committed, move it to Verify with `tasks_verify`, giving the commit,
+  and tell the user;
   until then it stays in InProgress. The user checks it and moves it to Done. Never claim a card
   is done on the board.
 - Ideas or follow-ups worth keeping go to Backlog with `tasks_add`, not into Pickup.

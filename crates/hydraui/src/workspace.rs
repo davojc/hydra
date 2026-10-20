@@ -188,6 +188,8 @@ pub struct Workspace {
     board_views: HashMap<PaneId, Entity<TaskBoardView>>,
     /// Each board view's focus watch, which takes the focus from the file pane.
     board_focus: HashMap<PaneId, Subscription>,
+    /// Each Tasks tab's board view events (a commit to show).
+    board_events: HashMap<PaneId, Subscription>,
     /// Listens for board files the MCP server's sessions create.
     _mcp_pump: Option<gpui::Task<()>>,
 }
@@ -327,6 +329,7 @@ impl Workspace {
             boards: HashMap::new(),
             board_views: HashMap::new(),
             board_focus: HashMap::new(),
+            board_events: HashMap::new(),
             _mcp_pump: mcp_pump,
         }
     }
@@ -1213,6 +1216,50 @@ impl Workspace {
                 if let Some(pane) = pane {
                     pane.update(cx, |f, cx| f.open_diff(path, patch, window, cx));
                 }
+            });
+        })
+        .detach();
+    }
+
+    /// Shows what `commit` changed in `project` (a Verify card's commit, task board spec §5) in
+    /// the selected environment's file pane, opening the pane first when it has none.
+    pub(super) fn show_commit(
+        &mut self,
+        project: PathBuf,
+        commit: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn_in(window, async move |this, cx| {
+            let repo = project.clone();
+            let hash = commit.clone();
+            let patch = cx
+                .background_spawn(async move { git_status::commit_patch(&repo, &hash) })
+                .await;
+            let _ = this.update_in(cx, |ws, window, cx| {
+                let Some(env) = ws.envs.active().map(|t| t.env.clone()) else {
+                    return;
+                };
+                let id = match ws.envs.get(&env).and_then(|t| t.files) {
+                    Some(id) if ws.files.contains_key(&id) => id,
+                    _ => {
+                        ws.next_pane += 1;
+                        let id = ws.next_pane;
+                        ws.create_files_pane(id, &[], 0, window, cx);
+                        ws.envs.set_files(&env, Some(id));
+                        id
+                    }
+                };
+                // The tab is named after the commit: `<hash> (diff)`.
+                let path = project.join(&commit);
+                if let Some(pane) = ws.files.get(&id).cloned() {
+                    pane.update(cx, |f, cx| f.open_diff(path, patch, window, cx));
+                }
+                if let Some(tab) = ws.envs.get_mut(&env) {
+                    tab.files_focused = true;
+                }
+                ws.focus_pane(id, window, cx);
+                cx.notify();
             });
         })
         .detach();

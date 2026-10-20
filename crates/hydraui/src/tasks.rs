@@ -45,6 +45,9 @@ impl Column {
 pub struct Card {
     pub text: String,
     pub taker: Option<String>,
+    /// The commit holding the card's work, given when it moved to Verify; written after the taker
+    /// as `[taker @commit]`.
+    pub commit: Option<String>,
 }
 
 impl Card {
@@ -52,6 +55,7 @@ impl Card {
         Card {
             text: text.into(),
             taker: None,
+            commit: None,
         }
     }
 }
@@ -126,10 +130,12 @@ pub enum Change {
         text: String,
         taker: String,
     },
-    /// The first InProgress card with this text that `taker` took goes to the top of Verify.
+    /// The first InProgress card with this text that `taker` took goes to the top of Verify,
+    /// recording `commit`.
     Verify {
         text: String,
         taker: String,
+        commit: Option<String>,
     },
     ClearDone,
 }
@@ -195,6 +201,21 @@ fn split_taker(text: &str) -> (Option<String>, &str) {
     }
 }
 
+/// A taker's `name @commit`: the name and a commit of 4 to 40 hex digits after ` @`, else the
+/// whole taker as the name.
+fn split_commit(taker: String) -> (String, Option<String>) {
+    match taker.rsplit_once(" @") {
+        Some((name, hash))
+            if !name.is_empty()
+                && (4..=40).contains(&hash.len())
+                && hash.chars().all(|c| c.is_ascii_hexdigit()) =>
+        {
+            (name.to_string(), Some(hash.to_string()))
+        }
+        _ => (taker, None),
+    }
+}
+
 /// In InProgress, Verify and Done, a leading `\` before `[` (after any further `\`) marks the text as
 /// literal, not a taker (MCP server spec §4); the text without that one `\`.
 fn unescape(text: &str) -> Option<&str> {
@@ -223,9 +244,14 @@ fn flush(board: &mut Board, column: Option<Column>, card: &mut Option<String>) {
         } else {
             (None, text.as_str())
         };
+        let (taker, commit) = match taker.map(split_commit) {
+            Some((name, commit)) => (Some(name), commit),
+            None => (None, None),
+        };
         board.columns[col as usize].push(Card {
             text: text.to_string(),
             taker,
+            commit,
         });
     }
 }
@@ -307,12 +333,15 @@ pub fn write(board: &Board) -> String {
         out.push('\n');
         let takes = column.has_takers();
         for card in board.cards(column) {
-            match &card.taker {
-                Some(taker) => write_card(&mut out, &format!("[{taker}] {}", card.text)),
-                None if takes && needs_escape(&card.text) => {
+            match (&card.taker, &card.commit) {
+                (Some(taker), Some(commit)) => {
+                    write_card(&mut out, &format!("[{taker} @{commit}] {}", card.text))
+                }
+                (Some(taker), None) => write_card(&mut out, &format!("[{taker}] {}", card.text)),
+                (None, _) if takes && needs_escape(&card.text) => {
                     write_card(&mut out, &format!("\\{}", card.text))
                 }
-                None => write_card(&mut out, &card.text),
+                (None, _) => write_card(&mut out, &card.text),
             }
         }
     }
@@ -359,6 +388,7 @@ pub fn apply(board: &mut Board, change: &Change) -> Result<(), Missing> {
             let mut moved = board.columns[card.column as usize].remove(at);
             if matches!(to, Column::Backlog | Column::Pickup) {
                 moved.taker = None;
+                moved.commit = None;
             }
             let target = &mut board.columns[*to as usize];
             target.insert((*index).min(target.len()), moved);
@@ -371,14 +401,19 @@ pub fn apply(board: &mut Board, change: &Change) -> Result<(), Missing> {
             card.taker = Some(taker.clone());
             board.columns[Column::InProgress as usize].insert(0, card);
         }
-        Change::Verify { text, taker } => {
+        Change::Verify {
+            text,
+            taker,
+            commit,
+        } => {
             let text = normalise(text);
             let doing = &mut board.columns[Column::InProgress as usize];
             let at = doing
                 .iter()
                 .position(|c| c.text == text && c.taker.as_deref() == Some(taker.as_str()))
                 .ok_or(Missing)?;
-            let card = doing.remove(at);
+            let mut card = doing.remove(at);
+            card.commit = commit.clone();
             board.columns[Column::Verify as usize].insert(0, card);
         }
         Change::Delete { card } => {
@@ -440,6 +475,7 @@ mod tests {
         let verify = |text: &str, taker: &str| Change::Verify {
             text: text.into(),
             taker: taker.into(),
+            commit: None,
         };
         apply(&mut b, &verify("same", "c")).unwrap();
         assert_eq!(
@@ -447,11 +483,13 @@ mod tests {
             [
                 Card {
                     text: "same".into(),
-                    taker: Some("bob".into())
+                    taker: Some("bob".into()),
+                    commit: None
                 },
                 Card {
                     text: "other".into(),
-                    taker: Some("c".into())
+                    taker: Some("c".into()),
+                    commit: None
                 }
             ]
         );
@@ -461,6 +499,75 @@ mod tests {
         let out = write(&b);
         assert!(out.contains("## Verify\n- [c] same\n"), "{out}");
         assert_eq!(parse(&out), b);
+    }
+
+    #[test]
+    fn verify_records_the_commit_beside_the_taker() {
+        let mut b = parse(
+            "## InProgress
+- [my term] same
+",
+        );
+        let verify = Change::Verify {
+            text: "same".into(),
+            taker: "my term".into(),
+            commit: Some("5e9a827".into()),
+        };
+        apply(&mut b, &verify).unwrap();
+        assert_eq!(
+            b.cards(Column::Verify),
+            [Card {
+                text: "same".into(),
+                taker: Some("my term".into()),
+                commit: Some("5e9a827".into()),
+            }]
+        );
+        let out = write(&b);
+        assert!(
+            out.contains(
+                "## Verify
+- [my term @5e9a827] same
+"
+            ),
+            "{out}"
+        );
+        assert_eq!(parse(&out), b);
+        // Back to Backlog or Pickup the taker goes, and its commit with it.
+        let card = b.card_ref(Column::Verify, 0).unwrap();
+        apply(
+            &mut b,
+            &Change::Move {
+                card,
+                to: Column::Pickup,
+                index: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(b.cards(Column::Pickup), [Card::new("same")]);
+    }
+
+    #[test]
+    fn only_a_hex_word_after_at_is_a_commit() {
+        let b = parse(
+            "## Verify
+- [a @beef12] x
+- [b @main] y
+- [c@beef12] z
+",
+        );
+        let got: Vec<_> = b
+            .cards(Column::Verify)
+            .iter()
+            .map(|c| (c.taker.as_deref(), c.commit.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (Some("a"), Some("beef12")),
+                (Some("b @main"), None),
+                (Some("c@beef12"), None)
+            ]
+        );
     }
 
     #[test]
@@ -643,7 +750,8 @@ mod tests {
             b.cards(Column::InProgress)[0],
             Card {
                 text: "doing it".into(),
-                taker: Some("claude".into())
+                taker: Some("claude".into()),
+                commit: None
             }
         );
         assert_eq!(b.cards(Column::InProgress)[1], Card::new("boxed too"));
@@ -698,7 +806,8 @@ wrapped "
             b.cards(Column::InProgress)[0],
             Card {
                 text: "the card wrapped".into(),
-                taker: Some("claude".into())
+                taker: Some("claude".into()),
+                commit: None
             }
         );
         assert_eq!(
@@ -791,7 +900,8 @@ wrapped "
             [
                 Card {
                     text: "[WIP] real".into(),
-                    taker: Some("bob".into())
+                    taker: Some("bob".into()),
+                    commit: None
                 },
                 Card::new("[c] d")
             ]

@@ -254,6 +254,39 @@ pub fn read(dir: &Path) -> Option<GitStatus> {
     Some(s)
 }
 
+/// `rev` as a commit's short hash in the repository at `repo_dir`, or `None` when it names no
+/// commit there. Call it off the UI thread.
+pub fn short_commit(repo_dir: &Path, rev: &str) -> Option<String> {
+    if rev.starts_with('-') {
+        return None;
+    }
+    let spec = format!("{rev}^{{commit}}");
+    git(
+        repo_dir,
+        &["rev-parse", "--verify", "--quiet", "--short", &spec],
+    )
+    .map(|h| h.trim().to_string())
+    .filter(|h| !h.is_empty())
+}
+
+/// What `commit` changed, as a patch of every file it touched (renames followed), without a
+/// console window; call it off the UI thread.
+pub fn commit_patch(repo_dir: &Path, commit: &str) -> Result<String, String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
+        .arg(repo_dir)
+        .args(["show", "--no-color", "--format=", "-M", commit, "--"]);
+    let out = hydra_platform::process::hide_window(&mut cmd)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
 /// `file`'s diff against `base` (with no commits yet, against nothing), without a console
 /// window; call it off the UI thread.
 pub fn diff_patch(repo_dir: &Path, file: &Path, base: &Base) -> Result<String, String> {
@@ -476,6 +509,61 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc both.rs\n\
             None,
             "a modified file doesn't spread up"
         );
+    }
+
+    #[test]
+    fn a_commit_resolves_to_its_short_hash_and_patch() {
+        let d = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(d.path())
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if !git(&["init", "-q"]) {
+            eprintln!("skipped: git isn't installed");
+            return;
+        }
+        std::fs::write(
+            d.path().join("a.txt"),
+            "one
+",
+        )
+        .unwrap();
+        assert!(git(&["add", "a.txt"]));
+        assert!(git(&["commit", "-q", "-m", "first"]));
+        std::fs::write(
+            d.path().join("a.txt"),
+            "two
+",
+        )
+        .unwrap();
+        std::fs::write(
+            d.path().join("b.txt"),
+            "new
+",
+        )
+        .unwrap();
+        assert!(git(&["add", "."]));
+        assert!(git(&["commit", "-q", "-m", "second"]));
+        let short = short_commit(d.path(), "HEAD").expect("HEAD is a commit");
+        assert!(short.len() >= 4, "{short}");
+        assert_eq!(
+            short_commit(d.path(), &short).as_deref(),
+            Some(short.as_str())
+        );
+        assert_eq!(short_commit(d.path(), "nope"), None);
+        assert_eq!(short_commit(d.path(), "--all"), None);
+        let patch = commit_patch(d.path(), &short).unwrap();
+        assert!(patch.contains("+two") && patch.contains("b.txt"), "{patch}");
+        // The first commit has no parent: still its whole patch.
+        let root = commit_patch(d.path(), "HEAD~1").unwrap();
+        assert!(root.contains("+one"), "{root}");
     }
 
     #[test]

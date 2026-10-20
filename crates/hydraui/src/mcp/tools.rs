@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 
 use super::registry::Terminal;
+use crate::git_status::short_commit;
 use crate::tasks::{Change, Column, normalise};
 use crate::tasks_project::{CommitError, commit, load, project_root};
 
@@ -17,9 +18,9 @@ columns: Backlog (ideas), Pickup (work the user has approved for you to do), InP
 
 - Check Pickup with tasks_read when the user asks you to, and after you finish a piece of work.
 - Take one card at a time from Pickup with tasks_take, then do the work it describes.
-- Once the card's work is committed, move it to Verify with tasks_verify and tell the user. Until \
-it is committed, leave it in InProgress. Only the user moves cards from Verify to Done: never claim \
-on the board that a card is done.
+- Once the card's work is committed, move it to Verify with tasks_verify, giving the commit's \
+hash, and tell the user. Until it is committed, leave it in InProgress. Only the user moves cards \
+from Verify to Done: never claim on the board that a card is done.
 - Ideas or follow-ups worth keeping go to Backlog with tasks_add, never into Pickup.
 - Use tasks_mine to recall which cards this session is working on.
 - You cannot move cards into Pickup or Done, edit, reorder or delete them: those are the user's.";
@@ -59,9 +60,25 @@ pub fn list() -> Value {
         {
             "name": "tasks_verify",
             "description": "Move one of your InProgress cards to Verify once its work is \
-                committed, then tell the user: they check it and move it to Done. Not before the \
-                work is committed; only the user moves cards to Done.",
-            "inputSchema": text("The exact text of your InProgress card, as tasks_mine shows it."),
+                committed, giving the commit, then tell the user: they check it (the card shows \
+                the commit, and clicking it shows its changes) and move it to Done. Not before \
+                the work is committed; only the user moves cards to Done.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "The exact text of your InProgress card, as tasks_mine \
+                            shows it.",
+                    },
+                    "commit": {
+                        "type": "string",
+                        "description": "The commit holding the card's work (its hash; the last \
+                            one if the work took several).",
+                    },
+                },
+                "required": ["text", "commit"],
+            },
         },
         {
             "name": "tasks_mine",
@@ -109,9 +126,15 @@ pub fn call(terminal: &Terminal, name: &str, args: &Value) -> Option<Outcome> {
                     let cards: Vec<Value> = board
                         .cards(column)
                         .iter()
-                        .map(|c| match &c.taker {
-                            Some(t) => json!({ "text": c.text, "taker": t }),
-                            None => json!({ "text": c.text }),
+                        .map(|c| {
+                            let mut card = json!({ "text": c.text });
+                            if let Some(t) = &c.taker {
+                                card["taker"] = json!(t);
+                            }
+                            if let Some(h) = &c.commit {
+                                card["commit"] = json!(h);
+                            }
+                            card
                         })
                         .collect();
                     columns.insert(column.heading().into(), Value::Array(cards));
@@ -147,6 +170,24 @@ pub fn call(terminal: &Terminal, name: &str, args: &Value) -> Option<Outcome> {
                 return Some(Outcome::err("text is empty"));
             }
             let taker = terminal.name.clone();
+            let commit_hash = if name == "tasks_verify" {
+                let Some(rev) = args.get("commit").and_then(Value::as_str) else {
+                    return Some(Outcome::err(
+                        "the argument `commit` is required and must be a string: the hash of the                          commit holding the card's work",
+                    ));
+                };
+                match short_commit(&project, rev.trim()) {
+                    Some(hash) => Some(hash),
+                    None => {
+                        return Some(Outcome::err(format!(
+                            "{rev:?} isn't a commit in {}: commit the card's work first, then                              give its hash",
+                            project.display()
+                        )));
+                    }
+                }
+            } else {
+                None
+            };
             let (change, said, missing) = match name {
                 "tasks_add" => (Change::Add { text }, "added to Backlog", ""),
                 "tasks_take" => (
@@ -156,7 +197,11 @@ pub fn call(terminal: &Terminal, name: &str, args: &Value) -> Option<Outcome> {
                      Call tasks_read to see the board.",
                 ),
                 _ => (
-                    Change::Verify { text, taker },
+                    Change::Verify {
+                        text,
+                        taker,
+                        commit: commit_hash,
+                    },
                     "the card is now in Verify: tell the user it's ready to check",
                     "none of your InProgress cards has that text: it may be moved or edited \
                      already. Call tasks_mine to see your cards.",
@@ -220,39 +265,77 @@ mod tests {
         let file = std::fs::read_to_string(d.path().join(".hydra/tasks.md")).unwrap();
         assert!(file.contains("## Backlog\n- follow-up\n"));
         assert!(file.contains("## InProgress\n- [claude] do the thing\n"));
-        let verify = call(&t, "tasks_verify", &json!({"text": "do the thing"})).unwrap();
-        assert!(!verify.is_error, "{}", verify.text);
-        assert!(
-            call(&t, "tasks_verify", &json!({"text": "do the thing"}))
-                .unwrap()
-                .is_error,
-            "already in Verify"
-        );
-        let file = std::fs::read_to_string(d.path().join(".hydra/tasks.md")).unwrap();
-        assert!(
-            file.contains("## Verify\n- [claude] do the thing\n"),
-            "{file}"
-        );
+    }
+
+    /// A real git repository with one commit, and that commit's short hash; `None` without git.
+    fn committed_repo() -> Option<(tempfile::TempDir, String)> {
+        let d = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(d.path())
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .is_ok_and(|o| o.status.success())
+        };
+        if !git(&["init", "-q"]) {
+            eprintln!("skipped: git isn't installed");
+            return None;
+        }
+        std::fs::write(d.path().join("a.txt"), "one\n").unwrap();
+        assert!(git(&["add", "a.txt"]) && git(&["commit", "-q", "-m", "x"]));
+        let head = short_commit(d.path(), "HEAD").unwrap();
+        Some((d, head))
     }
 
     #[test]
-    fn a_session_cant_verify_another_sessions_card() {
-        let d = repo();
+    fn verify_records_the_commit_and_needs_a_real_one() {
+        let Some((d, head)) = committed_repo() else {
+            return;
+        };
         let t = Terminal {
-            name: "c".into(),
+            name: "claude".into(),
             cwd: d.path().into(),
         };
         std::fs::create_dir(d.path().join(".hydra")).unwrap();
         std::fs::write(
             d.path().join(".hydra/tasks.md"),
-            "## InProgress\n- [bob] b\n",
+            "## InProgress\n- [claude] do the thing\n- [bob] b\n",
         )
         .unwrap();
-        let out = call(&t, "tasks_verify", &json!({"text": "b"})).unwrap();
+        let verify = |args: Value| call(&t, "tasks_verify", &args).unwrap();
+        let no_commit = verify(json!({"text": "do the thing"}));
+        assert!(no_commit.is_error && no_commit.text.contains("`commit`"));
+        let bad = verify(json!({"text": "do the thing", "commit": "deadbeef"}));
         assert!(
-            out.is_error && out.text.contains("tasks_mine"),
+            bad.is_error && bad.text.contains("isn't a commit"),
             "{}",
-            out.text
+            bad.text
+        );
+        let bobs = verify(json!({"text": "b", "commit": "HEAD"}));
+        assert!(
+            bobs.is_error && bobs.text.contains("tasks_mine"),
+            "{}",
+            bobs.text
+        );
+        let ok = verify(json!({"text": "do the thing", "commit": "HEAD"}));
+        assert!(!ok.is_error, "{}", ok.text);
+        assert!(
+            verify(json!({"text": "do the thing", "commit": "HEAD"})).is_error,
+            "already in Verify"
+        );
+        let file = std::fs::read_to_string(d.path().join(".hydra/tasks.md")).unwrap();
+        assert!(
+            file.contains(&format!("## Verify\n- [claude @{head}] do the thing\n")),
+            "{file}"
+        );
+        let read: Value =
+            serde_json::from_str(&call(&t, "tasks_read", &json!({})).unwrap().text).unwrap();
+        assert_eq!(
+            read["columns"]["Verify"],
+            json!([{"text": "do the thing", "taker": "claude", "commit": head}])
         );
     }
 

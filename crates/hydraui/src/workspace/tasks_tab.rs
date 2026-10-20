@@ -12,7 +12,7 @@ use gpui_component::{WindowExt, h_flex};
 use super::Workspace;
 use crate::envs::PaneId;
 use crate::task_board::{TaskBoard, TaskBoardEvent};
-use crate::task_board_view::TaskBoardView;
+use crate::task_board_view::{TaskBoardView, TaskBoardViewEvent};
 
 /// The project a terminal in `cwd` keeps its board in (§2): its git work tree, else `cwd`.
 fn tasks_project(cwd: &Path) -> PathBuf {
@@ -87,6 +87,7 @@ impl Workspace {
     pub(super) fn drop_tasks(&mut self, id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
         self.tasks_tabs.remove(&id);
         self.board_focus.remove(&id);
+        self.board_events.remove(&id);
         let Some(view) = self.board_views.remove(&id) else {
             return;
         };
@@ -180,13 +181,24 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let board = self.board_for(project, window, cx);
-        let view = cx.new(|cx| TaskBoardView::new(board, window, cx));
+        let view = cx.new(|cx| TaskBoardView::new(board.clone(), window, cx));
+        let events = cx.subscribe_in(
+            &view,
+            window,
+            move |ws, _, ev: &TaskBoardViewEvent, window, cx| match ev {
+                TaskBoardViewEvent::ShowCommit(hash) => {
+                    let project = board.read(cx).project().to_path_buf();
+                    ws.show_commit(project, hash.clone(), window, cx)
+                }
+            },
+        );
         let handle = view.read(cx).focus_handle(cx);
         let focus = cx.on_focus_in(&handle, window, move |ws, _, cx| {
             ws.leave_files(id);
             cx.notify();
         });
         self.board_focus.insert(id, focus);
+        self.board_events.insert(id, events);
         self.board_views.insert(id, view);
     }
 

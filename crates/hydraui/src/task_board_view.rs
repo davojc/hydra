@@ -65,6 +65,12 @@ struct Editing {
     _events: Subscription,
 }
 
+/// What the board asks of the window around it.
+pub enum TaskBoardViewEvent {
+    /// A Verify card's commit was clicked: show what it changed.
+    ShowCommit(String),
+}
+
 pub struct TaskBoardView {
     board: Entity<TaskBoard>,
     editing: Option<Editing>,
@@ -379,6 +385,7 @@ impl TaskBoardView {
         let len = b.cards(col).len();
         let card = b.card_ref(col, i).expect("rendering a card the board has");
         let taker = b.cards(col)[i].taker.clone();
+        let commit = b.cards(col)[i].commit.clone();
         let theme = cx.theme();
         let (border, bg, hover, line) = (
             theme.border,
@@ -479,15 +486,36 @@ impl TaskBoardView {
                             // edits only the text.
                             .children(taker.map(|name| {
                                 // A row, so the badge hugs its text instead of spanning the card.
-                                div().flex().mb_1().child(
-                                    div()
-                                        .px_1p5()
-                                        .rounded_sm()
-                                        .bg(badge_bg)
-                                        .text_color(badge_fg)
-                                        .text_xs()
-                                        .child(SharedString::from(name)),
-                                )
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .mb_1()
+                                    .child(
+                                        div()
+                                            .px_1p5()
+                                            .rounded_sm()
+                                            .bg(badge_bg)
+                                            .text_color(badge_fg)
+                                            .text_xs()
+                                            .child(SharedString::from(name)),
+                                    )
+                                    // The commit the card's work is in (MCP server spec §5):
+                                    // clicking shows its changes in the file pane.
+                                    .children(commit.map(|hash| {
+                                        Button::new(("task-commit", i))
+                                            .label(SharedString::from(hash.clone()))
+                                            .ghost()
+                                            .xsmall()
+                                            .tooltip("Show this commit's changes")
+                                            .on_click(cx.listener(move |_, _, _, cx| {
+                                                // The click is the button's, not the card's.
+                                                cx.stop_propagation();
+                                                cx.emit(TaskBoardViewEvent::ShowCommit(
+                                                    hash.clone(),
+                                                ));
+                                            }))
+                                    }))
                             }))
                             .child(SharedString::from(card.text.clone())),
                     )
@@ -572,6 +600,8 @@ impl TaskBoardView {
             .child(body)
     }
 }
+
+impl gpui::EventEmitter<TaskBoardViewEvent> for TaskBoardView {}
 
 impl Focusable for TaskBoardView {
     fn focus_handle(&self, _: &App) -> FocusHandle {

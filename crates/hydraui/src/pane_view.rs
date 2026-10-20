@@ -338,10 +338,10 @@ impl PaneView {
     /// Types a prompt into the session for auto-pickup: the text as a paste (bracketed when the
     /// program asked for that), then Enter on its own a moment later, so Claude submits it
     /// rather than taking a newline into the paste. It is not the user's draft, so it leaves the
-    /// readiness alone.
-    pub fn type_prompt(&mut self, text: &str, cx: &mut Context<Self>) {
+    /// readiness alone. `false` when nothing could be typed (the terminal isn't running).
+    pub fn type_prompt(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
         let Some(mode) = self.mode() else {
-            return;
+            return false;
         };
         self.send(
             &paste_bytes(text, mode.contains(TermMode::BRACKETED_PASTE)),
@@ -352,6 +352,7 @@ impl PaneView {
             let _ = this.update(cx, |v, cx| v.send(b"\r", cx));
         })
         .detach();
+        true
     }
 
     /// The terminal's name in the MCP server: what its Claude sessions write as a card's taker.

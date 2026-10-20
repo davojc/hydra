@@ -13,7 +13,10 @@ use gpui_component::notification::Notification;
 use super::Workspace;
 use crate::envs::PaneId;
 use crate::jev::{JEV_URL, JevKey};
-use crate::pickup::{Pick, Session, candidates, choose, idle_in_project, is_reserved, pick};
+use crate::pickup::{
+    Pick, Session, candidates, choose, focused_pane, idle_in_project, is_reserved, pick,
+    still_in_pickup,
+};
 use crate::task_board_view::SendTarget;
 
 /// Keys the "Sent to" toasts, so a newer one replaces the last.
@@ -57,10 +60,11 @@ impl Workspace {
         for view in self.panes.values() {
             view.update(cx, |v, _| v.check_draft());
         }
-        let focused = window
-            .is_window_active()
-            .then(|| self.envs.active().and_then(|t| t.shown))
-            .flatten();
+        let focused = focused_pane(
+            window.is_window_active(),
+            self.envs.active().and_then(|t| t.shown),
+            |id| self.tasks_tabs.get(&id) == Some(&true),
+        );
         self.sessions(focused, cx)
     }
 
@@ -80,8 +84,22 @@ impl Workspace {
             .collect()
     }
 
+    /// The user moved card `text` into `project`'s Pickup (§4): it left Pickup first, so a
+    /// past send of it no longer holds it, and it is offered.
+    pub(super) fn card_arrived(
+        &mut self,
+        project: PathBuf,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.in_flight.arrived(&project, &text);
+        self.offer_card(project, text, window, cx);
+    }
+
     /// Sends card `text` of `project` to a free Claude session (§5), or says there is none
-    /// (§7). For a card moved into Pickup and for the menu's Send to a free session.
+    /// (§7). For a card moved into Pickup and for the menu's Send to a free session. A card
+    /// already being offered, or sent moments ago, is left alone.
     pub(super) fn offer_card(
         &mut self,
         project: PathBuf,
@@ -89,24 +107,28 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let now = Instant::now();
+        let boards = &self.boards;
+        self.in_flight.expire(now, |p, t| {
+            boards
+                .get(p)
+                .is_some_and(|(b, _)| still_in_pickup(b.read(cx).board(), t))
+        });
+        if !self.in_flight.try_start(&project, &text, now) {
+            return;
+        }
         let key = match JevKey::app().get() {
             Ok(Some(key)) => Some(key),
             _ => None,
         };
         let sessions = self.fresh_sessions(window, cx);
         match pick(&sessions, &project, key.is_some()) {
-            Pick::Certain(panes) => match choose(&panes) {
-                Some(pane) => self.send_card(pane, &text, window, cx),
-                None => self.no_free_session(&project, window, cx),
-            },
+            Pick::Certain(panes) => self.deliver(choose(&panes), &project, &text, window, cx),
             Pick::AskJev(panes) => {
-                let Some(key) = key else {
+                let Some(key) = key.filter(|_| !panes.is_empty()) else {
+                    self.deliver(None, &project, &text, window, cx);
                     return;
                 };
-                if panes.is_empty() {
-                    self.no_free_session(&project, window, cx);
-                    return;
-                }
                 // One call per session, in parallel, off the UI thread.
                 let asks: Vec<_> = panes
                     .iter()
@@ -136,7 +158,8 @@ impl Workspace {
     }
 
     /// Jev found `free` free. Things may have changed during the calls: the facts are checked
-    /// again, and nothing is sent when the card has left Pickup (§6).
+    /// again, and nothing is sent when the card has left Pickup (§6) or the user sent it by
+    /// hand meanwhile.
     fn after_jev(
         &mut self,
         project: PathBuf,
@@ -145,19 +168,45 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.in_flight.running(&project, &text) {
+            return;
+        }
         if !self.in_pickup(&project, &text, cx) {
+            self.in_flight.finish(&project, &text);
             return;
         }
         let ok = candidates(&self.fresh_sessions(window, cx), &project);
         free.retain(|p| ok.contains(p));
-        match choose(&free) {
-            Some(pane) => self.send_card(pane, &text, window, cx),
-            None => self.no_free_session(&project, window, cx),
+        self.deliver(choose(&free), &project, &text, window, cx);
+    }
+
+    /// Ends an offer: sends the card to `pane` and holds it as sent, or, with no pane or a
+    /// failed send, says no session is free and lets the card be offered again.
+    fn deliver(
+        &mut self,
+        pane: Option<PaneId>,
+        project: &Path,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sent = match pane {
+            Some(pane) => self.send_card(pane, project, text, window, cx),
+            None => {
+                self.no_free_session(project, window, cx);
+                false
+            }
+        };
+        if sent {
+            self.in_flight.sent(project, text, Instant::now());
+        } else {
+            self.in_flight.finish(project, text);
         }
     }
 
     /// Sends card `text` of `project` to terminal `pane`, the user's choice in Send to (§8):
-    /// no draft, finished or Jev check.
+    /// no draft, finished or Jev check, and sent even while an offer for the card runs. It is
+    /// then held as sent, so a later offer leaves it alone.
     pub(super) fn send_card_to(
         &mut self,
         pane: PaneId,
@@ -166,8 +215,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.in_pickup(&project, &text, cx) {
-            self.send_card(pane, &text, window, cx);
+        if self.in_pickup(&project, &text, cx) && self.send_card(pane, &project, &text, window, cx)
+        {
+            self.in_flight.sent(&project, &text, Instant::now());
         }
     }
 
@@ -175,17 +225,30 @@ impl Workspace {
     fn in_pickup(&self, project: &Path, text: &str, cx: &App) -> bool {
         self.boards
             .get(project)
-            .is_some_and(|(board, _)| crate::pickup::still_in_pickup(board.read(cx).board(), text))
+            .is_some_and(|(board, _)| still_in_pickup(board.read(cx).board(), text))
     }
 
     /// Types the card's prompt into terminal `pane` (§6), reserves it, and says so in a toast
-    /// that shows the terminal when clicked.
-    fn send_card(&mut self, pane: PaneId, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.panes.get(&pane).cloned() else {
-            return;
-        };
+    /// that shows the terminal when clicked. When nothing could be typed (the terminal is
+    /// gone or not running), says no session is free instead and returns `false`.
+    fn send_card(
+        &mut self,
+        pane: PaneId,
+        project: &Path,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let prompt = crate::pickup::prompt(text);
-        view.update(cx, |v, cx| v.type_prompt(&prompt, cx));
+        let typed = self
+            .panes
+            .get(&pane)
+            .cloned()
+            .filter(|view| view.update(cx, |v, cx| v.type_prompt(&prompt, cx)));
+        let Some(view) = typed else {
+            self.no_free_session(project, window, cx);
+            return false;
+        };
         self.reserved.insert(pane, Instant::now());
         let place = format!(
             "Sent to {} in {}",
@@ -200,6 +263,7 @@ impl Workspace {
                 ws.update(cx, |ws, cx| ws.show_terminal(pane, window, cx));
             });
         window.push_notification(note, cx);
+        true
     }
 
     /// No session can take the card (§7): it stays in Pickup. The toast names the project when

@@ -205,6 +205,8 @@ pub struct Workspace {
     /// Terminals a card was just sent to, and when: not candidates for another until their
     /// next hook state, or 30 s (auto-pickup design §6).
     reserved: HashMap<PaneId, Instant>,
+    /// Cards being offered or just sent, so one card never goes to two sessions.
+    in_flight: crate::pickup::InFlight,
     /// Listens for board files the MCP server's sessions create.
     _mcp_pump: Option<gpui::Task<()>>,
     /// Coming back to the window clears the alert of the terminal it shows.
@@ -364,6 +366,7 @@ impl Workspace {
             board_focus: HashMap::new(),
             board_events: HashMap::new(),
             reserved: HashMap::new(),
+            in_flight: Default::default(),
             _mcp_pump: mcp_pump,
             _activation: activation,
         }

@@ -279,7 +279,7 @@ impl Workspace {
                 }
                 TaskBoardEvent::ArrivedInPickup(text) => {
                     let project = board.read(cx).project().to_path_buf();
-                    ws.offer_card(project, text.clone(), window, cx)
+                    ws.card_arrived(project, text.clone(), window, cx)
                 }
             },
         );

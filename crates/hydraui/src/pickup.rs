@@ -2,6 +2,7 @@
 //! docs/superpowers/specs/2026-10-20-hydraui-auto-pickup-design.md §5-§6): which terminals are
 //! candidates, which of them are clearly free, and the prompt typed into the one picked. Pure, so
 //! the rules are tested directly.
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -129,6 +130,76 @@ pub fn choose(panes: &[PaneId]) -> Option<PaneId> {
     getrandom::fill(&mut bytes).expect("the OS has a random source");
     let i = (u64::from_le_bytes(bytes) % panes.len() as u64) as usize;
     Some(panes[i])
+}
+
+/// The terminal the user may be typing in: the shown one of the selected environment, while
+/// the window is active and that terminal's Tasks tab isn't the one on screen (§5.1, 4).
+pub fn focused_pane(
+    window_active: bool,
+    shown: Option<PaneId>,
+    board_shown: impl Fn(PaneId) -> bool,
+) -> Option<PaneId> {
+    (window_active && shown.is_some_and(|id| !board_shown(id)))
+        .then_some(shown)
+        .flatten()
+}
+
+/// Cards on their way to a session, by project and text, so one card never goes to two
+/// sessions (§2 anti-goals): an offer is running for it, or it was sent moments ago.
+#[derive(Debug, Default)]
+pub struct InFlight {
+    /// `None` while an offer for it runs, else when it was sent.
+    cards: HashMap<(PathBuf, String), Option<Instant>>,
+}
+
+impl InFlight {
+    /// Starts an offer for the card; `false` when one is running or it was just sent.
+    pub fn try_start(&mut self, project: &Path, text: &str, now: Instant) -> bool {
+        let key = (project.to_path_buf(), text.to_string());
+        match self.cards.get(&key) {
+            None => {}
+            Some(Some(at)) if !is_reserved(*at, now) => {}
+            Some(_) => return false,
+        }
+        self.cards.insert(key, None);
+        true
+    }
+
+    /// The card was sent at `now`: it stays here until it leaves Pickup or 30 s pass.
+    pub fn sent(&mut self, project: &Path, text: &str, now: Instant) {
+        self.cards
+            .insert((project.to_path_buf(), text.to_string()), Some(now));
+    }
+
+    /// An offer for the card is still running: not ended, nor overtaken by a send by hand.
+    pub fn running(&self, project: &Path, text: &str) -> bool {
+        matches!(
+            self.cards.get(&(project.to_path_buf(), text.to_string())),
+            Some(None)
+        )
+    }
+
+    /// The offer ended without sending.
+    pub fn finish(&mut self, project: &Path, text: &str) {
+        self.cards
+            .remove(&(project.to_path_buf(), text.to_string()));
+    }
+
+    /// The card arrived in Pickup again, so it had left: a past send no longer holds it.
+    pub fn arrived(&mut self, project: &Path, text: &str) {
+        let key = (project.to_path_buf(), text.to_string());
+        if matches!(self.cards.get(&key), Some(Some(_))) {
+            self.cards.remove(&key);
+        }
+    }
+
+    /// Forgets cards sent 30 s ago or more, or no longer in Pickup (`in_pickup`).
+    pub fn expire(&mut self, now: Instant, in_pickup: impl Fn(&Path, &str) -> bool) {
+        self.cards.retain(|(project, text), sent| match sent {
+            None => true,
+            Some(at) => is_reserved(*at, now) && in_pickup(project, text),
+        });
+    }
 }
 
 #[cfg(test)]
@@ -294,6 +365,81 @@ mod tests {
         assert!(still_in_pickup(&board, "fix it"));
         assert!(!still_in_pickup(&board, "taken"));
         assert!(!still_in_pickup(&board, "gone"));
+    }
+
+    #[test]
+    fn a_card_cannot_end_the_paste_early() {
+        let p = prompt("x\x1b[201~\rrm -rf /");
+        assert!(!p.contains('\x1b'), "{p:?}");
+        assert!(!p.contains('\r'));
+    }
+
+    #[test]
+    fn the_terminal_under_its_shown_tasks_tab_is_not_focused() {
+        assert_eq!(focused_pane(true, Some(1), |_| false), Some(1));
+        assert_eq!(focused_pane(true, Some(1), |p| p == 1), None);
+        assert_eq!(focused_pane(false, Some(1), |_| false), None);
+        assert_eq!(focused_pane(true, None, |_| false), None);
+    }
+
+    #[test]
+    fn an_offer_overtaken_by_a_send_by_hand_stops() {
+        let (repo, now) = (project(), Instant::now());
+        let mut f = InFlight::default();
+        assert!(f.try_start(&repo, "card", now));
+        assert!(f.running(&repo, "card"));
+        // The user sent it with Send to while Jev was thinking.
+        f.sent(&repo, "card", now);
+        assert!(!f.running(&repo, "card"));
+        assert!(!InFlight::default().running(&repo, "card"));
+    }
+
+    #[test]
+    fn a_card_on_its_way_is_not_offered_twice() {
+        let (repo, now) = (project(), Instant::now());
+        let mut f = InFlight::default();
+        assert!(f.try_start(&repo, "card", now));
+        // An offer is running (Jev): another for the same card does nothing.
+        assert!(!f.try_start(&repo, "card", now));
+        // Other cards and other projects are their own.
+        assert!(f.try_start(&repo, "other", now));
+        assert!(f.try_start(Path::new("/elsewhere"), "card", now));
+        // Ended without a send: it can be offered again.
+        f.finish(&repo, "card");
+        assert!(f.try_start(&repo, "card", now));
+    }
+
+    #[test]
+    fn a_sent_card_is_held_until_it_leaves_pickup_or_time_passes() {
+        let (repo, now) = (project(), Instant::now());
+        let mut f = InFlight::default();
+        assert!(f.try_start(&repo, "card", now));
+        f.sent(&repo, "card", now);
+        let still = |_: &Path, _: &str| true;
+        f.expire(now + Duration::from_secs(10), still);
+        assert!(!f.try_start(&repo, "card", now + Duration::from_secs(10)));
+        // 30 s on, it can go again.
+        f.expire(now + RESERVED_FOR, still);
+        assert!(f.try_start(&repo, "card", now + RESERVED_FOR));
+
+        // Taken out of Pickup: it can go again.
+        let mut f = InFlight::default();
+        f.sent(&repo, "card", now);
+        f.expire(now, |_, _| false);
+        assert!(f.try_start(&repo, "card", now));
+
+        // Moved out and back into Pickup after the send: it can go again.
+        let mut f = InFlight::default();
+        f.sent(&repo, "card", now);
+        f.arrived(&repo, "card");
+        assert!(f.try_start(&repo, "card", now));
+
+        // ...but not while an offer for it is still running.
+        let mut f = InFlight::default();
+        assert!(f.try_start(&repo, "card", now));
+        f.arrived(&repo, "card");
+        f.expire(now, |_, _| false);
+        assert!(!f.try_start(&repo, "card", now));
     }
 
     #[test]

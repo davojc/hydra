@@ -125,6 +125,8 @@ this work, but the file it will read is.
 ## 5. The board
 
 - Four columns, equal width, each with its heading and card count. Columns scroll on their own.
+- Each column has a color, shown as a dot before its heading and a strip down its cards' left
+  edge: Backlog grey, Pickup blue, InProgress orange, Done green.
 - **Backlog** has a **+** that adds an empty card at its top, already being edited.
 - **Done** has a **Clear** button that removes all its cards (asks first, showing how many).
 - A card shows its whole paragraph, wrapped. Clicking it edits it in place (multi-line input);

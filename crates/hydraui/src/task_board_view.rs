@@ -3,8 +3,8 @@
 //! drag it or use its right-click menu to move it. Every change goes straight to the file.
 use gpui::prelude::*;
 use gpui::{
-    App, Context, DragMoveEvent, Entity, FocusHandle, Focusable, FontWeight, MouseButton,
-    ScrollHandle, SharedString, Subscription, Window, div, point, px,
+    App, Context, DragMoveEvent, Entity, FocusHandle, Focusable, FontWeight, Hsla, MouseButton,
+    ScrollHandle, SharedString, Subscription, Window, div, hsla, point, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Escape, InputEvent, Textarea, TextareaState};
@@ -19,6 +19,18 @@ use crate::tasks_project::{self, Privacy};
 /// mouse move.
 const SCROLL_EDGE: f32 = 32.;
 const SCROLL_STEP: f32 = 12.;
+
+/// Each column's color, on its heading's dot and its cards' left edge: Backlog grey, Pickup
+/// blue, InProgress orange, Done green. The theme has no orange, so it's fixed here.
+fn accent(col: Column, cx: &App) -> Hsla {
+    let theme = cx.theme();
+    match col {
+        Column::Backlog => theme.muted_foreground,
+        Column::Pickup => theme.blue,
+        Column::InProgress => hsla(28. / 360., 0.9, 0.55, 1.),
+        Column::Done => theme.green,
+    }
+}
 
 /// A card being dragged; it draws its own small preview under the pointer.
 #[derive(Clone)]
@@ -266,6 +278,7 @@ impl TaskBoardView {
             .h_8()
             .flex_none()
             .gap_2()
+            .child(div().size_2().rounded_full().bg(accent(col, cx)))
             .child(
                 div()
                     .text_sm()
@@ -342,6 +355,7 @@ impl TaskBoardView {
             theme.drag_border,
         );
         let (badge_bg, badge_fg) = (theme.muted, theme.muted_foreground);
+        let edge = accent(col, cx);
         let board = self.board.clone();
         div()
             .id(("task-card", i))
@@ -407,29 +421,39 @@ impl TaskBoardView {
             })
             .child(
                 div()
-                    .px_2()
-                    .py_1p5()
+                    .flex()
+                    .overflow_hidden()
                     .rounded_md()
                     .border_1()
                     .border_color(border)
                     .bg(bg)
                     .hover(|s| s.bg(hover))
                     .text_sm()
-                    // Who took the card (MCP server spec §4), above its text; the editor edits
-                    // only the text.
-                    .children(taker.map(|name| {
-                        // A row, so the badge hugs its text instead of spanning the card.
-                        div().flex().mb_1().child(
-                            div()
-                                .px_1p5()
-                                .rounded_sm()
-                                .bg(badge_bg)
-                                .text_color(badge_fg)
-                                .text_xs()
-                                .child(SharedString::from(name)),
-                        )
-                    }))
-                    .child(SharedString::from(card.text)),
+                    // The column's color down the card's left edge; gpui can't color one side
+                    // of a border, so it's a strip.
+                    .child(div().w_1().flex_none().bg(edge))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .px_2()
+                            .py_1p5()
+                            // Who took the card (MCP server spec §4), above its text; the editor
+                            // edits only the text.
+                            .children(taker.map(|name| {
+                                // A row, so the badge hugs its text instead of spanning the card.
+                                div().flex().mb_1().child(
+                                    div()
+                                        .px_1p5()
+                                        .rounded_sm()
+                                        .bg(badge_bg)
+                                        .text_color(badge_fg)
+                                        .text_xs()
+                                        .child(SharedString::from(name)),
+                                )
+                            }))
+                            .child(SharedString::from(card.text)),
+                    ),
             )
     }
 

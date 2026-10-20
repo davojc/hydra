@@ -192,8 +192,42 @@ pub fn render_claude_md(env: &str, base: Option<&str>, over: Option<&str>) -> Op
     Some(s)
 }
 
+/// The MCP server hydra registers in every environment (§3).
+pub const HYDRAUI_SERVER: &str = "hydraui";
+
+/// The tools that server offers; Claude Code may call them without asking.
+pub const HYDRAUI_TOOLS: [&str; 4] = ["tasks_read", "tasks_add", "tasks_take", "tasks_mine"];
+
+/// Appends each missing `mcp__hydraui__<tool>` to `permissions.allow` in the settings JSON
+/// (creating permissions/allow as needed, keeping every other key and rule). Idempotent.
+pub fn add_hydraui_allow(settings_json: &str) -> Result<String, String> {
+    let mut root: Value = serde_json::from_str(settings_json).map_err(|e| e.to_string())?;
+    let obj = root
+        .as_object_mut()
+        .ok_or("settings.json isn't a JSON object")?;
+    let permissions = obj
+        .entry("permissions")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or("settings.json: \"permissions\" isn't an object")?;
+    let allow = permissions
+        .entry("allow")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or("settings.json: permissions.allow isn't a list")?;
+    for tool in HYDRAUI_TOOLS {
+        let rule = format!("mcp__{HYDRAUI_SERVER}__{tool}");
+        if !allow.iter().any(|r| r.as_str() == Some(&rule)) {
+            allow.push(Value::String(rule));
+        }
+    }
+    let mut text = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    text.push('\n');
+    Ok(text)
+}
+
 /// Copies the base's `mcpServers` (minus exclusions) into the environment's
-/// `.claude.json`, leaving every other key alone. `Ok(None)` means nothing to write.
+/// `.claude.json`, leaving every other key alone, and adds the `hydraui` server. `Ok(None)` means nothing to write.
 /// Each side is `(path, text)`; the path is only used in errors.
 pub fn sync_mcp(
     state_json: Option<(&Path, &str)>,
@@ -207,6 +241,10 @@ pub fn sync_mcp(
         },
         None => Map::new(),
     };
+    servers.insert(
+        HYDRAUI_SERVER.to_string(),
+        serde_json::json!({"type": "stdio", "command": "hydra", "args": ["mcp"]}),
+    );
     drop_excluded(&mut servers, exclude);
     let mut state = match state_json {
         Some((path, text)) => parse_object(text, path, MAY_BE_WRITING)?,
@@ -231,6 +269,51 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::path::PathBuf;
+
+    #[test]
+    fn every_environment_gets_the_hydraui_server() {
+        let out = sync_mcp(None, None, &[]).unwrap().unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v["mcpServers"]["hydraui"],
+            json!({"type": "stdio", "command": "hydra", "args": ["mcp"]})
+        );
+        let base = r#"{"mcpServers":{"hydraui":{"command":"old"},"codegraph":{}}}"#;
+        let v: Value = serde_json::from_str(
+            &sync_mcp(None, Some((Path::new("b"), base)), &[])
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["mcpServers"]["hydraui"]["command"], "hydra");
+        assert!(v["mcpServers"]["codegraph"].is_object());
+        assert_eq!(sync_mcp(None, None, &["hydraui".into()]).unwrap(), None);
+    }
+
+    #[test]
+    fn hydraui_tools_are_allowed_once_keeping_the_users_rules() {
+        let user = r#"{"permissions":{"allow":["Bash(git status)"],"deny":["Read(.env)"]}}"#;
+        let once = add_hydraui_allow(user).unwrap();
+        let twice = add_hydraui_allow(&once).unwrap();
+        assert_eq!(once, twice);
+        let v: Value = serde_json::from_str(&once).unwrap();
+        assert_eq!(v["permissions"]["deny"], json!(["Read(.env)"]));
+        assert_eq!(
+            v["permissions"]["allow"],
+            json!([
+                "Bash(git status)",
+                "mcp__hydraui__tasks_read",
+                "mcp__hydraui__tasks_add",
+                "mcp__hydraui__tasks_take",
+                "mcp__hydraui__tasks_mine"
+            ])
+        );
+        assert!(
+            add_hydraui_allow("{}")
+                .unwrap()
+                .contains("mcp__hydraui__tasks_take")
+        );
+    }
 
     #[test]
     fn guard_hook_is_added_to_empty_settings() {
@@ -434,13 +517,13 @@ mod tests {
         assert_eq!(v["projects"]["E:/x"]["k"], 1);
         assert_eq!(
             v["mcpServers"],
-            serde_json::json!({"codegraph": {"command": "cg"}})
+            serde_json::json!({"codegraph": {"command": "cg"}, "hydraui": {"type": "stdio", "command": "hydra", "args": ["mcp"]}})
         );
     }
 
     #[test]
     fn sync_is_a_no_op_when_already_in_sync() {
-        let state = r#"{"mcpServers":{"codegraph":{"command":"cg"}}}"#;
+        let state = r#"{"mcpServers":{"codegraph":{"command":"cg"},"hydraui":{"type":"stdio","command":"hydra","args":["mcp"]}}}"#;
         let base = r#"{"mcpServers":{"codegraph":{"command":"cg"}}}"#;
         assert_eq!(sync(Some(state), Some(base), &[]).unwrap(), None);
     }
@@ -451,10 +534,10 @@ mod tests {
         let out = sync(None, Some(base), &[]).unwrap().unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&out).unwrap(),
-            serde_json::json!({"mcpServers": {"dash": {}}})
+            serde_json::json!({"mcpServers": {"dash": {}, "hydraui": {"type": "stdio", "command": "hydra", "args": ["mcp"]}}})
         );
         assert_eq!(
-            sync(None, None, &[]).unwrap(),
+            sync(None, None, &["hydraui".to_string()]).unwrap(),
             None,
             "nothing to sync, nothing written"
         );

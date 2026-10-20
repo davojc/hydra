@@ -130,7 +130,9 @@ this work, but the file it will read is.
 
 ## 5. The board
 
-- Five columns, equal width, each with its heading and card count. Columns scroll on their own.
+- Five columns, equal width, each with its heading and card count. Columns scroll on their own,
+  and a column longer than the window shows a scrollbar that stays visible, so it's clear there
+  are more cards below.
 - Each column has a color, shown as a dot before its heading and a strip down its cards' left
   edge: Backlog grey, Pickup blue, InProgress orange, Verify yellow, Done green.
 - **Backlog** has a **+** that adds an empty card at its top, already being edited.

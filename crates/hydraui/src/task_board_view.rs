@@ -9,6 +9,7 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Escape, InputEvent, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+use gpui_component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{ActiveTheme, Disableable, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit_assets::IconName;
@@ -635,7 +636,24 @@ impl TaskBoardView {
                 d.border_l_1().border_color(cx.theme().border)
             })
             .child(self.render_header(col, count, cx))
-            .child(body)
+            // A scrollbar that stays visible, so a column longer than the window shows it has
+            // more below.
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .child(body)
+                    .child(
+                        div().absolute().inset_0().child(
+                            Scrollbar::vertical(&self.scroll[col as usize])
+                                .id(("task-column-scrollbar", col as usize))
+                                .mode(ScrollbarMode::Always),
+                        ),
+                    ),
+            )
     }
 }
 

@@ -1,7 +1,7 @@
 //! The terminal list on the left (env-tabs design §2.2): **+ New**, then the selected
-//! environment's terminals in creation order, grouped by project under a heading when they are
-//! in more than one, each with its activity dot, its name and × on hover; click shows one,
-//! right-click opens its Tasks tab, renames, restarts or closes it.
+//! environment's terminals in creation order, grouped by project with a line between groups,
+//! each with its activity dot, its name and × on hover; click shows one, right-click opens its
+//! Tasks tab, renames, restarts or closes it.
 use std::cell::Cell;
 
 use gpui::prelude::*;
@@ -99,34 +99,22 @@ impl Workspace {
                     ws.new_terminal(&env, None, window, cx);
                 })),
         );
-        // Terminals in the same project sit together, under the project's name once there is
-        // more than one project.
-        let groups = self.grouped_terminals(cx);
-        let headed = groups.len() > 1;
+        // Terminals in the same project sit together, a line between one project's and the
+        // next's.
         let all_tasks = self.all_tasks_shown();
-        let rows: Vec<(Option<String>, PaneId)> = groups
+        let rows: Vec<(bool, PaneId)> = self
+            .grouped_terminals(cx)
             .into_iter()
-            .flat_map(|(project, ids)| {
-                let name = project
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| project.display().to_string());
+            .enumerate()
+            .flat_map(|(g, (_, ids))| {
                 ids.into_iter()
                     .enumerate()
-                    .map(move |(i, id)| ((headed && i == 0).then(|| name.clone()), id))
+                    .map(move |(i, id)| (g > 0 && i == 0, id))
             })
             .collect();
-        for (heading, id) in rows {
-            if let Some(name) = heading {
-                list = list.child(
-                    div()
-                        .px_2()
-                        .pt_2()
-                        .text_xs()
-                        .text_color(muted)
-                        .truncate()
-                        .child(name),
-                );
+        for (divided, id) in rows {
+            if divided {
+                list = list.child(div().h(px(1.)).mx_2().my_1().bg(cx.theme().border));
             }
             let Some(view) = self.panes.get(&id) else {
                 continue;

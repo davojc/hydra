@@ -77,8 +77,8 @@ the right.
 
 - The selected environment's terminals, in the order they were created, grouped by project (the
   git repository a terminal's folder is in, worktrees of one repository together, as the task
-  board's project is): groups in the order of their first terminal, each under its project's name
-  once the environment has terminals in more than one project. Ctrl+PageDown / Ctrl+PageUp follow
+  board's project is): groups in the order of their first terminal, a thin line between one
+  group and the next (no project names). Ctrl+PageDown / Ctrl+PageUp follow
   the list's order. Each row: the activity
   dot, the terminal's name, and a close button on hover. The shown terminal is highlighted. A
   terminal running Claude shows what the session says it is doing (working, needs you, idle)

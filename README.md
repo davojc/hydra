@@ -4,6 +4,11 @@
 
 **Terminals with their own identities.** hydra opens PowerShell or Git Bash terminals inside named *environments*. Each environment has its own sign-ins and identity for the tools you use, including Claude Code, the GitHub CLI, git, AWS, Azure, Google Cloud and more. A `work` terminal and a `personal` terminal can then sit side by side, each signed in to a different account, and neither can quietly use the other's.
 
+hydra comes in two parts that share the same `~/.hydra` folder:
+
+- **hydraui**, a desktop app: a tab per environment, its terminals down the side, a file tree and file pane, and a task board that the Claude sessions in those terminals work through. See [hydraui](#hydraui-the-desktop-app).
+- **`hydra`**, the command line: it creates environments, turns tools on, opens terminals in your own console, and guards folders against the wrong account.
+
 ```
 PS> hydra shell work
 [work] PS> gh api user --jq .login        # your work GitHub account
@@ -18,6 +23,7 @@ Typical uses:
 
 - **Stop identity mix-ups.** Commits and pushes always use the environment's author, SSH key and GitHub login.
 - **Run Claude Code on several accounts at once.** Each environment has its own Claude sign-in, usage limits and history, and all of them share your skills, plugins, settings and MCP servers.
+- **Keep several Claude sessions busy.** Jot ideas on a project's task board while Claude works; move one into Pickup and hydraui hands it to a Claude session that is free.
 
 > **Status:** early (0.6). Windows 11 with PowerShell 7 and Git for Windows. See [What's not built yet](#whats-not-built-yet).
 
@@ -40,6 +46,22 @@ hydra init        # creates ~/.hydra
 **Releases:** every merge to `main` that changes more than docs publishes a release. Patch versions are bumped automatically. Minor and major versions come from `Cargo.toml`.
 
 **Guide:** <https://davojc.github.io/hydra/>
+
+## hydraui: the desktop app
+
+hydraui runs the same environments as the CLI, in one window. Start it from the Start menu. The first time, it asks you to name an environment if you have none. The full guide is at <https://davojc.github.io/hydra/app.html>.
+
+- **Environments and terminals.** One tab per environment, tinted with its colour, and its terminals listed down the left, grouped by project. Each terminal has the same isolation as `hydra shell`. Activity dots show which terminals are working, waiting or idle; in a terminal running Claude, the dot follows what Claude says it is doing.
+- **Claude alerts.** When a Claude session you aren't looking at asks you something or finishes, its environment tab gets a badge, the taskbar flashes and a toast names the terminal; click it to go there. The status bar shows how much of the account's usage limits the session has used.
+- **Accounts.** The status bar lists the environment's tools with a ✓ or ✗. Click the environment's name to add a tool, sign in, switch account, or borrow another environment's login.
+- **Files.** `Ctrl+B` shows a file tree with git status marks; `Show changes` opens a side-by-side diff. Files open in a file pane beside the terminal: an editor, rendered Markdown, or OpenAPI specs as API docs. `Ctrl+Shift+O` opens a file by name, `Ctrl+Shift+F` searches in files, and `Ctrl+click` opens a path printed in the terminal.
+- **Task board.** Right-click a terminal and choose **Tasks** for its project's board: Backlog, Pickup, InProgress, Verify and Done. Cards live in `.hydra/tasks.md` in the project, as plain Markdown. Claude sessions in hydraui terminals see the board through a local tool server hydra sets up for them: they take cards from Pickup, work on them, commit, and move them to Verify with the commit, for you to check and move to Done. **Take in new worktree** gives a card its own branch, worktree and Claude terminal.
+- **Auto-pickup.** Moving a card into Pickup types it into a free Claude session of that project. A session is free when it is new or has just moved a card to Verify; with a Jev API key (TypeSafe's decision model, set from the launcher), Jev also judges whether a session that finished other work is ready for a new task. That sends the session's last 60 terminal lines to TypeSafe's API. A Pickup card's right-click menu also has **Send to a free session** and **Send to ▸**. The launcher's **Open hydraui log** shows why a card went where it did.
+- **Layouts.** Save a window as a layout file: its environments, terminals, folders and open files come back when you open it, and Claude restarts where it was running.
+- **Launcher and keys.** `Ctrl+Shift+P` opens the launcher: environments, sign-ins, secrets, settings, layouts and more. The help icon in the title bar lists every key; change them under `[keys]` in `~/.hydra/hydraui/config.toml`.
+- **Updates.** The title bar shows **Update hydra <version>** when a release is out, and updates hydraui and `hydra.exe` together.
+
+hydraui terminals skip the CLI's folder guard; a terminal whose folder is bound to another environment shows a warning badge instead.
 
 ## Quick start: two GitHub and Claude accounts
 
@@ -224,7 +246,7 @@ Each environment's Claude folder (`~/.hydra/state/<env>/claude`) is rebuilt from
 | | |
 |---|---|
 | **Linked from `~/.claude`** | `skills/`, `commands/`, `agents/`, `hooks/`, `output-styles/`, `plugins/`. Install once and it's available everywhere. |
-| **Rebuilt each launch** | `settings.json` (yours merged with the environment's own `envs/<env>/claude/settings.json`), `CLAUDE.md` (yours plus the environment's own section), and the MCP servers from `~/.claude.json`, minus any `--mcp-exclude` patterns |
+| **Rebuilt each launch** | `settings.json` (yours merged with the environment's own `envs/<env>/claude/settings.json`), `CLAUDE.md` (yours plus the environment's own section), and the MCP servers from `~/.claude.json`, minus any `--mcp-exclude` patterns, plus hydraui's `hydraui` tool server for the task board |
 | **Private to the environment** | the sign-in, history, projects, sessions, and the rest of `.claude.json` |
 
 - **Per-environment changes:** put files in `~/.hydra/envs/<env>/claude/`.
@@ -232,6 +254,7 @@ Each environment's Claude folder (`~/.hydra/state/<env>/claude`) is rebuilt from
 - **Sign-in settings are never shared.** `apiKeyHelper` and API-key variables in `~/.claude/settings.json` are left out of every environment, with a warning, so environments can't end up on the same account.
 - **Plain `claude` is unchanged.** Running `claude` outside hydra keeps using `~/.claude` as before.
 - **Folder guard hook.** Each environment's `settings.json` also gets a `PreToolUse` hook that blocks `git commit`, `git push` and `gh` write commands in folders bound to another environment (see [Folders and guards](#folders-and-guards)). It is added after any hooks of your own.
+- **hydraui's hooks.** `settings.json` also gets status hooks and a status line (`hydra hook`, `hydra statusline`) that tell hydraui what each session is doing and how much of its limits it has used, and the `hydraui` task board tools are pre-approved. Outside hydraui they do nothing. A status line of your own still runs.
 
 ## Commands
 
@@ -263,7 +286,10 @@ Output is coloured in terminals; set NO_COLOR=1 to turn it off.
   state/<env>/         hydra's: each tool's folder, sign-ins, generated config
   state/<env>/git/hooks/  hydra's git hook wrappers (the guard)
   secrets.toml         names (never values) of stored secrets
+  hydraui/             hydraui's: config.toml, layouts/, jev.toml, hydraui.log
 ```
+
+A project's task board is `.hydra/tasks.md` in the project itself.
 
 `[bindings]` in `config.toml` maps folders to environments:
 
@@ -299,4 +325,4 @@ Output is coloured in terminals; set NO_COLOR=1 to turn it off.
 - **`hydra doctor`.**
 - **macOS and Linux.**
 
-The design is in [`docs/superpowers/specs/2026-10-03-hydra-design.md`](docs/superpowers/specs/2026-10-03-hydra-design.md) and the roadmap in [`docs/superpowers/plans/2026-10-03-hydra-roadmap.md`](docs/superpowers/plans/2026-10-03-hydra-roadmap.md).
+The CLI's design is in [`docs/superpowers/specs/2026-10-03-hydra-design.md`](docs/superpowers/specs/2026-10-03-hydra-design.md) and its roadmap in [`docs/superpowers/plans/2026-10-03-hydra-roadmap.md`](docs/superpowers/plans/2026-10-03-hydra-roadmap.md). hydraui's designs are in [`docs/superpowers/specs/`](docs/superpowers/specs/): the app, environment tabs, the task board, its MCP server and auto-pickup.

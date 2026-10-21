@@ -139,20 +139,51 @@ fn prompt_at(row: &[(char, bool)]) -> Option<usize> {
     matches!(row[at].0, '>' | '❯').then_some(at)
 }
 
-/// Whether Claude's input line on screen is empty. `rows` are the screen's rows as
-/// `(char, dim)` cells. The input line is the last row starting with `>` or `❯` right below a
-/// rule of `─`, with another rule further down; the rows up to that rule are the rest of a
-/// draft. Dim text (a placeholder) doesn't count. `None` when there is no such line.
-pub fn claude_input_empty(rows: &[Vec<(char, bool)>]) -> Option<bool> {
-    let blank = |cells: &[(char, bool)]| cells.iter().all(|&(c, dim)| dim || c == ' ');
+/// Where Claude's input box is on screen: its input line, the prompt character's column on it,
+/// and the rule below the draft's last line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputBox {
+    line: usize,
+    prompt: usize,
+    end: usize,
+}
+
+impl InputBox {
+    /// Whether the screen's cell at `(row, col)` holds the input, not the prompt character.
+    pub fn contains(&self, row: usize, col: usize) -> bool {
+        (row == self.line && col > self.prompt) || (row > self.line && row < self.end)
+    }
+}
+
+/// Claude's input box on screen. `rows` are the screen's rows as `(char, faint)` cells. The
+/// input line is the last row starting with `>` or `❯` right below a rule of `─`, with another
+/// rule further down; the rows up to that rule are the rest of a draft. `None` when there is
+/// no such line.
+pub fn claude_input(rows: &[Vec<(char, bool)>]) -> Option<InputBox> {
     (1..rows.len()).rev().find_map(|i| {
         let at = prompt_at(&rows[i])?;
         if !is_rule(&rows[i - 1]) {
             return None;
         }
         let end = i + 1 + rows[i + 1..].iter().position(|r| is_rule(r))?;
-        Some(blank(&rows[i][at + 1..]) && rows[i + 1..end].iter().all(|r| blank(r)))
+        Some(InputBox {
+            line: i,
+            prompt: at,
+            end,
+        })
     })
+}
+
+/// Whether Claude's input box on screen is empty. Faint text (a placeholder, or a prompt Claude
+/// suggests) doesn't count. `None` when there is no input box.
+pub fn claude_input_empty(rows: &[Vec<(char, bool)>]) -> Option<bool> {
+    let input = claude_input(rows)?;
+    Some(rows.iter().enumerate().all(|(row, cells)| {
+        cells
+            .iter()
+            .enumerate()
+            .all(|(col, &(c, faint))| !input.contains(row, col) || faint || c == ' ')
+    }))
 }
 
 #[cfg(test)]
@@ -355,5 +386,15 @@ mod tests {
         );
         assert_eq!(claude_input_empty(&screen(&["$ ls", "a b"])), None);
         assert_eq!(claude_input_empty(&screen(&["> no rules"])), None);
+    }
+
+    #[test]
+    fn the_input_box_holds_the_text_after_the_prompt() {
+        let input =
+            claude_input(&screen(&["out", "────", " ❯ hi", "  more", "────", "x"])).unwrap();
+        assert!(!input.contains(2, 1), "the prompt character");
+        assert!(input.contains(2, 3));
+        assert!(input.contains(3, 0));
+        assert!(!input.contains(0, 0) && !input.contains(4, 0) && !input.contains(5, 0));
     }
 }

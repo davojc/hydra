@@ -39,7 +39,7 @@ use crate::input::{
 use crate::keys::{CopyText, Find, PasteText, TerminalBackTab, TerminalTab};
 use crate::mcp::{McpTerminal, SessionState};
 use crate::palette::Palette;
-use crate::readiness::{Draft, Readiness, claude_input_empty};
+use crate::readiness::{Draft, Readiness, claude_input, claude_input_empty};
 
 /// The font and colours every pane draws with.
 pub struct TermStyle {
@@ -334,9 +334,16 @@ impl PaneView {
     }
 
     /// The last `rows` lines of the terminal, scrollback included, trailing spaces trimmed.
+    /// Faint text in Claude's input box, a placeholder or a prompt it suggests, is left out: it
+    /// isn't a draft.
     pub fn screen_text(&self, rows: usize) -> String {
         match &self.slot {
-            Slot::Running(pane) => pane.with_term(|t| last_lines(t, rows)),
+            Slot::Running(pane) => pane.with_term(|t| {
+                let input = claude_input(&screen_cells(t));
+                last_lines(t, rows, |row, col| {
+                    input.is_some_and(|b| b.contains(row, col))
+                })
+            }),
             _ => String::new(),
         }
     }

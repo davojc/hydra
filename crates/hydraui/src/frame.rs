@@ -4,10 +4,10 @@ use hydraui_term::alacritty_terminal::Term;
 use hydraui_term::alacritty_terminal::event::EventListener;
 use hydraui_term::alacritty_terminal::grid::Dimensions;
 use hydraui_term::alacritty_terminal::index::{Boundary, Column, Direction, Line, Point};
-use hydraui_term::alacritty_terminal::term::cell::Flags;
+use hydraui_term::alacritty_terminal::term::cell::{Cell, Flags};
 use hydraui_term::alacritty_terminal::term::search::{Match, RegexSearch};
 use hydraui_term::alacritty_terminal::term::viewport_to_point;
-use hydraui_term::alacritty_terminal::vte::ansi::CursorShape;
+use hydraui_term::alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
 
 use crate::palette::{Palette, dim};
 
@@ -266,23 +266,42 @@ pub fn visible_rows<T>(term: &Term<T>) -> Vec<(String, bool)> {
         .collect()
 }
 
+/// Whether a cell's text is faint: dim, or in a grey. Claude Code draws its placeholder dim
+/// and the prompt it suggests in grey, and what you type in the normal colour.
+fn faint(cell: &Cell) -> bool {
+    cell.flags.contains(Flags::DIM)
+        || match cell.fg {
+            Color::Named(NamedColor::BrightBlack | NamedColor::DimForeground)
+            | Color::Indexed(8) => true,
+            Color::Spec(c) => c.r == c.g && c.g == c.b && (0x40..0xc0).contains(&c.r),
+            _ => false,
+        }
+}
+
 /// The last `rows` lines of the terminal, scrollback included, whatever the view is scrolled
-/// to: trailing spaces trimmed, joined with newlines.
-pub fn last_lines<T>(term: &Term<T>, rows: usize) -> String {
+/// to: trailing spaces trimmed, joined with newlines. Faint text in the live screen's
+/// `(row, column)` cells that `quiet` picks is left out.
+pub fn last_lines<T>(term: &Term<T>, rows: usize, quiet: impl Fn(usize, usize) -> bool) -> String {
     let grid = term.grid();
     let (top, bottom) = (grid.topmost_line().0, grid.bottommost_line().0);
     let first = (bottom + 1 - rows.min(i32::MAX as usize) as i32).max(top);
     (first..=bottom)
         .map(|line| {
             let row = &grid[Line(line)];
-            let text: String = (0..term.columns()).map(|col| row[Column(col)].c).collect();
+            let text: String = (0..term.columns())
+                .map(|col| {
+                    let cell = &row[Column(col)];
+                    let left_out = line >= 0 && faint(cell) && quiet(line as usize, col);
+                    if left_out { ' ' } else { cell.c }
+                })
+                .collect();
             text.trim_end_matches(' ').to_string()
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-/// The live screen's rows (not the scrolled view) as `(char, dim)` cells.
+/// The live screen's rows (not the scrolled view) as `(char, faint)` cells.
 pub fn screen_cells<T>(term: &Term<T>) -> Vec<Vec<(char, bool)>> {
     (0..term.screen_lines() as i32)
         .map(|line| {
@@ -290,7 +309,7 @@ pub fn screen_cells<T>(term: &Term<T>) -> Vec<Vec<(char, bool)>> {
             (0..term.columns())
                 .map(|col| {
                     let cell = &row[Column(col)];
-                    (cell.c, cell.flags.contains(Flags::DIM))
+                    (cell.c, faint(cell))
                 })
                 .collect()
         })
@@ -358,10 +377,24 @@ mod tests {
     fn the_last_lines_reach_into_the_scrollback() {
         let mut t = term(6, 2, b"one\r\ntwo  \r\nthree");
         t.scroll_display(Scroll::Delta(1));
-        assert_eq!(last_lines(&t, 2), "two\nthree");
-        assert_eq!(last_lines(&t, 3), "one\ntwo\nthree");
-        assert_eq!(last_lines(&t, 10), "one\ntwo\nthree");
-        assert_eq!(last_lines(&t, 0), "");
+        let all = |_, _| true;
+        assert_eq!(last_lines(&t, 2, all), "two\nthree");
+        assert_eq!(last_lines(&t, 3, all), "one\ntwo\nthree");
+        assert_eq!(last_lines(&t, 10, all), "one\ntwo\nthree");
+        assert_eq!(last_lines(&t, 0, all), "");
+    }
+
+    #[test]
+    fn faint_text_where_asked_is_left_out_of_the_last_lines() {
+        // Dim, then grey (Claude's suggested prompt), then the normal colour.
+        let t = term(
+            12,
+            2,
+            b"> \x1b[2mtry\x1b[0m\r\n> \x1b[38;2;153;153;153mpush\x1b[0m ok",
+        );
+        assert_eq!(last_lines(&t, 2, |_, _| false), "> try\n> push ok");
+        assert_eq!(last_lines(&t, 2, |_, _| true), ">\n>      ok");
+        assert_eq!(last_lines(&t, 2, |row, _| row == 1), "> try\n>      ok");
     }
 
     #[test]
@@ -374,6 +407,16 @@ mod tests {
         assert_eq!(cells[1][0], ('c', false));
         let t = term(4, 2, b"a\x1b[2mb");
         assert_eq!(screen_cells(&t)[0][..2], [('a', false), ('b', true)]);
+        let t = term(
+            4,
+            2,
+            b"a\x1b[38;2;153;153;153mb\x1b[38;2;255;255;255mc\x1b[90md",
+        );
+        assert_eq!(
+            screen_cells(&t)[0],
+            [('a', false), ('b', true), ('c', false), ('d', true)],
+            "grey is faint, white isn't"
+        );
     }
 
     #[test]

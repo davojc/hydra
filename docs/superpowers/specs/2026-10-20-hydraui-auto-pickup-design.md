@@ -177,7 +177,11 @@ The **state** sent is the text of the terminal's last ~60 rows (screen plus
 the end of scrollback), as hydraui's grid holds it: that shows the end of
 Claude's last message and its input box (my call; no change to the hooks is
 needed. The builder may add Claude's last message from the transcript if
-testing shows the screen isn't enough).
+testing shows the screen isn't enough). Faint text in the input box is left
+out: Claude Code draws its placeholder dim and the prompt it suggests (such
+as `push`) in grey, and sent as plain text either reads as a typed draft.
+Text that is dim or grey (bright black, or an RGB grey from 0x40 to 0xBF)
+counts as faint; what you type is in the normal colour.
 
 A candidate is **free** when Jev picks `ready` with confidence ≥ 0.7. A Jev
 error, timeout (~5 s), a pick that wasn't offered or any other unexpected reply

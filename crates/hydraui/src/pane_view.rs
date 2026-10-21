@@ -33,7 +33,8 @@ use crate::frame::{
 };
 use crate::hydra::{Hydra, PaneRequest, Started};
 use crate::input::{
-    Mods, MouseKind, ReportButton, Wheel, key_bytes, mouse_report, paste_bytes, wheel,
+    Mods, MouseKind, ReportButton, Wheel, ctrl_v_pastes, key_bytes, mouse_report, paste_bytes,
+    wheel,
 };
 use crate::keys::{CopyText, Find, PasteText, TerminalBackTab, TerminalTab};
 use crate::mcp::{McpTerminal, SessionState};
@@ -649,6 +650,14 @@ impl PaneView {
         let Some(mode) = self.mode() else {
             return;
         };
+        if k.key == "v" {
+            let text = cx.read_from_clipboard().and_then(|item| item.text());
+            if ctrl_v_pastes(&k.key, mods(k.modifiers), text.is_some()) {
+                self.paste(&text.unwrap_or_default(), mode, cx);
+                cx.stop_propagation();
+                return;
+            }
+        }
         if let Some(bytes) = key_bytes(&k.key, k.key_char.as_deref(), mods(k.modifiers), mode) {
             if k.key == "enter" && !k.modifiers.modified() {
                 self.readiness.enter();
@@ -893,9 +902,14 @@ impl PaneView {
         let Some(mode) = self.mode() else {
             return;
         };
+        self.paste(&text, mode, cx);
+    }
+
+    /// Sends `text` as the user's paste (bracketed when the program asked for that).
+    fn paste(&mut self, text: &str, mode: TermMode, cx: &mut Context<Self>) {
         self.readiness.typed();
         self.send(
-            &paste_bytes(&text, mode.contains(TermMode::BRACKETED_PASTE)),
+            &paste_bytes(text, mode.contains(TermMode::BRACKETED_PASTE)),
             cx,
         );
     }

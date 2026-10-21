@@ -453,7 +453,7 @@ binding → `default_env` in `config.toml` → a picker.
 | Split right / down | Ctrl+Shift+D / Ctrl+Shift+E |
 | Move focus | Alt+Arrows |
 | Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab |
-| Copy / paste | Ctrl+Shift+C / Ctrl+Shift+V |
+| Copy / paste | Ctrl+Shift+C / Ctrl+Shift+V (in a terminal Ctrl+V also pastes text; with no text in the clipboard it goes to the program, for image paste) |
 | Find | Ctrl+F |
 | Launcher | Ctrl+Shift+P |
 | File tree | Ctrl+B |

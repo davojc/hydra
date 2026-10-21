@@ -121,6 +121,13 @@ fn control(key: &str) -> Option<Vec<u8>> {
     Some(vec![code])
 }
 
+/// Whether Ctrl+V pastes the clipboard's text, as in Windows Terminal: only plain Ctrl+V, and
+/// only when there is text (`has_text`). Without text, ^V reaches the program, so Claude Code
+/// can paste an image.
+pub fn ctrl_v_pastes(key: &str, m: Mods, has_text: bool) -> bool {
+    key == "v" && m.ctrl && !m.alt && !m.shift && has_text
+}
+
 /// Pasted text for the shell: every line ending becomes one Enter (`\r`). With bracketed
 /// paste on, the text is wrapped and ESC is removed so it can't end the bracket early.
 pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
@@ -239,6 +246,31 @@ pub fn wheel(lines: i32, col: usize, row: usize, m: Mods, mode: TermMode) -> Whe
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ctrl_v_pastes_text_and_leaves_an_image_to_the_program() {
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::default()
+        };
+        assert!(ctrl_v_pastes("v", ctrl, true));
+        assert!(!ctrl_v_pastes("v", ctrl, false), "no text: ^V goes through");
+        assert!(!ctrl_v_pastes("v", Mods::default(), true));
+        let ctrl_shift = Mods {
+            shift: true,
+            ..ctrl
+        };
+        assert!(
+            !ctrl_v_pastes("v", ctrl_shift, true),
+            "Ctrl+Shift+V is the Paste command"
+        );
+        let ctrl_alt = Mods { alt: true, ..ctrl };
+        assert!(
+            !ctrl_v_pastes("v", ctrl_alt, true),
+            "AltGr+V and Ctrl+Alt+V are left alone"
+        );
+        assert!(!ctrl_v_pastes("c", ctrl, true));
+    }
+
     use super::*;
 
     const NONE: Mods = Mods {

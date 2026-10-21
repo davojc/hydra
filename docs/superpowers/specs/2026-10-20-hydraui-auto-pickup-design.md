@@ -106,7 +106,8 @@ On arrival hydraui looks for a free session (§5).
    Terminals in a linked worktree are not candidates (my call): a worktree is
    made for one card, and new work typed there would land on that card's
    branch.
-3. Last hook state **idle** (from `SessionStart` or `Stop`). Working, waiting
+3. Last hook state **idle** (from `SessionStart` or `Stop`; a resumed start,
+   reported as `resumed`, is idle too). Working, waiting
    (a permission or question dialog) and ended are not candidates; nor is a
    terminal whose Claude hasn't reported yet.
 4. Not the focused terminal while the hydraui window is active (my call: the
@@ -116,7 +117,9 @@ On arrival hydraui looks for a free session (§5).
    the user sends it:
    - typing sets it: printable keys, text from the input handler (IME/AltGr),
      paste, Backspace/Delete and other editing keys. Mouse reports, focus
-     events and hydraui's own injected text do not;
+     events do not. A prompt hydraui itself typed (§6) counts as a draft until
+     the session starts working on it (idle→working) or ends, so a prompt that
+     didn't submit keeps the session from being sent another card;
    - **Enter** (unmodified) clears it;
    - a change of hook state from *idle* to *working* clears it: while idle,
      only `UserPromptSubmit` reports *working*, so the input was just
@@ -136,8 +139,13 @@ uncertain (§5.3).
 ### 5.2 Clearly finished: free, with or without Jev
 
 A candidate is clearly finished, and so free, when it is:
-- **fresh**: its Claude session started (`SessionStart`) and has had no prompt
-  since (no idle→working change); or
+- **fresh**: its Claude session started new (`SessionStart` with source
+  `startup` or `clear`) and has had no prompt since (no idle→working change).
+  A resumed conversation (source `resume`: `claude -c`, `claude -r`,
+  `/resume`, and the session a layout restore starts) is not fresh: it may end
+  in a question. hydra's SessionStart status hooks are split by matcher:
+  `startup|clear` reports `idle`, `resume` reports `resumed` (idle in every
+  other way). `compact` reports nothing; or
 - **just verified**: during its last turn it called `tasks_verify` (the MCP
   server knows which terminal's token made the call), and no prompt has
   started since (an idle→working change resets this).
@@ -220,6 +228,9 @@ toasts).
 
 The card stays in Pickup. A warning toast (auto-hides) says "No free Claude
 session for this card", naming the project when the window has more than one.
+When Jev was asked and every call failed, the toast says why, e.g. "No free
+Claude session for this card (Jev: HTTP 401)"; the reason never contains the
+key.
 There is no retry: the user sends it by hand (§8) or tells a session
 themselves.
 
@@ -228,7 +239,8 @@ themselves.
 Pickup cards' right-click menu, next to Take in new worktree:
 
 - **Send to a free session**: picks and sends as §5 and §6, or shows §7's
-  toast.
+  toast. On a card already being offered or sent in the last 30 s, an info
+  toast says "This card is already on its way".
 - **Send to ▸**: a submenu of the project's idle Claude sessions in the main
   work tree (§5.1 items 1–3), by name and environment. The user picks; no
   draft, Jev or finished check (my call: the user is deciding). Disabled
@@ -247,8 +259,7 @@ Both send as §6, reservation and toast included.
 - Where the draft flag and the fresh/just-verified state live (likely
   `PaneView`, beside its Claude state) and how injected text skips the draft
   flag.
-- Tests: the `[jev]` config and add-tool, the jev tool contributing no
-  variables, draft flag transitions, fresh/just-verified transitions, the
+- Tests: the Jev key in the credential store, draft flag transitions, fresh/just-verified transitions, the
   candidate filter, the free decision from Jev answers (thresholds, errors),
   the prompt text, arrival only on moves into Pickup.
   A hands-on check in a real Claude session that the prompt submits and Claude

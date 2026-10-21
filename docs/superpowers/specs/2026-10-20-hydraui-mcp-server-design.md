@@ -204,13 +204,17 @@ replacing older status hooks:
 
 | Event | Matcher | State |
 |---|---|---|
-| SessionStart | | idle |
+| SessionStart | `startup\|clear` | idle |
+| SessionStart | `resume` | resumed |
 | UserPromptSubmit | | working |
 | PreToolUse | `AskUserQuestion\|ExitPlanMode` | waiting |
 | PostToolUse | `*` | working |
 | Notification | `permission_prompt\|elicitation_dialog` | waiting |
 | Stop | | idle |
 | SessionEnd | | ended |
+
+`resumed` (a conversation resumed with `claude -c`, `claude -r` or `/resume`) is idle in every way
+except that the session isn't a new one (auto-pickup's "fresh"). `compact` reports nothing.
 
 `hydra hook <state>` posts the JSON-RPC notification `hydraui/status` with `{"state": ...}` to
 `$HYDRA_MCP_URL` with the terminal's bearer token (500 ms timeout). Outside hydraui (no

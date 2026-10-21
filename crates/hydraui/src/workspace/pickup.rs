@@ -13,7 +13,7 @@ use gpui_component::notification::Notification;
 use super::Workspace;
 use crate::action_log;
 use crate::envs::PaneId;
-use crate::jev::{JEV_URL, JevKey, Verdict};
+use crate::jev::{Failure, JEV_URL, JevKey, JevSettings, Reply};
 use crate::pickup::{
     Pick, Session, candidates, choose, describe, focused_pane, idle_in_project, is_reserved,
     jev_failure, no_free_text, pick, still_in_pickup,
@@ -103,6 +103,37 @@ impl Workspace {
             ));
         }
         action_log::write(text);
+    }
+
+    /// The Jev questions and thresholds from jev.toml, logged; the defaults, with a warning,
+    /// when it can't be used.
+    fn jev_settings(&self, window: &mut Window, cx: &mut Context<Self>) -> JevSettings {
+        let path = crate::jev::settings_file(self.hydra.paths.root());
+        let (settings, problem) = crate::jev::load_settings(&path);
+        let from = if let Some(problem) = &problem {
+            window.push_notification(
+                Notification::warning(format!("jev.toml: {problem}. Using the default questions."))
+                    .title("Jev"),
+                cx,
+            );
+            format!("defaults (jev.toml: {problem})")
+        } else if path.exists() {
+            path.display().to_string()
+        } else {
+            "defaults (no jev.toml)".to_string()
+        };
+        action_log::write(format!(
+            "jev: questions from {from}; model {}; free when finished >= {}, waiting <= {}, draft <= {}\n\
+             waiting: {}\nfinished: {}\ndraft: {}",
+            settings.model,
+            settings.finished_min,
+            settings.waiting_max,
+            settings.draft_max,
+            question_text(&settings.waiting),
+            question_text(&settings.finished),
+            question_text(&settings.draft),
+        ));
+        settings
     }
 
     /// The card menu's Send to submenu (§8): `project`'s idle Claude sessions, as
@@ -206,19 +237,22 @@ impl Workspace {
                     "pickup: none clearly free; asking Jev about {}",
                     self.pane_names(&panes, cx)
                 ));
+                let settings = self.jev_settings(window, cx);
                 // One call per session, in parallel, off the UI thread.
                 let asks: Vec<_> = panes
                     .iter()
                     .filter_map(|pane| {
                         let state = self.panes.get(pane)?.read(cx).screen_text(JEV_ROWS);
                         let name = self.pane_name(*pane, cx);
-                        let (pane, key) = (*pane, key.clone());
+                        let (pane, key, settings) = (*pane, key.clone(), settings.clone());
                         Some(cx.background_spawn(async move {
-                            // The error is a short reason without the key (`jev::ask`).
-                            let verdict =
-                                crate::jev::ask(JEV_URL, &key, &state).map_err(|e| e.to_string());
-                            log_jev(&name, &state, &verdict);
-                            (pane, verdict.map(|v| v.is_free()))
+                            let reply = crate::jev::ask(JEV_URL, &key, &state, &settings);
+                            log_jev(&name, &state, &reply, &settings);
+                            // The failure is a short reason without the key (`jev::ask`).
+                            let free = reply
+                                .map(|r| r.verdict.is_free(&settings))
+                                .map_err(|f| f.reason);
+                            (pane, free)
                         }))
                     })
                     .collect();
@@ -412,17 +446,40 @@ impl Workspace {
     }
 }
 
-/// Logs Jev's answer about terminal `name`, with the screen it was sent.
-fn log_jev(name: &str, state: &str, verdict: &Result<Verdict, String>) {
-    let said = match verdict {
-        Ok(v) => format!(
-            "waiting {:.2}, finished {:.2}, draft {:.2}: {}",
-            v.waiting,
-            v.finished,
-            v.draft,
-            if v.is_free() { "free" } else { "not free" }
+/// A question as the log shows it: its instructions, then its criteria when it has them.
+fn question_text(q: &crate::jev::Question) -> String {
+    match &q.criteria {
+        Some(c) => format!("{} (criteria: {c})", q.instructions).replace('\n', " "),
+        None => q.instructions.clone(),
+    }
+}
+
+/// Logs Jev's answer about terminal `name`: each answer (Jev's probability of yes), the
+/// verdict by `settings`' thresholds, the reply as it came and the screen sent.
+fn log_jev(name: &str, state: &str, reply: &Result<Reply, Failure>, settings: &JevSettings) {
+    let said = match reply {
+        Ok(r) => {
+            let v = r.verdict;
+            format!(
+                "waiting {:.3}, finished {:.3}, draft {:.3}: {}\nreply: {}",
+                v.waiting,
+                v.finished,
+                v.draft,
+                if v.is_free(settings) {
+                    "free"
+                } else {
+                    "not free"
+                },
+                r.body.trim()
+            )
+        }
+        Err(f) => format!(
+            "failed: {}{}",
+            f.reason,
+            f.body
+                .as_deref()
+                .map_or(String::new(), |b| format!("\nreply: {}", b.trim()))
         ),
-        Err(e) => format!("failed: {e}"),
     };
     action_log::write(format!(
         "jev: {name}: {said}\nscreen sent ({} lines):\n{state}",

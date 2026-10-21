@@ -45,6 +45,8 @@ pub enum Action {
     SetJevKey,
     /// Forget the stored Jev API key, after asking.
     RemoveJevKey,
+    /// jev.toml, the questions auto-pickup asks Jev, in the file pane (written first if new).
+    EditJevQuestions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +101,7 @@ pub fn entries(
     add("All boards".into(), Action::AllBoards);
     add("Keyboard shortcuts".into(), Action::Shortcuts);
     add("Set Jev API key…".into(), Action::SetJevKey);
+    add("Edit Jev questions".into(), Action::EditJevQuestions);
     if jev_set {
         add("Remove Jev API key".into(), Action::RemoveJevKey);
     }
@@ -141,6 +144,7 @@ mod tests {
                 "All boards",
                 "Keyboard shortcuts",
                 "Set Jev API key…",
+                "Edit Jev questions",
             ]
         );
         assert!(!labels.iter().any(|l| l.starts_with("Set:")), "no sets");
@@ -188,7 +192,8 @@ mod tests {
                 "Check for updates",
                 "All boards",
                 "Keyboard shortcuts",
-                "Set Jev API key…"
+                "Set Jev API key…",
+                "Edit Jev questions"
             ]
         );
         assert_eq!(got[10].action, Action::OpenLog);

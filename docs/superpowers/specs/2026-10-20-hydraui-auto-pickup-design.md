@@ -180,6 +180,11 @@ A candidate is **free** when `finished ≥ 0.8`, `waiting ≤ 0.2` and
 `draft ≤ 0.2` (my call on the thresholds; constants, tuned during the hands-on
 check). A Jev error, timeout (~5 s) or unexpected reply means not free.
 
+The questions' wording (and optional criteria for yes and no), the model and the
+three thresholds can be changed in `<HYDRA_HOME>/hydraui/jev.toml` (launcher: Edit Jev
+questions), read on every ask; the three question ids stay fixed, since the free rule
+uses them. `hydraui.log` records each answer, Jev's reply and the screen sent.
+
 Jev API (docs.typesafe.ai/api): `POST https://api.typesafe.ai/v1/systemone`,
 `Authorization: Bearer <key>`, body
 `{"model": "jev-latest", "state": "...", "questions": {"<id>": {"type": "noul", "instructions": "..."}}}`,

@@ -125,6 +125,22 @@ impl Workspace {
             Action::Shortcuts => self.shortcuts(window, cx),
             Action::SetJevKey => self.set_jev_key_dialog(window, cx),
             Action::RemoveJevKey => self.remove_jev_key_dialog(window, cx),
+            Action::EditJevQuestions => {
+                let path = crate::jev::settings_file(self.hydra.paths.root());
+                if !path.exists() {
+                    if let Some(dir) = path.parent() {
+                        let _ = std::fs::create_dir_all(dir);
+                    }
+                    if let Err(e) = std::fs::write(&path, crate::jev::DEFAULT_SETTINGS_TEXT) {
+                        window.push_notification(
+                            Notification::error(format!("Can't write jev.toml: {e}")).title("Jev"),
+                            cx,
+                        );
+                        return;
+                    }
+                }
+                self.show_file(path, window, cx);
+            }
         }
     }
 

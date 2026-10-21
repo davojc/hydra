@@ -22,7 +22,7 @@ PS> hydra shell personal
 Typical uses:
 
 - **Stop identity mix-ups.** Commits and pushes always use the environment's author, SSH key and GitHub login.
-- **Run Claude Code on several accounts at once.** Each environment has its own Claude sign-in, usage limits and history, and all of them share your skills, plugins, settings and MCP servers.
+- **Run Claude Code on several accounts at once.** Each environment has its own Claude sign-in, usage limits and history, and all of them share the skills, plugins, settings and MCP servers in your `~/.claude`. Things you add from inside an environment stay in that environment (see [Claude Code](#claude-code-separate-accounts-shared-setup)).
 - **Keep several Claude sessions busy.** Jot ideas on a project's task board while Claude works; move one into Pickup and hydraui hands it to a Claude session that is free.
 
 > **Status:** early (0.6). Windows 11 with PowerShell 7 and Git for Windows. See [What's not built yet](#whats-not-built-yet).
@@ -249,7 +249,8 @@ Each environment's Claude folder (`~/.hydra/state/<env>/claude`) is rebuilt from
 | **Rebuilt each launch** | `settings.json` (yours merged with the environment's own `envs/<env>/claude/settings.json`), `CLAUDE.md` (yours plus the environment's own section), and the MCP servers from `~/.claude.json`, minus any `--mcp-exclude` patterns, plus hydraui's `hydraui` tool server for the task board |
 | **Private to the environment** | the sign-in, history, projects, sessions, and the rest of `.claude.json` |
 
-- **Per-environment changes:** put files in `~/.hydra/envs/<env>/claude/`.
+- **Per-environment changes:** put files in `~/.hydra/envs/<env>/claude/`. A folder there, such as `skills/`, replaces the shared one for that environment rather than adding to it.
+- **Added inside an environment, kept there.** `claude mcp add --scope user` run in a hydra terminal writes to that environment's `.claude.json`, not `~/.claude.json`, so other environments don't see it. Add shared servers, skills and plugins outside hydra, in `~/.claude`. A terminal picks up changes when it next opens.
 - **Changes made inside Claude:** if Claude itself edits the rebuilt `settings.json` or `CLAUDE.md` (for example with `/model`), hydra saves your version as `.bak` on the next launch, tells you, and rebuilds the file.
 - **Sign-in settings are never shared.** `apiKeyHelper` and API-key variables in `~/.claude/settings.json` are left out of every environment, with a warning, so environments can't end up on the same account.
 - **Plain `claude` is unchanged.** Running `claude` outside hydra keeps using `~/.claude` as before.

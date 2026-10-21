@@ -114,7 +114,14 @@ impl Workspace {
             .collect();
         for (divided, id) in rows {
             if divided {
-                list = list.child(div().h(px(1.)).mx_2().my_1().bg(cx.theme().border));
+                list = list.child(
+                    div()
+                        .h(px(2.))
+                        .mx_1()
+                        .my_2()
+                        .rounded_full()
+                        .bg(tint.opacity(0.6)),
+                );
             }
             let Some(view) = self.panes.get(&id) else {
                 continue;

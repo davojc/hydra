@@ -26,7 +26,7 @@ pub enum Cmd {
     Shell {
         /// Environment name
         env: Option<String>,
-        /// pwsh or bash (default: default_shell in config.toml, else pwsh)
+        /// pwsh, bash or zsh (default: default_shell in config.toml, else pwsh on Windows, zsh on macOS)
         #[arg(long)]
         shell: Option<String>,
         /// Folder to open in

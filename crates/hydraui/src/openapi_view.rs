@@ -1035,18 +1035,16 @@ mod tests {
 
     #[test]
     fn referenced_files_open_under_their_plain_path() {
-        let dir = std::path::Path::new(r"C:\x\api");
-        assert_eq!(
-            ref_file(dir, "./common.yaml"),
-            PathBuf::from(r"C:\x\api\common.yaml")
-        );
+        let x = std::path::Path::new(if cfg!(windows) { r"C:\x" } else { "/x" });
+        let dir = &x.join("api");
+        assert_eq!(ref_file(dir, "./common.yaml"), dir.join("common.yaml"));
         assert_eq!(
             ref_file(dir, "../shared/./errors.yaml"),
-            PathBuf::from(r"C:\x\shared\errors.yaml")
+            x.join("shared").join("errors.yaml")
         );
         assert_eq!(
             ref_file(dir, "paths/pets.yaml"),
-            PathBuf::from(r"C:\x\api\paths\pets.yaml")
+            dir.join("paths").join("pets.yaml")
         );
     }
 

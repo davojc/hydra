@@ -429,10 +429,20 @@ mod tests {
 
     #[test]
     fn absolute_paths_and_misses() {
-        let ex = exists_in(&["D:/x/b.rs"]);
+        // An absolute path in the platform's spelling: `D:/x` is relative on Unix.
+        let abs = if cfg!(windows) {
+            "D:/x/b.rs"
+        } else {
+            "/x/b.rs"
+        };
+        let ex = exists_in(if cfg!(windows) {
+            &["D:/x/b.rs"]
+        } else {
+            &["/x/b.rs"]
+        });
         let at = |t: &str, c| path_at(t, c, Path::new(CWD), &ex);
-        assert_eq!(at("D:/x/b.rs:3", 2), hit("D:/x/b.rs", 3, 0));
+        assert_eq!(at(&format!("{abs}:3"), 2), hit(abs, 3, 0));
         assert_eq!(at("nothing here", 2), None, "not a file that exists");
-        assert_eq!(at("D:/x/b.rs:3   ", 12), None, "click on the spaces");
+        assert_eq!(at(&format!("{abs}:3   "), 12), None, "click on the spaces");
     }
 }

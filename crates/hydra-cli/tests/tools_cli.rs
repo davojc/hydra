@@ -1,5 +1,5 @@
 mod common;
-use common::Home;
+use common::{Home, native, show};
 use predicates::prelude::*;
 
 /// An environment with comments but no tool sections, like a hand-trimmed template.
@@ -13,15 +13,8 @@ fn home_with_work() -> Home {
 
 fn show_claude_dir(h: &Home) -> assert_cmd::assert::Assert {
     h.hydra()
-        .args([
-            "run",
-            "work",
-            "--",
-            "pwsh",
-            "-NoProfile",
-            "-Command",
-            "Write-Output \"[$env:CLAUDE_CONFIG_DIR]\"",
-        ])
+        .args(["run", "work", "--"])
+        .args(show("CLAUDE_CONFIG_DIR"))
         .assert()
 }
 
@@ -43,7 +36,7 @@ fn add_claude_writes_config_only_and_points_at_the_environment() {
     );
     show_claude_dir(&h)
         .success()
-        .stdout(predicate::str::is_match(r"state\\work\\claude\]").unwrap());
+        .stdout(predicate::str::contains(native("state\\work\\claude]")));
 }
 
 #[test]

@@ -139,12 +139,14 @@ fn env_rename_updates_bindings_refs_and_secrets() {
 
 #[test]
 fn env_edit_validates_after_the_editor_closes() {
+    // An editor that changes nothing and exits at once.
+    let editor = if cfg!(windows) { "cmd /c rem" } else { "true" };
     let h = Home::new();
     h.write_env("work", "color = \"teal\"\n");
     h.hydra()
         .args(["env", "edit", "work"])
         .env_remove("VISUAL")
-        .env("EDITOR", "cmd /c rem")
+        .env("EDITOR", editor)
         .assert()
         .code(1)
         .stderr(predicate::str::contains("must look like"));
@@ -152,7 +154,7 @@ fn env_edit_validates_after_the_editor_closes() {
     h.hydra()
         .args(["env", "edit", "work"])
         .env_remove("VISUAL")
-        .env("EDITOR", "cmd /c rem")
+        .env("EDITOR", editor)
         .assert()
         .success()
         .stdout(predicate::str::contains("saved"));

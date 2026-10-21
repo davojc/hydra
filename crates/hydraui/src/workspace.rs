@@ -498,7 +498,7 @@ impl Workspace {
         });
     }
 
-    /// The shell new terminals start: hydraui's `default_shell`, else hydra's, else pwsh.
+    /// The shell new terminals start: hydraui's `default_shell`, else hydra's, else the platform's.
     fn shell(&self) -> hydra_platform::shell::ShellKind {
         self.hydra.shell(self.ui.default_shell.as_deref())
     }

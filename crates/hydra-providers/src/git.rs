@@ -339,10 +339,9 @@ impl Provider for Git {
         let hydra_exe = std::env::current_exe().map(|p| fwd(&p)).unwrap_or_default();
         let chain_dir = user_hooks_path(&user.files);
         for hook in HOOKS {
-            write_atomic(
-                &hooks.join(hook),
-                &render_hook(ctx.name, hook, &hydra_exe, &chain_dir),
-            )?;
+            let path = hooks.join(hook);
+            write_atomic(&path, &render_hook(ctx.name, hook, &hydra_exe, &chain_dir))?;
+            hydra_platform::fs::make_executable(&path)?;
         }
         write_atomic(&dir.join("gitconfig"), &render(Some(&hooks)))?;
         Ok(())
@@ -711,6 +710,26 @@ mod tests {
 
     fn hooks_dir(f: &Fixture) -> std::path::PathBuf {
         f.paths.state_dir(&f.name).join("git").join("hooks")
+    }
+
+    // git only runs a hook it can execute.
+    #[cfg(unix)]
+    #[test]
+    fn the_wrappers_are_executable_even_when_already_written() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new("");
+        git().materialise(&f.ctx()).unwrap();
+        // An older hydra wrote the same text without the executable bit.
+        let pre_commit = hooks_dir(&f).join("pre-commit");
+        std::fs::set_permissions(&pre_commit, std::fs::Permissions::from_mode(0o644)).unwrap();
+        git().materialise(&f.ctx()).unwrap();
+        for hook in ALL_HOOKS {
+            let mode = std::fs::metadata(hooks_dir(&f).join(hook))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o111, 0o111, "{hook}: {mode:o}");
+        }
     }
 
     #[test]

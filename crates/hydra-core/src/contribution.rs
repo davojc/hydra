@@ -65,15 +65,23 @@ pub struct Conflict {
     pub second: String,
 }
 
-/// Combines contributions. Variable names compare case-insensitively (Windows semantics).
+/// Whether `a` and `b` name the same environment variable: ignoring case on Windows, exactly
+/// elsewhere (on Unix `foo` and `FOO` are two variables).
+pub fn same_var(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
+}
+
+/// Combines contributions. Variable names compare as the platform compares them (`same_var`).
 pub fn merge(parts: Vec<(String, Contribution)>) -> Result<Merged, Vec<Conflict>> {
     let mut m = Merged::default();
     let mut conflicts = Vec::new();
     for (provider, c) in parts {
         for (k, v) in c.vars {
-            if let Some((existing, (first, _))) =
-                m.vars.iter().find(|(ek, _)| ek.eq_ignore_ascii_case(&k))
-            {
+            if let Some((existing, (first, _))) = m.vars.iter().find(|(ek, _)| same_var(ek, &k)) {
                 conflicts.push(Conflict {
                     var: existing.clone(),
                     first: first.clone(),
@@ -86,8 +94,7 @@ pub fn merge(parts: Vec<(String, Contribution)>) -> Result<Merged, Vec<Conflict>
         m.unset.extend(c.unset);
     }
     let set: Vec<String> = m.vars.keys().cloned().collect();
-    m.unset
-        .retain(|u| !set.iter().any(|k| k.eq_ignore_ascii_case(u)));
+    m.unset.retain(|u| !set.iter().any(|k| same_var(k, u)));
     if conflicts.is_empty() {
         Ok(m)
     } else {
@@ -112,9 +119,30 @@ mod tests {
     }
 
     #[test]
-    fn reports_conflicts_naming_both_providers() {
+    fn variable_names_compare_as_the_platform_does() {
+        assert!(same_var("GH_TOKEN", "GH_TOKEN"));
+        assert_eq!(same_var("GH_TOKEN", "gh_token"), cfg!(windows));
         let a = Contribution::new().literal("GH_TOKEN", "1");
         let b = Contribution::new().literal("gh_token", "2");
+        let merged = merge(vec![("github".into(), a), ("env".into(), b)]);
+        if cfg!(windows) {
+            assert!(merged.is_err());
+        } else {
+            assert_eq!(merged.unwrap().vars.len(), 2, "two variables on Unix");
+        }
+    }
+
+    #[test]
+    fn reports_conflicts_naming_both_providers() {
+        let a = Contribution::new().literal("GH_TOKEN", "1");
+        let b = Contribution::new().literal(
+            if cfg!(windows) {
+                "gh_token"
+            } else {
+                "GH_TOKEN"
+            },
+            "2",
+        );
         let errs = merge(vec![("github".into(), a), ("env".into(), b)]).unwrap_err();
         assert_eq!(
             errs,
@@ -133,7 +161,12 @@ mod tests {
     #[test]
     fn a_set_variable_is_never_unset() {
         let a = Contribution::new().unset("AWS_PROFILE").unset("GIT_SSH");
-        let b = Contribution::new().literal("aws_profile", "x");
+        let set = if cfg!(windows) {
+            "aws_profile"
+        } else {
+            "AWS_PROFILE"
+        };
+        let b = Contribution::new().literal(set, "x");
         let m = merge(vec![("a".into(), a), ("b".into(), b)]).unwrap();
         assert_eq!(m.unset, BTreeSet::from(["GIT_SSH".to_string()]));
     }

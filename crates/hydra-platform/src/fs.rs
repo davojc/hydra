@@ -8,6 +8,29 @@ pub fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
     })
 }
 
+/// Lets everyone who can read `path` run it, as git needs for a hook. Windows has no such
+/// bit: there it does nothing.
+#[cfg(unix)]
+pub fn make_executable(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(path)?.permissions();
+    let mode = perms.mode();
+    // Execute wherever read is allowed: 0o644 -> 0o755, 0o600 -> 0o700.
+    let wanted = mode | ((mode & 0o444) >> 2);
+    if wanted != mode {
+        perms.set_mode(wanted);
+        std::fs::set_permissions(path, perms)?;
+    }
+    Ok(())
+}
+
+/// Lets everyone who can read `path` run it, as git needs for a hook. Windows has no such
+/// bit: there it does nothing.
+#[cfg(windows)]
+pub fn make_executable(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 #[cfg(windows)]
 fn write_restricted(path: &Path, contents: &str) -> std::io::Result<()> {
     std::fs::write(path, contents)?;

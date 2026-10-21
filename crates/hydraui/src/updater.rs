@@ -456,6 +456,8 @@ mod tests {
         clean_old(&ui, None); // nothing there: no panic
     }
 
+    // The install folder comes from the Windows installer's Settings entry.
+    #[cfg(windows)]
     #[test]
     fn only_the_installed_copy_records_its_version() {
         let exe = Path::new(r"C:\Users\u\AppData\Local\Programs\hydra\hydraui.exe");

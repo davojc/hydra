@@ -36,7 +36,7 @@ pub struct UiConfig {
     pub theme: ThemeChoice,
     /// The environment for a new tab in an unbound folder (spec §7.6).
     pub default_env: Option<String>,
-    /// `pwsh` or `bash`; else hydra's `default_shell`, else pwsh.
+    /// `pwsh`, `bash` or `zsh`; else hydra's `default_shell`, else the platform's (zsh on macOS).
     pub default_shell: Option<String>,
     /// Opens files from the file tree (plan 4); read now so the file format is stable.
     pub editor: Option<String>,
@@ -99,7 +99,7 @@ pub fn parse(text: &str) -> (UiConfig, Vec<String>) {
             "default_env" => get(value).map(|e| cfg.default_env = Some(e)),
             "default_shell" => get::<String>(value).and_then(|s| {
                 if ShellKind::parse(&s).is_none() {
-                    return Err(format!("{s:?}: use pwsh or bash"));
+                    return Err(format!("{s:?}: use pwsh, bash or zsh"));
                 }
                 cfg.default_shell = Some(s);
                 Ok(())

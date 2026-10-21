@@ -128,9 +128,21 @@ pub fn long_path(p: &Path) -> PathBuf {
     p.to_path_buf()
 }
 
-/// `pattern` with its literal leading folders expanded by [`long_path`].
+/// The one spelling of a folder that every other spelling of it maps to: on Windows its long
+/// name ([`long_path`]); on Unix its real path, through symlinks (macOS's `/var` is
+/// `/private/var`) and, on macOS's case-insensitive disks, in the case it is stored in.
+/// Paths that don't exist come back unchanged.
+pub fn canonical_path(p: &Path) -> PathBuf {
+    if cfg!(windows) {
+        long_path(p)
+    } else {
+        p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+    }
+}
+
+/// `pattern` with its literal leading folders spelled by [`canonical_path`].
 fn long_pattern(pattern: &str) -> String {
-    if !pattern.contains('~') {
+    if cfg!(windows) && !pattern.contains('~') {
         return pattern.to_string();
     }
     let segs: Vec<&str> = pattern.split(['/', '\\']).collect();
@@ -139,7 +151,9 @@ fn long_pattern(pattern: &str) -> String {
         .take_while(|s| !s.contains('*') && !s.contains('?'))
         .count();
     let prefix = segs[..n].join("/");
-    let mut out = long_path(Path::new(&prefix)).to_string_lossy().into_owned();
+    let mut out = canonical_path(Path::new(&prefix))
+        .to_string_lossy()
+        .into_owned();
     for s in &segs[n..] {
         out.push('/');
         out.push_str(s);
@@ -149,17 +163,20 @@ fn long_pattern(pattern: &str) -> String {
 
 /// Resolve a folder to its environment from config rules and `.hydra` files.
 pub fn resolve(dir: &Path, rules: &BTreeMap<String, String>) -> Option<Binding> {
-    let dir = &long_path(dir);
+    let dir = &canonical_path(dir);
     let dir_str = normalize(&dir.to_string_lossy());
+    // Depths are counted on the same spelling as `dir`: `/var/x` is one folder shallower
+    // than the `/private/var/x` it names.
     let rule = rules
         .iter()
-        .filter(|(pattern, _)| glob_path(&long_pattern(pattern), &dir_str))
-        .max_by_key(|(pattern, _)| (literal_depth(pattern), pattern.len()));
+        .map(|(pattern, env)| (pattern, env, long_pattern(pattern)))
+        .filter(|(_, _, long)| glob_path(long, &dir_str))
+        .max_by_key(|(pattern, _, long)| (literal_depth(long), pattern.len()));
     // An unreadable or invalid .hydra file is ignored and the walk continues upward.
     let file = dir
         .ancestors()
         .find_map(|folder| read_hydra_file(folder).map(|env| (folder, env)));
-    let rule_depth = rule.map(|(p, _)| literal_depth(p));
+    let rule_depth = rule.as_ref().map(|(_, _, long)| literal_depth(long));
     match (file, rule) {
         (Some((folder, env)), r)
             if r.is_none()
@@ -170,7 +187,7 @@ pub fn resolve(dir: &Path, rules: &BTreeMap<String, String>) -> Option<Binding> 
                 source: Source::File(folder.to_path_buf()),
             })
         }
-        (_, Some((pattern, env))) => Some(Binding {
+        (_, Some((pattern, env, _))) => Some(Binding {
             env: env.clone(),
             source: Source::Rule(pattern.clone()),
         }),
@@ -235,7 +252,10 @@ mod tests {
             normalize("//server/share/x")
         );
         assert_eq!(normalize(r"\\server\share"), normalize("//server/share"));
-        assert!(glob_path("c:/work/**", r"\\?\C:\work\a"));
+        // Case only folds on Windows.
+        if cfg!(windows) {
+            assert!(glob_path("c:/work/**", r"\\?\C:\work\a"));
+        }
     }
 
     #[test]
@@ -251,12 +271,49 @@ mod tests {
         assert_eq!(literal_depth("e:/*/repo"), 1);
     }
 
+    #[cfg(windows)]
     #[test]
     fn matching_ignores_case_and_slashes() {
         let r = rules(&[("E:/Work/**", "work")]);
         let b = resolve(Path::new(r"e:\work\Repo\src"), &r).unwrap();
         assert_eq!(b.env, "work");
         assert_eq!(b.source, Source::Rule("E:/Work/**".into()));
+    }
+
+    /// A rule and a folder name the same place through a symlink (macOS's temp folder is
+    /// `/var/…`, which is `/private/var/…`, and that is what a shell's working folder reports).
+    #[cfg(unix)]
+    #[test]
+    fn a_rule_matches_a_folder_reached_through_a_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(real.join("repo").join("src")).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let by_link = rules(&[(&format!("{}/**", link.display()), "work")]);
+        assert_eq!(
+            resolve(&real.join("repo").join("src"), &by_link).map(|b| b.env),
+            Some("work".into())
+        );
+        let by_real = rules(&[(&format!("{}/**", real.display()), "work")]);
+        assert_eq!(
+            resolve(&link.join("repo"), &by_real).map(|b| b.env),
+            Some("work".into())
+        );
+    }
+
+    /// macOS's file system ignores case, like Windows', so a folder matches however either
+    /// side spells it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn on_macos_a_rule_matches_however_the_folder_is_cased() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("Work").join("repo")).unwrap();
+        let r = rules(&[(&format!("{}/work/**", tmp.path().display()), "work")]);
+        assert_eq!(
+            resolve(&tmp.path().join("WORK").join("repo"), &r).map(|b| b.env),
+            Some("work".into())
+        );
     }
 
     #[test]

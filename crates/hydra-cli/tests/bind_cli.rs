@@ -1,5 +1,5 @@
 mod common;
-use common::Home;
+use common::{Home, PRINT_PWD_AND_EXIT, SHELL};
 use predicates::prelude::*;
 
 fn home() -> Home {
@@ -207,9 +207,9 @@ fn bound_folder(h: &Home, sub: &str, env: &str) -> std::path::PathBuf {
 fn shell_without_a_name_uses_the_folders_binding() {
     let h = home();
     let d = bound_folder(&h, "w", "work");
-    h.hydra()
+    h.hydra_shell()
         .current_dir(&d)
-        .args(["shell", "--shell", "pwsh"])
+        .args(["shell", "--shell", SHELL])
         .write_stdin("exit 0\n")
         .assert()
         .success()
@@ -223,7 +223,7 @@ fn shell_without_a_name_in_an_unbound_folder_fails() {
     std::fs::create_dir_all(&d).unwrap();
     h.hydra()
         .current_dir(&d)
-        .args(["shell", "--shell", "pwsh"])
+        .args(["shell", "--shell", SHELL])
         .assert()
         .failure()
         .stderr(predicate::str::contains("isn't bound to an environment"))
@@ -262,10 +262,10 @@ fn shell_with_a_name_from_elsewhere_starts_in_home() {
     let elsewhere = h.dir.path().join("elsewhere");
     std::fs::create_dir_all(&elsewhere).unwrap();
     let out = h
-        .hydra()
+        .hydra_shell()
         .current_dir(&elsewhere)
-        .args(["shell", "web", "--shell", "pwsh"])
-        .write_stdin("Write-Output \"[$PWD]\"; exit 0\n")
+        .args(["shell", "web", "--shell", SHELL])
+        .write_stdin(PRINT_PWD_AND_EXIT)
         .assert()
         .success()
         .get_output()

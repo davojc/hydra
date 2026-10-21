@@ -81,6 +81,8 @@ pub enum SpawnError {
     NoPwsh,
     #[error("Git Bash wasn't found; set git_bash in config.toml")]
     NoBash,
+    #[error("zsh isn't on PATH")]
+    NoZsh,
     #[error("can't {what}: {source}")]
     Io {
         what: &'static str,
@@ -126,6 +128,7 @@ impl Pane {
         let exe = find_shell(spec.shell, spec.git_bash.as_deref()).ok_or(match spec.shell {
             ShellKind::Pwsh => SpawnError::NoPwsh,
             ShellKind::Bash => SpawnError::NoBash,
+            ShellKind::Zsh => SpawnError::NoZsh,
         })?;
         let env = &spec.launch.name;
         let lock = hold_shared(&spec.paths, env).map_err(io("lock the environment"))?;

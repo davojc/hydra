@@ -319,7 +319,9 @@ pub fn diff_patch(repo_dir: &Path, file: &Path, base: &Base) -> Result<String, S
     cmd.arg("-C").arg(repo_dir).arg("diff").arg("--no-color");
     match base {
         Base::Nothing => {
-            cmd.args(["--no-index", "--", "NUL"]).arg(file);
+            // The empty file to diff a new one against: the null device.
+            let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+            cmd.args(["--no-index", "--", null]).arg(file);
         }
         Base::Head => {
             cmd.args(["HEAD", "--"]).arg(file);
@@ -717,17 +719,22 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc both.rs\n\
 
     #[test]
     fn the_root_keeps_the_spelling_of_the_folder_asked_about() {
-        let api = Path::new(r"Q:\code\api");
+        let api = Path::new(if cfg!(windows) {
+            r"Q:\code\api"
+        } else {
+            "/code/api"
+        });
         assert_eq!(root_from_cdup(api, ""), api);
         assert_eq!(
-            root_from_cdup(Path::new(r"Q:\code\api\src\lib"), "../../\n"),
+            root_from_cdup(&api.join("src").join("lib"), "../../\n"),
             api
         );
-        assert_eq!(root_from_cdup(Path::new(r"Q:\code\api\.\src"), "../"), api);
+        assert_eq!(root_from_cdup(&api.join(".").join("src"), "../"), api);
     }
 
-    /// A folder reached through a junction (as through a `subst` drive): git names the real
-    /// folder as its top, but the root must be spelt as the tree spells its paths.
+    /// A folder reached through a junction (as through a `subst` drive; a symlink on Unix):
+    /// git names the real folder as its top, but the root must be spelt as the tree spells
+    /// its paths.
     #[test]
     fn a_repository_through_a_junction_keeps_the_junction_path_as_its_root() {
         let d = tempfile::tempdir().unwrap();
@@ -743,13 +750,18 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc both.rs\n\
             return;
         }
         let link = d.path().join("link");
-        let made = std::process::Command::new("cmd")
-            .args(["/c", "mklink", "/J"])
-            .arg(&link)
-            .arg(&real)
-            .output()
-            .is_ok_and(|o| o.status.success());
-        assert!(made, "mklink /J");
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd")
+                .args(["/c", "mklink", "/J"])
+                .arg(&link)
+                .arg(&real)
+                .output()
+                .is_ok_and(|o| o.status.success());
+            assert!(made, "mklink /J");
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
         std::fs::write(real.join("sub").join("a.txt"), "x").unwrap();
         let s = read(&link.join("sub")).unwrap();
         assert_eq!(s.root.as_deref(), Some(link.as_path()));

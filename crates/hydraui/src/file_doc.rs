@@ -522,15 +522,17 @@ mod tests {
 
     #[test]
     fn only_local_images_load() {
-        let dir = Path::new("C:/docs");
+        let (dir, abs) = if cfg!(windows) {
+            ("C:/docs", "C:/pics/b.png")
+        } else {
+            ("/docs", "/pics/b.png")
+        };
+        let dir = Path::new(dir);
         assert_eq!(
             image_use("img/a.png", dir),
             ImageUse::Local(dir.join("img/a.png"))
         );
-        assert_eq!(
-            image_use("C:/pics/b.png", dir),
-            ImageUse::Local(PathBuf::from("C:/pics/b.png"))
-        );
+        assert_eq!(image_use(abs, dir), ImageUse::Local(PathBuf::from(abs)));
         for remote in [
             "https://example.com/a.png",
             "HTTPS://example.com/a.png",

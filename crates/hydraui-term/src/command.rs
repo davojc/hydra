@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 use std::path::Path;
 
+use hydra_core::contribution::same_var;
 use hydra_core::resolve::{EnvChange, LaunchEnv};
 use hydra_platform::shell::{ShellKind, shell_launch};
 use portable_pty::CommandBuilder;
@@ -29,12 +30,15 @@ pub fn pane_command(
     cmd.env_clear();
     let mut path = None;
     for (k, v) in inherited {
-        if k.eq_ignore_ascii_case("PATH") {
+        if k.to_str().is_some_and(|k| same_var(k, "PATH")) {
             path = Some(v.clone());
         }
         cmd.env(k, v);
     }
-    for (k, v) in TERMINAL_VARS.into_iter().chain(vars) {
+    for (k, v) in TERMINAL_VARS {
+        cmd.env(k, v);
+    }
+    for (k, v) in vars {
         cmd.env(k, v);
     }
     for change in launch.env_changes(path) {

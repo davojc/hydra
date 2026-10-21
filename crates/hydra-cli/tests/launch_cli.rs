@@ -1,15 +1,6 @@
 mod common;
-use common::Home;
+use common::{Home, SHELL, exit_with, show};
 use predicates::prelude::*;
-
-fn show(var: &str) -> Vec<String> {
-    vec![
-        "pwsh".into(),
-        "-NoProfile".into(),
-        "-Command".into(),
-        format!("Write-Output \"[$env:{var}]\""),
-    ]
-}
 
 fn run_args(env: &str, cmd: Vec<String>) -> Vec<String> {
     let mut a = vec!["run".to_string(), env.to_string(), "--".to_string()];
@@ -62,15 +53,7 @@ fn run_passes_exit_code_through() {
     let h = Home::new();
     h.write_env("work", "");
     h.hydra()
-        .args(run_args(
-            "work",
-            vec![
-                "pwsh".into(),
-                "-NoProfile".into(),
-                "-Command".into(),
-                "exit 7".into(),
-            ],
-        ))
+        .args(run_args("work", exit_with(7)))
         .assert()
         .code(7);
 }
@@ -94,8 +77,12 @@ fn run_finds_cmd_launchers() {
     let h = Home::new();
     h.write_env("work", "");
     let bin = h.dir.path().join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    std::fs::write(bin.join("hello.cmd"), "@echo hello-from-cmd\r\n").unwrap();
+    Home::write_launcher(
+        &bin,
+        "hello",
+        "@echo hello-from-cmd\r\n",
+        "echo hello-from-cmd",
+    );
     let path = std::env::join_paths(
         std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
     )
@@ -145,20 +132,19 @@ fn whoami_needs_an_environment() {
 fn shell_writes_init_and_exits_with_the_shell() {
     let h = Home::new();
     h.write_env("work", "color = \"#1f9a8a\"\n");
-    h.hydra()
-        .args(["shell", "work", "--shell", "pwsh"])
+    h.hydra_shell()
+        .args(["shell", "work", "--shell", SHELL])
         .write_stdin("exit 0\n")
         .assert()
         .success();
-    let init = std::fs::read_to_string(
-        h.root()
-            .join("state")
-            .join("work")
-            .join("shell")
-            .join("init.ps1"),
-    )
-    .unwrap();
-    assert!(init.contains("$([char]27)[38;2;31;154;138m[work]"));
+    let shell = h.root().join("state").join("work").join("shell");
+    if cfg!(windows) {
+        let init = std::fs::read_to_string(shell.join("init.ps1")).unwrap();
+        assert!(init.contains("$([char]27)[38;2;31;154;138m[work]"));
+    } else {
+        let init = std::fs::read_to_string(shell.join("init.zsh").join(".zshrc")).unwrap();
+        assert!(init.contains("38;2;31;154;138m%}[work]"), "{init}");
+    }
 }
 
 #[test]
@@ -248,7 +234,7 @@ fn shell_checks_cwd_before_preparing_anything() {
     h.write_env("work", "");
     let missing = h.dir.path().join("no-such-folder");
     h.hydra()
-        .args(["shell", "work", "--shell", "pwsh", "--cwd"])
+        .args(["shell", "work", "--shell", SHELL, "--cwd"])
         .arg(&missing)
         .assert()
         .failure()
@@ -264,8 +250,8 @@ fn shell_opens_without_github_sign_in_and_says_how() {
         "[github]
 ",
     );
-    h.hydra()
-        .args(["shell", "work", "--shell", "pwsh"])
+    h.hydra_shell()
+        .args(["shell", "work", "--shell", SHELL])
         .write_stdin(
             "exit 0
 ",
@@ -302,7 +288,7 @@ fn launch_removes_an_old_shims_folder() {
     std::fs::write(shims.join("gh.exe"), "old").unwrap();
     std::fs::write(shims.join("ssh.exe"), "old").unwrap();
     h.hydra()
-        .args(["run", "work", "--", "cmd", "/c", "exit 0"])
+        .args(run_args("work", exit_with(0)))
         .assert()
         .success();
     assert!(!shims.exists());
@@ -325,7 +311,7 @@ fn launch_notes_a_locked_old_shim_and_carries_on() {
         .open(&gh)
         .unwrap();
     h.hydra()
-        .args(["run", "work", "--", "cmd", "/c", "exit 0"])
+        .args(run_args("work", exit_with(0)))
         .assert()
         .success()
         .stderr(predicate::str::contains("can't remove old shims folder"));
@@ -336,11 +322,13 @@ fn launch_drops_the_old_shims_folder_from_path() {
     let h = Home::new();
     h.write_env("work", "");
     let shims = h.root().join("shims");
-    let shouty = shims.to_string_lossy().replace('\\', "/").to_uppercase();
-    let mut path = vec![
-        shims.clone(),
-        std::path::PathBuf::from(format!("{shouty}/")),
-    ];
+    // Windows spells one folder many ways; Unix only adds a trailing `/`.
+    let other = if cfg!(windows) {
+        shims.to_string_lossy().replace('\\', "/").to_uppercase()
+    } else {
+        shims.to_string_lossy().into_owned()
+    };
+    let mut path = vec![shims.clone(), std::path::PathBuf::from(format!("{other}/"))];
     path.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
     ));
@@ -352,7 +340,12 @@ fn launch_drops_the_old_shims_folder_from_path() {
         .success();
     let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_lowercase();
     let shims = shims.to_string_lossy().to_lowercase();
-    assert!(stdout.contains("system32"), "{stdout}");
+    let system = if cfg!(windows) {
+        "system32"
+    } else {
+        "/usr/bin"
+    };
+    assert!(stdout.contains(system), "{stdout}");
     assert!(!stdout.contains(&shims), "{stdout}");
     assert!(!stdout.contains(&shims.replace('\\', "/")), "{stdout}");
 }
@@ -362,7 +355,7 @@ fn launch_never_creates_a_shims_folder() {
     let h = Home::new();
     h.write_env("work", "");
     h.hydra()
-        .args(["run", "work", "--", "cmd", "/c", "exit 0"])
+        .args(run_args("work", exit_with(0)))
         .assert()
         .success();
     h.hydra().args(["whoami", "work"]).output().unwrap();

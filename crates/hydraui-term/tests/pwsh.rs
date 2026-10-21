@@ -19,12 +19,24 @@ use windows_sys::Win32::System::Threading::{
 
 const PWSH: ShellKind = ShellKind::Pwsh;
 
+/// A native program that exits with `code`, as pwsh runs it: cmd on Windows, sh elsewhere.
+fn native_exit(code: i32) -> String {
+    if cfg!(windows) {
+        format!("cmd /c exit {code}")
+    } else {
+        format!("sh -c 'exit {code}'")
+    }
+}
+
 #[test]
 fn startup_command_sees_the_environment_and_reports_its_exit_code() {
     let fx = Fx::new();
     let Some((pane, rx)) = fx.spawn(
         PWSH,
-        Some("Write-Output \"FOO=[$env:FOO] GH=[$env:GH_TOKEN] TERM=[$env:TERM] 'héllo' wörld\"; cmd /c exit 5"),
+        Some(&format!(
+            "Write-Output \"FOO=[$env:FOO] GH=[$env:GH_TOKEN] TERM=[$env:TERM] 'héllo' wörld\"; {}",
+            native_exit(5)
+        )),
     ) else {
         return;
     };
@@ -62,7 +74,8 @@ fn a_command_goes_running_then_done_with_its_exit_code() {
         return;
     };
     wait_for(&rx, "the first prompt", at_prompt);
-    pane.write(b"cmd /c exit 3\r").unwrap();
+    pane.write(format!("{}\r", native_exit(3)).as_bytes())
+        .unwrap();
     let events = wait_for(&rx, "the next prompt", at_prompt);
     assert_eq!(
         prompts(&events),

@@ -507,8 +507,14 @@ mod tests {
             return;
         };
         let (d, folder) = awkward_folder();
+        // A native program that exits 3: cmd on Windows, sh elsewhere (pwsh runs on macOS).
+        let exit3 = if cfg!(windows) {
+            "cmd /c exit 3"
+        } else {
+            "sh -c 'exit 3'"
+        };
         let script = format!(
-            "function global:prompt {{ 'PS> ' }}\n$function:__hydra_prompt = $function:prompt\n{}Set-Location -LiteralPath '{}'\n$global:__hydraui_ran = $true\ncmd /c exit 3\nprompt\n",
+            "function global:prompt {{ 'PS> ' }}\n$function:__hydra_prompt = $function:prompt\n{}Set-Location -LiteralPath '{}'\n$global:__hydraui_ran = $true\n{exit3}\nprompt\n",
             pwsh_integration("[work] "),
             folder.to_string_lossy().replace('\'', "''")
         );

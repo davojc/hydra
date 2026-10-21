@@ -17,7 +17,7 @@ use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
-use crate::file_doc::{self, DiskChange, DiskFlags, FileDoc, ImageUse};
+use crate::file_doc::{self, DiskChange, DiskFlags, FileDoc, ImageKind, ImageUse};
 use crate::file_ops;
 use crate::keys::SaveFile;
 use crate::open_files::{after_close, find};
@@ -56,8 +56,30 @@ enum Body {
         swagger: bool,
     },
     CantShow(String),
+    /// A PNG or JPEG, shown as a picture; or why it can't be.
+    Image(Result<Picture, String>),
     /// How the file differs from git's last commit (spec §7.3), or why it can't be shown.
     Diff(Result<Entity<DiffState>, String>),
+}
+
+struct Picture {
+    image: Arc<gpui::Image>,
+    kind: ImageKind,
+    bytes: u64,
+}
+
+/// The image file at `path`, read now: a change on disk loads it again.
+fn picture(path: &Path) -> Result<Picture, String> {
+    let (kind, bytes) = file_doc::load_image(path)?;
+    let format = match kind {
+        ImageKind::Png => gpui::ImageFormat::Png,
+        ImageKind::Jpeg => gpui::ImageFormat::Jpeg,
+    };
+    Ok(Picture {
+        bytes: bytes.len() as u64,
+        image: Arc::new(gpui::Image::from_bytes(format, bytes)),
+        kind,
+    })
 }
 
 struct FileTab {
@@ -166,9 +188,13 @@ impl FilePane {
     }
 
     fn push(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let body = match file_doc::load(&path) {
-            Ok(doc) => Self::text_body(&path, doc, window, cx),
-            Err(e) => Body::CantShow(e),
+        let body = if file_doc::is_image(&path) {
+            Body::Image(picture(&path))
+        } else {
+            match file_doc::load(&path) {
+                Ok(doc) => Self::text_body(&path, doc, window, cx),
+                Err(e) => Body::CantShow(e),
+            }
         };
         self.tabs.push(FileTab {
             path,
@@ -526,6 +552,14 @@ impl FilePane {
             return;
         };
         let t = &mut self.tabs[i];
+        // An image can't be edited here, so it just shows what is on disk now.
+        if let Body::Image(_) = t.body {
+            if t.path.is_file() {
+                t.body = Body::Image(picture(&t.path));
+            }
+            cx.notify();
+            return;
+        }
         let Body::Text {
             editor, saved, api, ..
         } = &mut t.body
@@ -666,6 +700,13 @@ impl Render for FilePane {
             .justify_end()
             .border_b_1()
             .border_color(border);
+        if let Body::Image(Ok(p)) = &t.body {
+            header = header.child(div().text_sm().text_color(muted).child(format!(
+                "{} image, {}",
+                p.kind.name(),
+                file_doc::size_label(p.bytes)
+            )));
+        }
         if let Body::Text { swagger: true, .. } = &t.body {
             header = header.child(
                 div()
@@ -744,6 +785,32 @@ impl Render for FilePane {
                 .justify_center()
                 .text_color(muted)
                 .child(format!("Can't show this file: {why}"))
+                .into_any_element(),
+            Body::Image(Err(why)) => v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .text_color(muted)
+                .child(format!("Can't show this image: {why}"))
+                .into_any_element(),
+            // Shrunk to fit the pane, never enlarged, centred.
+            Body::Image(Ok(p)) => div()
+                .size_full()
+                .p_3()
+                .child(
+                    gpui::img(p.image.clone())
+                        .size_full()
+                        .object_fit(gpui::ObjectFit::ScaleDown)
+                        .with_fallback(move || {
+                            v_flex()
+                                .size_full()
+                                .items_center()
+                                .justify_center()
+                                .text_color(muted)
+                                .child("Can't show this image: it doesn't decode")
+                                .into_any_element()
+                        }),
+                )
                 .into_any_element(),
             // Wrapped, so both sides fit the pane instead of the new side scrolling off.
             Body::Diff(Ok(state)) => Diff::new(state)

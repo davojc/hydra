@@ -549,6 +549,13 @@ open switches to its file tab.
   when clicked; images load only from local files, never from the network;
   only `http`, `https` and `mailto` links open; nothing runs.
 
+**Images.** A `.png`, `.jpg` or `.jpeg` file shows as a picture, shrunk to fit
+the pane (never enlarged) and centred, with its kind and size in the header
+("PNG image, 110 KB"). Its kind is read from its first bytes, so one that
+isn't really a PNG or JPEG, or is over 50 MB, says why it can't be shown. A
+change on disk shows the new picture. Images have no Raw view and aren't
+edited here.
+
 **Reading.** A file over 5 MB, or binary (a NUL byte in the first 8 KB, or not
 valid UTF-8), shows "can't show this file" with Open in editor; so does one
 that can't be read, with the reason. A file's line endings (CRLF or LF) and

@@ -89,6 +89,60 @@ pub fn save(path: &Path, doc: &FileDoc) -> Result<(), String> {
     })
 }
 
+/// The largest image the file pane shows.
+pub const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageKind {
+    Png,
+    Jpeg,
+}
+
+impl ImageKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            ImageKind::Png => "PNG",
+            ImageKind::Jpeg => "JPEG",
+        }
+    }
+}
+
+/// Whether the file pane shows the file as a picture: `.png`, `.jpg` or `.jpeg`.
+pub fn is_image(path: &Path) -> bool {
+    matches!(ext(path).as_deref(), Some("png" | "jpg" | "jpeg"))
+}
+
+/// An image's kind from its first bytes, whatever its name says.
+pub fn image_kind(bytes: &[u8]) -> Option<ImageKind> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(ImageKind::Png)
+    } else if bytes.starts_with(b"\xFF\xD8\xFF") {
+        Some(ImageKind::Jpeg)
+    } else {
+        None
+    }
+}
+
+/// An image file's bytes and kind; too big, unreadable or not a PNG or JPEG can't be shown.
+pub fn load_image(path: &Path) -> Result<(ImageKind, Vec<u8>), String> {
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if meta.len() > MAX_IMAGE_BYTES {
+        return Err("over 50 MB".into());
+    }
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let kind = image_kind(&bytes).ok_or("not a PNG or JPEG image")?;
+    Ok((kind, bytes))
+}
+
+/// A file size as people read it: bytes, KB or MB.
+pub fn size_label(bytes: u64) -> String {
+    match bytes {
+        b if b < 1024 => format!("{b} bytes"),
+        b if b < 1024 * 1024 => format!("{} KB", b.div_ceil(1024)),
+        b => format!("{:.1} MB", b as f64 / (1024.0 * 1024.0)),
+    }
+}
+
 pub fn is_markdown(path: &Path) -> bool {
     matches!(ext(path).as_deref(), Some("md" | "markdown"))
 }
@@ -235,6 +289,52 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    #[test]
+    fn png_and_jpeg_files_show_as_pictures() {
+        assert!(is_image(Path::new("a/shot.png")));
+        assert!(is_image(Path::new("a/PHOTO.JPG")));
+        assert!(is_image(Path::new("photo.jpeg")));
+        assert!(!is_image(Path::new("logo.svg")));
+        assert!(!is_image(Path::new("png")));
+    }
+
+    #[test]
+    fn an_images_kind_is_read_from_its_bytes() {
+        assert_eq!(
+            image_kind(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"),
+            Some(ImageKind::Png)
+        );
+        assert_eq!(
+            image_kind(b"\xFF\xD8\xFF\xE0\0\x10JFIF"),
+            Some(ImageKind::Jpeg)
+        );
+        assert_eq!(image_kind(b"GIF89a"), None);
+        assert_eq!(image_kind(b""), None);
+    }
+
+    #[test]
+    fn an_image_that_isnt_one_cant_be_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("fake.png");
+        std::fs::write(&fake, "not an image").unwrap();
+        assert_eq!(load_image(&fake), Err("not a PNG or JPEG image".into()));
+        let real = dir.path().join("real.jpg");
+        std::fs::write(&real, b"\xFF\xD8\xFF\xE0rest").unwrap();
+        assert_eq!(
+            load_image(&real),
+            Ok((ImageKind::Jpeg, b"\xFF\xD8\xFF\xE0rest".to_vec()))
+        );
+        assert!(load_image(&dir.path().join("gone.png")).is_err());
+    }
+
+    #[test]
+    fn sizes_read_as_bytes_kb_or_mb() {
+        assert_eq!(size_label(512), "512 bytes");
+        assert_eq!(size_label(1024), "1 KB");
+        assert_eq!(size_label(1500), "2 KB");
+        assert_eq!(size_label(3 * 1024 * 1024 + 300 * 1024), "3.3 MB");
+    }
 
     #[test]
     fn crlf_and_bom_are_recorded_and_stripped() {

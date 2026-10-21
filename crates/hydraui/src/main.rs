@@ -17,6 +17,8 @@ fn main() {
         Ok(h) => h,
         Err(e) => fatal(&e),
     };
+    hydraui::action_log::init(hydraui::action_log::file_for(hydra.paths.root()));
+    hydraui::action_log::write(format!("hydraui {} started", env!("CARGO_PKG_VERSION")));
     let (ui, ui_problems) = config::load(&hydra.paths);
     let (palette, colour_problems) = Palette::from_config(&ui.colors);
     let (keymap, key_problems) = keys::keymap(&ui.keys);

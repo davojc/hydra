@@ -11,11 +11,12 @@ use gpui_component::WindowExt;
 use gpui_component::notification::Notification;
 
 use super::Workspace;
+use crate::action_log;
 use crate::envs::PaneId;
-use crate::jev::{JEV_URL, JevKey};
+use crate::jev::{JEV_URL, JevKey, Verdict};
 use crate::pickup::{
-    Pick, Session, candidates, choose, focused_pane, idle_in_project, is_reserved, jev_failure,
-    no_free_text, pick, still_in_pickup,
+    Pick, Session, candidates, choose, describe, focused_pane, idle_in_project, is_reserved,
+    jev_failure, no_free_text, pick, still_in_pickup,
 };
 use crate::task_board_view::SendTarget;
 
@@ -68,6 +69,42 @@ impl Workspace {
         self.sessions(focused, cx)
     }
 
+    /// Terminal `pane` as the log names it: "<terminal> (<env>) #<pane>".
+    pub(super) fn pane_name(&self, pane: PaneId, cx: &App) -> String {
+        let label = self
+            .panes
+            .get(&pane)
+            .map_or_else(|| "?".to_string(), |v| v.read(cx).label());
+        format!(
+            "{label} ({}) #{pane}",
+            self.envs.env_of(pane).unwrap_or("?")
+        )
+    }
+
+    /// `panes` by name for the log, comma-separated.
+    fn pane_names(&self, panes: &[PaneId], cx: &App) -> String {
+        let names: Vec<String> = panes.iter().map(|p| self.pane_name(*p, cx)).collect();
+        if names.is_empty() {
+            "none".into()
+        } else {
+            names.join(", ")
+        }
+    }
+
+    /// Logs every terminal and why it can or can't take a card for `project`.
+    fn log_sessions(&self, sessions: &[Session], project: &Path, cx: &App) {
+        let mut text = format!("pickup: {} terminal(s) in this window", sessions.len());
+        for s in sessions {
+            text.push_str(&format!(
+                "\n{}: {} [cwd {}]",
+                self.pane_name(s.pane, cx),
+                describe(s, project),
+                s.cwd.display()
+            ));
+        }
+        action_log::write(text);
+    }
+
     /// The card menu's Send to submenu (§8): `project`'s idle Claude sessions, as
     /// "<terminal> (<env>)".
     pub(super) fn send_targets(&self, project: &Path, cx: &App) -> Vec<SendTarget> {
@@ -93,6 +130,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        action_log::write(format!(
+            "pickup: card moved into Pickup in {}: {:?}",
+            project.display(),
+            text
+        ));
         self.in_flight.arrived(&project, &text);
         self.offer_card(project, text, false, window, cx);
     }
@@ -116,7 +158,15 @@ impl Workspace {
                 .get(p)
                 .is_some_and(|(b, _)| still_in_pickup(b.read(cx).board(), t))
         });
+        if by_hand {
+            action_log::write(format!(
+                "pickup: Send to a free session, in {}: {:?}",
+                project.display(),
+                text
+            ));
+        }
         if !self.in_flight.try_start(&project, &text, now) {
+            action_log::write("pickup: already on its way (being offered, or sent < 30 s ago)");
             if by_hand {
                 window.push_notification(
                     Notification::info("This card is already on its way").title("Tasks"),
@@ -127,28 +177,48 @@ impl Workspace {
         }
         let key = match JevKey::app().get() {
             Ok(Some(key)) => Some(key),
-            _ => None,
+            Ok(None) => {
+                action_log::write("pickup: no Jev key set");
+                None
+            }
+            Err(e) => {
+                action_log::write(format!("pickup: can't read the Jev key: {e}"));
+                None
+            }
         };
         let sessions = self.fresh_sessions(window, cx);
+        self.log_sessions(&sessions, &project, cx);
         match pick(&sessions, &project, key.is_some()) {
-            Pick::Certain(panes) => self.deliver(choose(&panes), &project, &text, None, window, cx),
+            Pick::Certain(panes) => {
+                action_log::write(format!(
+                    "pickup: clearly free: {}",
+                    self.pane_names(&panes, cx)
+                ));
+                self.deliver(choose(&panes), &project, &text, None, window, cx)
+            }
             Pick::AskJev(panes) => {
                 let Some(key) = key.filter(|_| !panes.is_empty()) else {
+                    action_log::write("pickup: none clearly free, and none for Jev to judge");
                     self.deliver(None, &project, &text, None, window, cx);
                     return;
                 };
+                action_log::write(format!(
+                    "pickup: none clearly free; asking Jev about {}",
+                    self.pane_names(&panes, cx)
+                ));
                 // One call per session, in parallel, off the UI thread.
                 let asks: Vec<_> = panes
                     .iter()
                     .filter_map(|pane| {
                         let state = self.panes.get(pane)?.read(cx).screen_text(JEV_ROWS);
+                        let name = self.pane_name(*pane, cx);
                         let (pane, key) = (*pane, key.clone());
                         Some(cx.background_spawn(async move {
                             // The error is a short reason without the key (`jev::ask`).
-                            let free = crate::jev::ask(JEV_URL, &key, &state)
-                                .map(|v| v.is_free())
-                                .map_err(|e| e.to_string());
-                            (pane, free)
+                            let verdict =
+                                crate::jev::ask(JEV_URL, &key, &state).map_err(|e| e.to_string());
+                            log_jev(&name, &state, &verdict);
+                            (pane, verdict.map(|v| v.is_free()))
                         }))
                     })
                     .collect();
@@ -184,14 +254,27 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if !self.in_flight.running(&project, &text) {
+            action_log::write("pickup: after Jev, the card had already been sent by hand");
             return;
         }
         if !self.in_pickup(&project, &text, cx) {
+            action_log::write("pickup: after Jev, the card had left Pickup: not sent");
             self.in_flight.finish(&project, &text);
             return;
         }
         let ok = candidates(&self.fresh_sessions(window, cx), &project);
+        let before = free.len();
         free.retain(|p| ok.contains(p));
+        if free.len() < before {
+            action_log::write(format!(
+                "pickup: {} that Jev found free changed meanwhile (busy, typed in or in front)",
+                before - free.len()
+            ));
+        }
+        action_log::write(format!(
+            "pickup: Jev found free: {}",
+            self.pane_names(&free, cx)
+        ));
         let pane = choose(&free);
         self.deliver(pane, &project, &text, failure.as_deref(), window, cx);
     }
@@ -211,6 +294,10 @@ impl Workspace {
         let sent = match pane {
             Some(pane) => self.send_card(pane, project, text, window, cx),
             None => {
+                action_log::write(match jev_failure {
+                    Some(why) => format!("pickup: no free session (every Jev call failed: {why})"),
+                    None => "pickup: no free session".to_string(),
+                });
                 self.no_free_session(project, jev_failure, window, cx);
                 false
             }
@@ -233,8 +320,16 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.in_pickup(&project, &text, cx) && self.send_card(pane, &project, &text, window, cx)
-        {
+        action_log::write(format!(
+            "pickup: Send to {} by hand: {:?}",
+            self.pane_name(pane, cx),
+            text
+        ));
+        if !self.in_pickup(&project, &text, cx) {
+            action_log::write("pickup: the card is no longer in Pickup: not sent");
+            return;
+        }
+        if self.send_card(pane, &project, &text, window, cx) {
             self.in_flight.sent(&project, &text, Instant::now());
         }
     }
@@ -264,9 +359,17 @@ impl Workspace {
             .cloned()
             .filter(|view| view.update(cx, |v, cx| v.type_prompt(&prompt, cx)));
         let Some(view) = typed else {
+            action_log::write(format!(
+                "pickup: couldn't type into {} (gone or not running)",
+                self.pane_name(pane, cx)
+            ));
             self.no_free_session(project, None, window, cx);
             return false;
         };
+        action_log::write(format!(
+            "pickup: typed into {}: {prompt}",
+            self.pane_name(pane, cx)
+        ));
         self.reserved.insert(pane, Instant::now());
         let place = format!(
             "Sent to {} in {}",
@@ -307,4 +410,22 @@ impl Workspace {
             cx,
         );
     }
+}
+
+/// Logs Jev's answer about terminal `name`, with the screen it was sent.
+fn log_jev(name: &str, state: &str, verdict: &Result<Verdict, String>) {
+    let said = match verdict {
+        Ok(v) => format!(
+            "waiting {:.2}, finished {:.2}, draft {:.2}: {}",
+            v.waiting,
+            v.finished,
+            v.draft,
+            if v.is_free() { "free" } else { "not free" }
+        ),
+        Err(e) => format!("failed: {e}"),
+    };
+    action_log::write(format!(
+        "jev: {name}: {said}\nscreen sent ({} lines):\n{state}",
+        state.lines().count()
+    ));
 }

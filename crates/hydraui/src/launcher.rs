@@ -32,6 +32,8 @@ pub enum Action {
     /// Store a value for an `env/key` typed in the dialog.
     NewSecret,
     OpenConfigFolder,
+    /// hydraui.log, what hydraui did and why (`action_log`), in the file pane.
+    OpenLog,
     ReloadConfig,
     /// Ask GitHub for a newer hydra now (spec §7.11).
     CheckForUpdates,
@@ -91,6 +93,7 @@ pub fn entries(
     add("New environment…".into(), Action::NewEnv);
     add("Set secret: other…".into(), Action::NewSecret);
     add("Open config folder".into(), Action::OpenConfigFolder);
+    add("Open hydraui log".into(), Action::OpenLog);
     add("Reload config".into(), Action::ReloadConfig);
     add("Check for updates".into(), Action::CheckForUpdates);
     add("All boards".into(), Action::AllBoards);
@@ -132,6 +135,7 @@ mod tests {
                 "New environment…",
                 "Set secret: other…",
                 "Open config folder",
+                "Open hydraui log",
                 "Reload config",
                 "Check for updates",
                 "All boards",
@@ -179,6 +183,7 @@ mod tests {
                 "New environment…",
                 "Set secret: other…",
                 "Open config folder",
+                "Open hydraui log",
                 "Reload config",
                 "Check for updates",
                 "All boards",
@@ -186,9 +191,10 @@ mod tests {
                 "Set Jev API key…"
             ]
         );
-        assert_eq!(got[11].action, Action::CheckForUpdates);
-        assert_eq!(got[12].action, Action::AllBoards);
-        assert_eq!(got[13].action, Action::Shortcuts);
+        assert_eq!(got[10].action, Action::OpenLog);
+        assert_eq!(got[12].action, Action::CheckForUpdates);
+        assert_eq!(got[13].action, Action::AllBoards);
+        assert_eq!(got[14].action, Action::Shortcuts);
         assert_eq!(got[0].action, Action::OpenFile);
         assert_eq!(got[1].action, Action::SearchFiles);
         assert_eq!(got[4].action, Action::StartPage);

@@ -112,6 +112,13 @@ impl Workspace {
                 let _ = std::fs::create_dir_all(&dir);
                 cx.open_with_system(&dir);
             }
+            Action::OpenLog => {
+                let path = crate::action_log::file_for(self.hydra.paths.root());
+                if !path.exists() {
+                    crate::action_log::write("log opened");
+                }
+                self.show_file(path, window, cx);
+            }
             Action::ReloadConfig => self.reload_config(window, cx),
             Action::CheckForUpdates => self.check_for_updates(window, cx),
             Action::AllBoards => self.all_boards(window, cx),

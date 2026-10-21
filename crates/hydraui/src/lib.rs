@@ -1,6 +1,7 @@
 //! hydraui: a desktop terminal for hydra environments
 //! (spec: docs/superpowers/specs/2026-10-17-hydraui-design.md).
 pub mod accounts;
+pub mod action_log;
 pub mod activity;
 pub mod assets;
 pub mod claim;

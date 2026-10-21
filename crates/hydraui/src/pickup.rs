@@ -93,6 +93,31 @@ pub fn pick(sessions: &[Session], project: &Path, jev: bool) -> Pick {
     }
 }
 
+/// Why `s` can or can't take a card for `project`, for the log: the first fact of §5.1 it fails,
+/// else whether it is clearly finished or left to Jev.
+pub fn describe(s: &Session, project: &Path) -> String {
+    match s.claude {
+        None => return "skipped: no Claude hook report from it".into(),
+        Some(SessionState::Idle) => {}
+        Some(state) => return format!("skipped: Claude is {state:?}, not Idle"),
+    }
+    if !in_project(s, project) {
+        let at = s.project_root.as_ref().unwrap_or(&s.cwd);
+        return format!("skipped: in {}, not this project", at.display());
+    }
+    if s.focused {
+        "skipped: it is the terminal in front of you".into()
+    } else if s.reserved {
+        "skipped: a card was sent to it moments ago".into()
+    } else if s.draft {
+        "skipped: its input may hold a draft".into()
+    } else if s.finished {
+        "free: clearly finished (fresh, or just verified a card)".into()
+    } else {
+        "uncertain: idle after other work, Jev decides".into()
+    }
+}
+
 /// Whether a card sent at `at` still holds its terminal at `now`.
 pub fn is_reserved(at: Instant, now: Instant) -> bool {
     now.saturating_duration_since(at) < RESERVED_FOR
@@ -244,6 +269,62 @@ mod tests {
             draft: false,
             finished: true,
         }
+    }
+
+    #[test]
+    fn describe_names_the_first_fact_a_session_fails() {
+        let p = project();
+        let said = |s: Session| describe(&s, &p);
+        assert!(
+            said(Session {
+                claude: None,
+                ..free(1)
+            })
+            .contains("no Claude hook report")
+        );
+        assert!(
+            said(Session {
+                claude: Some(SessionState::Working),
+                focused: true,
+                ..free(1)
+            })
+            .contains("Working")
+        );
+        let elsewhere = Session {
+            project_root: Some(PathBuf::from("/other")),
+            ..free(1)
+        };
+        assert!(said(elsewhere).contains("other"), "names where it is");
+        assert!(
+            said(Session {
+                focused: true,
+                draft: true,
+                ..free(1)
+            })
+            .contains("in front")
+        );
+        assert!(
+            said(Session {
+                reserved: true,
+                ..free(1)
+            })
+            .contains("sent to it")
+        );
+        assert!(
+            said(Session {
+                draft: true,
+                ..free(1)
+            })
+            .contains("draft")
+        );
+        assert!(said(free(1)).starts_with("free"));
+        assert!(
+            said(Session {
+                finished: false,
+                ..free(1)
+            })
+            .contains("Jev decides")
+        );
     }
 
     #[test]

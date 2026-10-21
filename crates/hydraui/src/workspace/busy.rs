@@ -97,9 +97,15 @@ impl Workspace {
             .find(|(_, v)| v.read(cx).mcp_token() == Some(token))
             .map(|(id, v)| (*id, v.clone()));
         let Some((id, view)) = found else {
+            crate::action_log::write(format!("hook: {state:?} from a token no terminal holds"));
             return;
         };
         let before = view.read(cx).claude();
+        crate::action_log::write(format!(
+            "hook: {}: {before:?} -> {state:?}{}",
+            self.pane_name(id, cx),
+            if resumed { " (resumed session)" } else { "" }
+        ));
         // A card sent here has reached the session, or it moved on: no longer reserved.
         self.reserved.remove(&id);
         view.update(cx, |v, cx| v.set_claude(state, resumed, cx));
@@ -114,11 +120,15 @@ impl Workspace {
     pub(super) fn session_verified(&mut self, token: &str, cx: &mut Context<Self>) {
         if let Some(view) = self
             .panes
-            .values()
-            .find(|v| v.read(cx).mcp_token() == Some(token))
-            .cloned()
+            .iter()
+            .find(|(_, v)| v.read(cx).mcp_token() == Some(token))
+            .map(|(id, v)| (*id, v.clone()))
         {
-            view.update(cx, |v, _| v.verified());
+            crate::action_log::write(format!(
+                "hook: {}: moved a card to Verify (clearly finished)",
+                self.pane_name(view.0, cx)
+            ));
+            view.1.update(cx, |v, _| v.verified());
         }
     }
 

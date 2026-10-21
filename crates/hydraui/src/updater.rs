@@ -36,18 +36,20 @@ pub fn check(url: &str) -> anyhow::Result<Option<Version>> {
     check_against(url, VERSION)
 }
 
-/// The hydra.exe to update alongside hydraui: next to it, else the first on `path_var`;
-/// only one `is_ours` accepts, so another program called hydra.exe is left alone.
+/// The hydra.exe (`hydra` outside Windows) to update alongside hydraui: next to it, else the
+/// first on `path_var`; only one `is_ours` accepts, so another program called hydra is left
+/// alone.
 pub fn find_hydra(
     hydraui_exe: &Path,
     path_var: Option<&OsStr>,
     is_ours: &dyn Fn(&Path) -> bool,
 ) -> Option<PathBuf> {
-    let beside = hydraui_exe.parent().map(|d| d.join("hydra.exe"));
+    let name = format!("hydra{}", std::env::consts::EXE_SUFFIX);
+    let beside = hydraui_exe.parent().map(|d| d.join(&name));
     let on_path: Vec<PathBuf> = path_var
         .map(|p| {
             std::env::split_paths(p)
-                .map(|dir| dir.join("hydra.exe"))
+                .map(|dir| dir.join(&name))
                 .collect()
         })
         .unwrap_or_default();
@@ -84,7 +86,8 @@ pub struct Installed {
     pub hydra_updated: bool,
 }
 
-/// The swap for `exe`: `<stem>.new.exe` takes its place, it moves to `<stem>.old.exe`.
+/// The swap for `exe`: `<stem>.new.exe` takes its place, it moves to `<stem>.old.exe`
+/// (no `.exe` outside Windows).
 fn swap_for(exe: &Path) -> Swap {
     let dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
     let stem = exe
@@ -93,8 +96,8 @@ fn swap_for(exe: &Path) -> Swap {
         .unwrap_or_default();
     Swap {
         target: exe.to_path_buf(),
-        new: dir.join(format!("{stem}.new.exe")),
-        old: dir.join(format!("{stem}.old.exe")),
+        new: dir.join(format!("{stem}.new{}", std::env::consts::EXE_SUFFIX)),
+        old: dir.join(format!("{stem}.old{}", std::env::consts::EXE_SUFFIX)),
     }
 }
 
@@ -251,6 +254,11 @@ mod tests {
     use super::*;
     use hydra_update::fake::FakeGitHub;
     use hydra_update::{HYDRA_ASSET, HYDRAUI_ASSET};
+
+    /// `name` as the platform names a program: `hydra.exe` on Windows, `hydra` elsewhere.
+    fn exe(name: &str) -> String {
+        format!("{name}{}", std::env::consts::EXE_SUFFIX)
+    }
     use semver::Version;
 
     fn v(s: &str) -> Version {
@@ -300,20 +308,20 @@ mod tests {
         let (app, tools) = (d.path().join("app"), d.path().join("tools"));
         std::fs::create_dir_all(&app).unwrap();
         std::fs::create_dir_all(&tools).unwrap();
-        let ui = app.join("hydraui.exe");
+        let ui = app.join(exe("hydraui"));
         std::fs::write(&ui, "").unwrap();
-        std::fs::write(tools.join("hydra.exe"), "").unwrap();
+        std::fs::write(tools.join(exe("hydra")), "").unwrap();
         let path = std::env::join_paths([d.path().join("nowhere"), tools.clone()]).unwrap();
         assert_eq!(
             find_hydra(&ui, Some(&path), &|_| true),
-            Some(tools.join("hydra.exe"))
+            Some(tools.join(exe("hydra")))
         );
-        std::fs::write(app.join("hydra.exe"), "").unwrap();
+        std::fs::write(app.join(exe("hydra")), "").unwrap();
         assert_eq!(
             find_hydra(&ui, Some(&path), &|_| true),
-            Some(app.join("hydra.exe"))
+            Some(app.join(exe("hydra")))
         );
-        std::fs::remove_file(app.join("hydra.exe")).unwrap();
+        std::fs::remove_file(app.join(exe("hydra"))).unwrap();
         assert_eq!(find_hydra(&ui, None, &|_| true), None);
     }
 
@@ -328,16 +336,16 @@ mod tests {
         for dir in [&app, &other, &ours] {
             std::fs::create_dir_all(dir).unwrap();
         }
-        let ui = app.join("hydraui.exe");
+        let ui = app.join(exe("hydraui"));
         std::fs::write(&ui, "").unwrap();
         // Some other program called hydra.exe comes first on PATH.
-        std::fs::write(other.join("hydra.exe"), "").unwrap();
-        std::fs::write(ours.join("hydra.exe"), "").unwrap();
+        std::fs::write(other.join(exe("hydra")), "").unwrap();
+        std::fs::write(ours.join(exe("hydra")), "").unwrap();
         let path = std::env::join_paths([other.clone(), ours.clone()]).unwrap();
         let is_ours = |p: &Path| p.starts_with(&ours);
         assert_eq!(
             find_hydra(&ui, Some(&path), &is_ours),
-            Some(ours.join("hydra.exe"))
+            Some(ours.join(exe("hydra")))
         );
         let only_other = std::env::join_paths([other.clone()]).unwrap();
         assert_eq!(find_hydra(&ui, Some(&only_other), &is_ours), None);
@@ -362,7 +370,7 @@ mod tests {
             &[(HYDRAUI_ASSET, b"new ui"), (HYDRA_ASSET, b"new cli")],
         );
         let d = tempfile::tempdir().unwrap();
-        let (ui, cli) = (d.path().join("hydraui.exe"), d.path().join("hydra.exe"));
+        let (ui, cli) = (d.path().join(exe("hydraui")), d.path().join(exe("hydra")));
         std::fs::write(&ui, "old ui").unwrap();
         std::fs::write(&cli, "old cli").unwrap();
         let done = install(&gh.latest_url(), &ui, Some(&cli), &none_running).unwrap();
@@ -379,7 +387,7 @@ mod tests {
             &[(HYDRAUI_ASSET, b"new ui"), (HYDRA_ASSET, b"new cli")],
         );
         let d = tempfile::tempdir().unwrap();
-        let ui = d.path().join("hydraui.exe");
+        let ui = d.path().join(exe("hydraui"));
         std::fs::write(&ui, "old ui").unwrap();
         let done = install(&gh.latest_url(), &ui, None, &none_running).unwrap();
         assert!(!done.hydra_updated);
@@ -393,7 +401,7 @@ mod tests {
             &[(HYDRAUI_ASSET, b"new ui"), (HYDRA_ASSET, b"new cli")],
         );
         let d = tempfile::tempdir().unwrap();
-        let ui = d.path().join("hydraui.exe");
+        let ui = d.path().join(exe("hydraui"));
         std::fs::write(&ui, "old ui").unwrap();
         let err = install(&gh.latest_url(), &ui, None, &|| Ok(vec![4242])).unwrap_err();
         assert!(format!("{err:#}").contains("4242"), "{err:#}");
@@ -414,7 +422,7 @@ mod tests {
             ],
         );
         let d = tempfile::tempdir().unwrap();
-        let (ui, cli) = (d.path().join("hydraui.exe"), d.path().join("hydra.exe"));
+        let (ui, cli) = (d.path().join(exe("hydraui")), d.path().join(exe("hydra")));
         std::fs::write(&ui, "old ui").unwrap();
         std::fs::write(&cli, "old cli").unwrap();
         let err = install(&gh.latest_url(), &ui, Some(&cli), &none_running).unwrap_err();
@@ -437,7 +445,7 @@ mod tests {
     fn a_release_without_hydraui_changes_nothing() {
         let gh = FakeGitHub::serve("v0.7.0", &[(HYDRA_ASSET, b"new cli")]);
         let d = tempfile::tempdir().unwrap();
-        let ui = d.path().join("hydraui.exe");
+        let ui = d.path().join(exe("hydraui"));
         std::fs::write(&ui, "old ui").unwrap();
         let err = install(&gh.latest_url(), &ui, None, &none_running).unwrap_err();
         assert!(format!("{err:#}").contains(HYDRAUI_ASSET), "{err:#}");
@@ -447,12 +455,12 @@ mod tests {
     #[test]
     fn old_exes_are_cleaned_up() {
         let d = tempfile::tempdir().unwrap();
-        let (ui, cli) = (d.path().join("hydraui.exe"), d.path().join("hydra.exe"));
-        std::fs::write(d.path().join("hydraui.old.exe"), "").unwrap();
-        std::fs::write(d.path().join("hydra.old.exe"), "").unwrap();
+        let (ui, cli) = (d.path().join(exe("hydraui")), d.path().join(exe("hydra")));
+        std::fs::write(d.path().join(exe("hydraui.old")), "").unwrap();
+        std::fs::write(d.path().join(exe("hydra.old")), "").unwrap();
         clean_old(&ui, Some(&cli));
-        assert!(!d.path().join("hydraui.old.exe").exists());
-        assert!(!d.path().join("hydra.old.exe").exists());
+        assert!(!d.path().join(exe("hydraui.old")).exists());
+        assert!(!d.path().join(exe("hydra.old")).exists());
         clean_old(&ui, None); // nothing there: no panic
     }
 

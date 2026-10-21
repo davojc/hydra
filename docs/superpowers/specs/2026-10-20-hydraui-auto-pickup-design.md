@@ -160,15 +160,18 @@ Jev says so. Without a Jev key (§3) it is not free. A session that ended its
 turn by asking something hasn't verified a card, so without Jev it is always
 skipped; nothing is guessed from wording.
 
-One call per uncertain candidate, asking three yes/no ("noul") questions about
-the terminal's screen:
+One call per uncertain candidate, asking one **choice** question about the
+terminal's screen: what state is the assistant in? The options are `ready`
+(finished, asks nothing of the user, though it may mention optional next steps),
+`asking` (needs the user's answer, approval or choice to continue), `working`,
+`draft` (unsent text in the input box: a second check on §5.1.6, from the
+screen) and `none` (none of these, or it can't be told). `none` is always
+offered (the user's rule): without it Jev picks one of the others even when it
+can't tell.
 
-- `waiting`: Is the assistant waiting for the user to answer a question, make a
-  decision or give more information?
-- `finished`: Has the assistant finished its work and is it ready for a new,
-  unrelated task?
-- `draft`: Is there unsent text typed in the input box at the bottom? (A
-  second check on §5.1.6, from the screen.)
+(First built as three yes/no questions with thresholds. Tried on a real screen,
+"finished" 0.86 lost to "waiting" 0.27: independent probabilities don't compete,
+so the options now do.)
 
 The **state** sent is the text of the terminal's last ~60 rows (screen plus
 the end of scrollback), as hydraui's grid holds it: that shows the end of
@@ -176,19 +179,20 @@ Claude's last message and its input box (my call; no change to the hooks is
 needed. The builder may add Claude's last message from the transcript if
 testing shows the screen isn't enough).
 
-A candidate is **free** when `finished ≥ 0.8`, `waiting ≤ 0.2` and
-`draft ≤ 0.2` (my call on the thresholds; constants, tuned during the hands-on
-check). A Jev error, timeout (~5 s) or unexpected reply means not free.
+A candidate is **free** when Jev picks `ready` with confidence ≥ 0.7. A Jev
+error, timeout (~5 s), a pick that wasn't offered or any other unexpected reply
+means not free.
 
-The questions' wording (and optional criteria for yes and no), the model and the
-three thresholds can be changed in `<HYDRA_HOME>/hydraui/jev.toml` (launcher: Edit Jev
-questions), read on every ask; the three question ids stay fixed, since the free rule
-uses them. `hydraui.log` records each answer, Jev's reply and the screen sent.
+The question's wording, its options (which must include `ready`; `none` is
+added when left out), the model and the confidence can be changed in
+`<HYDRA_HOME>/hydraui/jev.toml` (launcher: Edit Jev questions), read on every
+ask. `hydraui.log` records the pick, its confidence, each option's probability,
+Jev's reply and the screen sent.
 
 Jev API (docs.typesafe.ai/api): `POST https://api.typesafe.ai/v1/systemone`,
 `Authorization: Bearer <key>`, body
-`{"model": "jev-latest", "state": "...", "questions": {"<id>": {"type": "noul", "instructions": "..."}}}`,
-reply `{"answers": {"<id>": {"type": "noul", "noul": 0.93}}, ...}`. Jev is in
+`{"model": "jev-latest", "state": "...", "questions": {"state": {"type": "choice", "instructions": "...", "criteria": {"ready": "...", ...}}}}`,
+reply `{"answers": {"state": {"type": "choice", "choice": "ready", "confidence": 0.8, "probabilities": {...}}}, ...}`. Jev is in
 early access; the model alias is a constant.
 
 ### 5.4 Picking

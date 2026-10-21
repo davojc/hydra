@@ -105,14 +105,14 @@ impl Workspace {
         action_log::write(text);
     }
 
-    /// The Jev questions and thresholds from jev.toml, logged; the defaults, with a warning,
+    /// The Jev question and confidence from jev.toml, logged; the defaults, with a warning,
     /// when it can't be used.
     fn jev_settings(&self, window: &mut Window, cx: &mut Context<Self>) -> JevSettings {
         let path = crate::jev::settings_file(self.hydra.paths.root());
         let (settings, problem) = crate::jev::load_settings(&path);
         let from = if let Some(problem) = &problem {
             window.push_notification(
-                Notification::warning(format!("jev.toml: {problem}. Using the default questions."))
+                Notification::warning(format!("jev.toml: {problem}. Using the default question."))
                     .title("Jev"),
                 cx,
             );
@@ -122,16 +122,18 @@ impl Workspace {
         } else {
             "defaults (no jev.toml)".to_string()
         };
+        let options: Vec<String> = settings
+            .options
+            .iter()
+            .map(|(name, means)| format!("{name}: {means}"))
+            .collect();
         action_log::write(format!(
-            "jev: questions from {from}; model {}; free when finished >= {}, waiting <= {}, draft <= {}\n\
-             waiting: {}\nfinished: {}\ndraft: {}",
+            "jev: question from {from}; model {}; free when it picks {} with confidence >= {}\n{}\n{}",
             settings.model,
-            settings.finished_min,
-            settings.waiting_max,
-            settings.draft_max,
-            question_text(&settings.waiting),
-            question_text(&settings.finished),
-            question_text(&settings.draft),
+            crate::jev::READY,
+            settings.min_confidence,
+            settings.instructions,
+            options.join("\n"),
         ));
         settings
     }
@@ -446,25 +448,22 @@ impl Workspace {
     }
 }
 
-/// A question as the log shows it: its instructions, then its criteria when it has them.
-fn question_text(q: &crate::jev::Question) -> String {
-    match &q.criteria {
-        Some(c) => format!("{} (criteria: {c})", q.instructions).replace('\n', " "),
-        None => q.instructions.clone(),
-    }
-}
-
-/// Logs Jev's answer about terminal `name`: each answer (Jev's probability of yes), the
-/// verdict by `settings`' thresholds, the reply as it came and the screen sent.
+/// Logs Jev's answer about terminal `name`: its pick, confidence and each option's
+/// probability, the verdict by `settings`, the reply as it came and the screen sent.
 fn log_jev(name: &str, state: &str, reply: &Result<Reply, Failure>, settings: &JevSettings) {
     let said = match reply {
         Ok(r) => {
-            let v = r.verdict;
+            let v = &r.verdict;
+            let odds: Vec<String> = v
+                .probabilities
+                .iter()
+                .map(|(option, p)| format!("{option} {p:.3}"))
+                .collect();
             format!(
-                "waiting {:.3}, finished {:.3}, draft {:.3}: {}\nreply: {}",
-                v.waiting,
-                v.finished,
-                v.draft,
+                "picked {} with confidence {:.3} ({}): {}\nreply: {}",
+                v.choice,
+                v.confidence,
+                odds.join(", "),
                 if v.is_free(settings) {
                     "free"
                 } else {

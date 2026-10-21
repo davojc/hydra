@@ -1,6 +1,7 @@
 //! The Jev API (TypeSafe's decision model): its key, kept in the OS credential store, and the
-//! question asking whether a Claude session is free.
+//! choice question asking what state a Claude session is in.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -66,65 +67,59 @@ impl JevKey {
 /// Where Jev answers.
 pub const JEV_URL: &str = "https://api.typesafe.ai/v1/systemone";
 
-/// The questions auto-pickup asks Jev, and the answers that make a session free: read from
-/// `<HYDRA_HOME>/hydraui/jev.toml` on every ask, so wording can be tried without a restart.
-/// A setting left out keeps its default.
+/// The option meaning the session can take a card.
+pub const READY: &str = "ready";
+/// The option Jev can fall back on when it can't tell: always offered, or Jev would pick one
+/// of the others anyway.
+pub const NONE: &str = "none";
+
+/// The one question auto-pickup asks Jev, a choice between states of the session, and how sure
+/// Jev must be: read from `<HYDRA_HOME>/hydraui/jev.toml` on every ask, so wording can be tried
+/// without a restart. A setting left out keeps its default.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct JevSettings {
     pub model: String,
-    /// A session is free from this much "finished" up...
-    pub finished_min: f64,
-    /// ...while "waiting for the user" is no more than this...
-    pub waiting_max: f64,
-    /// ...and "unsent draft" no more than this.
-    pub draft_max: f64,
-    pub waiting: Question,
-    pub finished: Question,
-    pub draft: Question,
-}
-
-/// One yes/no ("noul") question about the terminal's screen.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Question {
+    /// A session is free when Jev picks `ready` with at least this confidence.
+    pub min_confidence: f64,
     pub instructions: String,
-    /// What a yes and a no mean, passed to Jev as written (`true = "…"`, `false = "…"`).
-    #[serde(default)]
-    pub criteria: Option<toml::Table>,
+    /// Each option's name and what it means. Must include `ready`; `none` is added when left
+    /// out.
+    pub options: BTreeMap<String, String>,
 }
 
-impl Question {
-    fn new(instructions: &str) -> Self {
-        Self {
-            instructions: instructions.to_string(),
-            criteria: None,
-        }
-    }
-
-    fn json(&self) -> serde_json::Value {
-        let mut q = serde_json::json!({"type": "noul", "instructions": self.instructions});
-        if let Some(criteria) = &self.criteria {
-            q["criteria"] = serde_json::to_value(criteria).unwrap_or_default();
-        }
-        q
-    }
-}
+/// What `none` means when jev.toml doesn't say.
+const NONE_TEXT: &str = "None of these, or it can't be told from the screen";
 
 impl Default for JevSettings {
     fn default() -> Self {
+        let options = [
+            (
+                READY,
+                "Finished its work and asks nothing of the user: it may mention optional next steps or things to try, but nothing must be answered before it can start a new task",
+            ),
+            (
+                "asking",
+                "Needs the user to answer a question, approve something or make a choice before it can continue",
+            ),
+            (
+                "working",
+                "Still working: running tools or thinking, or its last message says it is carrying on",
+            ),
+            (
+                "draft",
+                "Unsent text is typed in the input box at the bottom",
+            ),
+            (NONE, NONE_TEXT),
+        ];
         Self {
             model: "jev-latest".into(),
-            finished_min: 0.8,
-            waiting_max: 0.2,
-            draft_max: 0.2,
-            waiting: Question::new(
-                "Is the assistant waiting for the user to answer a question, make a decision or give more information?",
-            ),
-            finished: Question::new(
-                "Has the assistant finished its work and is it ready for a new, unrelated task?",
-            ),
-            draft: Question::new("Is there unsent text typed in the input box at the bottom?"),
+            min_confidence: 0.7,
+            instructions: "This is the end of a terminal running an AI coding assistant (Claude Code). What state is the assistant in?".into(),
+            options: options
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
         }
     }
 }
@@ -135,31 +130,25 @@ pub fn settings_file(hydra_root: &Path) -> PathBuf {
 }
 
 /// What a new jev.toml holds: the defaults, written out to be edited.
-pub const DEFAULT_SETTINGS_TEXT: &str = r#"# The questions hydraui's auto-pickup asks Jev about a Claude terminal's last 60 lines,
-# and the answers that make the session free to take a card. Read on every ask: save and
-# move a card into Pickup to try new wording. Each answer is Jev's probability of "yes",
-# from 0 to 1; hydraui.log shows them, with the lines sent. Delete this file for the defaults.
+pub const DEFAULT_SETTINGS_TEXT: &str = r#"# The question hydraui's auto-pickup asks Jev about a Claude terminal's last 60 lines: one
+# choice between the states below. The session can take a card when Jev picks "ready" with
+# at least min_confidence. Read on every ask: save and move a card into Pickup to try new
+# wording; hydraui.log shows Jev's pick, confidence and each option's probability, with the
+# lines sent. Delete this file for the defaults.
+#
+# "ready" must be an option. "none" is always offered (added if you leave it out), so Jev
+# can say it can't tell rather than pick something anyway. Add or rename the others freely.
 
 model = "jev-latest"
+min_confidence = 0.7
+instructions = "This is the end of a terminal running an AI coding assistant (Claude Code). What state is the assistant in?"
 
-# Free when finished >= finished_min, waiting <= waiting_max and draft <= draft_max.
-finished_min = 0.8
-waiting_max = 0.2
-draft_max = 0.2
-
-[waiting]
-instructions = "Is the assistant waiting for the user to answer a question, make a decision or give more information?"
-
-[finished]
-instructions = "Has the assistant finished its work and is it ready for a new, unrelated task?"
-
-[draft]
-instructions = "Is there unsent text typed in the input box at the bottom?"
-
-# Each question may also say what a yes and a no mean:
-# [finished.criteria]
-# true = "The last message reports work done and asks nothing of the user"
-# false = "The assistant is still working, or asks the user something"
+[options]
+ready = "Finished its work and asks nothing of the user: it may mention optional next steps or things to try, but nothing must be answered before it can start a new task"
+asking = "Needs the user to answer a question, approve something or make a choice before it can continue"
+working = "Still working: running tools or thinking, or its last message says it is carrying on"
+draft = "Unsent text is typed in the input box at the bottom"
+none = "None of these, or it can't be told from the screen"
 "#;
 
 /// The settings in `path`: the defaults when there is no file, and also, with the problem,
@@ -179,55 +168,50 @@ pub fn load_settings(path: &Path) -> (JevSettings, Option<String>) {
 }
 
 fn parse_settings(text: &str) -> Result<JevSettings, String> {
-    let s: JevSettings = toml::from_str(text.strip_prefix('\u{feff}').unwrap_or(text))
+    let mut s: JevSettings = toml::from_str(text.strip_prefix('\u{feff}').unwrap_or(text))
         .map_err(|e| e.message().to_string())?;
-    for (name, v) in [
-        ("finished_min", s.finished_min),
-        ("waiting_max", s.waiting_max),
-        ("draft_max", s.draft_max),
-    ] {
-        if !(0.0..=1.0).contains(&v) {
-            return Err(format!("{name} must be from 0 to 1"));
-        }
+    if !(0.0..=1.0).contains(&s.min_confidence) {
+        return Err("min_confidence must be from 0 to 1".into());
     }
-    for (name, q) in [
-        ("waiting", &s.waiting),
-        ("finished", &s.finished),
-        ("draft", &s.draft),
-    ] {
-        if q.instructions.trim().is_empty() {
-            return Err(format!("[{name}] needs instructions"));
-        }
+    if s.instructions.trim().is_empty() {
+        return Err("instructions can't be empty".into());
     }
+    if !s.options.contains_key(READY) {
+        return Err("[options] needs a \"ready\" option".into());
+    }
+    s.options
+        .entry(NONE.to_string())
+        .or_insert_with(|| NONE_TEXT.to_string());
     Ok(s)
 }
 
-/// Jev's three answers about a terminal screen, each from 0 to 1.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Jev's answer about a terminal screen: the option it picked, how sure it is, and each
+/// option's probability.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Verdict {
-    pub waiting: f64,
-    pub finished: f64,
-    pub draft: f64,
+    pub choice: String,
+    pub confidence: f64,
+    pub probabilities: BTreeMap<String, f64>,
 }
 
 impl Verdict {
-    /// Finished, not waiting on the user and no unsent draft, by `s`'s thresholds.
+    /// Jev picked `ready`, at least as sure as `s` asks.
     pub fn is_free(&self, s: &JevSettings) -> bool {
-        self.finished >= s.finished_min
-            && self.waiting <= s.waiting_max
-            && self.draft <= s.draft_max
+        self.choice == READY && self.confidence >= s.min_confidence
     }
 }
 
-/// The request asking Jev `s`'s three questions about `state`.
+/// The request asking Jev `s`'s question about `state`.
 pub fn request_body(state: &str, s: &JevSettings) -> serde_json::Value {
     serde_json::json!({
         "model": s.model,
         "state": state,
         "questions": {
-            "waiting": s.waiting.json(),
-            "finished": s.finished.json(),
-            "draft": s.draft.json(),
+            "state": {
+                "type": "choice",
+                "instructions": s.instructions,
+                "criteria": s.options,
+            },
         },
     })
 }
@@ -283,19 +267,35 @@ pub fn ask(url: &str, key: &str, state: &str, s: &JevSettings) -> Result<Reply, 
         .map_err(|_| failure("unexpected reply", None))?;
     let reply: serde_json::Value =
         serde_json::from_str(&body).map_err(|_| failure("unexpected reply", Some(body.clone())))?;
-    // Each answer is a number from 0 to 1; anything else is a reply hydraui can't trust.
-    let noul = |id: &str| {
-        reply["answers"][id]["noul"]
-            .as_f64()
-            .filter(|n| n.is_finite() && (0.0..=1.0).contains(n))
-            .ok_or_else(|| failure("unexpected reply", Some(body.clone())))
-    };
-    let verdict = Verdict {
-        waiting: noul("waiting")?,
-        finished: noul("finished")?,
-        draft: noul("draft")?,
-    };
+    let verdict = read_verdict(&reply["answers"]["state"], s)
+        .ok_or_else(|| failure("unexpected reply", Some(body.clone())))?;
     Ok(Reply { verdict, body })
+}
+
+/// The choice answer: an option `s` offered and a confidence from 0 to 1, or `None` for
+/// anything else, a reply hydraui can't trust. Probabilities outside 0 to 1 are left out.
+fn read_verdict(answer: &serde_json::Value, s: &JevSettings) -> Option<Verdict> {
+    let unit = |v: &serde_json::Value| {
+        v.as_f64()
+            .filter(|n| n.is_finite() && (0.0..=1.0).contains(n))
+    };
+    let choice = answer["choice"].as_str()?;
+    if !s.options.contains_key(choice) {
+        return None;
+    }
+    let probabilities = answer["probabilities"]
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| Some((k.clone(), unit(v)?)))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Verdict {
+        choice: choice.to_string(),
+        confidence: unit(&answer["confidence"])?,
+        probabilities,
+    })
 }
 
 #[cfg(test)]
@@ -322,8 +322,9 @@ mod tests {
     /// Serves one canned reply on a local port; returns the url and the request's Authorization header.
     fn serve_once(
         status: u16,
-        body: &'static str,
+        body: impl Into<String>,
     ) -> (String, std::thread::JoinHandle<Option<String>>) {
+        let body: String = body.into();
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let url = format!("http://{}", server.server_addr().to_ip().unwrap());
         let h = std::thread::spawn(move || {
@@ -345,34 +346,45 @@ mod tests {
         JevSettings::default()
     }
 
-    #[test]
-    fn free_needs_finished_and_no_waiting_or_draft() {
-        let v = |w, f, d| Verdict {
-            waiting: w,
-            finished: f,
-            draft: d,
-        };
-        let s = d();
-        assert!(v(0.1, 0.9, 0.0).is_free(&s));
-        assert!(v(0.2, 0.8, 0.2).is_free(&s));
-        assert!(!v(0.3, 0.9, 0.0).is_free(&s));
-        assert!(!v(0.1, 0.7, 0.0).is_free(&s));
-        assert!(!v(0.1, 0.9, 0.5).is_free(&s));
-        let lenient = JevSettings {
-            finished_min: 0.6,
-            ..d()
-        };
-        assert!(v(0.1, 0.7, 0.0).is_free(&lenient));
+    fn verdict(choice: &str, confidence: f64) -> Verdict {
+        Verdict {
+            choice: choice.into(),
+            confidence,
+            probabilities: BTreeMap::new(),
+        }
+    }
+
+    /// A choice reply picking `choice` at `confidence`.
+    fn reply(choice: &str, confidence: f64) -> String {
+        format!(
+            r#"{{"answers":{{"state":{{"type":"choice","choice":"{choice}","confidence":{confidence},"probabilities":{{"ready":0.8,"asking":0.1,"none":0.1}}}}}}}}"#
+        )
     }
 
     #[test]
-    fn the_request_asks_three_noul_questions() {
+    fn free_needs_ready_with_enough_confidence() {
+        let s = d();
+        assert!(verdict("ready", 0.7).is_free(&s));
+        assert!(!verdict("ready", 0.69).is_free(&s));
+        assert!(!verdict("asking", 0.95).is_free(&s));
+        assert!(!verdict("none", 0.95).is_free(&s));
+        let lenient = JevSettings {
+            min_confidence: 0.5,
+            ..d()
+        };
+        assert!(verdict("ready", 0.6).is_free(&lenient));
+    }
+
+    #[test]
+    fn the_request_asks_one_choice_with_none_among_the_options() {
         let b = request_body("screen", &d());
         assert_eq!(b["model"], "jev-latest");
         assert_eq!(b["state"], "screen");
-        for id in ["waiting", "finished", "draft"] {
-            assert_eq!(b["questions"][id]["type"], "noul");
-            assert!(b["questions"][id].get("criteria").is_none());
+        let q = &b["questions"]["state"];
+        assert_eq!(q["type"], "choice");
+        assert!(q["instructions"].as_str().unwrap().contains("state"));
+        for option in ["ready", "asking", "working", "draft", "none"] {
+            assert!(q["criteria"][option].is_string(), "{option}");
         }
     }
 
@@ -382,34 +394,54 @@ mod tests {
     }
 
     #[test]
-    fn the_file_changes_wording_criteria_and_thresholds() {
+    fn the_file_changes_wording_options_and_confidence() {
         let s = parse_settings(
-            "finished_min = 0.7\n[finished]\ninstructions = \"Done?\"\n[finished.criteria]\ntrue = \"yes\"\nfalse = \"no\"\n",
+            "min_confidence = 0.6\ninstructions = \"State?\"\n[options]\nready = \"Done\"\nbusy = \"Not done\"\n",
         )
         .unwrap();
-        assert_eq!(s.finished_min, 0.7);
-        assert_eq!(s.waiting, d().waiting, "left out: the default");
+        assert_eq!(s.min_confidence, 0.6);
+        assert_eq!(s.model, "jev-latest", "left out: the default");
         let b = request_body("x", &s);
-        assert_eq!(b["questions"]["finished"]["instructions"], "Done?");
-        assert_eq!(b["questions"]["finished"]["criteria"]["true"], "yes");
-        assert_eq!(b["questions"]["finished"]["criteria"]["false"], "no");
+        assert_eq!(b["questions"]["state"]["instructions"], "State?");
+        assert_eq!(b["questions"]["state"]["criteria"]["ready"], "Done");
+        assert_eq!(b["questions"]["state"]["criteria"]["busy"], "Not done");
+        assert!(
+            b["questions"]["state"]["criteria"]["none"].is_string(),
+            "none is always offered"
+        );
+        assert_eq!(
+            b["questions"]["state"]["criteria"]
+                .as_object()
+                .unwrap()
+                .len(),
+            3
+        );
     }
 
     #[test]
     fn a_file_that_makes_no_sense_says_why() {
         assert!(
-            parse_settings("finished_min = 2")
+            parse_settings("min_confidence = 2")
                 .unwrap_err()
-                .contains("finished_min")
+                .contains("min_confidence")
         );
         assert!(
-            parse_settings("[draft]\ninstructions = \" \"")
+            parse_settings("instructions = \" \"")
                 .unwrap_err()
-                .contains("[draft]")
+                .contains("instructions")
         );
         assert!(
-            parse_settings("finshed_min = 0.5").is_err(),
+            parse_settings("[options]\nasking = \"x\"")
+                .unwrap_err()
+                .contains("ready")
+        );
+        assert!(
+            parse_settings("min_confidense = 0.5").is_err(),
             "a misspelt setting"
+        );
+        assert!(
+            parse_settings("finished_min = 0.8").is_err(),
+            "the old three-question file"
         );
         assert!(parse_settings("not toml").is_err());
     }
@@ -419,28 +451,40 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("jev.toml");
         assert_eq!(load_settings(&path), (d(), None));
-        std::fs::write(&path, "waiting_max = -1").unwrap();
+        std::fs::write(&path, "min_confidence = -1").unwrap();
         let (s, problem) = load_settings(&path);
         assert_eq!(s, d());
-        assert!(problem.unwrap().contains("waiting_max"));
+        assert!(problem.unwrap().contains("min_confidence"));
+    }
+
+    #[test]
+    fn a_choice_reply_is_read_with_its_probabilities() {
+        let answer: serde_json::Value = serde_json::from_str(&reply("ready", 0.82)).unwrap();
+        let v = read_verdict(&answer["answers"]["state"], &d()).unwrap();
+        assert_eq!(v.choice, "ready");
+        assert_eq!(v.confidence, 0.82);
+        assert_eq!(v.probabilities.get("asking"), Some(&0.1));
+    }
+
+    #[test]
+    fn a_choice_not_offered_or_a_confidence_outside_zero_to_one_is_untrusted() {
+        let read = |r: String| {
+            let answer: serde_json::Value = serde_json::from_str(&r).unwrap();
+            read_verdict(&answer["answers"]["state"], &d())
+        };
+        assert!(read(reply("sleeping", 0.9)).is_none());
+        assert!(read(reply("ready", 1.5)).is_none());
+        assert!(read(reply("ready", -0.1)).is_none());
+        assert!(read(r#"{"answers":{"state":{"choice":"ready"}}}"#.into()).is_none());
     }
 
     #[test]
     fn a_reply_is_read_and_the_key_sent() {
-        let (url, h) = serve_once(
-            200,
-            r#"{"answers":{"waiting":{"type":"noul","noul":0.1},"finished":{"type":"noul","noul":0.9},"draft":{"type":"noul","noul":0.05}}}"#,
-        );
+        let (url, h) = serve_once(200, reply("ready", 0.9));
         let r = ask(&url, "k", "s", &d()).unwrap();
         assert!(r.body.contains("answers"), "the body is kept for the log");
-        assert_eq!(
-            r.verdict,
-            Verdict {
-                waiting: 0.1,
-                finished: 0.9,
-                draft: 0.05
-            }
-        );
+        assert_eq!(r.verdict.choice, "ready");
+        assert_eq!(r.verdict.confidence, 0.9);
         assert_eq!(h.join().unwrap().as_deref(), Some("Bearer k"));
     }
 
@@ -456,20 +500,6 @@ mod tests {
             Some(r#"{"detail":"bad"}"#),
             "Jev's why, for the log"
         );
-    }
-
-    #[test]
-    fn an_answer_outside_zero_to_one_is_an_error() {
-        let (url, _h) = serve_once(
-            200,
-            r#"{"answers":{"waiting":{"noul":0.1},"finished":{"noul":1.5},"draft":{"noul":0.0}}}"#,
-        );
-        assert!(ask(&url, "k", "s", &d()).is_err());
-        let (url, _h) = serve_once(
-            200,
-            r#"{"answers":{"waiting":{"noul":-0.1},"finished":{"noul":0.9},"draft":{"noul":0.0}}}"#,
-        );
-        assert!(ask(&url, "k", "s", &d()).is_err());
     }
 
     #[test]

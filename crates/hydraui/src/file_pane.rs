@@ -54,9 +54,11 @@ enum Body {
         _api_sub: Option<Subscription>,
         /// A Swagger 2.0 file: Raw only, with a note.
         swagger: bool,
+        /// An SVG's picture, of the text as it is now: its Rendered view.
+        svg: Option<Arc<gpui::Image>>,
     },
     CantShow(String),
-    /// A PNG or JPEG, shown as a picture; or why it can't be.
+    /// A PNG, JPEG or ICO, shown as a picture; or why it can't be.
     Image(Result<Picture, String>),
     /// How the file differs from git's last commit (spec §7.3), or why it can't be shown.
     Diff(Result<Entity<DiffState>, String>),
@@ -74,12 +76,43 @@ fn picture(path: &Path) -> Result<Picture, String> {
     let format = match kind {
         ImageKind::Png => gpui::ImageFormat::Png,
         ImageKind::Jpeg => gpui::ImageFormat::Jpeg,
+        ImageKind::Ico => gpui::ImageFormat::Ico,
     };
     Ok(Picture {
         bytes: bytes.len() as u64,
         image: Arc::new(gpui::Image::from_bytes(format, bytes)),
         kind,
     })
+}
+
+/// An SVG file's text as a picture.
+fn svg_image(text: &str) -> Arc<gpui::Image> {
+    Arc::new(gpui::Image::from_bytes(
+        gpui::ImageFormat::Svg,
+        text.as_bytes().to_vec(),
+    ))
+}
+
+/// A picture shrunk to fit the pane, never enlarged, centred; or a note when it doesn't decode.
+fn picture_view(image: Arc<gpui::Image>, muted: gpui::Hsla) -> gpui::AnyElement {
+    div()
+        .size_full()
+        .p_3()
+        .child(
+            gpui::img(image)
+                .size_full()
+                .object_fit(gpui::ObjectFit::ScaleDown)
+                .with_fallback(move || {
+                    v_flex()
+                        .size_full()
+                        .items_center()
+                        .justify_center()
+                        .text_color(muted)
+                        .child("Can't show this image: it doesn't decode")
+                        .into_any_element()
+                }),
+        )
+        .into_any_element()
 }
 
 struct FileTab {
@@ -242,7 +275,8 @@ impl FilePane {
             }
             _ => (None, None),
         };
-        let view = if file_doc::is_markdown(path) || api.is_some() {
+        let svg = file_doc::is_svg(path).then(|| svg_image(&doc.text));
+        let view = if file_doc::is_markdown(path) || api.is_some() || svg.is_some() {
             View::Rendered
         } else {
             View::Raw
@@ -255,6 +289,7 @@ impl FilePane {
             api,
             _api_sub: api_sub,
             swagger: kind == Some(SpecKind::Swagger2),
+            svg,
         }
     }
 
@@ -263,11 +298,18 @@ impl FilePane {
         if let Some(i) = file_tab(&self.tabs, path)
             && let t = &mut self.tabs[i]
             && let Body::Text {
-                editor, saved, api, ..
-            } = &t.body
+                editor,
+                saved,
+                api,
+                svg,
+                ..
+            } = &mut t.body
         {
             let text = editor.read(cx).value().to_string();
             t.dirty = file_doc::normalize(&text) != saved.text;
+            if let Some(svg) = svg {
+                *svg = svg_image(&text);
+            }
             if let Some(api) = api {
                 api.update(cx, |v, cx| v.set_text(text, cx));
             }
@@ -561,7 +603,11 @@ impl FilePane {
             return;
         }
         let Body::Text {
-            editor, saved, api, ..
+            editor,
+            saved,
+            api,
+            svg,
+            ..
         } = &mut t.body
         else {
             return;
@@ -572,6 +618,9 @@ impl FilePane {
         if let DiskChange::Reload(doc) = change {
             let text = doc.text.clone();
             *saved = doc;
+            if let Some(svg) = svg {
+                *svg = svg_image(&text);
+            }
             if let Some(api) = api {
                 let t = text.clone();
                 api.update(cx, |v, cx| v.set_text(t, cx));
@@ -587,7 +636,11 @@ impl FilePane {
             return;
         };
         let Body::Text {
-            editor, saved, api, ..
+            editor,
+            saved,
+            api,
+            svg,
+            ..
         } = &mut t.body
         else {
             return;
@@ -598,6 +651,9 @@ impl FilePane {
                 *saved = doc;
                 t.dirty = false;
                 t.disk = DiskFlags::default();
+                if let Some(svg) = svg {
+                    *svg = svg_image(&text);
+                }
                 if let Some(api) = api {
                     let t = text.clone();
                     api.update(cx, |v, cx| v.set_text(t, cx));
@@ -715,8 +771,16 @@ impl Render for FilePane {
                     .child("Swagger 2.0 isn't rendered"),
             );
         }
-        if let Body::Text { view, api, .. } = &t.body
-            && (file_doc::is_markdown(&t.path) || api.is_some())
+        if let Body::Text {
+            view: View::Rendered,
+            svg: Some(_),
+            ..
+        } = &t.body
+        {
+            header = header.child(div().text_sm().text_color(muted).child("SVG image"));
+        }
+        if let Body::Text { view, api, svg, .. } = &t.body
+            && (file_doc::is_markdown(&t.path) || api.is_some() || svg.is_some())
         {
             let other = if *view == View::Raw {
                 "Rendered"
@@ -793,25 +857,7 @@ impl Render for FilePane {
                 .text_color(muted)
                 .child(format!("Can't show this image: {why}"))
                 .into_any_element(),
-            // Shrunk to fit the pane, never enlarged, centred.
-            Body::Image(Ok(p)) => div()
-                .size_full()
-                .p_3()
-                .child(
-                    gpui::img(p.image.clone())
-                        .size_full()
-                        .object_fit(gpui::ObjectFit::ScaleDown)
-                        .with_fallback(move || {
-                            v_flex()
-                                .size_full()
-                                .items_center()
-                                .justify_center()
-                                .text_color(muted)
-                                .child("Can't show this image: it doesn't decode")
-                                .into_any_element()
-                        }),
-                )
-                .into_any_element(),
+            Body::Image(Ok(p)) => picture_view(p.image.clone(), muted),
             // Wrapped, so both sides fit the pane instead of the new side scrolling off.
             Body::Diff(Ok(state)) => Diff::new(state)
                 .soft_wrap(true)
@@ -837,6 +883,11 @@ impl Render for FilePane {
                 api: Some(api),
                 ..
             } => div().size_full().child(api.clone()).into_any_element(),
+            Body::Text {
+                view: View::Rendered,
+                svg: Some(image),
+                ..
+            } => picture_view(image.clone(), muted),
             Body::Text {
                 editor,
                 view: View::Rendered,

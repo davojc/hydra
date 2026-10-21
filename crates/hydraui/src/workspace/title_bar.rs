@@ -293,11 +293,14 @@ impl Workspace {
                     });
                 }
                 if let Some(c) = current.clone() {
-                    menu = menu.item(PopupMenuItem::new("Reveal in Explorer").on_click(
+                    menu = menu.item(PopupMenuItem::new(crate::file_ops::REVEAL_LABEL).on_click(
                         move |_, _, _| {
+                            #[cfg(windows)]
                             let _ = std::process::Command::new("explorer.exe")
                                 .arg(format!("/select,{}", c.display()))
                                 .spawn();
+                            #[cfg(not(windows))]
+                            let _ = crate::file_ops::reveal_in_explorer(&c);
                         },
                     ));
                 }

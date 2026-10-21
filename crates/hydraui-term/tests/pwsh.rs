@@ -1,6 +1,7 @@
 //! pwsh in a real ConPTY. Each test prints "skipped" and passes when pwsh isn't installed.
 mod common;
 
+#[cfg(windows)]
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -9,7 +10,9 @@ use hydra_core::lock::is_running;
 use hydra_platform::shell::ShellKind;
 use hydraui_term::alacritty_terminal::grid::Dimensions;
 use hydraui_term::{GridSize, PromptState, TermEvent};
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+#[cfg(windows)]
 use windows_sys::Win32::System::Threading::{
     OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
 };
@@ -155,6 +158,8 @@ fn output_time_is_kept_without_rendering() {
     assert!(later > first, "{first:?} → {later:?}");
 }
 
+// The Job Object's tree kill; bash.rs has the Unix counterpart.
+#[cfg(windows)]
 #[test]
 fn dropping_a_busy_pane_ends_the_whole_tree_promptly() {
     let fx = Fx::new();
@@ -182,6 +187,7 @@ fn dropping_a_busy_pane_ends_the_whole_tree_promptly() {
     unsafe { CloseHandle(ping) };
 }
 
+#[cfg(windows)]
 fn wait_for_pid(file: &Path) -> u32 {
     let deadline = Instant::now() + common::TIMEOUT;
     loop {
@@ -200,6 +206,7 @@ fn wait_for_pid(file: &Path) -> u32 {
     }
 }
 
+#[cfg(windows)]
 fn open_process(pid: u32) -> HANDLE {
     // SAFETY: a plain call; the result is checked.
     let h = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
@@ -208,6 +215,7 @@ fn open_process(pid: u32) -> HANDLE {
 }
 
 /// Whether the process ended within `ms` milliseconds.
+#[cfg(windows)]
 fn exited(process: HANDLE, ms: u32) -> bool {
     // SAFETY: `process` is a live handle from `open_process`.
     unsafe { WaitForSingleObject(process, ms) == WAIT_OBJECT_0 }

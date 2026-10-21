@@ -97,7 +97,7 @@ pub fn row_menu(is_dir: bool, changed: bool, can_cd: bool) -> Vec<Option<MenuEnt
         out.push(entry("New terminal here", MenuAction::NewTerminal));
     }
     out.extend([
-        entry("Reveal in Explorer", MenuAction::Reveal),
+        entry(crate::file_ops::REVEAL_LABEL, MenuAction::Reveal),
         None,
         entry("Rename…", MenuAction::Rename),
         entry("Delete…", MenuAction::Delete),
@@ -516,7 +516,7 @@ mod tests {
                 "-",
                 "cd here",
                 "New terminal here",
-                "Reveal in Explorer",
+                crate::file_ops::REVEAL_LABEL,
                 "-",
                 "Rename…",
                 "Delete…",

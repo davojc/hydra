@@ -58,6 +58,11 @@ mod tests {
 
     use super::*;
 
+    /// Folders in the platform's own form: `C:\\old` can't go in a Unix PATH, whose
+    /// separator is `:`.
+    const OLD: &str = if cfg!(windows) { "C:\\old" } else { "/old" };
+    const KEEP: &str = if cfg!(windows) { "C:\\keep" } else { "/keep" };
+
     fn launch(set: &[(&str, &str)]) -> LaunchEnv {
         LaunchEnv {
             name: EnvName::parse("work").unwrap(),
@@ -67,17 +72,18 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect::<BTreeMap<_, _>>(),
             unset: BTreeSet::from(["GH_TOKEN".to_string()]),
-            path_drop: vec![PathBuf::from("C:\\old")],
+            path_drop: vec![PathBuf::from(OLD)],
             warnings: Vec::new(),
         }
     }
 
-    /// Windows spells it `Path`; hydra writes `PATH`.
+    /// Windows spells it `Path`; hydra writes `PATH`. Unix names are case-sensitive, and
+    /// always `PATH`.
     fn inherited() -> Vec<(OsString, OsString)> {
         vec![
             (
-                "Path".into(),
-                std::env::join_paths(["C:\\old", "C:\\keep"]).unwrap(),
+                if cfg!(windows) { "Path" } else { "PATH" }.into(),
+                std::env::join_paths([OLD, KEEP]).unwrap(),
             ),
             ("GH_TOKEN".into(), "leaked".into()),
             ("SystemRoot".into(), "C:\\Windows".into()),
@@ -117,7 +123,7 @@ mod tests {
             .filter(|(k, _)| k.eq_ignore_ascii_case("PATH"))
             .collect();
         assert_eq!(paths.len(), 1, "{paths:?}");
-        assert_eq!(paths[0].1, "C:\\keep");
+        assert_eq!(paths[0].1, KEEP);
     }
 
     #[test]

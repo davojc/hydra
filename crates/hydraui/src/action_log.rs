@@ -68,6 +68,7 @@ fn entry(stamp: &str, pid: u32, text: &str) -> String {
 }
 
 /// The local time as `2026-10-21 08:45:12.345`.
+#[cfg(windows)]
 fn now() -> String {
     use windows_sys::Win32::System::SystemInformation::GetLocalTime;
     // SAFETY: GetLocalTime only fills in the struct it is given.
@@ -79,6 +80,31 @@ fn now() -> String {
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
         t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, t.wMilliseconds
+    )
+}
+
+/// The local time as `2026-10-21 08:45:12.345`.
+#[cfg(unix)]
+fn now() -> String {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = libc::time_t::try_from(since.as_secs()).unwrap_or(0);
+    // SAFETY: localtime_r only reads `secs` and fills in the struct it is given.
+    let t = unsafe {
+        let mut t = std::mem::zeroed();
+        libc::localtime_r(&secs, &mut t);
+        t
+    };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+        t.tm_year + 1900,
+        t.tm_mon + 1,
+        t.tm_mday,
+        t.tm_hour,
+        t.tm_min,
+        t.tm_sec,
+        since.subsec_millis()
     )
 }
 

@@ -1,7 +1,8 @@
-//! A shell in a ConPTY, in a hydra environment, feeding an `alacritty_terminal` grid
+//! A shell in a pseudo-terminal (ConPTY on Windows), in a hydra environment, feeding an `alacritty_terminal` grid
 //! (spec §6).
 use std::ffi::OsString;
 use std::io::{Read, Write};
+#[cfg(windows)]
 use std::os::windows::io::BorrowedHandle;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -246,8 +247,8 @@ struct Started {
     output: Arc<OutputClock>,
 }
 
-/// Opens the ConPTY, starts `cmd` in it inside a new job, and starts the reader and waiter
-/// threads.
+/// Opens the pseudo-terminal, starts `cmd` in it inside a new job, and starts the reader and
+/// waiter threads.
 fn start(
     cmd: CommandBuilder,
     size: GridSize,
@@ -256,6 +257,7 @@ fn start(
     let mut child = pair.slave.spawn_command(cmd).map_err(pty_err)?;
     drop(pair.slave);
     let killer = child.clone_killer();
+    #[cfg(windows)]
     let job = Job::new().and_then(|job| {
         let process = child
             .as_raw_handle()
@@ -264,6 +266,12 @@ fn start(
         job.assign(unsafe { BorrowedHandle::borrow_raw(process) })?;
         Ok(job)
     });
+    // portable-pty made the shell a session leader; its session is the job.
+    #[cfg(unix)]
+    let job = child
+        .process_id()
+        .ok_or_else(|| std::io::Error::other("the shell has no process id"))
+        .and_then(Job::new);
     let job = match job {
         Ok(job) => job,
         Err(source) => {

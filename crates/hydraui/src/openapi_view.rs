@@ -1,6 +1,6 @@
 //! OpenAPI specs as API docs (spec §7.8): a read-only view of an `Api` in the file pane's
 //! Rendered mode. What is open is kept here; schema trees are built only when opened.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -8,13 +8,15 @@ use std::time::Duration;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FontWeight, Hsla, SharedString, Subscription,
-    Task, Window, div, px,
+    Task, Window, div, px, relative,
 };
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{ActiveTheme, Sizable, h_flex, v_flex};
+use gpui_component::notification::Notification;
+use gpui_component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
 use serde_json::Value;
 
+use crate::openapi::example::{curl, example, operation_line, rules};
 use crate::openapi::{Api, Kind, Operation, ParseError, level, matches, parse};
 
 /// The last good parse, the current error if the text no longer parses, and what is open.
@@ -120,6 +122,10 @@ pub struct ApiView {
     json: bool,
     /// The spec's folder, for refs into other files.
     dir: PathBuf,
+    /// The spec's text as last given, to find an operation's line.
+    text: Rc<str>,
+    /// Each open operation's chosen response, by its `op:` key; the first when unset.
+    tabs: HashMap<String, String>,
     filter: Entity<InputState>,
     _filter_sub: Subscription,
     _pending: Option<Task<()>>,
@@ -167,6 +173,8 @@ impl ApiView {
             state: ViewState::default(),
             json,
             dir,
+            text: Rc::from(text.as_str()),
+            tabs: HashMap::new(),
             filter,
             _filter_sub: sub,
             _pending: None,
@@ -192,6 +200,7 @@ impl ApiView {
 
     /// The text changed (unsaved edits): parse again once typing stops for 300 ms.
     pub fn set_text(&mut self, text: String, cx: &mut Context<Self>) {
+        self.text = Rc::from(text.as_str());
         self.parse_after(text, Duration::from_millis(300), cx);
     }
 
@@ -204,10 +213,6 @@ impl ApiView {
 
     fn is_open(&self, key: &str) -> bool {
         self.state.open.contains(key)
-    }
-
-    fn heading(text: &'static str) -> gpui::Div {
-        div().font_weight(FontWeight::SEMIBOLD).child(text)
     }
 
     /// A schema node: its label, and when open its next level. `key` names it in `open`;
@@ -307,12 +312,321 @@ impl ApiView {
         node.into_any_element()
     }
 
+    /// A small caps label over a part of an operation.
+    fn label(text: impl Into<SharedString>, cx: &App) -> gpui::Div {
+        div()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(text.into())
+    }
+
+    /// A rule as a chip: `max 200 chars`, `≥ 1`.
+    fn chip(text: String, cx: &App) -> gpui::Div {
+        div()
+            .flex_none()
+            .px_1p5()
+            .rounded_sm()
+            .text_xs()
+            .bg(cx.theme().secondary)
+            .text_color(cx.theme().secondary_foreground)
+            .child(text)
+    }
+
+    /// The column headings of a field table.
+    fn table_head(first: &'static str, cx: &App) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        h_flex()
+            .px_2()
+            .py_0p5()
+            .gap_2()
+            .text_xs()
+            .text_color(muted)
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(div().w(relative(0.32)).flex_none().child(first))
+            .child(div().w(relative(0.24)).flex_none().child("Type"))
+            .child(div().flex_1().child("Rules"))
+            .into_any_element()
+    }
+
+    /// One field of a table: its name (indented by `depth`, `*` when required, `▸` when it
+    /// opens), its type, and its rules and description; when open, its own fields below.
+    #[allow(clippy::too_many_arguments)]
+    fn render_field(
+        &self,
+        api: &Api,
+        key: String,
+        name: String,
+        required: bool,
+        schema: &Value,
+        above: Vec<String>,
+        depth: usize,
+        out: &mut Vec<AnyElement>,
+        cx: &mut Context<Self>,
+    ) {
+        let lvl = level(&api.root, schema, &above);
+        let (muted, warning, info, mono) = (
+            cx.theme().muted_foreground,
+            cx.theme().warning,
+            cx.theme().info,
+            cx.theme().mono_font_family.clone(),
+        );
+        let expandable = matches!(lvl.kind, Kind::Object(_) | Kind::OneOf(_));
+        let open = expandable && self.is_open(&key);
+        let resolved = schema
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|r| crate::openapi::resolve(&api.root, r))
+            .unwrap_or(schema);
+        let shown = match &lvl.kind {
+            Kind::Cycle(n) => format!("↻ {n}"),
+            Kind::Missing(r) => format!("⚠ {r} (missing)"),
+            // An enum's values are a rule chip; its type is just its type.
+            _ if resolved.get("enum").is_some() && !lvl.label.ends_with("[]") => resolved
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("enum")
+                .to_string(),
+            _ => lvl.label.clone(),
+        };
+        let description = schema
+            .get("description")
+            .or_else(|| resolved.get("description"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let chips: Vec<AnyElement> = rules(resolved)
+            .into_iter()
+            .map(|r| Self::chip(r, cx).into_any_element())
+            .collect();
+        let arrow = match (expandable, open) {
+            (false, _) => " ",
+            (true, true) => "▾",
+            (true, false) => "▸",
+        };
+        let mut row = h_flex()
+            .id(SharedString::from(key.clone()))
+            .px_2()
+            .py_0p5()
+            .gap_2()
+            .items_start()
+            .text_sm()
+            .child(
+                h_flex()
+                    .w(relative(0.32))
+                    .flex_none()
+                    .min_w_0()
+                    .pl(px(depth as f32 * 14.))
+                    .gap_1()
+                    .child(div().w(px(10.)).flex_none().text_color(muted).child(arrow))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(mono.clone())
+                            .child(name),
+                    )
+                    .when(required, |d| d.child(div().text_color(warning).child("*"))),
+            )
+            .child(
+                div()
+                    .w(relative(0.24))
+                    .flex_none()
+                    .min_w_0()
+                    .truncate()
+                    .font_family(mono)
+                    .text_color(info)
+                    .child(shown),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .when(!chips.is_empty(), |d| {
+                        d.child(h_flex().flex_wrap().gap_1().children(chips))
+                    })
+                    .when_some(description, |d, text| {
+                        d.child(div().text_color(muted).child(text))
+                    }),
+            );
+        match &lvl.kind {
+            Kind::External { file, .. } => {
+                let path = ref_file(&self.dir, file);
+                row =
+                    row.cursor_pointer()
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(ApiViewEvent::OpenFile(path.clone()))
+                        }));
+            }
+            _ if expandable => {
+                let k = key.clone();
+                row = row
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |v, _, _, cx| v.toggle(k.clone(), cx)));
+            }
+            _ => {}
+        }
+        out.push(row.into_any_element());
+        if !open {
+            return;
+        }
+        let mut above = above;
+        for r in [
+            schema.get("$ref").and_then(Value::as_str),
+            schema.pointer("/items/$ref").and_then(Value::as_str),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            above.push(r.to_string());
+        }
+        match &lvl.kind {
+            Kind::Object(props) => {
+                for p in props {
+                    self.render_field(
+                        api,
+                        format!("{key}/{}", p.name),
+                        p.name.clone(),
+                        p.required,
+                        &p.schema,
+                        above.clone(),
+                        depth + 1,
+                        out,
+                        cx,
+                    );
+                }
+            }
+            Kind::OneOf(choices) => {
+                for (i, (_, s)) in choices.iter().enumerate() {
+                    self.render_field(
+                        api,
+                        format!("{key}/{i}"),
+                        format!("option {}", i + 1),
+                        false,
+                        s,
+                        above.clone(),
+                        depth + 1,
+                        out,
+                        cx,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A schema as a field table: an object lists its fields; anything else is one row.
+    fn render_fields(
+        &self,
+        api: &Api,
+        key: String,
+        schema: &Value,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let border = cx.theme().border;
+        let mut rows = vec![Self::table_head("Field", cx)];
+        let lvl = level(&api.root, schema, &[]);
+        let mut above = Vec::new();
+        for r in [
+            schema.get("$ref").and_then(Value::as_str),
+            schema.pointer("/items/$ref").and_then(Value::as_str),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            above.push(r.to_string());
+        }
+        match &lvl.kind {
+            Kind::Object(props) => {
+                // An array of objects says so above its item's fields.
+                if lvl.label.ends_with("[]") {
+                    rows.insert(
+                        0,
+                        Self::label(
+                            format!("A list of {}", lvl.label.trim_end_matches("[]")),
+                            cx,
+                        )
+                        .px_2()
+                        .into_any_element(),
+                    );
+                }
+                for p in props {
+                    self.render_field(
+                        api,
+                        format!("{key}/{}", p.name),
+                        p.name.clone(),
+                        p.required,
+                        &p.schema,
+                        above.clone(),
+                        0,
+                        &mut rows,
+                        cx,
+                    );
+                }
+            }
+            _ => self.render_field(
+                api,
+                key,
+                "(body)".into(),
+                false,
+                schema,
+                Vec::new(),
+                0,
+                &mut rows,
+                cx,
+            ),
+        }
+        v_flex()
+            .border_1()
+            .border_color(border)
+            .rounded_md()
+            .py_0p5()
+            .children(rows)
+            .into_any_element()
+    }
+
+    /// An example value as indented JSON, in a code block.
+    fn render_example(value: &Value, cx: &App) -> AnyElement {
+        let text = serde_json::to_string_pretty(value).unwrap_or_default();
+        v_flex()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary)
+            .font_family(cx.theme().mono_font_family.clone())
+            .text_sm()
+            .children(
+                text.lines()
+                    .map(|l| div().whitespace_nowrap().child(l.to_string()))
+                    .collect::<Vec<_>>(),
+            )
+            .into_any_element()
+    }
+
+    /// The method as a filled badge.
+    fn method_badge(method: &str, cx: &App) -> gpui::Div {
+        div()
+            .w(px(58.))
+            .flex_none()
+            .py_0p5()
+            .rounded_sm()
+            .text_center()
+            .text_xs()
+            .font_weight(FontWeight::BOLD)
+            .bg(method_colour(method, cx))
+            .text_color(cx.theme().background)
+            .child(method.to_string())
+    }
+
     fn render_operation(&self, api: &Api, op: &Operation, cx: &mut Context<Self>) -> AnyElement {
         let key = format!("op:{}", op.key());
         let open = self.is_open(&key);
-        let (muted, accent, mono) = (
+        let (muted, accent, border, mono) = (
             cx.theme().muted_foreground,
             cx.theme().accent,
+            cx.theme().border,
             cx.theme().mono_font_family.clone(),
         );
         let k = key.clone();
@@ -323,17 +637,10 @@ impl ApiView {
             .py_1()
             .rounded_md()
             .cursor_pointer()
-            .hover(move |d| d.bg(accent))
+            .when(!open, |d| d.hover(move |d| d.bg(accent)))
+            .when(op.deprecated, |d| d.opacity(0.6))
             .on_click(cx.listener(move |v, _, _, cx| v.toggle(k.clone(), cx)))
-            .child(
-                div()
-                    .w(px(64.))
-                    .flex_none()
-                    .text_xs()
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(method_colour(&op.method, cx))
-                    .child(op.method.clone()),
-            )
+            .child(Self::method_badge(&op.method, cx))
             .child(
                 div()
                     .flex_none()
@@ -347,12 +654,52 @@ impl ApiView {
                     .text_color(muted)
                     .truncate()
                     .child(op.summary.clone().unwrap_or_default()),
-            );
-        let mut block = v_flex().child(row);
+            )
+            .when(op.deprecated, |d| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .px_1p5()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(muted)
+                        .text_xs()
+                        .text_color(muted)
+                        .child("deprecated"),
+                )
+            });
         if !open {
-            return block.into_any_element();
+            return v_flex().child(row).into_any_element();
         }
-        let mut detail = v_flex().pl(px(84.)).pb_2().gap_2();
+        // The open operation is a card: its row, then what to do with it, then its parts.
+        let line = operation_line(&self.text, &op.path, &op.method);
+        let command = curl(api, op);
+        let actions = h_flex()
+            .gap_1()
+            .justify_end()
+            .child(
+                Button::new(SharedString::from(format!("{key}/curl")))
+                    .label("Copy as curl")
+                    .xsmall()
+                    .on_click(move |_, window, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(command.clone()));
+                        window.push_notification(
+                            Notification::success("The curl command is on the clipboard"),
+                            cx,
+                        );
+                    }),
+            )
+            .when_some(line, |d, l| {
+                d.child(
+                    Button::new(SharedString::from(format!("{key}/line")))
+                        .label(format!("Go to line {l}"))
+                        .xsmall()
+                        .on_click(
+                            cx.listener(move |_, _, _, cx| cx.emit(ApiViewEvent::GoToLine(l))),
+                        ),
+                )
+            });
+        let mut detail = v_flex().px_3().pb_3().gap_2().child(actions);
         // A path item defined elsewhere: its ref, as a link to the file (or ⚠ missing).
         if let Some(r) = &op.reference {
             detail = detail.child(self.render_schema(
@@ -368,92 +715,120 @@ impl ApiView {
             detail = detail.child(div().text_sm().child(d.clone()));
         }
         if !op.parameters.is_empty() {
-            detail = detail.child(Self::heading("Parameters"));
+            let mut rows = vec![Self::table_head("Parameter", cx)];
             for p in &op.parameters {
-                let pkey = format!("{key}/param/{}/{}", p.location, p.name);
-                detail = detail.child(
-                    h_flex()
-                        .gap_3()
-                        .items_start()
-                        .child(
-                            div()
-                                .w(px(56.))
-                                .flex_none()
-                                .text_color(muted)
-                                .child(p.location.clone()),
-                        )
-                        .child(self.render_schema(
-                            api,
-                            pkey,
-                            Some((p.name.clone(), p.required)),
-                            &p.schema,
-                            Vec::new(),
-                            cx,
-                        ))
-                        .child(
-                            div()
-                                .text_color(muted)
-                                .child(p.description.clone().unwrap_or_default()),
-                        ),
+                let mut schema = p.schema.clone();
+                if let (Some(d), Value::Object(m)) = (&p.description, &mut schema) {
+                    m.entry("description").or_insert(Value::String(d.clone()));
+                }
+                self.render_field(
+                    api,
+                    format!("{key}/param/{}/{}", p.location, p.name),
+                    format!("{} ({})", p.name, p.location),
+                    p.required,
+                    &schema,
+                    Vec::new(),
+                    0,
+                    &mut rows,
+                    cx,
                 );
             }
+            detail = detail.child(Self::label("PARAMETERS", cx)).child(
+                v_flex()
+                    .border_1()
+                    .border_color(border)
+                    .rounded_md()
+                    .py_0p5()
+                    .children(rows),
+            );
         }
         if let Some(body) = &op.request_body {
-            detail = detail.child(Self::heading("Request body"));
-            if let Some(d) = &body.description {
-                detail = detail.child(div().text_color(muted).child(d.clone()));
-            }
             for (media, schema) in &body.content {
                 detail = detail
-                    .child(div().text_sm().text_color(muted).child(media.clone()))
-                    .child(self.render_schema(
-                        api,
-                        format!("{key}/body/{media}"),
-                        None,
-                        schema,
-                        Vec::new(),
-                        cx,
-                    ));
+                    .child(Self::label(format!("REQUEST BODY · {media}"), cx))
+                    .when_some(body.description.clone(), |d, text| {
+                        d.child(div().text_sm().text_color(muted).child(text))
+                    })
+                    .child(self.render_fields(api, format!("{key}/body/{media}"), schema, cx));
             }
         }
         if !op.responses.is_empty() {
-            detail = detail.child(Self::heading("Responses"));
+            let chosen = self
+                .tabs
+                .get(&key)
+                .and_then(|s| op.responses.iter().find(|r| &r.status == s))
+                .unwrap_or(&op.responses[0]);
+            let example_mode = self.is_open(&format!("{key}/example"));
+            let mut tabs = h_flex()
+                .gap_1()
+                .flex_wrap()
+                .child(Self::label("RESPONSES", cx).mr_2());
             for r in &op.responses {
-                detail = detail.child(
-                    h_flex()
-                        .gap_3()
-                        .child(
-                            div()
-                                .w(px(56.))
-                                .flex_none()
-                                .text_color(status_colour(&r.status, cx))
-                                .child(r.status.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_color(muted)
-                                .child(r.description.clone().unwrap_or_default()),
-                        ),
+                let picked = r.status == chosen.status;
+                let colour = status_colour(&r.status, cx);
+                let (k, status) = (key.clone(), r.status.clone());
+                tabs = tabs.child(
+                    div()
+                        .id(SharedString::from(format!("{key}/tab/{}", r.status)))
+                        .px_2()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(if picked { colour } else { border })
+                        .when(picked, |d| d.bg(colour.opacity(0.15)))
+                        .text_sm()
+                        .text_color(colour)
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |v, _, _, cx| {
+                            v.tabs.insert(k.clone(), status.clone());
+                            cx.notify();
+                        }))
+                        .child(match &r.description {
+                            Some(d) => format!("{} {}", r.status, d),
+                            None => r.status.clone(),
+                        }),
                 );
-                for (media, schema) in &r.content {
-                    detail = detail.child(
-                        v_flex()
-                            .pl(px(68.))
-                            .child(div().text_sm().text_color(muted).child(media.clone()))
-                            .child(self.render_schema(
-                                api,
-                                format!("{key}/resp/{}/{media}", r.status),
-                                None,
-                                schema,
-                                Vec::new(),
-                                cx,
-                            )),
-                    );
-                }
+            }
+            let has_content = !chosen.content.is_empty();
+            if has_content {
+                let ek = format!("{key}/example");
+                tabs = tabs.child(div().flex_1()).child(
+                    Button::new(SharedString::from(format!("{key}/mode")))
+                        .label(if example_mode { "Schema" } else { "Example" })
+                        .xsmall()
+                        .on_click(cx.listener(move |v, _, _, cx| v.toggle(ek.clone(), cx))),
+                );
+            }
+            detail = detail.child(tabs);
+            if !has_content {
+                detail = detail.child(div().text_sm().text_color(muted).child("No body"));
+            }
+            for (media, schema) in &chosen.content {
+                detail = detail.child(Self::label(media.clone(), cx));
+                detail = detail.child(if example_mode {
+                    Self::render_example(&example(&api.root, schema), cx)
+                } else {
+                    self.render_fields(
+                        api,
+                        format!("{key}/resp/{}/{media}", chosen.status),
+                        schema,
+                        cx,
+                    )
+                });
             }
         }
-        block = block.child(detail);
-        block.into_any_element()
+        v_flex()
+            .my_1()
+            .border_1()
+            .border_color(border)
+            .rounded_md()
+            .child(
+                div()
+                    .rounded_t_md()
+                    .bg(method_colour(&op.method, cx).opacity(0.08))
+                    .child(row),
+            )
+            .child(detail)
+            .into_any_element()
     }
 
     fn section_header(
@@ -568,7 +943,38 @@ impl Render for ApiView {
             );
         }
         if !api.groups.is_empty() {
-            content = content.child(Input::new(&self.filter).small());
+            // Expand all opens every operation; once all are open it closes them.
+            let keys: Vec<String> = api
+                .groups
+                .iter()
+                .flat_map(|g| &g.operations)
+                .map(|o| format!("op:{}", o.key()))
+                .collect();
+            let all_open = keys.iter().all(|k| self.is_open(k));
+            content = content.child(
+                h_flex()
+                    .gap_2()
+                    .child(div().flex_1().child(Input::new(&self.filter).small()))
+                    .child(
+                        Button::new("expand-all")
+                            .label(if all_open {
+                                "Collapse all"
+                            } else {
+                                "Expand all"
+                            })
+                            .small()
+                            .on_click(cx.listener(move |v, _, _, cx| {
+                                for k in &keys {
+                                    if all_open {
+                                        v.state.open.remove(k);
+                                    } else {
+                                        v.state.open.insert(k.clone());
+                                    }
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            );
         }
         let (groups, hidden) = rows_to_show(&api, &filter, &self.state.open, ROW_CAP);
         for (gi, ops) in groups {

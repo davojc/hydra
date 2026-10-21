@@ -619,16 +619,27 @@ Raw with "Swagger 2.0 isn't rendered" in the header and no switch.
   start collapsed below their first level.
 - **View**, top to bottom: the title and version, the description, the
   servers; a filter box (narrows operations by path, summary, method or
-  operationId, hiding tags with none left); a collapsible group per tag
-  (open at first) with its description, then one row per operation: a method
-  badge (GET blue, POST green, PUT amber, PATCH teal, DELETE red, others
-  grey), the path in monospace, the summary muted, struck through when
-  deprecated. Clicking a row opens its description, **Parameters** (a table:
-  name, in, type, required, description), **Request body** (each media type's
-  schema) and **Responses** (each status, 2xx green, 4xx amber, 5xx red, with
-  its description and each media type's schema). Last, **Schemas**
-  (collapsed): every `components.schemas` entry as a tree. Text can be
-  selected and copied.
+  operationId, hiding tags with none left) with **Expand all** beside it
+  (opens every operation; **Collapse all** once all are open); a collapsible
+  group per tag (open at first) with its description, then one row per
+  operation: a filled method badge (GET blue, POST green, PUT amber, PATCH
+  teal, DELETE red, others grey), the path in monospace, the summary muted;
+  a deprecated one is struck through, dimmed and tagged "deprecated".
+  Clicking a row opens it as a card, tinted by its method, with **Copy as
+  curl** (the first server, path and required query parameters and required
+  headers filled with examples, an example JSON body) and **Go to line N**
+  (Raw at the operation, found by its path and method keys; not shown when
+  it can't be found), then its description, **Parameters** and **Request
+  body** as field tables (Field, Type, Rules: `*` for required; rules as
+  chips such as "max 200 chars", "≥ 1", "one of open, paid", "default 20",
+  "read-only", with the description under them; an object field opens to its
+  own fields, indented) and **Responses** as tabs, one per status (2xx green,
+  4xx amber, 5xx red, with its description), the first chosen, plus a
+  **Schema | Example** switch: the chosen response's field table, or an
+  example JSON made up from its schema (its `example`, `default`, `const` or
+  first enum value, else one from its type and format; a schema that refers
+  back to itself stops at `null`). Last, **Schemas** (collapsed): every
+  `components.schemas` entry as a tree. Text can be selected and copied.
 - **State.** What is open is kept per file tab while it is open, not in the
   layout. Rendered follows unsaved edits, parsing again 300 ms after typing
   stops and keeping open rows open (by method and path).

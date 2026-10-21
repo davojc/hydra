@@ -96,6 +96,7 @@ pub const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 pub enum ImageKind {
     Png,
     Jpeg,
+    Gif,
     Ico,
 }
 
@@ -104,15 +105,19 @@ impl ImageKind {
         match self {
             ImageKind::Png => "PNG",
             ImageKind::Jpeg => "JPEG",
+            ImageKind::Gif => "GIF",
             ImageKind::Ico => "ICO",
         }
     }
 }
 
-/// Whether the file pane shows the file as a picture: `.png`, `.jpg`, `.jpeg` or `.ico`. (An
-/// SVG is text: it opens in an editor, with the picture as its Rendered view.)
+/// Whether the file pane shows the file as a picture: `.png`, `.jpg`, `.jpeg`, `.gif` or
+/// `.ico`. (An SVG is text: it opens in an editor, with the picture as its Rendered view.)
 pub fn is_image(path: &Path) -> bool {
-    matches!(ext(path).as_deref(), Some("png" | "jpg" | "jpeg" | "ico"))
+    matches!(
+        ext(path).as_deref(),
+        Some("png" | "jpg" | "jpeg" | "gif" | "ico")
+    )
 }
 
 pub fn is_svg(path: &Path) -> bool {
@@ -125,6 +130,8 @@ pub fn image_kind(bytes: &[u8]) -> Option<ImageKind> {
         Some(ImageKind::Png)
     } else if bytes.starts_with(b"\xFF\xD8\xFF") {
         Some(ImageKind::Jpeg)
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some(ImageKind::Gif)
     } else if bytes.starts_with(b"\0\0\x01\0") {
         Some(ImageKind::Ico)
     } else {
@@ -132,15 +139,15 @@ pub fn image_kind(bytes: &[u8]) -> Option<ImageKind> {
     }
 }
 
-/// An image file's bytes and kind; too big, unreadable or not a PNG, JPEG or ICO can't be
-/// shown.
+/// An image file's bytes and kind; too big, unreadable or not a PNG, JPEG, GIF or ICO can't
+/// be shown.
 pub fn load_image(path: &Path) -> Result<(ImageKind, Vec<u8>), String> {
     let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
     if meta.len() > MAX_IMAGE_BYTES {
         return Err("over 50 MB".into());
     }
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    let kind = image_kind(&bytes).ok_or("not a PNG, JPEG or ICO image")?;
+    let kind = image_kind(&bytes).ok_or("not a PNG, JPEG, GIF or ICO image")?;
     Ok((kind, bytes))
 }
 
@@ -306,6 +313,7 @@ mod tests {
         assert!(is_image(Path::new("a/PHOTO.JPG")));
         assert!(is_image(Path::new("photo.jpeg")));
         assert!(is_image(Path::new("favicon.ICO")));
+        assert!(is_image(Path::new("spinner.gif")));
         assert!(!is_image(Path::new("logo.svg")), "an SVG is text");
         assert!(!is_image(Path::new("png")));
         assert!(is_svg(Path::new("a/Logo.SVG")));
@@ -331,7 +339,10 @@ mod tests {
             None,
             "a cursor file isn't an icon"
         );
-        assert_eq!(image_kind(b"GIF89a"), None);
+        assert_eq!(image_kind(b"GIF89a\x01\0"), Some(ImageKind::Gif));
+        assert_eq!(image_kind(b"GIF87a\x01\0"), Some(ImageKind::Gif));
+        assert_eq!(image_kind(b"GIF8"), None);
+        assert_eq!(image_kind(b"BM6\0"), None, "a BMP isn't shown");
         assert_eq!(image_kind(b""), None);
     }
 
@@ -342,7 +353,7 @@ mod tests {
         std::fs::write(&fake, "not an image").unwrap();
         assert_eq!(
             load_image(&fake),
-            Err("not a PNG, JPEG or ICO image".into())
+            Err("not a PNG, JPEG, GIF or ICO image".into())
         );
         let real = dir.path().join("real.jpg");
         std::fs::write(&real, b"\xFF\xD8\xFF\xE0rest").unwrap();

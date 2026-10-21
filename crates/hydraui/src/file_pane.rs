@@ -58,7 +58,7 @@ enum Body {
         svg: Option<Arc<gpui::Image>>,
     },
     CantShow(String),
-    /// A PNG, JPEG or ICO, shown as a picture; or why it can't be.
+    /// A PNG, JPEG, GIF or ICO, shown as a picture; or why it can't be.
     Image(Result<Picture, String>),
     /// How the file differs from git's last commit (spec §7.3), or why it can't be shown.
     Diff(Result<Entity<DiffState>, String>),
@@ -76,6 +76,7 @@ fn picture(path: &Path) -> Result<Picture, String> {
     let format = match kind {
         ImageKind::Png => gpui::ImageFormat::Png,
         ImageKind::Jpeg => gpui::ImageFormat::Jpeg,
+        ImageKind::Gif => gpui::ImageFormat::Gif,
         ImageKind::Ico => gpui::ImageFormat::Ico,
     };
     Ok(Picture {
@@ -94,12 +95,15 @@ fn svg_image(text: &str) -> Arc<gpui::Image> {
 }
 
 /// A picture shrunk to fit the pane, never enlarged, centred; or a note when it doesn't decode.
+/// An animated GIF plays: its id keeps the frame it is on from one draw to the next.
 fn picture_view(image: Arc<gpui::Image>, muted: gpui::Hsla) -> gpui::AnyElement {
+    let id = SharedString::from(format!("picture-{}", image.id()));
     div()
         .size_full()
         .p_3()
         .child(
             gpui::img(image)
+                .id(id)
                 .size_full()
                 .object_fit(gpui::ObjectFit::ScaleDown)
                 .with_fallback(move || {

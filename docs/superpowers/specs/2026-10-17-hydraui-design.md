@@ -549,11 +549,12 @@ open switches to its file tab.
   when clicked; images load only from local files, never from the network;
   only `http`, `https` and `mailto` links open; nothing runs.
 
-**Images.** A `.png`, `.jpg`, `.jpeg` or `.ico` file shows as a picture, shrunk to fit
-the pane (never enlarged) and centred, with its kind and size in the header
-("PNG image, 110 KB"). Its kind is read from its first bytes, so one that
-isn't really a PNG, JPEG or ICO (an icon's largest image is shown), or is
-over 50 MB, says why it can't be shown. A change on disk shows the new
+**Images.** A `.png`, `.jpg`, `.jpeg`, `.gif` or `.ico` file shows as a picture, shrunk
+to fit the pane (never enlarged) and centred, with its kind and size in the
+header ("PNG image, 110 KB"). Its kind is read from its first bytes, so one
+that isn't really a PNG, JPEG, GIF or ICO (an icon's largest image is shown),
+or is over 50 MB, says why it can't be shown. An animated GIF plays while the
+window is active, unless Windows is set to show no animations. A change on disk shows the new
 picture. These have no Raw view and aren't edited here. An `.svg` is text: it
 opens like Markdown, in Rendered (the picture, drawn from the editor's text,
 so it follows edits) with Raw to edit it. An SVG that doesn't draw says so.

@@ -250,8 +250,26 @@ pub fn read(dir: &Path) -> Option<GitStatus> {
         ],
     )?;
     let mut s = parse(&text);
-    s.root = git(dir, &["rev-parse", "--show-toplevel"]).map(|r| PathBuf::from(r.trim()));
+    // Not --show-toplevel: git resolves `subst` drives and junctions there, so the root would
+    // be spelt unlike the paths the file tree matches against it.
+    s.root = git(dir, &["rev-parse", "--show-cdup"]).map(|up| root_from_cdup(dir, &up));
     Some(s)
+}
+
+/// The repository's root, spelt as `dir` is: `dir` with git's `--show-cdup` ("../../") applied.
+fn root_from_cdup(dir: &Path, cdup: &str) -> PathBuf {
+    let mut root = PathBuf::new();
+    for part in dir.components() {
+        if part != std::path::Component::CurDir {
+            root.push(part);
+        }
+    }
+    for step in cdup.trim().split('/').filter(|s| !s.is_empty()) {
+        if step == ".." {
+            root.pop();
+        }
+    }
+    root
 }
 
 /// `rev` as a commit's short hash in the repository at `repo_dir`, or `None` when it names no
@@ -695,5 +713,48 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc both.rs\n\
         );
         let plain = tempfile::tempdir().unwrap();
         assert_eq!(read(plain.path()), None);
+    }
+
+    #[test]
+    fn the_root_keeps_the_spelling_of_the_folder_asked_about() {
+        let api = Path::new(r"Q:\code\api");
+        assert_eq!(root_from_cdup(api, ""), api);
+        assert_eq!(
+            root_from_cdup(Path::new(r"Q:\code\api\src\lib"), "../../\n"),
+            api
+        );
+        assert_eq!(root_from_cdup(Path::new(r"Q:\code\api\.\src"), "../"), api);
+    }
+
+    /// A folder reached through a junction (as through a `subst` drive): git names the real
+    /// folder as its top, but the root must be spelt as the tree spells its paths.
+    #[test]
+    fn a_repository_through_a_junction_keeps_the_junction_path_as_its_root() {
+        let d = tempfile::tempdir().unwrap();
+        let real = d.path().join("real");
+        std::fs::create_dir_all(real.join("sub")).unwrap();
+        let init = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&real)
+            .args(["init", "-q"])
+            .output();
+        if !init.is_ok_and(|o| o.status.success()) {
+            eprintln!("skipped: git isn't installed");
+            return;
+        }
+        let link = d.path().join("link");
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real)
+            .output()
+            .is_ok_and(|o| o.status.success());
+        assert!(made, "mklink /J");
+        std::fs::write(real.join("sub").join("a.txt"), "x").unwrap();
+        let s = read(&link.join("sub")).unwrap();
+        assert_eq!(s.root.as_deref(), Some(link.as_path()));
+        assert_eq!(s.untracked, 1, "{s:?}");
+        // Leave the junction, not the folder it points at, to the temp dir's cleanup.
+        let _ = std::fs::remove_dir(&link);
     }
 }

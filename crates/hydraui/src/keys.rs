@@ -226,7 +226,10 @@ pub fn bindings(keys: &[(Command, String)]) -> Vec<KeyBinding> {
 /// Keys that aren't commands, so `[keys]` can't change them: (keys, what they do).
 pub const FIXED: [(&str, &str); 5] = [
     ("Ctrl+S", "Save the file (in a file pane)"),
-    ("Ctrl+V", "Paste text (in a terminal; an image goes to the program)"),
+    (
+        "Ctrl+V",
+        "Paste text (in a terminal; an image goes to the program)",
+    ),
     ("Tab / Shift+Tab", "Completion in the shell (in a terminal)"),
     ("Ctrl+click", "Open a path or link in terminal output"),
     ("Ctrl+click", "Insert a file's path (in the file tree)"),

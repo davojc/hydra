@@ -99,13 +99,14 @@ pub fn request_body(state: &str) -> serde_json::Value {
     })
 }
 
-/// Asks Jev about `state`. Blocks (up to about 5 s), so call it off the UI thread.
-/// Errors never mention the key.
+/// The longest a call may take, connecting and reading included.
+const TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Asks Jev about `state`. Blocks (up to 5 s), so call it off the UI thread. The error is a
+/// short reason for a toast ("HTTP 401", "not reachable", "unexpected reply") and never
+/// mentions the key.
 pub fn ask(url: &str, key: &str, state: &str) -> anyhow::Result<Verdict> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(5))
-        .timeout_read(Duration::from_secs(5))
-        .build();
+    let agent = ureq::AgentBuilder::new().timeout(TIMEOUT).build();
     let resp = match agent
         .post(url)
         .set("Authorization", &format!("Bearer {key}"))
@@ -113,15 +114,17 @@ pub fn ask(url: &str, key: &str, state: &str) -> anyhow::Result<Verdict> {
         .send_string(&request_body(state).to_string())
     {
         Ok(r) => r,
-        Err(ureq::Error::Status(code, _)) => anyhow::bail!("Jev answered HTTP {code}"),
-        Err(_) => anyhow::bail!("Jev could not be reached"),
+        Err(ureq::Error::Status(code, _)) => anyhow::bail!("HTTP {code}"),
+        Err(_) => anyhow::bail!("not reachable"),
     };
     let reply: serde_json::Value = serde_json::from_reader(resp.into_reader())
-        .map_err(|_| anyhow::anyhow!("Jev sent a reply that is not JSON"))?;
+        .map_err(|_| anyhow::anyhow!("unexpected reply"))?;
+    // Each answer is a number from 0 to 1; anything else is a reply hydraui can't trust.
     let noul = |id: &str| {
         reply["answers"][id]["noul"]
             .as_f64()
-            .ok_or_else(|| anyhow::anyhow!("Jev's reply has no answer for {id}"))
+            .filter(|n| n.is_finite() && (0.0..=1.0).contains(n))
+            .ok_or_else(|| anyhow::anyhow!("unexpected reply"))
     };
     Ok(Verdict {
         waiting: noul("waiting")?,
@@ -222,6 +225,52 @@ mod tests {
         let (url, _h) = serve_once(422, r#"{"detail":"bad"}"#);
         let e = ask(&url, "secret-key", "s").unwrap_err();
         assert!(!format!("{e:#}").contains("secret-key"));
+    }
+
+    #[test]
+    fn an_answer_outside_zero_to_one_is_an_error() {
+        let (url, _h) = serve_once(
+            200,
+            r#"{"answers":{"waiting":{"noul":0.1},"finished":{"noul":1.5},"draft":{"noul":0.0}}}"#,
+        );
+        assert!(ask(&url, "k", "s").is_err());
+        let (url, _h) = serve_once(
+            200,
+            r#"{"answers":{"waiting":{"noul":-0.1},"finished":{"noul":0.9},"draft":{"noul":0.0}}}"#,
+        );
+        assert!(ask(&url, "k", "s").is_err());
+    }
+
+    #[test]
+    fn an_error_says_the_http_status() {
+        let (url, _h) = serve_once(401, r#"{"detail":"bad key"}"#);
+        let e = ask(&url, "secret-key", "s").unwrap_err();
+        assert_eq!(e.to_string(), "HTTP 401");
+    }
+
+    #[test]
+    fn a_slow_drip_reply_is_cut_off() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        // Answers, then sends the body a byte every second: each read is quick, the whole slow.
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let Ok((mut s, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf);
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n");
+            for _ in 0..30 {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                if s.write_all(b" ").is_err() {
+                    return;
+                }
+            }
+        });
+        let start = std::time::Instant::now();
+        assert!(ask(&url, "k", "s").is_err());
+        assert!(start.elapsed() < std::time::Duration::from_secs(8));
     }
 
     #[test]

@@ -299,8 +299,13 @@ impl PaneView {
     }
 
     /// A Claude hook in this terminal reported `state`; `Ended` forgets the session.
-    pub fn set_claude(&mut self, state: SessionState, cx: &mut Context<Self>) {
-        self.readiness.state(self.claude, state);
+    /// `resumed`: the session just started by resuming a conversation, so it isn't fresh.
+    pub fn set_claude(&mut self, state: SessionState, resumed: bool, cx: &mut Context<Self>) {
+        if resumed {
+            self.readiness.resumed_start(self.claude);
+        } else {
+            self.readiness.state(self.claude, state);
+        }
         self.claude = (state != SessionState::Ended).then_some(state);
         cx.notify();
     }
@@ -337,8 +342,10 @@ impl PaneView {
 
     /// Types a prompt into the session for auto-pickup: the text as a paste (bracketed when the
     /// program asked for that), then Enter on its own a moment later, so Claude submits it
-    /// rather than taking a newline into the paste. It is not the user's draft, so it leaves the
-    /// readiness alone. `false` when nothing could be typed (the terminal isn't running).
+    /// rather than taking a newline into the paste. Until the session starts working on it, the
+    /// prompt counts as a draft, so a prompt that didn't submit keeps the session busy. The
+    /// Enter goes only to the same run of the terminal: one restarted meanwhile gets none.
+    /// `false` when nothing could be typed (the terminal isn't running).
     pub fn type_prompt(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
         let Some(mode) = self.mode() else {
             return false;
@@ -347,9 +354,15 @@ impl PaneView {
             &paste_bytes(text, mode.contains(TermMode::BRACKETED_PASTE)),
             cx,
         );
+        self.readiness.prompt_typed();
+        let generation = self.generation;
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(ENTER_AFTER).await;
-            let _ = this.update(cx, |v, cx| v.send(b"\r", cx));
+            let _ = this.update(cx, |v, cx| {
+                if v.generation == generation {
+                    v.send(b"\r", cx);
+                }
+            });
         })
         .detach();
         true

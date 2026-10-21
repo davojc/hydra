@@ -216,9 +216,13 @@ pub fn add_status_line(settings_json: &str, hydra: &str) -> Result<String, Strin
 }
 
 /// The hooks that tell hydraui what a session is doing: each Claude Code event, its matcher
-/// (`None`: every time) and the state `hydra hook` reports.
-pub const STATUS_HOOKS: [(&str, Option<&str>, &str); 7] = [
-    ("SessionStart", None, "idle"),
+/// (`None`: every time) and the state `hydra hook` reports. SessionStart's matcher is its
+/// source: a new session (`startup`, `/clear`) is idle and fresh, a resumed one (`claude -c`,
+/// `claude -r`, `/resume`) is `resumed`, idle but not fresh. `compact` is left out: compacting
+/// changes neither what the session is doing nor whether it is new.
+pub const STATUS_HOOKS: [(&str, Option<&str>, &str); 8] = [
+    ("SessionStart", Some("startup|clear"), "idle"),
+    ("SessionStart", Some("resume"), "resumed"),
     ("UserPromptSubmit", None, "working"),
     // Asking the user a question or to approve a plan.
     (
@@ -511,12 +515,34 @@ mod tests {
             }])
         );
         assert_eq!(add_status_hooks(&again, "hydra").unwrap(), again);
-        for (event, _, state) in STATUS_HOOKS {
-            let cmd = &v["hooks"][event].as_array().unwrap().last().unwrap()["hooks"][0]["command"];
-            assert_eq!(cmd, &json!(format!("hydra hook {state}")), "{event}");
+        for (event, matcher, state) in STATUS_HOOKS {
+            let entries = v["hooks"][event].as_array().unwrap();
+            let found = entries.iter().any(|e| {
+                e["matcher"].as_str() == matcher
+                    && e["hooks"][0]["command"] == json!(format!("hydra hook {state}"))
+            });
+            assert!(found, "{event} {matcher:?} {state}");
         }
         assert!(!is_status_hook("hydra hook later"));
         assert!(!is_status_hook("\"C:/h/hydra.exe\" guard claude"));
+    }
+
+    #[test]
+    fn session_start_tells_a_new_session_from_a_resumed_one() {
+        // Settings an older hydra wrote: one SessionStart hook for every source.
+        let old = r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"mine.sh"}]},{"hooks":[{"type":"command","command":"\"C:/h/hydra.exe\" hook idle"}]}]}}"#;
+        let out = add_status_hooks(old, "hydra").unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v["hooks"]["SessionStart"],
+            json!([
+                {"hooks": [{"type": "command", "command": "mine.sh"}]},
+                {"matcher": "startup|clear", "hooks": [{"type": "command", "command": "hydra hook idle"}]},
+                {"matcher": "resume", "hooks": [{"type": "command", "command": "hydra hook resumed"}]}
+            ])
+        );
+        assert_eq!(add_status_hooks(&out, "hydra").unwrap(), out, "stable");
+        assert!(is_status_hook("hydra hook resumed"));
     }
 
     #[test]

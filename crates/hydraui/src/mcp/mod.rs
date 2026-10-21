@@ -32,6 +32,16 @@ impl SessionState {
             _ => None,
         }
     }
+
+    /// Reads a hook's report (`hydra hook <state>`): the state, and whether the session just
+    /// started by resuming a conversation. `resumed` (SessionStart for `claude -c`, `claude -r`
+    /// or `/resume`) is idle in every way except that the session isn't a new one.
+    pub fn parse_report(s: &str) -> Option<(SessionState, bool)> {
+        match s {
+            "resumed" => Some((SessionState::Idle, true)),
+            _ => SessionState::parse(s).map(|state| (state, false)),
+        }
+    }
 }
 
 /// One of Claude's rate-limit windows, as its status line reports it.
@@ -175,6 +185,19 @@ mod tests {
         assert_eq!((u.seven_day, u.context), (None, None));
         assert!(u.has_limits());
         assert!(!Usage::parse(&serde_json::json!({})).has_limits());
+    }
+
+    #[test]
+    fn a_resumed_report_is_idle_but_resumed() {
+        use SessionState::*;
+        assert_eq!(SessionState::parse_report("resumed"), Some((Idle, true)));
+        assert_eq!(SessionState::parse_report("idle"), Some((Idle, false)));
+        assert_eq!(
+            SessionState::parse_report("working"),
+            Some((Working, false))
+        );
+        assert_eq!(SessionState::parse_report("asleep"), None);
+        assert_eq!(SessionState::parse("resumed"), None);
     }
 
     #[test]

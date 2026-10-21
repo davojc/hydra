@@ -22,8 +22,13 @@ pub enum McpEvent {
     /// A terminal made a project's task board; carries the project folder.
     BoardCreated(PathBuf),
     /// A Claude session's hook (`hydra hook <state>`) said what it is doing: the terminal's
-    /// token and the state.
-    Session(String, SessionState),
+    /// token, the state, and whether the session just started by resuming a conversation (it
+    /// is then idle, but not a new session).
+    Session {
+        token: String,
+        state: SessionState,
+        resumed: bool,
+    },
     /// A Claude session's status line (`hydra statusline`) said how much of its account's
     /// limits are used: the terminal's token and the usage.
     Usage(String, Usage),
@@ -101,7 +106,7 @@ fn reply_to(
 ) -> (Reply, Option<McpEvent>) {
     let peers = lock(registry).peers(token);
     let (reply, event) = answer(terminal, token, &peers, body);
-    if let Some(McpEvent::Session(token, state)) = &event {
+    if let Some(McpEvent::Session { token, state, .. }) = &event {
         lock(registry).set_session(token, *state);
     }
     (reply, event)
@@ -163,8 +168,12 @@ pub fn answer(
             Some("hydraui/status") => params
                 .get("state")
                 .and_then(Value::as_str)
-                .and_then(SessionState::parse)
-                .map(|state| McpEvent::Session(token.to_string(), state)),
+                .and_then(SessionState::parse_report)
+                .map(|(state, resumed)| McpEvent::Session {
+                    token: token.to_string(),
+                    state,
+                    resumed,
+                }),
             Some("hydraui/usage") => Some(McpEvent::Usage(token.to_string(), Usage::parse(params))),
             _ => None,
         };
@@ -457,7 +466,22 @@ mod tests {
         assert_eq!(reply.status, 202);
         assert_eq!(
             event,
-            Some(McpEvent::Session(token.clone(), SessionState::Waiting))
+            Some(McpEvent::Session {
+                token: token.clone(),
+                state: SessionState::Waiting,
+                resumed: false
+            })
+        );
+        let (_, event) =
+            send(r#"{"jsonrpc":"2.0","method":"hydraui/status","params":{"state":"resumed"}}"#);
+        assert_eq!(
+            event,
+            Some(McpEvent::Session {
+                token: token.clone(),
+                state: SessionState::Idle,
+                resumed: true
+            }),
+            "a resumed session is idle, but not a new one"
         );
         let (_, event) =
             send(r#"{"jsonrpc":"2.0","method":"hydraui/status","params":{"state":"asleep"}}"#);

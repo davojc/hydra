@@ -14,8 +14,8 @@ use super::Workspace;
 use crate::envs::PaneId;
 use crate::jev::{JEV_URL, JevKey};
 use crate::pickup::{
-    Pick, Session, candidates, choose, focused_pane, idle_in_project, is_reserved, pick,
-    still_in_pickup,
+    Pick, Session, candidates, choose, focused_pane, idle_in_project, is_reserved, jev_failure,
+    no_free_text, pick, still_in_pickup,
 };
 use crate::task_board_view::SendTarget;
 
@@ -94,16 +94,18 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.in_flight.arrived(&project, &text);
-        self.offer_card(project, text, window, cx);
+        self.offer_card(project, text, false, window, cx);
     }
 
     /// Sends card `text` of `project` to a free Claude session (§5), or says there is none
-    /// (§7). For a card moved into Pickup and for the menu's Send to a free session. A card
-    /// already being offered, or sent moments ago, is left alone.
+    /// (§7). For a card moved into Pickup and for the menu's Send to a free session
+    /// (`by_hand`). A card already being offered, or sent moments ago, is left alone; when the
+    /// user asked by hand, a toast says so.
     pub(super) fn offer_card(
         &mut self,
         project: PathBuf,
         text: String,
+        by_hand: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -115,6 +117,12 @@ impl Workspace {
                 .is_some_and(|(b, _)| still_in_pickup(b.read(cx).board(), t))
         });
         if !self.in_flight.try_start(&project, &text, now) {
+            if by_hand {
+                window.push_notification(
+                    Notification::info("This card is already on its way").title("Tasks"),
+                    cx,
+                );
+            }
             return;
         }
         let key = match JevKey::app().get() {
@@ -123,10 +131,10 @@ impl Workspace {
         };
         let sessions = self.fresh_sessions(window, cx);
         match pick(&sessions, &project, key.is_some()) {
-            Pick::Certain(panes) => self.deliver(choose(&panes), &project, &text, window, cx),
+            Pick::Certain(panes) => self.deliver(choose(&panes), &project, &text, None, window, cx),
             Pick::AskJev(panes) => {
                 let Some(key) = key.filter(|_| !panes.is_empty()) else {
-                    self.deliver(None, &project, &text, window, cx);
+                    self.deliver(None, &project, &text, None, window, cx);
                     return;
                 };
                 // One call per session, in parallel, off the UI thread.
@@ -136,20 +144,26 @@ impl Workspace {
                         let state = self.panes.get(pane)?.read(cx).screen_text(JEV_ROWS);
                         let (pane, key) = (*pane, key.clone());
                         Some(cx.background_spawn(async move {
-                            let free =
-                                crate::jev::ask(JEV_URL, &key, &state).is_ok_and(|v| v.is_free());
+                            // The error is a short reason without the key (`jev::ask`).
+                            let free = crate::jev::ask(JEV_URL, &key, &state)
+                                .map(|v| v.is_free())
+                                .map_err(|e| e.to_string());
                             (pane, free)
                         }))
                     })
                     .collect();
                 cx.spawn_in(window, async move |this, cx| {
-                    let answers = futures::future::join_all(asks).await;
+                    let answers: Vec<(PaneId, Result<bool, String>)> =
+                        futures::future::join_all(asks).await;
+                    let results: Vec<Result<bool, String>> =
+                        answers.iter().map(|(_, r)| r.clone()).collect();
+                    let failure = jev_failure(&results);
                     let free: Vec<PaneId> = answers
                         .into_iter()
-                        .filter_map(|(pane, free)| free.then_some(pane))
+                        .filter_map(|(pane, free)| (free == Ok(true)).then_some(pane))
                         .collect();
                     let _ = this.update_in(cx, |ws, window, cx| {
-                        ws.after_jev(project, text, free, window, cx)
+                        ws.after_jev(project, text, free, failure, window, cx)
                     });
                 })
                 .detach();
@@ -157,14 +171,15 @@ impl Workspace {
         }
     }
 
-    /// Jev found `free` free. Things may have changed during the calls: the facts are checked
-    /// again, and nothing is sent when the card has left Pickup (§6) or the user sent it by
-    /// hand meanwhile.
+    /// Jev found `free` free; `failure` is why, when every call failed. Things may have
+    /// changed during the calls: the facts are checked again, and nothing is sent when the card
+    /// has left Pickup (§6) or the user sent it by hand meanwhile.
     fn after_jev(
         &mut self,
         project: PathBuf,
         text: String,
         mut free: Vec<PaneId>,
+        failure: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -177,23 +192,26 @@ impl Workspace {
         }
         let ok = candidates(&self.fresh_sessions(window, cx), &project);
         free.retain(|p| ok.contains(p));
-        self.deliver(choose(&free), &project, &text, window, cx);
+        let pane = choose(&free);
+        self.deliver(pane, &project, &text, failure.as_deref(), window, cx);
     }
 
     /// Ends an offer: sends the card to `pane` and holds it as sent, or, with no pane or a
-    /// failed send, says no session is free and lets the card be offered again.
+    /// failed send, says no session is free (and why Jev couldn't help, `jev_failure`) and
+    /// lets the card be offered again.
     fn deliver(
         &mut self,
         pane: Option<PaneId>,
         project: &Path,
         text: &str,
+        jev_failure: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let sent = match pane {
             Some(pane) => self.send_card(pane, project, text, window, cx),
             None => {
-                self.no_free_session(project, window, cx);
+                self.no_free_session(project, jev_failure, window, cx);
                 false
             }
         };
@@ -246,7 +264,7 @@ impl Workspace {
             .cloned()
             .filter(|view| view.update(cx, |v, cx| v.type_prompt(&prompt, cx)));
         let Some(view) = typed else {
-            self.no_free_session(project, window, cx);
+            self.no_free_session(project, None, window, cx);
             return false;
         };
         self.reserved.insert(pane, Instant::now());
@@ -267,8 +285,14 @@ impl Workspace {
     }
 
     /// No session can take the card (§7): it stays in Pickup. The toast names the project when
-    /// this window has terminals in more than one.
-    fn no_free_session(&self, project: &Path, window: &mut Window, cx: &mut Context<Self>) {
+    /// this window has terminals in more than one, and says why when every Jev call failed.
+    fn no_free_session(
+        &self,
+        project: &Path,
+        jev_failure: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let projects: HashSet<PathBuf> = self
             .panes
             .values()
@@ -279,7 +303,7 @@ impl Workspace {
             _ => "Tasks".to_string(),
         };
         window.push_notification(
-            Notification::warning("No free Claude session for this card").title(title),
+            Notification::warning(no_free_text(jev_failure)).title(title),
             cx,
         );
     }

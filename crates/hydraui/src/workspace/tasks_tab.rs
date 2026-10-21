@@ -198,7 +198,7 @@ impl Workspace {
                 }
                 TaskBoardViewEvent::SendToFree(text) => {
                     let project = board.read(cx).project().to_path_buf();
-                    ws.offer_card(project, text.clone(), window, cx)
+                    ws.offer_card(project, text.clone(), true, window, cx)
                 }
                 TaskBoardViewEvent::SendTo { text, pane } => {
                     let project = board.read(cx).project().to_path_buf();

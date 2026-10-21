@@ -105,20 +105,41 @@ pub fn still_in_pickup(board: &Board, text: &str) -> bool {
 }
 
 /// The one-line prompt typed into the session for `card` (§6). Line breaks and other control
-/// characters become spaces; a long card is cut, with "…".
+/// characters become spaces; a long card is cut, with "…", and the prompt says where its full
+/// text is, which `tasks_take` needs.
 pub fn prompt(card: &str) -> String {
     let flat: String = card
         .trim()
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
-    let text = if flat.chars().count() > CARD_CHARS {
+    if flat.chars().count() > CARD_CHARS {
         let cut: String = flat.chars().take(CARD_CHARS).collect();
-        format!("{}…", cut.trim_end())
+        format!(
+            "A card was moved to Pickup: \"{}…\". Take it with tasks_take and do it. (shortened: tasks_read shows it in full)",
+            cut.trim_end()
+        )
     } else {
-        flat
-    };
-    format!("A card was moved to Pickup: \"{text}\". Take it with tasks_take and do it.")
+        format!("A card was moved to Pickup: \"{flat}\". Take it with tasks_take and do it.")
+    }
+}
+
+/// Why Jev found no session free, when every ask failed (`Err` holds the failure, never the
+/// key): the first failure. `None` when Jev answered at least once, or wasn't asked.
+pub fn jev_failure(answers: &[Result<bool, String>]) -> Option<String> {
+    if answers.iter().all(Result::is_err) {
+        answers.first().and_then(|a| a.clone().err())
+    } else {
+        None
+    }
+}
+
+/// The warning when no session can take a card (§7), with Jev's failure when it had one.
+pub fn no_free_text(jev_failure: Option<&str>) -> String {
+    match jev_failure {
+        Some(why) => format!("No free Claude session for this card (Jev: {why})"),
+        None => "No free Claude session for this card".to_string(),
+    }
 }
 
 /// One of `panes` at random.
@@ -347,6 +368,28 @@ mod tests {
             "{long}"
         );
         assert!(!long.contains(&"x".repeat(121)));
+        assert!(
+            long.ends_with("(shortened: tasks_read shows it in full)"),
+            "{long}"
+        );
+        assert!(!p.contains("shortened"));
+    }
+
+    #[test]
+    fn jev_is_blamed_only_when_every_ask_failed() {
+        let ok: Result<bool, String> = Ok(false);
+        let err: Result<bool, String> = Err("HTTP 401".into());
+        assert_eq!(jev_failure(&[]), None);
+        assert_eq!(jev_failure(&[ok, err.clone()]), None);
+        assert_eq!(
+            jev_failure(&[err.clone(), err]),
+            Some("HTTP 401".to_string())
+        );
+        assert_eq!(no_free_text(None), "No free Claude session for this card");
+        assert_eq!(
+            no_free_text(Some("HTTP 401")),
+            "No free Claude session for this card (Jev: HTTP 401)"
+        );
     }
 
     #[test]

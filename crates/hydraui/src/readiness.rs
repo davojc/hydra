@@ -1,6 +1,6 @@
 //! Whether a terminal's Claude session is ready for a new prompt, from what hydraui saw: a
-//! draft typed into its input, and whether its last turn clearly finished (a fresh session,
-//! or one that just moved its card to Verify). Pure, so the rules are tested directly.
+//! draft typed into its input (or a prompt hydraui typed that hasn't started), and whether its
+//! last turn clearly finished (a fresh session, or one that just moved its card to Verify). Pure, so the rules are tested directly.
 use std::time::{Duration, Instant};
 
 use crate::mcp::SessionState;
@@ -27,7 +27,7 @@ pub struct Readiness {
     pub draft: Draft,
     /// The session's last turn clearly finished: it is new, or it just verified a card.
     pub finished: bool,
-    /// The session was resumed by layout restore, so its next start is not a fresh one.
+    /// The session resumes a conversation (layout restore), so its next start is not fresh.
     resumed: bool,
     last_escape: Option<Instant>,
 }
@@ -90,6 +90,23 @@ impl Readiness {
             }
             _ => {}
         }
+    }
+
+    /// The session's hooks said it started by resuming a conversation (`claude -c`, `claude -r`,
+    /// `/resume`): it is idle, but its last turn may have ended in a question, so it is not
+    /// fresh.
+    pub fn resumed_start(&mut self, before: Option<SessionState>) {
+        self.resumed = true;
+        self.state(before, SessionState::Idle);
+        self.resumed = false;
+        self.finished = false;
+    }
+
+    /// hydraui typed a prompt into the session (auto-pickup). Until the session starts working
+    /// on it (or ends), it counts as a draft: a prompt that didn't submit still sits in the
+    /// input, so the session isn't free.
+    pub fn prompt_typed(&mut self) {
+        self.draft = Draft::Typed;
     }
 
     /// The session moved a card to Verify: its turn is clearly finished.
@@ -258,6 +275,45 @@ mod tests {
         assert!(r.finished);
         r.state(Some(Idle), Working);
         assert!(!r.finished);
+    }
+
+    #[test]
+    fn a_prompt_hydraui_typed_is_a_draft_until_it_starts() {
+        let mut r = Readiness::default();
+        r.state(None, Idle);
+        r.prompt_typed();
+        assert!(
+            r.has_draft(),
+            "an unsubmitted prompt keeps the session busy"
+        );
+        r.state(Some(Idle), Working);
+        assert!(!r.has_draft());
+
+        let mut ended = Readiness::default();
+        ended.state(None, Idle);
+        ended.prompt_typed();
+        ended.state(Some(Idle), SessionState::Ended);
+        assert!(!ended.has_draft());
+    }
+
+    #[test]
+    fn a_session_resumed_by_hand_is_not_fresh() {
+        let mut r = Readiness::default();
+        r.typed();
+        r.resumed_start(None);
+        assert!(!r.finished);
+        assert_eq!(r.draft, Draft::Clear);
+
+        // `/resume` inside a fresh session.
+        let mut inside = Readiness::default();
+        inside.state(None, Idle);
+        assert!(inside.finished);
+        inside.resumed_start(Some(Idle));
+        assert!(!inside.finished);
+
+        inside.state(Some(Idle), SessionState::Ended);
+        inside.state(None, Idle);
+        assert!(inside.finished, "a later new session is fresh");
     }
 
     fn screen(rows: &[&str]) -> Vec<Vec<(char, bool)>> {

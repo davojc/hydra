@@ -114,7 +114,7 @@ pub enum Cmd {
         command: Vec<String>,
     },
     /// Tells hydraui what the Claude session in its terminal is doing (run by Claude Code's
-    /// hooks, not by hand): working, waiting, idle or ended
+    /// hooks, not by hand): working, waiting, idle, resumed or ended
     #[command(hide = true)]
     Hook { state: String },
     /// Claude Code's status line in a hydraui terminal (run by Claude Code, not by hand): passes

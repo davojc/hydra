@@ -295,9 +295,11 @@ impl Workspace {
                 while let Some(event) = rx.next().await {
                     let alive = this.update_in(cx, |ws, window, cx| match event {
                         McpEvent::BoardCreated(project) => ws.board_created(project, window, cx),
-                        McpEvent::Session(token, state) => {
-                            ws.session_state(&token, state, window, cx)
-                        }
+                        McpEvent::Session {
+                            token,
+                            state,
+                            resumed,
+                        } => ws.session_state(&token, state, resumed, window, cx),
                         McpEvent::Usage(token, usage) => ws.usage_reported(&token, usage, cx),
                         McpEvent::Verified(token) => ws.session_verified(&token, cx),
                     });

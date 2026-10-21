@@ -87,6 +87,7 @@ impl Workspace {
         &mut self,
         token: &str,
         state: SessionState,
+        resumed: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -101,7 +102,7 @@ impl Workspace {
         let before = view.read(cx).claude();
         // A card sent here has reached the session, or it moved on: no longer reserved.
         self.reserved.remove(&id);
-        view.update(cx, |v, cx| v.set_claude(state, cx));
+        view.update(cx, |v, cx| v.set_claude(state, resumed, cx));
         self.tick_activity(cx);
         if let Some(alert) = alert_for(before, state) {
             self.alert(id, alert, window, cx);

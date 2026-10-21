@@ -123,9 +123,9 @@ fn control(key: &str) -> Option<Vec<u8>> {
 
 /// Whether Ctrl+V pastes the clipboard's text, as in Windows Terminal: only plain Ctrl+V, and
 /// only when there is text (`has_text`). Without text, ^V reaches the program, so Claude Code
-/// can paste an image.
+/// can paste an image. Never on macOS, where Cmd+V pastes and ^V is always the program's.
 pub fn ctrl_v_pastes(key: &str, m: Mods, has_text: bool) -> bool {
-    key == "v" && m.ctrl && !m.alt && !m.shift && has_text
+    !cfg!(target_os = "macos") && key == "v" && m.ctrl && !m.alt && !m.shift && has_text
 }
 
 /// Pasted text for the shell: every line ending becomes one Enter (`\r`). With bracketed
@@ -252,7 +252,8 @@ mod tests {
             ctrl: true,
             ..Mods::default()
         };
-        assert!(ctrl_v_pastes("v", ctrl, true));
+        // macOS pastes with Cmd+V (the Paste command); Ctrl+V is the program's, as in Terminal.
+        assert_eq!(ctrl_v_pastes("v", ctrl, true), !cfg!(target_os = "macos"));
         assert!(!ctrl_v_pastes("v", ctrl, false), "no text: ^V goes through");
         assert!(!ctrl_v_pastes("v", Mods::default(), true));
         let ctrl_shift = Mods {

@@ -349,6 +349,17 @@ mod tests {
         d.path().join("t.hydraui")
     }
 
+    /// Removes the layout's lock file (on Unix it lives in the temp folder, outside `d`)
+    /// when the test ends.
+    struct LockFileGone(PathBuf);
+
+    impl Drop for LockFileGone {
+        fn drop(&mut self) {
+            #[cfg(unix)]
+            let _ = std::fs::remove_file(lock_path(&self.0));
+        }
+    }
+
     #[test]
     fn the_mutex_name_ignores_case_and_slashes() {
         let a = mutex_name(Path::new("C:/Work/A.hydraui"));
@@ -363,6 +374,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let running = d.path().join("running");
         let layout = unique(&d);
+        let _gone = LockFileGone(layout.clone());
         // This test's process stands in for the holder, so its pid is alive; it has no real
         // window, so hwnd 0 fails the window check and the holder's window is `None`.
         let Taken::Mine(first) = take(&running, &layout, 0) else {
@@ -379,6 +391,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let running = d.path().join("running");
         let layout = unique(&d);
+        let _gone = LockFileGone(layout.clone());
         let Taken::Mine(c) = take(&running, &layout, 0) else {
             panic!("first claim")
         };
@@ -396,6 +409,7 @@ mod tests {
         let running = d.path().join("running");
         std::fs::create_dir_all(&running).unwrap();
         let layout = unique(&d);
+        let _gone = LockFileGone(layout.clone());
         let line = format!(
             "layout = {:?}\nwindow = 1234\n",
             layout.display().to_string()

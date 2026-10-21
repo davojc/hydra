@@ -657,6 +657,10 @@ impl PaneView {
         let Some(mode) = self.mode() else {
             return;
         };
+        // A Cmd chord is a macOS shortcut, never input for the shell (Cmd+Left isn't Left).
+        if cfg!(target_os = "macos") && k.modifiers.platform {
+            return;
+        }
         if k.key == "v" {
             let text = cx.read_from_clipboard().and_then(|item| item.text());
             if ctrl_v_pastes(&k.key, mods(k.modifiers), text.is_some()) {
@@ -705,7 +709,8 @@ impl PaneView {
         else {
             return;
         };
-        if ev.button == MouseButton::Left && ev.modifiers.control {
+        // Ctrl+click; Cmd+click on macOS, where Ctrl+click is a right click.
+        if ev.button == MouseButton::Left && ev.modifiers.secondary() {
             enum Hit {
                 Url(String),
                 Path(crate::term_paths::PathHit),
@@ -858,7 +863,7 @@ impl PaneView {
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.mouse = Some(ev.position);
-        self.update_hover(ev.modifiers.control, cx);
+        self.update_hover(ev.modifiers.secondary(), cx);
         if !self.selecting {
             self.report(
                 ev.pressed_button.and_then(report_button),
@@ -1300,7 +1305,7 @@ impl Render for PaneView {
             .key_context("Terminal")
             // On the focused element: modifier changes only reach the focus path.
             .on_modifiers_changed(cx.listener(|v, ev: &ModifiersChangedEvent, _, cx| {
-                v.update_hover(ev.modifiers.control, cx)
+                v.update_hover(ev.modifiers.secondary(), cx)
             }))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_action(cx.listener(Self::copy_text))

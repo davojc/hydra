@@ -378,7 +378,7 @@ impl FileTreeView {
             self.sync_watches();
             cx.notify();
         } else {
-            cx.emit(file_click(ev.modifiers().control, path));
+            cx.emit(file_click(ev.modifiers().secondary(), path));
         }
     }
 }

@@ -36,9 +36,14 @@ pub fn test_bindings() -> Vec<KeyBinding> {
     }
 }
 
-/// Ctrl+S in a file pane (spec §7.8).
+/// Ctrl+S in a file pane (spec §7.8); Cmd+S on macOS.
 pub fn file_pane_bindings() -> Vec<KeyBinding> {
-    vec![KeyBinding::new("ctrl-s", SaveFile, Some("FilePane"))]
+    let save = if cfg!(target_os = "macos") {
+        "cmd-s"
+    } else {
+        "ctrl-s"
+    };
+    vec![KeyBinding::new(save, SaveFile, Some("FilePane"))]
 }
 
 /// Tab and Shift+Tab for the shell (completion), inside a pane. Without these, gpui-component's
@@ -103,8 +108,26 @@ impl Command {
         }
     }
 
-    /// The spec §7.6 defaults.
+    /// The spec §7.6 defaults. macOS uses Cmd, as Terminal and iTerm do: there Ctrl+letter
+    /// belongs to the shell (Ctrl+T, Ctrl+W, Ctrl+B, Ctrl+F are readline keys).
     pub fn default_keys(self) -> &'static str {
+        if cfg!(target_os = "macos") {
+            return match self {
+                Command::NewTerminal => "cmd-t",
+                Command::ClosePane => "cmd-w",
+                Command::NextTerminal => "cmd-shift-]",
+                Command::PreviousTerminal => "cmd-shift-[",
+                Command::NextTab => "ctrl-tab",
+                Command::PreviousTab => "ctrl-shift-tab",
+                Command::Copy => "cmd-c",
+                Command::Paste => "cmd-v",
+                Command::Find => "cmd-f",
+                Command::Launcher => "cmd-shift-p",
+                Command::FileTree => "cmd-b",
+                Command::OpenFile => "cmd-o",
+                Command::Search => "cmd-shift-f",
+            };
+        }
         match self {
             Command::NewTerminal => "ctrl-t",
             Command::ClosePane => "ctrl-w",
@@ -224,6 +247,20 @@ pub fn bindings(keys: &[(Command, String)]) -> Vec<KeyBinding> {
 }
 
 /// Keys that aren't commands, so `[keys]` can't change them: (keys, what they do).
+#[cfg(target_os = "macos")]
+pub const FIXED: [(&str, &str); 5] = [
+    ("Cmd+S", "Save the file (in a file pane)"),
+    (
+        "Ctrl+V",
+        "Reaches the program (in a terminal), so Claude Code can paste an image",
+    ),
+    ("Tab / Shift+Tab", "Completion in the shell (in a terminal)"),
+    ("Cmd+click", "Open a path or link in terminal output"),
+    ("Cmd+click", "Insert a file's path (in the file tree)"),
+];
+
+/// Keys that aren't commands, so `[keys]` can't change them: (keys, what they do).
+#[cfg(not(target_os = "macos"))]
 pub const FIXED: [(&str, &str); 5] = [
     ("Ctrl+S", "Save the file (in a file pane)"),
     (
@@ -244,6 +281,7 @@ pub fn display(keys: &str) -> String {
                     "ctrl" => "Ctrl".to_string(),
                     "shift" => "Shift".to_string(),
                     "alt" => "Alt".to_string(),
+                    "cmd" | "win" | "super" if cfg!(target_os = "macos") => "Cmd".to_string(),
                     "cmd" | "win" | "super" => "Win".to_string(),
                     "pagedown" => "PgDn".to_string(),
                     "pageup" => "PgUp".to_string(),
@@ -276,7 +314,12 @@ mod tests {
             gpui::KeyContext::parse("Workspace").unwrap(),
             gpui::KeyContext::parse("FilePane").unwrap(),
         ];
-        let (found, _) = keymap.bindings_for_input(&[Keystroke::parse("ctrl-s").unwrap()], &stack);
+        let save = if cfg!(target_os = "macos") {
+            "cmd-s"
+        } else {
+            "ctrl-s"
+        };
+        let (found, _) = keymap.bindings_for_input(&[Keystroke::parse(save).unwrap()], &stack);
         assert!(found[0].action().partial_eq(&SaveFile));
     }
 
@@ -312,12 +355,38 @@ mod tests {
         let (keys, problems) = keymap(&BTreeMap::new());
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(keys.len(), Command::ALL.len());
-        assert!(keys.contains(&(Command::NewTerminal, "ctrl-t".to_string())));
+        let m = if cfg!(target_os = "macos") {
+            "cmd"
+        } else {
+            "ctrl"
+        };
+        assert!(keys.contains(&(Command::NewTerminal, format!("{m}-t"))));
         assert!(keys.contains(&(Command::NextTab, "ctrl-tab".to_string())));
-        assert!(keys.contains(&(Command::Launcher, "ctrl-shift-p".to_string())));
-        assert!(keys.contains(&(Command::FileTree, "ctrl-b".to_string())));
+        assert!(keys.contains(&(Command::Launcher, format!("{m}-shift-p"))));
+        assert!(keys.contains(&(Command::FileTree, format!("{m}-b"))));
         assert_eq!(Command::FileTree.name(), "file_tree");
         assert_eq!(Command::Copy.name(), "copy");
+    }
+
+    /// On macOS Ctrl+letter belongs to the shell (Ctrl+T, Ctrl+W, Ctrl+B and Ctrl+F are
+    /// readline keys), so hydraui's own commands use Cmd, as Terminal and iTerm do.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn on_macos_the_commands_use_cmd_and_leave_ctrl_to_the_shell() {
+        for c in Command::ALL {
+            let keys = c.default_keys();
+            let tab = matches!(c, Command::NextTab | Command::PreviousTab);
+            assert!(
+                keys.starts_with("cmd-")
+                    || (tab && keys.starts_with("ctrl-") && keys.contains("tab")),
+                "{}: {keys}",
+                c.name()
+            );
+        }
+        assert_eq!(Command::Copy.default_keys(), "cmd-c");
+        assert_eq!(Command::Paste.default_keys(), "cmd-v");
+        assert_eq!(Command::NextTerminal.default_keys(), "cmd-shift-]");
+        assert_eq!(display("cmd-shift-p"), "Cmd+Shift+P");
     }
 
     #[test]
@@ -341,12 +410,12 @@ mod tests {
             "{problems:?}"
         );
         assert!(problems.iter().any(|p| p.contains("copy")), "{problems:?}");
-        assert!(keys.contains(&(Command::Copy, "ctrl-shift-c".to_string())));
+        assert!(keys.contains(&(Command::Copy, Command::Copy.default_keys().to_string())));
     }
 
     #[test]
     fn the_same_keys_on_two_commands_is_reported() {
-        let (_, problems) = keymap(&map(&[("find", "ctrl-t")]));
+        let (_, problems) = keymap(&map(&[("find", Command::NewTerminal.default_keys())]));
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(
             problems[0].contains("new_terminal") && problems[0].contains("find"),
@@ -366,10 +435,15 @@ mod tests {
     #[test]
     fn terminal_keys_have_defaults() {
         let (keys, _) = keymap(&BTreeMap::new());
+        let (new, next, previous) = if cfg!(target_os = "macos") {
+            ("cmd-t", "cmd-shift-]", "cmd-shift-[")
+        } else {
+            ("ctrl-t", "ctrl-pagedown", "ctrl-pageup")
+        };
         for (name, key) in [
-            ("new_terminal", "ctrl-t"),
-            ("next_terminal", "ctrl-pagedown"),
-            ("previous_terminal", "ctrl-pageup"),
+            ("new_terminal", new),
+            ("next_terminal", next),
+            ("previous_terminal", previous),
         ] {
             assert!(
                 keys.iter().any(|(c, k)| c.name() == name && k == key),

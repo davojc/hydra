@@ -136,6 +136,7 @@ impl Workspace {
     /// selected environment's shown one, not behind its Tasks tab.
     fn in_sight(&self, id: PaneId, window: &Window) -> bool {
         window.is_window_active()
+            && !self.all_tasks_shown()
             && self.envs.active().and_then(|t| t.shown) == Some(id)
             && self.tasks_tabs.get(&id) != Some(&true)
     }

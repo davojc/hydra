@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use gpui::prelude::*;
-use gpui::{Context, Entity, Focusable, Hsla, SharedString, Window, div, px};
+use gpui::{Context, Entity, Focusable, Hsla, SharedString, Subscription, Window, div, px};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::notification::Notification;
 use gpui_component::{WindowExt, h_flex};
@@ -13,6 +13,14 @@ use super::Workspace;
 use crate::envs::PaneId;
 use crate::task_board::{TaskBoard, TaskBoardEvent};
 use crate::task_board_view::{TaskBoardView, TaskBoardViewEvent};
+
+/// Where a board view sits: a terminal's Tasks tab, or a lane of an environment's
+/// Tasks: all projects.
+#[derive(Debug, Clone)]
+pub(super) enum BoardHost {
+    Tab(PaneId),
+    Lane(String),
+}
 
 /// The project a terminal in `cwd` keeps its board in (§2): its git work tree, else `cwd`.
 fn tasks_project(cwd: &Path) -> PathBuf {
@@ -99,6 +107,9 @@ impl Workspace {
     /// The terminal whose Tasks tab is on screen: the selected environment's shown terminal,
     /// when its Tasks tab is selected.
     pub(super) fn visible_tasks(&self) -> Option<PaneId> {
+        if self.all_tasks_shown() {
+            return None;
+        }
         let id = self.envs.active()?.shown?;
         (self.tasks_tabs.get(&id) == Some(&true)).then_some(id)
     }
@@ -129,21 +140,42 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> bool {
         self.finish_edits_except(None, window, cx);
-        !self.board_views.values().any(|v| v.read(cx).is_editing())
+        let lanes: Vec<Entity<TaskBoardView>> =
+            self.shown_lanes().iter().map(|l| l.view.clone()).collect();
+        for view in &lanes {
+            view.update(cx, |v, cx| v.finish_edit(window, cx));
+        }
+        !self
+            .board_views
+            .values()
+            .chain(lanes.iter())
+            .any(|v| v.read(cx).is_editing())
     }
 
-    /// Saves the edit in progress of every board view but terminal `keep`'s.
+    /// Saves the edit in progress of every board view but terminal `keep`'s and the lanes on
+    /// screen.
     fn finish_edits_except(
         &mut self,
         keep: Option<PaneId>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let shown: Vec<Entity<TaskBoardView>> =
+            self.shown_lanes().iter().map(|l| l.view.clone()).collect();
         let editing: Vec<Entity<TaskBoardView>> = self
             .board_views
             .iter()
-            .filter(|(id, v)| Some(**id) != keep && v.read(cx).is_editing())
-            .map(|(_, v)| v.clone())
+            .filter(|(id, _)| Some(**id) != keep)
+            .map(|(_, v)| v)
+            .chain(
+                self.lanes
+                    .values()
+                    .flatten()
+                    .map(|l| &l.view)
+                    .filter(|v| !shown.contains(v)),
+            )
+            .filter(|v| v.read(cx).is_editing())
+            .cloned()
             .collect();
         for view in editing {
             view.update(cx, |v, cx| v.finish_edit(window, cx));
@@ -171,8 +203,7 @@ impl Workspace {
         self.drop_unused_board(&old, cx);
     }
 
-    /// A board view for terminal `id` on `project`'s board; a focus in it takes the focus
-    /// from the file pane, so Ctrl+W closes the Tasks tab.
+    /// A board view for terminal `id`'s Tasks tab on `project`'s board.
     fn new_board_view(
         &mut self,
         id: PaneId,
@@ -180,9 +211,25 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let (view, events, focus) = self.make_board_view(BoardHost::Tab(id), project, window, cx);
+        self.board_focus.insert(id, focus);
+        self.board_events.insert(id, events);
+        self.board_views.insert(id, view);
+    }
+
+    /// A view of `project`'s board for `host`, with its events and its focus watch: a focus in
+    /// it takes the focus from the file pane, so Ctrl+W closes the board, not a file.
+    pub(super) fn make_board_view(
+        &mut self,
+        host: BoardHost,
+        project: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Entity<TaskBoardView>, Subscription, Subscription) {
         let board = self.board_for(project, window, cx);
         let targets_board = board.clone();
         let view = cx.new(|cx| TaskBoardView::new(board.clone(), window, cx));
+        let env_host = host.clone();
         let events = cx.subscribe_in(
             &view,
             window,
@@ -194,7 +241,9 @@ impl Workspace {
                 TaskBoardViewEvent::ShowTaker(name) => ws.show_taker(name, window, cx),
                 TaskBoardViewEvent::TakeInWorktree(text) => {
                     let project = board.read(cx).project().to_path_buf();
-                    ws.take_in_worktree(id, project, text.clone(), window, cx)
+                    if let Some(env) = ws.host_env(&env_host) {
+                        ws.take_in_worktree(env, project, text.clone(), window, cx)
+                    }
                 }
                 TaskBoardViewEvent::SendToFree(text) => {
                     let project = board.read(cx).project().to_path_buf();
@@ -219,12 +268,20 @@ impl Workspace {
         });
         let handle = view.read(cx).focus_handle(cx);
         let focus = cx.on_focus_in(&handle, window, move |ws, _, cx| {
-            ws.leave_files(id);
+            if let Some(env) = ws.host_env(&host) {
+                ws.leave_env_files(&env);
+            }
             cx.notify();
         });
-        self.board_focus.insert(id, focus);
-        self.board_events.insert(id, events);
-        self.board_views.insert(id, view);
+        (view, events, focus)
+    }
+
+    /// The environment a board view sits in.
+    fn host_env(&self, host: &BoardHost) -> Option<String> {
+        match host {
+            BoardHost::Tab(id) => self.envs.env_of(*id).map(str::to_string),
+            BoardHost::Lane(env) => Some(env.clone()),
+        }
     }
 
     /// Shows the terminal whose sessions write `name` as a card's taker (MCP server spec §4),
@@ -287,12 +344,13 @@ impl Workspace {
         board
     }
 
-    /// Drops `project`'s board, and its watcher, when no Tasks tab uses it. At the end of the
-    /// effect cycle, so a question its last change raised still arrives.
-    fn drop_unused_board(&mut self, project: &Path, cx: &mut Context<Self>) {
+    /// Drops `project`'s board, and its watcher, when no Tasks tab or lane uses it. At the end
+    /// of the effect cycle, so a question its last change raised still arrives.
+    pub(super) fn drop_unused_board(&mut self, project: &Path, cx: &mut Context<Self>) {
         let used = self
             .board_views
             .values()
+            .chain(self.lanes.values().flatten().map(|l| &l.view))
             .any(|v| v.read(cx).board().read(cx).project() == project);
         if !used && let Some(entry) = self.boards.remove(project) {
             cx.defer(move |_| drop(entry));
@@ -362,9 +420,14 @@ impl Workspace {
 
     /// Terminal `id`'s environment no longer has its file pane focused.
     fn leave_files(&mut self, id: PaneId) {
-        if let Some(env) = self.envs.env_of(id).map(str::to_string)
-            && let Some(tab) = self.envs.get_mut(&env)
-        {
+        if let Some(env) = self.envs.env_of(id).map(str::to_string) {
+            self.leave_env_files(&env);
+        }
+    }
+
+    /// Environment `env` no longer has its file pane focused.
+    fn leave_env_files(&mut self, env: &str) {
+        if let Some(tab) = self.envs.get_mut(env) {
             tab.files_focused = false;
         }
     }

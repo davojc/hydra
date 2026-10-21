@@ -59,6 +59,8 @@ pub fn accent(col: Column, cx: &App) -> Hsla {
 #[derive(Clone)]
 pub struct DraggedCard {
     pub card: CardRef,
+    /// The project whose board it came from: it can only be dropped on that board.
+    pub project: std::path::PathBuf,
 }
 
 impl Render for DraggedCard {
@@ -119,6 +121,8 @@ pub struct TaskBoardView {
     focus: FocusHandle,
     /// The sessions the "Send to" submenu offers; none set means none.
     send_targets: Option<SendTargets>,
+    /// Leaves out the Done column (the cross-project board shows only outstanding work).
+    hide_done: bool,
     _observe: Subscription,
 }
 
@@ -132,6 +136,7 @@ impl TaskBoardView {
             scroll: std::array::from_fn(|_| ScrollHandle::new()),
             focus: cx.focus_handle(),
             send_targets: None,
+            hide_done: false,
             _observe: observe,
         }
     }
@@ -139,6 +144,11 @@ impl TaskBoardView {
     /// Sets how the card menu finds the sessions it can send a Pickup card to.
     pub fn set_send_targets(&mut self, f: impl Fn(&App) -> Vec<SendTarget> + 'static) {
         self.send_targets = Some(Rc::new(f));
+    }
+
+    /// Leaves out the Done column.
+    pub fn hide_done(&mut self) {
+        self.hide_done = true;
     }
 
     /// The project board this view shows.
@@ -231,7 +241,12 @@ impl TaskBoardView {
     }
 
     /// `card` dropped before the card at `before` in `to`, or at its end.
-    fn drop_card(&mut self, card: &CardRef, to: Column, before: Option<usize>, cx: &mut App) {
+    fn drop_card(&mut self, d: &DraggedCard, to: Column, before: Option<usize>, cx: &mut App) {
+        // A card dragged from another project's board (another lane) stays where it was.
+        if d.project != self.board.read(cx).project() {
+            return;
+        }
+        let card = &d.card;
         let change = drop_move(self.board.read(cx).board(), card, to, before);
         if let Some(change) = change {
             self.board.update(cx, |b, cx| b.change(change, cx));
@@ -458,12 +473,18 @@ impl TaskBoardView {
             .border_t_2()
             .border_color(gpui::transparent_black())
             .drag_over::<DraggedCard>(move |s, _, _, _| s.border_color(line))
-            .on_drop(cx.listener(move |this, d: &DraggedCard, _, cx| {
-                this.drop_card(&d.card, col, Some(i), cx)
-            }))
-            .on_drag(DraggedCard { card: card.clone() }, |d, _, _, cx| {
-                cx.new(|_| d.clone())
-            })
+            .on_drop(
+                cx.listener(move |this, d: &DraggedCard, _, cx| {
+                    this.drop_card(d, col, Some(i), cx)
+                }),
+            )
+            .on_drag(
+                DraggedCard {
+                    card: card.clone(),
+                    project: self.board.read(cx).project().to_path_buf(),
+                },
+                |d, _, _, cx| cx.new(|_| d.clone()),
+            )
             .on_click({
                 let card = card.clone();
                 cx.listener(move |this, ev: &gpui::ClickEvent, window, cx| {
@@ -694,9 +715,9 @@ impl TaskBoardView {
             .on_drag_move::<DraggedCard>(
                 cx.listener(move |this, ev, _, cx| this.drag_scroll(col, ev, cx)),
             )
-            .on_drop(cx.listener(move |this, d: &DraggedCard, _, cx| {
-                this.drop_card(&d.card, col, None, cx)
-            }));
+            .on_drop(
+                cx.listener(move |this, d: &DraggedCard, _, cx| this.drop_card(d, col, None, cx)),
+            );
         let input = self.editing.as_ref().map(|e| e.input.clone());
         if let (Some(None), Some(input)) = (editor, &input) {
             body = body.child(self.render_editor(input, cx));
@@ -768,7 +789,12 @@ impl Render for TaskBoardView {
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| window.focus(&this.focus, cx)),
             )
-            .children(Column::ALL.map(|col| self.render_column(col, cx)))
+            .children(
+                Column::ALL
+                    .into_iter()
+                    .filter(|col| !(self.hide_done && *col == Column::Done))
+                    .map(|col| self.render_column(col, cx)),
+            )
     }
 }
 

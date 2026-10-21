@@ -63,7 +63,10 @@ impl Workspace {
         }
         let focused = focused_pane(
             window.is_window_active(),
-            self.envs.active().and_then(|t| t.shown),
+            self.envs
+                .active()
+                .and_then(|t| t.shown)
+                .filter(|_| !self.all_tasks_shown()),
             |id| self.tasks_tabs.get(&id) == Some(&true),
         );
         self.sessions(focused, cx)

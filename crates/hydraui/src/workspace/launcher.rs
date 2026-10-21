@@ -121,7 +121,7 @@ impl Workspace {
             }
             Action::ReloadConfig => self.reload_config(window, cx),
             Action::CheckForUpdates => self.check_for_updates(window, cx),
-            Action::AllBoards => self.all_boards(window, cx),
+            Action::AllBoards => self.show_all_tasks(window, cx),
             Action::Shortcuts => self.shortcuts(window, cx),
             Action::SetJevKey => self.set_jev_key_dialog(window, cx),
             Action::RemoveJevKey => self.remove_jev_key_dialog(window, cx),

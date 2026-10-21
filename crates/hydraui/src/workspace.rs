@@ -2,7 +2,7 @@
 //! the selected environment's shown terminal beside its file pane, the status bar, and the
 //! commands bound to keys.
 mod accounts;
-mod all_boards;
+mod all_tasks;
 mod busy;
 mod finder;
 mod launcher;
@@ -198,6 +198,12 @@ pub struct Workspace {
     boards: HashMap<PathBuf, (Entity<TaskBoard>, Subscription)>,
     /// One view per terminal's Tasks tab.
     board_views: HashMap<PaneId, Entity<TaskBoardView>>,
+    /// Environments showing Tasks: all projects in place of their terminal.
+    all_tasks: HashSet<String>,
+    /// Each environment's Tasks: all projects lanes, one per project of its terminals.
+    lanes: HashMap<String, Vec<all_tasks::Lane>>,
+    /// Keeps the shown lanes in step with the terminals' projects.
+    _lane_tick: Task<()>,
     /// Each board view's focus watch, which takes the focus from the file pane.
     board_focus: HashMap<PaneId, Subscription>,
     /// Each Tasks tab's board view events (a commit to show).
@@ -254,6 +260,19 @@ impl Workspace {
                     .timer(std::time::Duration::from_secs(1))
                     .await;
                 if this.update(cx, |ws, cx| ws.tick_activity(cx)).is_err() {
+                    break;
+                }
+            }
+        });
+        let lane_tick = cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                if this
+                    .update_in(cx, |ws, window, cx| ws.sync_shown_lanes(window, cx))
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -365,6 +384,9 @@ impl Workspace {
             tasks_tabs: HashMap::new(),
             boards: HashMap::new(),
             board_views: HashMap::new(),
+            all_tasks: HashSet::new(),
+            lanes: HashMap::new(),
+            _lane_tick: lane_tick,
             board_focus: HashMap::new(),
             board_events: HashMap::new(),
             reserved: HashMap::new(),
@@ -564,7 +586,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.envs.show(id) {
+        // Its environment goes back to showing a terminal; others keep what they show.
+        let left = self
+            .envs
+            .env_of(id)
+            .is_some_and(|env| self.all_tasks.remove(env));
+        if self.envs.show(id) || left {
             self.shown_changed(window, cx);
         }
     }
@@ -872,6 +899,13 @@ impl Workspace {
     /// Focuses the selected environment's file pane when it had the focus, else its shown
     /// terminal; with neither, the window.
     fn focus_active(&self, window: &mut Window, cx: &mut App) {
+        if self.all_tasks_shown() {
+            match self.all_tasks_focus(cx) {
+                Some(handle) => window.focus(&handle, cx),
+                None => window.focus(&self.focus, cx),
+            }
+            return;
+        }
         let target = self.envs.active().and_then(|t| match t.files {
             Some(f) if t.files_focused => Some(f),
             _ => t.shown,
@@ -923,6 +957,17 @@ impl Workspace {
         }
         if let Some(id) = self.visible_tasks() {
             self.close_tasks(id, window, cx);
+            return;
+        }
+        // Tasks: all projects closes back to the terminal; the cards stay.
+        if self.all_tasks_shown() {
+            match tab.shown {
+                Some(id) => self.show_terminal(id, window, cx),
+                None => {
+                    self.leave_all_tasks();
+                    cx.notify();
+                }
+            }
             return;
         }
         if let Some(id) = tab.shown {
@@ -985,6 +1030,7 @@ impl Workspace {
             self.drop_tasks(id, window, cx);
             self.drop_pane(id);
         }
+        self.drop_lanes(env, window, cx);
         crate::window_layout::forget_env(&mut self.unopened, env);
         self.shown_changed(window, cx);
     }
@@ -1426,6 +1472,9 @@ impl Workspace {
     ) -> AnyElement {
         let tint = self.tint(&tab.env);
         let terminal = match tab.shown.and_then(|id| Some((id, self.panes.get(&id)?))) {
+            _ if self.all_tasks.contains(&tab.env) => {
+                self.render_all_tasks(tint, muted, border, cx)
+            }
             // With a Tasks tab: its strip above the terminal or its board (task-board §4).
             Some((id, view)) if self.tasks_tabs.contains_key(&id) => {
                 let label = view.read(cx).label();

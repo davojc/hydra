@@ -210,10 +210,19 @@ repository):
   tree has uncommitted changes or the main work tree isn't on the base branch; a merge with
   conflicts is aborted. **Not now** leaves everything as it is.
 
-## 10. All boards
+## 10. Tasks: all projects
 
-The launcher's **All boards** opens one read-only look across projects: every project a terminal
-in the window is in (its project as §2 says), each with its **Pickup**, **InProgress** and
-**Verify** cards (and their takers), read from the board files when the dialog opens. Projects with
-none of those cards, and empty columns, are left out. Clicking a project's name shows a terminal in
-it (the shown one when it is in that project) and opens its Tasks tab.
+The terminal list has an entry pinned at its top, **Tasks: all projects**, set apart from the
+terminals (it isn't one). Clicking it shows, in the middle in place of the shown terminal, one
+swimlane per project that a terminal of the **selected environment** is in (its project as §2
+says; projects with an empty board included, so the first card can be added), in the terminal
+list's order. Each lane is a header (the project's name, its folder, and how many Done cards it
+leaves out) over that project's working board: the same board as its Tasks tab, with every column
+but **Done**, which the overview leaves out because it shows outstanding work. Cards are edited,
+added, dragged between columns and sent from their menus as on a Tasks tab; a card can't be
+dragged to another project's lane. Lanes share the height and scroll when they don't fit.
+
+Clicking a terminal (or anything that shows one) goes back to it; Ctrl+W does too. Each
+environment remembers whether it shows its terminal or its projects' boards. The lanes follow the
+terminals: a terminal opened, closed or `cd`'d into another project adds or removes a lane within
+a second. The launcher's **Tasks: all projects** opens it too. It isn't saved in the layout.

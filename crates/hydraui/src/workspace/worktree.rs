@@ -35,20 +35,17 @@ impl Workspace {
             .join("worktrees.toml")
     }
 
-    /// "Take in new worktree" on the Pickup card `card` of `project`'s board, from the Tasks tab
-    /// of terminal `id`: the worktree is made off the UI thread, then a terminal in `id`'s
-    /// environment opens in it running Claude, and the card is taken for that terminal.
+    /// "Take in new worktree" on the Pickup card `card` of `project`'s board, from a board in
+    /// environment `env`: the worktree is made off the UI thread, then a terminal in `env`
+    /// opens in it running Claude, and the card is taken for that terminal.
     pub(super) fn take_in_worktree(
         &mut self,
-        id: PaneId,
+        env: String,
         project: PathBuf,
         card: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(env) = self.envs.env_of(id).map(str::to_string) else {
-            return;
-        };
         cx.spawn_in(window, async move |this, cx| {
             let repo = project.clone();
             let text = card.clone();

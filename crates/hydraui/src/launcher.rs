@@ -37,7 +37,7 @@ pub enum Action {
     ReloadConfig,
     /// Ask GitHub for a newer hydra now (spec §7.11).
     CheckForUpdates,
-    /// Every open project's Pickup, InProgress and Verify cards (task board spec §10).
+    /// The selected environment's Tasks: all projects (task board spec §10).
     AllBoards,
     /// The list of every key hydraui answers to.
     Shortcuts,
@@ -98,7 +98,7 @@ pub fn entries(
     add("Open hydraui log".into(), Action::OpenLog);
     add("Reload config".into(), Action::ReloadConfig);
     add("Check for updates".into(), Action::CheckForUpdates);
-    add("All boards".into(), Action::AllBoards);
+    add("Tasks: all projects".into(), Action::AllBoards);
     add("Keyboard shortcuts".into(), Action::Shortcuts);
     add("Set Jev API key…".into(), Action::SetJevKey);
     add("Edit Jev questions".into(), Action::EditJevQuestions);
@@ -141,7 +141,7 @@ mod tests {
                 "Open hydraui log",
                 "Reload config",
                 "Check for updates",
-                "All boards",
+                "Tasks: all projects",
                 "Keyboard shortcuts",
                 "Set Jev API key…",
                 "Edit Jev questions",
@@ -190,7 +190,7 @@ mod tests {
                 "Open hydraui log",
                 "Reload config",
                 "Check for updates",
-                "All boards",
+                "Tasks: all projects",
                 "Keyboard shortcuts",
                 "Set Jev API key…",
                 "Edit Jev questions"

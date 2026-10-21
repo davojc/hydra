@@ -85,6 +85,10 @@ impl Workspace {
             return list;
         };
         let (env, tint) = (tab.env.clone(), self.tint(&tab.env));
+        // Pinned above the terminals: the environment's projects' boards (task board §10).
+        list = list
+            .child(self.render_all_tasks_entry(tint, cx))
+            .child(div().h(px(1.)).mx_2().my_0p5().bg(cx.theme().border));
         list = list.child(
             Button::new("list-new-terminal")
                 .label("+ New")
@@ -99,6 +103,7 @@ impl Workspace {
         // more than one project.
         let groups = self.grouped_terminals(cx);
         let headed = groups.len() > 1;
+        let all_tasks = self.all_tasks_shown();
         let rows: Vec<(Option<String>, PaneId)> = groups
             .into_iter()
             .flat_map(|(project, ids)| {
@@ -146,7 +151,9 @@ impl Workspace {
                     .py_1()
                     .gap_2()
                     .rounded_md()
-                    .when(tab.shown == Some(id), |d| d.bg(tint.opacity(0.25)))
+                    .when(tab.shown == Some(id) && !all_tasks, |d| {
+                        d.bg(tint.opacity(0.25))
+                    })
                     .hover(|d| d.bg(tint.opacity(0.15)))
                     .on_click(
                         cx.listener(move |ws, _, window, cx| ws.show_terminal(id, window, cx)),

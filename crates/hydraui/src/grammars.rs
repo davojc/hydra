@@ -87,6 +87,58 @@ pub fn proto() -> LanguageConfig {
     )
 }
 
+/// C#: as for GraphQL, gpui-component ships the grammar with no colour rules, so these are
+/// the grammar's own (MIT), adapted to the theme's names.
+const CSHARP_HIGHLIGHTS: &str = include_str!("../grammars/csharp/queries/highlights.scm");
+
+pub fn csharp() -> LanguageConfig {
+    LanguageConfig::new(
+        "csharp",
+        tree_sitter_c_sharp::LANGUAGE.into(),
+        vec![],
+        CSHARP_HIGHLIGHTS,
+        "",
+        "",
+    )
+}
+
+/// SQL: gpui-component's own rules, with the nvim-style names its theme doesn't know
+/// renamed to ones it does, so columns, decimals, CASE/WHEN and parameters get colours.
+/// Its number patterns are written in Lua's `%d`, which tree-sitter's regexes read as a
+/// literal `%d`, so they're spelled `[0-9]` here; and they follow the catch-all string
+/// pattern, which the highlighter lets win, so that one is kept off numbers.
+fn sql_highlights() -> String {
+    [
+        (
+            "(literal) @string\n",
+            "((literal) @string (#not-match? @string \"^[-+]?[0-9]*[.]?[0-9]+$\"))\n",
+        ),
+        (r"%d*\.%d*", "[0-9]*[.][0-9]*"),
+        ("%d", "[0-9]"),
+        ("@field", "@property"),
+        ("@float", "@number"),
+        ("@conditional", "@keyword"),
+        ("@storageclass", "@keyword"),
+        ("@parameter", "@variable.special"),
+    ]
+    .iter()
+    .fold(
+        tree_sitter_sequel::HIGHLIGHTS_QUERY.to_string(),
+        |q, (old, new)| q.replace(old, new),
+    )
+}
+
+pub fn sql() -> LanguageConfig {
+    LanguageConfig::new(
+        "sql",
+        tree_sitter_sequel::LANGUAGE.into(),
+        vec![],
+        &sql_highlights(),
+        "",
+        "",
+    )
+}
+
 /// Adds the grammars to the editor's highlighter; call once at startup.
 pub fn register() {
     LanguageRegistry::singleton().register("typespec", &typespec());
@@ -95,6 +147,8 @@ pub fn register() {
     // Replace gpui-component's colourless built-ins.
     LanguageRegistry::singleton().register("graphql", &graphql());
     LanguageRegistry::singleton().register("proto", &proto());
+    LanguageRegistry::singleton().register("csharp", &csharp());
+    LanguageRegistry::singleton().register("sql", &sql());
 }
 
 #[cfg(test)]
@@ -352,16 +406,108 @@ service Pets {
         }
     }
 
-    /// The built-ins this file relies on gpui-component for.
+    const CSHARP_SAMPLE: &str = r#"using System.Text;
+
+namespace Demo.Pets;
+
+/// A pet.
+[Serializable]
+public sealed class Pet<T> : IAnimal where T : struct
+{
+    public string Name { get; set; } = "rex";
+
+    // How old.
+    public int Age(int years, double scale = 1.5) => years * 2;
+
+    public void Speak()
+    {
+        var sb = new StringBuilder();
+        if (sb.Length == 0 && true) { Console.WriteLine($"hi {Name}"); }
+        var tab = "a\tb";
+        object nothing = null;
+    }
+}
+
+enum Colour { Red, Green }
+"#;
+
     #[test]
-    fn java_and_sql_come_from_gpui_component() {
-        for name in ["java", "sql"] {
+    fn csharp_parses_and_shows_the_right_colours() {
+        let shown = shown(
+            tree_sitter_c_sharp::LANGUAGE,
+            CSHARP_HIGHLIGHTS,
+            CSHARP_SAMPLE,
+        );
+        for want in [
+            ("using", "keyword"),
+            ("namespace", "keyword"),
+            ("Demo.Pets", "type"),
+            ("public", "keyword"),
+            ("class", "keyword"),
+            ("Pet", "type"),
+            ("T", "type"),
+            ("IAnimal", "type"),
+            ("Serializable", "attribute"),
+            ("string", "type.builtin"),
+            ("Name", "property"),
+            ("Age", "function"),
+            ("years", "variable.parameter"),
+            ("1.5", "number"),
+            ("var", "keyword"),
+            ("StringBuilder", "type"),
+            ("WriteLine", "function"),
+            ("Length", "property"),
+            ("true", "boolean"),
+            ("null", "constant"),
+            (r"\t", "string.escape"),
+            ("Text", "type"),
+            ("/// A pet.", "comment.doc"),
+            ("// How old.", "comment"),
+            ("Red", "property"),
+        ] {
+            let want = (want.0, want.1.to_string());
+            assert!(shown.contains(&want), "{want:?} missing from {shown:?}");
+        }
+    }
+
+    const SQL_SAMPLE: &str = "SELECT u.name, 1.5 AS ratio,
+  CASE WHEN u.age > 18 THEN 'adult' ELSE 'minor' END
+FROM users u
+WHERE u.id = $1;
+";
+
+    #[test]
+    fn sql_shows_the_names_gpui_component_left_uncoloured() {
+        let shown = shown(tree_sitter_sequel::LANGUAGE, &sql_highlights(), SQL_SAMPLE);
+        for want in [
+            ("SELECT", "keyword"),
+            ("name", "property"),
+            ("1.5", "number"),
+            ("CASE", "keyword"),
+            ("WHEN", "keyword"),
+            ("'adult'", "string"),
+        ] {
+            let want = (want.0, want.1.to_string());
+            assert!(shown.contains(&want), "{want:?} missing from {shown:?}");
+        }
+        let theme = gpui_component::highlighter::HighlightTheme::default_dark();
+        for want in ["18", "name", "1.5", "$1"] {
+            let (_, name) = shown.iter().find(|(text, _)| *text == want).unwrap();
             assert!(
-                gpui_component::highlighter::LanguageRegistry::singleton()
-                    .language(name)
-                    .is_some(),
-                "{name}"
+                theme.style.syntax.style(name).is_some(),
+                "{want} is {name}, which has no colour"
             );
         }
+        assert!(shown.contains(&("18", "number".to_string())), "{shown:?}");
+    }
+
+    /// The built-in this file relies on gpui-component for.
+    #[test]
+    fn java_comes_from_gpui_component() {
+        assert!(
+            gpui_component::highlighter::LanguageRegistry::singleton()
+                .language("java")
+                .is_some()
+        );
     }
 }

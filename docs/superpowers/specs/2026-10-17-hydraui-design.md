@@ -548,8 +548,9 @@ open switches to its file tab.
   `Containerfile`, `*.dockerfile`, `Dockerfile.*`; HCL/Terraform, `.hcl`, `.tf`,
   `.tfvars`, `.tofu`) are vendored under
   `crates/hydraui/grammars/`, compiled by the build script and registered at startup.
-  GraphQL and Protobuf use gpui-component's grammars, which come without colour
-  rules, with rules vendored there too.
+  GraphQL, Protobuf and C# use gpui-component's grammars, which come without colour
+  rules, with rules vendored there too. SQL keeps gpui-component's rules, with the
+  capture names its theme doesn't colour renamed at startup.
 - **Rendered**: Markdown, read-only, reflecting unsaved edits. Markdown files
   and OpenAPI specs open in Rendered, others in Raw. Links open in the browser
   when clicked; images load only from local files, never from the network;

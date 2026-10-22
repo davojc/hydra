@@ -72,16 +72,17 @@ impl Workspace {
     /// The selected environment's terminals, the shown one highlighted in the environment's
     /// colour; a row's tooltip is the title its program set, when it set one.
     pub(super) fn render_terminal_list(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        // The terminals scroll; the allowance meter stays at the panel's foot.
+        let panel = v_flex().w(px(self.list_width)).h_full().flex_none();
         let mut list = v_flex()
             .id("terminal-list")
-            .w(px(self.list_width))
-            .h_full()
-            .flex_none()
+            .flex_1()
+            .min_h_0()
             .overflow_y_scroll()
             .p_1()
             .gap_0p5();
         let Some(tab) = self.envs.active() else {
-            return list;
+            return panel.child(list);
         };
         let (env, tint) = (tab.env.clone(), self.tint(&tab.env));
         // Pinned above the terminals: the environment's projects' boards (task board §10).
@@ -191,10 +192,14 @@ impl Workspace {
                 list = list.child(row);
             }
         }
-        if !cards.is_empty() {
-            list = list.children(self.render_allowance_meter(&tab.env));
-        }
-        list
+        let meter = if cards.is_empty() {
+            None
+        } else {
+            self.render_allowance_meter(&tab.env)
+        };
+        panel
+            .child(list)
+            .children(meter.map(|m| div().flex_none().p_1().pb_3().child(m)))
     }
 
     /// Terminal `id`'s row: its activity dot, name, Claude's state and × on hover;

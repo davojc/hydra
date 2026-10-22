@@ -71,14 +71,12 @@ Detail: [plan 1 deferred](superpowers/notes/2026-10-03-plan-1-deferred.md),
 
 ## Platform
 
-- **A Mac build.** Most of hydra's crates already type-check for macOS. First question, an
-  afternoon on a real Mac: do Claude Code and gh keep each environment's login apart when
-  given separate config folders, now that they store tokens in the Keychain? Then: the
-  keyring's macOS backend, zsh support, Unix process groups instead of Job Objects, a lock
-  file instead of the named mutex, Cmd-based keys, the title bar, signing and notarising, and
-  a Homebrew tap in place of `hydra-setup`.
-- `ring` (via the updater's HTTPS) needs a macOS C toolchain, so cross-checking the CLI from
-  Windows stops there; a `macos-latest` CI job would cover it.
+- **The Mac build: what's left.** hydra and hydraui build, test and run on macOS (Apple
+  silicon): zsh, the login Keychain, process groups instead of Job Objects, a lock file
+  instead of the named mutex, Cmd keys, and macOS builds in each release. Still to do:
+  confirm on a real Mac that Claude Code and gh keep each environment's login apart now
+  that they keep tokens in the Keychain; signing and notarising; a `.app` bundle (so
+  `.hydraui` files open with it); and a Homebrew tap in place of `hydra-setup`.
 
 ## Out of scope (decided, not pending)
 

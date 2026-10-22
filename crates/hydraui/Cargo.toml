@@ -25,8 +25,6 @@ futures.workspace = true
 ignore.workspace = true
 regex.workspace = true
 notify.workspace = true
-windows.workspace = true
-windows-sys.workspace = true
 serde.workspace = true
 toml.workspace = true
 semver.workspace = true
@@ -49,6 +47,20 @@ tree-sitter-proto = "0.2"
 [dev-dependencies]
 hydra-update = { workspace = true, features = ["fake"] }
 tempfile.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+windows-sys.workspace = true
+keyring = { workspace = true, features = ["windows-native"] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
+objc2.workspace = true
+objc2-app-kit.workspace = true
+objc2-foundation.workspace = true
 
 [build-dependencies]
 winresource = "0.1"

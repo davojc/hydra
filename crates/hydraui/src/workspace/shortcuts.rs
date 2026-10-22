@@ -34,7 +34,11 @@ impl Workspace {
                             div()
                                 .w(px(160.))
                                 .flex_none()
-                                .font_family("Consolas")
+                                .font_family(if cfg!(windows) {
+                                    "Consolas"
+                                } else {
+                                    crate::config::DEFAULT_FONT
+                                })
                                 .text_sm()
                                 .child(keys.clone()),
                         )
@@ -74,6 +78,12 @@ mod tests {
         assert_eq!(got[0], ("Ctrl+Shift+P".into(), "Launcher".into()));
         assert_eq!(got[1], ("Ctrl+Alt+N".into(), "New terminal".into()));
         assert_eq!(got.len(), 2 + FIXED.len());
-        assert_eq!(got[2].0, "Ctrl+S");
+        assert_eq!(got[2].0, FIXED[0].0);
+        let save = if cfg!(target_os = "macos") {
+            "Cmd+S"
+        } else {
+            "Ctrl+S"
+        };
+        assert_eq!(got[2].0, save);
     }
 }

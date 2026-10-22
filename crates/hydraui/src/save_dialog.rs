@@ -1,13 +1,17 @@
-//! Save As for layout files (spec §7.9). The dialog knows the file type, so Windows
+//! Save As for layout files (spec §7.9). On Windows the dialog knows the file type, so it
 //! adds the extension when it's left off, and its "replace?" question is about the file that
-//! will really be written.
-use std::path::{Path, PathBuf};
+//! will really be written. Elsewhere gpui's own Save panel is used and `with_extension` adds
+//! it afterwards.
+#[cfg(windows)]
+use std::path::Path;
+use std::path::PathBuf;
 
 /// The dialog's file type: its label, its pattern, and the extension added when none is typed.
 const FILE_TYPE: (&str, &str, &str) = ("hydraui layout (*.hydraui)", "*.hydraui", "hydraui");
 
 /// Shows the Save As dialog in `dir` with `name` filled in, owned by the window `owner` (an
 /// HWND, 0 for none). `None` when cancelled. It blocks until closed: call it off the UI thread.
+#[cfg(windows)]
 pub fn prompt(dir: &Path, name: &str, owner: isize) -> Result<Option<PathBuf>, String> {
     use windows::Win32::Foundation::{ERROR_CANCELLED, HWND};
     use windows::Win32::System::Com::{
@@ -58,9 +62,34 @@ pub fn prompt(dir: &Path, name: &str, owner: isize) -> Result<Option<PathBuf>, S
     }
 }
 
+/// `path` with the layout extension added when it has none, as the Windows dialog does.
+pub fn with_extension(path: PathBuf) -> PathBuf {
+    if path.extension().is_some() {
+        return path;
+    }
+    path.with_extension(FILE_TYPE.2)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_name_without_an_extension_gets_the_layout_one() {
+        assert_eq!(
+            with_extension(PathBuf::from("/w/my layout")),
+            PathBuf::from("/w/my layout.hydraui")
+        );
+        assert_eq!(
+            with_extension(PathBuf::from("/w/a.hydraui")),
+            PathBuf::from("/w/a.hydraui")
+        );
+        // A typed extension is the user's choice, as in the Windows dialog.
+        assert_eq!(
+            with_extension(PathBuf::from("/w/a.toml")),
+            PathBuf::from("/w/a.toml")
+        );
+    }
 
     #[test]
     fn the_file_type_names_its_extension() {

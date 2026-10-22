@@ -200,12 +200,19 @@ pub fn shell(
     };
     let kind_name = shell
         .or(global.default_shell.clone())
-        .unwrap_or_else(|| "pwsh".to_string());
+        .unwrap_or_else(|| ShellKind::platform_default().as_str().to_string());
     let kind = ShellKind::parse(&kind_name)
-        .with_context(|| format!("unknown shell {kind_name:?}; use pwsh or bash"))?;
+        .with_context(|| format!("unknown shell {kind_name:?}; use pwsh, bash or zsh"))?;
     let exe = find_shell(kind, global.git_bash.as_deref()).with_context(|| match kind {
-        ShellKind::Pwsh => "pwsh.exe isn't on PATH; install PowerShell 7".to_string(),
-        ShellKind::Bash => "Git Bash wasn't found; set git_bash in config.toml".to_string(),
+        ShellKind::Pwsh if cfg!(windows) => {
+            "pwsh.exe isn't on PATH; install PowerShell 7".to_string()
+        }
+        ShellKind::Pwsh => "pwsh isn't on PATH; install PowerShell 7".to_string(),
+        ShellKind::Bash if cfg!(windows) => {
+            "Git Bash wasn't found; set git_bash in config.toml".to_string()
+        }
+        ShellKind::Bash => "bash isn't on PATH".to_string(),
+        ShellKind::Zsh => "zsh isn't on PATH".to_string(),
     })?;
     let launch = prepare_launch(app, &name, &PrepareOptions::default())?;
     let _lock = hold_shared(&app.paths, &name)?;

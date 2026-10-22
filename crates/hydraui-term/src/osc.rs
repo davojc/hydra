@@ -102,11 +102,20 @@ fn interpret(payload: &[u8]) -> Option<Osc> {
     }
 }
 
-/// The folder in an OSC 7 `file://<host>/<path>` URL, as a Windows path; the host is
-/// ignored. hydraui's own scripts don't percent-encode, so the path is taken as written.
-/// `file://h/C:/x` → `C:\x`; `file://h///server/share` → `\\server\share`; else `None`.
+/// The folder in an OSC 7 `file://<host>/<path>` URL, as a path of this platform; the host
+/// is ignored. hydraui's own scripts don't percent-encode, so the path is taken as written.
+/// Windows: `file://h/C:/x` → `C:\x`; `file://h///server/share` → `\\server\share`.
+/// Unix: `file://h/x` and hydraui's bash prompt's `file://h//x` → `/x`. Else `None`.
 pub fn parse_osc7(url: &str) -> Option<PathBuf> {
     let rest = url.strip_prefix("file://")?;
+    if cfg!(unix) {
+        let path = &rest[rest.find('/')?..];
+        let path = path
+            .strip_prefix('/')
+            .filter(|p| p.starts_with('/'))
+            .unwrap_or(path);
+        return Some(PathBuf::from(path));
+    }
     let path = &rest[rest.find('/')? + 1..];
     let b = path.as_bytes();
     let drive = b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':';
@@ -122,13 +131,23 @@ mod tests {
     use super::*;
 
     /// What hydraui's pwsh prompt prints after `cmd /c exit 3` in `C:\work\it's here`.
+    #[cfg(windows)]
     const PROMPT: &[u8] =
         b"\x1b]133;D;3\x07\x1b]7;file://PC/C:/work/it's here\x07\x1b]133;A\x07PS> \x1b]133;B\x07";
+    #[cfg(windows)]
+    const CWD: &str = "C:\\work\\it's here";
+
+    /// What hydraui's bash prompt prints after `(exit 3)` in `/work/it's here`.
+    #[cfg(unix)]
+    const PROMPT: &[u8] =
+        b"\x1b]133;D;3\x07\x1b]7;file://mac//work/it's here\x07\x1b]133;A\x07$ \x1b]133;B\x07";
+    #[cfg(unix)]
+    const CWD: &str = "/work/it's here";
 
     fn expected() -> Vec<Osc> {
         vec![
             Osc::Prompt(PromptState::CommandDone(Some(3))),
-            Osc::Cwd(PathBuf::from("C:\\work\\it's here")),
+            Osc::Cwd(PathBuf::from(CWD)),
             Osc::Prompt(PromptState::AtPrompt),
         ]
     }
@@ -205,6 +224,24 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn osc7_unix_paths() {
+        // hydraui's bash prompt prints `file://$HOSTNAME/$(pwd)`, so the path keeps its `/`.
+        assert_eq!(
+            parse_osc7("file://mac//Users/me/it's here"),
+            Some(PathBuf::from("/Users/me/it's here"))
+        );
+        assert_eq!(
+            parse_osc7("file:///Users/me"),
+            Some(PathBuf::from("/Users/me"))
+        );
+        assert_eq!(parse_osc7("file://mac//"), Some(PathBuf::from("/")));
+        assert_eq!(parse_osc7("http://mac//x"), None);
+        assert_eq!(parse_osc7("file://mac"), None);
+    }
+
+    #[cfg(windows)]
     #[test]
     fn osc7_paths() {
         assert_eq!(

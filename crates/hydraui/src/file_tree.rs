@@ -137,13 +137,14 @@ pub fn editor_command(
     cmd
 }
 
-/// A path as one word for the shell: single-quoted for pwsh, and single-quoted with forward
-/// slashes for Git Bash.
+/// A path as one word for the shell: single-quoted for pwsh, single-quoted with forward
+/// slashes for Git Bash, and single-quoted as it is for zsh.
 pub fn quote_path(shell: ShellKind, path: &Path) -> String {
     let text = path.to_string_lossy();
     match shell {
         ShellKind::Pwsh => pwsh_quote(&text),
         ShellKind::Bash => sh_quote(&text.replace('\\', "/")),
+        ShellKind::Zsh => sh_quote(&text),
     }
 }
 
@@ -152,7 +153,7 @@ pub fn quote_path(shell: ShellKind, path: &Path) -> String {
 pub fn cd_command(shell: ShellKind, dir: &Path) -> String {
     match shell {
         ShellKind::Pwsh => format!("Set-Location -LiteralPath {}\r", quote_path(shell, dir)),
-        ShellKind::Bash => format!("cd {}\r", quote_path(shell, dir)),
+        ShellKind::Bash | ShellKind::Zsh => format!("cd {}\r", quote_path(shell, dir)),
     }
 }
 
@@ -271,6 +272,31 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn an_editor_script_gets_the_path_whole() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let bin = d.path().join("my editor");
+        std::fs::create_dir_all(&bin).unwrap();
+        // Writes its first argument, as given, next to itself.
+        let ed = bin.join("ed");
+        std::fs::write(
+            &ed,
+            "#!/bin/sh\nprintf '%s' \"$1\" > \"$(dirname \"$0\")/out.txt\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&ed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let file = d.path().join("my dir").join("a&b.txt");
+        let status = editor_command("ed", &file, bin.as_os_str(), None)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let got = std::fs::read_to_string(bin.join("out.txt")).unwrap_or_default();
+        assert_eq!(got, file.display().to_string());
+    }
+
+    #[cfg(windows)]
     #[test]
     fn a_cmd_editor_gets_the_path_whole() {
         let d = tempfile::tempdir().unwrap();

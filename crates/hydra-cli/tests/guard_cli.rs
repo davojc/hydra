@@ -77,11 +77,21 @@ impl Setup {
     }
 
     fn write_repo_hook(&self, name: &str, body: &str) {
-        std::fs::write(
-            self.repo.join(".git").join("hooks").join(name),
-            format!("#!/bin/sh\n{body}\n"),
-        )
-        .unwrap();
+        write_script(
+            &self.repo.join(".git").join("hooks").join(name),
+            &format!("#!/bin/sh\n{body}\n"),
+        );
+    }
+}
+
+/// Writes a script git or the wrapper runs. Outside Windows, git only runs a hook it can
+/// execute, and the wrapper only calls an executable hydra.
+fn write_script(path: &Path, text: &str) {
+    std::fs::write(path, text).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 }
 
@@ -258,11 +268,10 @@ fn commit_through_wrapper(s: &Setup, exe_line: &str) -> assert_cmd::assert::Asse
         .to_string();
     let hooks = s.tmp().join("hooks");
     std::fs::create_dir_all(&hooks).unwrap();
-    std::fs::write(
-        hooks.join("pre-commit"),
-        wrapper.replace(&original, exe_line),
-    )
-    .unwrap();
+    write_script(
+        &hooks.join("pre-commit"),
+        &wrapper.replace(&original, exe_line),
+    );
     s.git()
         .arg("-C")
         .arg(&s.repo)
@@ -289,7 +298,7 @@ fn hook_allows_when_hydra_is_missing() {
 /// A stand-in hydra that exits with `code`.
 fn fake_hydra(s: &Setup, code: i32) -> String {
     let f = s.tmp().join(format!("fake-hydra-{code}"));
-    std::fs::write(&f, format!("#!/bin/sh\nexit {code}\n")).unwrap();
+    write_script(&f, &format!("#!/bin/sh\nexit {code}\n"));
     format!("hydra_exe='{}'", f.to_string_lossy().replace('\\', "/"))
 }
 
@@ -334,11 +343,10 @@ fn the_users_own_global_config_is_included_and_carried() {
     let s = Setup::new();
     let global_hooks = s.tmp().join("global-hooks");
     std::fs::create_dir_all(&global_hooks).unwrap();
-    std::fs::write(
-        global_hooks.join("pre-commit"),
+    write_script(
+        &global_hooks.join("pre-commit"),
         "#!/bin/sh\necho ran > global-ran\nexit 0\n",
-    )
-    .unwrap();
+    );
     let mine = s.tmp().join("dev").join(".gitconfig");
     std::fs::create_dir_all(mine.parent().unwrap()).unwrap();
     std::fs::write(
@@ -496,9 +504,12 @@ fn claude_is_told_to_ask_the_user_and_cannot_allow_itself() {
         ));
 }
 
-/// `C:\a\b` as Git Bash writes it: `/c/a/b`.
+/// `C:\a\b` as Git Bash writes it: `/c/a/b`. Elsewhere bash writes a path as it is.
 fn msys(p: &Path) -> String {
     let s = p.to_string_lossy().replace('\\', "/");
+    if !cfg!(windows) {
+        return s;
+    }
     let (drive, rest) = s.split_once(':').unwrap();
     format!("/{}{rest}", drive.to_lowercase())
 }
@@ -535,7 +546,12 @@ fn claude_hook_follows_shell_paths_and_cds() {
 #[test]
 fn allow_reaches_only_its_own_command() {
     let s = Setup::new();
-    let echo = ["cmd", "/c", "echo [%HYDRA_ALLOW%]"];
+    // cmd echoes an unset variable's name; sh echoes nothing.
+    let (echo, unset) = if cfg!(windows) {
+        (["cmd", "/c", "echo [%HYDRA_ALLOW%]"], "[%HYDRA_ALLOW%]")
+    } else {
+        (["sh", "-c", "echo [$HYDRA_ALLOW]"], "[]")
+    };
     // `hydra allow -- <cmd>` hands the override to its child ...
     s.h.hydra()
         .args([
@@ -557,7 +573,7 @@ fn allow_reaches_only_its_own_command() {
         .args(echo)
         .assert()
         .success()
-        .stdout(predicate::str::contains("[%HYDRA_ALLOW%]"));
+        .stdout(predicate::str::contains(unset));
 }
 
 #[test]

@@ -42,12 +42,10 @@ mod tests {
 
     #[test]
     fn names_drop_every_layout_extension() {
-        assert_eq!(layout_name(Path::new(r"C:\l\client-a.hydraui")), "client-a");
-        assert_eq!(
-            layout_name(Path::new(r"C:\l\client-a.HydraUI.TOML")),
-            "client-a"
-        );
-        assert_eq!(layout_name(Path::new(r"C:\l\work.toml")), "work");
+        let l = Path::new(if cfg!(windows) { r"C:\l" } else { "/l" });
+        assert_eq!(layout_name(&l.join("client-a.hydraui")), "client-a");
+        assert_eq!(layout_name(&l.join("client-a.HydraUI.TOML")), "client-a");
+        assert_eq!(layout_name(&l.join("work.toml")), "work");
     }
 
     #[test]

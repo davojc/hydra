@@ -1,5 +1,5 @@
 mod common;
-use common::Home;
+use common::{Home, SHELL, exit_with, native, show, with_home};
 use predicates::prelude::*;
 
 /// The test runs hydra with HYDRA_USER_HOME pointed at a fake user folder, so the
@@ -32,18 +32,13 @@ fn each_environment_gets_its_own_claude_folder() {
     h.write_env("personal", "[claude]\n");
     for env in ["work", "personal"] {
         hydra_as(&h, &user)
-            .args([
-                "run",
-                env,
-                "--",
-                "pwsh",
-                "-NoProfile",
-                "-Command",
-                "Write-Output \"[$env:CLAUDE_CONFIG_DIR]\"",
-            ])
+            .args(["run", env, "--"])
+            .args(show("CLAUDE_CONFIG_DIR"))
             .assert()
             .success()
-            .stdout(predicate::str::contains(format!("state\\{env}\\claude]")));
+            .stdout(predicate::str::contains(native(&format!(
+                "state\\{env}\\claude]"
+            ))));
         let dir = h.root().join("state").join(env).join("claude");
         assert_eq!(
             std::fs::read_to_string(dir.join("skills").join("s1").join("SKILL.md")).unwrap(),
@@ -62,8 +57,8 @@ fn shell_says_how_to_sign_in_to_claude() {
     let h = Home::new();
     let user = fake_user(&h);
     h.write_env("work", "[claude]\n");
-    hydra_as(&h, &user)
-        .args(["shell", "work", "--shell", "pwsh"])
+    with_home(hydra_as(&h, &user), &user)
+        .args(["shell", "work", "--shell", SHELL])
         .write_stdin("exit 0\n")
         .assert()
         .success()
@@ -78,7 +73,8 @@ fn env_rm_keeps_the_claude_base_intact() {
     let user = fake_user(&h);
     h.write_env("work", "[claude]\n");
     hydra_as(&h, &user)
-        .args(["run", "work", "--", "cmd", "/c", "exit", "0"])
+        .args(["run", "work", "--"])
+        .args(exit_with(0))
         .assert()
         .success();
     hydra_as(&h, &user)
@@ -156,7 +152,8 @@ fn run_rename_and_rm_never_change_the_base() {
     let before = fingerprint(&base, &user.join(".claude.json"));
     h.write_env("work", "[claude]\n");
     hydra_as(&h, &user)
-        .args(["run", "work", "--", "cmd", "/c", "exit", "0"])
+        .args(["run", "work", "--"])
+        .args(exit_with(0))
         .assert()
         .success();
     hydra_as(&h, &user)

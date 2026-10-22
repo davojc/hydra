@@ -1,5 +1,5 @@
 mod common;
-use common::Home;
+use common::{Home, SHELL, exit_with, native, show, with_home};
 use predicates::prelude::*;
 
 /// A fake user folder (so the real ~/.claude is never touched), as in claude_cli.rs.
@@ -14,15 +14,6 @@ fn hydra_as(h: &Home, user: &std::path::Path) -> assert_cmd::Command {
     let mut c = h.hydra();
     c.env("HYDRA_USER_HOME", user);
     c
-}
-
-fn echo(var: &str) -> [String; 4] {
-    [
-        "pwsh".into(),
-        "-NoProfile".into(),
-        "-Command".into(),
-        format!("Write-Output \"[$env:{var}]\""),
-    ]
 }
 
 #[test]
@@ -41,10 +32,12 @@ fn borrowed_tools_point_at_the_owners_folders() {
     ] {
         hydra_as(&h, &user)
             .args(["run", "work", "--"])
-            .args(echo(var))
+            .args(show(var))
             .assert()
             .success()
-            .stdout(predicate::str::contains(format!("state\\personal\\{sub}]")));
+            .stdout(predicate::str::contains(native(&format!(
+                "state\\personal\\{sub}]"
+            ))));
     }
     assert!(!h.root().join("state").join("work").join("claude").exists());
     // The guard hook is in the shared folder and still guards as the borrower (HYDRA_ENV=work).
@@ -59,7 +52,7 @@ fn borrowed_tools_point_at_the_owners_folders() {
     assert!(settings.contains("guard claude"), "{settings}");
     hydra_as(&h, &user)
         .args(["run", "work", "--"])
-        .args(echo("HYDRA_ENV"))
+        .args(show("HYDRA_ENV"))
         .assert()
         .success()
         .stdout(predicate::str::contains("[work]"));
@@ -83,10 +76,10 @@ fn borrowed_github_keeps_the_borrowers_git_author() {
         .stdout(predicate::str::contains("Work Me <work@example.com>"));
     hydra_as(&h, &user)
         .args(["run", "work", "--"])
-        .args(echo("GH_CONFIG_DIR"))
+        .args(show("GH_CONFIG_DIR"))
         .assert()
         .success()
-        .stdout(predicate::str::contains("state\\personal\\gh]"));
+        .stdout(predicate::str::contains(native("state\\personal\\gh]")));
 }
 
 #[test]
@@ -96,7 +89,8 @@ fn launch_fails_closed_when_the_owner_lacks_the_tool() {
     h.write_env("personal", "label = \"p\"\n");
     h.write_env("work", "[claude]\nfrom = \"personal\"\n");
     hydra_as(&h, &user)
-        .args(["run", "work", "--", "cmd", "/c", "exit", "0"])
+        .args(["run", "work", "--"])
+        .args(exit_with(0))
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -113,8 +107,8 @@ fn not_signed_in_points_at_the_owner() {
     let user = fake_user(&h);
     h.write_env("personal", "[claude]\n");
     h.write_env("work", "[claude]\nfrom = \"personal\"\n");
-    hydra_as(&h, &user)
-        .args(["shell", "work", "--shell", "pwsh"])
+    with_home(hydra_as(&h, &user), &user)
+        .args(["shell", "work", "--shell", SHELL])
         .write_stdin("exit 0\n")
         .assert()
         .success()
@@ -176,8 +170,7 @@ fn auth_on_a_borrowed_tool_names_the_owner() {
     let user = fake_user(&h);
     // A stand-in `codex login` that succeeds, first on PATH.
     let bin = h.dir.path().join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    std::fs::write(bin.join("codex.cmd"), "@exit /b 0\r\n").unwrap();
+    Home::write_launcher(&bin, "codex", "@exit /b 0\r\n", "exit 0");
     let mut path = vec![bin];
     path.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),

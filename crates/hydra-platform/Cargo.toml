@@ -15,3 +15,7 @@ tempfile.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 junction.workspace = true
+keyring = { workspace = true, features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }

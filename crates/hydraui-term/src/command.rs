@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 use std::path::Path;
 
+use hydra_core::contribution::same_var;
 use hydra_core::resolve::{EnvChange, LaunchEnv};
 use hydra_platform::shell::{ShellKind, shell_launch};
 use portable_pty::CommandBuilder;
@@ -29,12 +30,15 @@ pub fn pane_command(
     cmd.env_clear();
     let mut path = None;
     for (k, v) in inherited {
-        if k.eq_ignore_ascii_case("PATH") {
+        if k.to_str().is_some_and(|k| same_var(k, "PATH")) {
             path = Some(v.clone());
         }
         cmd.env(k, v);
     }
-    for (k, v) in TERMINAL_VARS.into_iter().chain(vars) {
+    for (k, v) in TERMINAL_VARS {
+        cmd.env(k, v);
+    }
+    for (k, v) in vars {
         cmd.env(k, v);
     }
     for change in launch.env_changes(path) {
@@ -58,6 +62,11 @@ mod tests {
 
     use super::*;
 
+    /// Folders in the platform's own form: `C:\\old` can't go in a Unix PATH, whose
+    /// separator is `:`.
+    const OLD: &str = if cfg!(windows) { "C:\\old" } else { "/old" };
+    const KEEP: &str = if cfg!(windows) { "C:\\keep" } else { "/keep" };
+
     fn launch(set: &[(&str, &str)]) -> LaunchEnv {
         LaunchEnv {
             name: EnvName::parse("work").unwrap(),
@@ -67,17 +76,18 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect::<BTreeMap<_, _>>(),
             unset: BTreeSet::from(["GH_TOKEN".to_string()]),
-            path_drop: vec![PathBuf::from("C:\\old")],
+            path_drop: vec![PathBuf::from(OLD)],
             warnings: Vec::new(),
         }
     }
 
-    /// Windows spells it `Path`; hydra writes `PATH`.
+    /// Windows spells it `Path`; hydra writes `PATH`. Unix names are case-sensitive, and
+    /// always `PATH`.
     fn inherited() -> Vec<(OsString, OsString)> {
         vec![
             (
-                "Path".into(),
-                std::env::join_paths(["C:\\old", "C:\\keep"]).unwrap(),
+                if cfg!(windows) { "Path" } else { "PATH" }.into(),
+                std::env::join_paths([OLD, KEEP]).unwrap(),
             ),
             ("GH_TOKEN".into(), "leaked".into()),
             ("SystemRoot".into(), "C:\\Windows".into()),
@@ -117,7 +127,7 @@ mod tests {
             .filter(|(k, _)| k.eq_ignore_ascii_case("PATH"))
             .collect();
         assert_eq!(paths.len(), 1, "{paths:?}");
-        assert_eq!(paths[0].1, "C:\\keep");
+        assert_eq!(paths[0].1, KEEP);
     }
 
     #[test]

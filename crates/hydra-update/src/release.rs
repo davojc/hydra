@@ -203,10 +203,7 @@ mod tests {
         ))
         .unwrap();
         let err = r.windows_build(EXE_ASSET).err().unwrap().to_string();
-        assert_eq!(
-            err,
-            "release v0.4.1 has no hydra-x86_64-pc-windows-msvc.exe"
-        );
+        assert_eq!(err, format!("release v0.4.1 has no {EXE_ASSET}"));
         let r = Release::parse(r#"{"tag_name":"v0.4.1"}"#).unwrap();
         assert!(r.windows_build(EXE_ASSET).is_err());
     }

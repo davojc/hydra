@@ -1,5 +1,5 @@
 mod common;
-use common::Home;
+use common::{Home, SHELL};
 use predicates::prelude::*;
 
 const GREEN: &str = "\x1b[32m";
@@ -38,8 +38,8 @@ fn forced_colour_paints_sign_in_hint_yellow() {
     let h = Home::new();
     h.write_env("work", "[github]\n");
     let out = h
-        .hydra()
-        .args(["shell", "work", "--shell", "pwsh"])
+        .hydra_shell()
+        .args(["shell", "work", "--shell", SHELL])
         .write_stdin("exit 0\n")
         .env("CLICOLOR_FORCE", "1")
         .env_remove("NO_COLOR")

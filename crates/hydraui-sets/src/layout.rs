@@ -214,7 +214,7 @@ pub struct Context<'a> {
     pub user_home: &'a Path,
     /// hydra's `[bindings]` from config.toml.
     pub bindings: &'a BTreeMap<String, String>,
-    /// From hydraui's config.toml; pwsh when unset.
+    /// From hydraui's config.toml; the platform's shell when unset.
     pub default_shell: ShellKind,
 }
 
@@ -353,7 +353,7 @@ fn plan_terminal(
     let shell = match t.shell.as_deref() {
         None => ctx.default_shell,
         Some(s) => ShellKind::parse(s)
-            .ok_or_else(|| format!("{env}: unknown shell {s:?}; use pwsh or bash"))?,
+            .ok_or_else(|| format!("{env}: unknown shell {s:?}; use pwsh, bash or zsh"))?,
     };
     let bound_elsewhere = bindings::resolve(&cwd, ctx.bindings)
         .filter(|b| b.env != env.as_str())
@@ -811,7 +811,7 @@ cwd = \"~\"
         let plan = plan_layout(&fx.ctx(), &layout(vec![env("work", vec![t.clone()])]));
         assert_eq!(
             plan.problems,
-            ["work: unknown shell \"fish\"; use pwsh or bash"]
+            ["work: unknown shell \"fish\"; use pwsh, bash or zsh"]
         );
         assert_eq!(plan.unopened.envs[0].terminals, vec![t]);
         assert!(plan.envs[0].terminals.is_empty());

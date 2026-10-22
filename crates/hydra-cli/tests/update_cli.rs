@@ -7,7 +7,8 @@ use std::path::PathBuf;
 use common::Home;
 use predicates::prelude::*;
 
-const EXE_ASSET: &str = "hydra-x86_64-pc-windows-msvc.exe";
+/// This platform's build of hydra, as releases name it.
+use hydra_update::HYDRA_ASSET as EXE_ASSET;
 const NEW_BYTES: &[u8] = b"new hydra build";
 
 /// A tiny HTTP/1.1 server answering GETs for a fixed set of paths (404 otherwise).
@@ -80,7 +81,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn installed(h: &Home) -> PathBuf {
     let dir = h.dir.path().join("bin");
     std::fs::create_dir_all(&dir).unwrap();
-    let exe = dir.join("hydra.exe");
+    let exe = dir.join(format!("hydra{}", std::env::consts::EXE_SUFFIX));
     std::fs::write(&exe, "old").unwrap();
     exe
 }
@@ -105,7 +106,16 @@ fn newer_release_replaces_the_exe() {
         .stdout(predicate::str::contains("updated to 99.0.0"));
     assert_eq!(std::fs::read(&exe).unwrap(), NEW_BYTES);
     let dir = exe.parent().unwrap();
-    assert!(!dir.join("hydra.new.exe").exists());
+    assert!(
+        !dir.join(format!("hydra.new{}", std::env::consts::EXE_SUFFIX))
+            .exists()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&exe).unwrap().permissions().mode();
+        assert_eq!(mode & 0o111, 0o111, "the new hydra must run: {mode:o}");
+    }
 }
 
 #[test]
@@ -121,7 +131,12 @@ fn checksum_mismatch_changes_nothing() {
             "checksum mismatch - nothing changed",
         ));
     assert_eq!(std::fs::read_to_string(&exe).unwrap(), "old");
-    assert!(!exe.parent().unwrap().join("hydra.new.exe").exists());
+    assert!(
+        !exe.parent()
+            .unwrap()
+            .join(format!("hydra.new{}", std::env::consts::EXE_SUFFIX))
+            .exists()
+    );
 }
 
 #[test]
@@ -197,7 +212,10 @@ fn version_flag_reports_a_dev_build() {
 #[test]
 fn start_removes_a_leftover_old_exe() {
     let bin = PathBuf::from(env!("CARGO_BIN_EXE_hydra"));
-    let old = bin.parent().unwrap().join("hydra.old.exe");
+    let old = bin
+        .parent()
+        .unwrap()
+        .join(format!("hydra.old{}", std::env::consts::EXE_SUFFIX));
     std::fs::write(&old, "left over from an update").unwrap();
     Home::new().hydra().arg("--version").assert().success();
     assert!(!old.exists());

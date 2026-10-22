@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::{ConfigError, EnvConfig, load_env};
-use crate::contribution::{VarValue, merge};
+use crate::contribution::{VarValue, merge, same_var};
 use crate::name::EnvName;
 use crate::paths::HydraPaths;
 use crate::provider::{Ctx, Provider, Warnings};
@@ -289,11 +289,11 @@ pub fn prepare(
         );
     }
     for v in &opts.drop_vars {
-        set.retain(|k, _| !k.eq_ignore_ascii_case(v));
+        set.retain(|k, _| !same_var(k, v));
         unset.insert(v.clone());
     }
     unset.extend(merged.unset.iter().cloned());
-    unset.retain(|u| !set.keys().any(|k| k.eq_ignore_ascii_case(u)));
+    unset.retain(|u| !set.keys().any(|k| same_var(k, u)));
     // `hydra allow -- pwsh` must not switch the guard off for a whole session: the one-off
     // override never reaches what a launch starts. (`hydra allow` sets it on its own child.)
     unset.insert(ALLOW_VAR.into());
@@ -313,26 +313,31 @@ pub fn prepare(
 mod tests {
     use super::*;
 
+    /// Folders in the platform's own form: `C:\\old` can't go in a Unix PATH, whose
+    /// separator is `:`.
+    const OLD: &str = if cfg!(windows) { "C:\\old" } else { "/old" };
+    const KEEP: &str = if cfg!(windows) { "C:\\keep" } else { "/keep" };
+
     fn sample_launch() -> LaunchEnv {
         LaunchEnv {
             name: EnvName::parse("work").unwrap(),
             config: EnvConfig::default(),
             set: BTreeMap::from([("A".to_string(), "1".to_string())]),
             unset: BTreeSet::from(["GH_TOKEN".to_string()]),
-            path_drop: vec![PathBuf::from("C:\\old")],
+            path_drop: vec![PathBuf::from(OLD)],
             warnings: Vec::new(),
         }
     }
 
     #[test]
     fn env_changes_lists_removals_then_values_then_path() {
-        let path = std::env::join_paths(["C:\\old", "C:\\keep"]).unwrap();
+        let path = std::env::join_paths([OLD, KEEP]).unwrap();
         assert_eq!(
             sample_launch().env_changes(Some(path)),
             vec![
                 EnvChange::Remove("GH_TOKEN".into()),
                 EnvChange::Set("A".into(), "1".into()),
-                EnvChange::Set("PATH".into(), "C:\\keep".into()),
+                EnvChange::Set("PATH".into(), KEEP.into()),
             ]
         );
     }
@@ -642,19 +647,27 @@ mod tests {
         )
         .unwrap();
         let shims = paths.legacy_shims_dir().to_string_lossy().into_owned();
-        let shouty = format!("{}\\", shims.replace('\\', "/").to_uppercase());
+        // The same folder spelled another way: case and separators on Windows, a trailing
+        // `/` on Unix.
+        let other = if cfg!(windows) {
+            format!("{}\\", shims.replace('\\', "/").to_uppercase())
+        } else {
+            format!("{shims}/")
+        };
+        let (bin, near) = if cfg!(windows) {
+            ("C:/bin", "C:/shims")
+        } else {
+            ("/usr/bin", "/shims")
+        };
         let current = std::env::join_paths([
             PathBuf::from(&shims),
-            PathBuf::from("C:/bin"),
-            PathBuf::from(&shouty),
-            PathBuf::from("C:/shims"),
+            PathBuf::from(bin),
+            PathBuf::from(&other),
+            PathBuf::from(near),
         ])
         .unwrap();
         let parts: Vec<PathBuf> = std::env::split_paths(&env.path_value(Some(current))).collect();
-        assert_eq!(
-            parts,
-            vec![PathBuf::from("C:/bin"), PathBuf::from("C:/shims")]
-        );
+        assert_eq!(parts, vec![PathBuf::from(bin), PathBuf::from(near)]);
     }
 
     #[test]
@@ -687,7 +700,14 @@ mod tests {
         };
         let env = run(&paths, &name, &providers, &MemoryStore::default(), &opts).unwrap();
         assert!(env.unset.contains("LINEAR_API_KEY"), "{:?}", env.unset);
-        assert!(!env.unset.iter().any(|u| u.eq_ignore_ascii_case("REGION")));
+        // On Windows the outer `region` is the REGION this environment sets, so it stays; on
+        // Unix it is another variable, which goes like the rest of the outer environment's.
+        if cfg!(windows) {
+            assert!(!env.unset.iter().any(|u| u.eq_ignore_ascii_case("REGION")));
+        } else {
+            assert!(env.unset.contains("region"), "{:?}", env.unset);
+            assert!(!env.unset.contains("REGION"), "{:?}", env.unset);
+        }
         assert!(!env.unset.contains(""));
         assert_eq!(env.set["REGION"], "us");
         assert_eq!(env.set["HYDRA_ENV_VARS"], "REGION");

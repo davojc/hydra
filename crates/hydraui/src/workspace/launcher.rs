@@ -465,6 +465,8 @@ impl Workspace {
         if let Some(view) = self.panes.get(&id).cloned() {
             view.update(cx, |v, cx| v.set_name(Some("orchestrator".into()), cx));
         }
+        // Its card shows at once, so its settings can be set before the first ticket.
+        self.orchestrators.insert(id, pipeline.to_string());
         crate::action_log::write(format!("started an orchestrator for {pipeline} in {env}"));
     }
 

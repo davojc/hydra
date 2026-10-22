@@ -7,6 +7,8 @@ use crate::runs::{Run, RunState, StageStatus};
 /// Linear in phase 2). `Stopped` is a ticket a person ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CardState {
+    /// Started from the launcher, waiting for a ticket.
+    Ready,
     Working,
     NeedsYou,
     Paused,
@@ -17,6 +19,7 @@ pub enum CardState {
 impl CardState {
     pub fn word(self) -> &'static str {
         match self {
+            CardState::Ready => "Ready",
             CardState::Working => "Working",
             CardState::NeedsYou => "Needs you",
             CardState::Paused => "Paused",
@@ -86,6 +89,17 @@ pub fn card(run: &Run) -> Card {
         line: format!("{} · {stage}", run.ticket),
         state,
         segments,
+    }
+}
+
+/// The card of an orchestrator started from the launcher before it has a ticket: the pipeline
+/// it will run, so its settings and history are one click away.
+pub fn ready_card(pipeline: &crate::pipeline::Pipeline) -> Card {
+    Card {
+        name: pipeline.name.clone(),
+        line: "No ticket yet".into(),
+        state: CardState::Ready,
+        segments: vec![Segment::Pending; pipeline.stages.len()],
     }
 }
 
@@ -210,6 +224,21 @@ mod tests {
         );
         runs.person(&id, crate::runs::Choice::Stop).unwrap();
         assert_eq!(card(runs.run(&id).unwrap()).state, CardState::Stopped);
+    }
+
+    #[test]
+    fn an_orchestrator_without_a_ticket_is_ready() {
+        let p = crate::pipeline::parse(
+            "name = \"INTH SLA tickets\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n\
+             [[stage]]\nid = \"b\"\ntitle = \"B\"\n",
+        )
+        .unwrap();
+        let c = ready_card(&p);
+        assert_eq!(c.name, "INTH SLA tickets");
+        assert_eq!(c.line, "No ticket yet");
+        assert_eq!(c.state, CardState::Ready);
+        assert_eq!(c.state.word(), "Ready");
+        assert_eq!(c.segments, [Segment::Pending, Segment::Pending]);
     }
 
     #[test]

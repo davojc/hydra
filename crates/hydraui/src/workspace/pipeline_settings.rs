@@ -135,12 +135,12 @@ impl Workspace {
         let view = self.panes.get(&orch)?.read(cx);
         let token = view.mcp_token()?.to_string();
         let sv = server::get()?;
+        // Its current run's pipeline, else the one it was started for (no ticket yet).
         let file = server::lock(sv.registry())
             .runs
-            .current(&token)?
-            .pipeline
-            .file
-            .clone();
+            .current(&token)
+            .map(|r| r.pipeline.file.clone())
+            .or_else(|| self.orchestrators.get(&orch).cloned())?;
         (!file.is_empty()).then(|| (file, view.env().to_string(), view.cwd().clone()))
     }
 

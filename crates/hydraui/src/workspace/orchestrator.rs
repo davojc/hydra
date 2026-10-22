@@ -15,7 +15,7 @@ use crate::hydra::{PaneRequest, command_line};
 use crate::mcp::server::{self, McpEvent};
 use crate::orchestrator_theme::{self as theme, color};
 use crate::pickup::{Session, ready_for_prompt};
-use crate::pipeline_card::{Card, CardState, Segment, card, card_tokens, meter};
+use crate::pipeline_card::{Card, CardState, Segment, card, card_tokens, meter, ready_card};
 use crate::rating::{Outcome, Side};
 use crate::runs::{Change, Decided, MAX_ATTEMPTS, Role, Run, RunState, StageStatus, StartStage};
 use crate::worktrees;
@@ -512,10 +512,16 @@ impl Workspace {
             .filter_map(|id| Some((*id, token_of(id)?)))
             .collect();
         let reg = server::lock(sv.registry());
+        let root = self.hydra.paths.root();
         tokens
             .iter()
             .filter_map(|(id, token)| {
-                let run = reg.runs.current(token)?;
+                let Some(run) = reg.runs.current(token) else {
+                    // Started from the launcher, no ticket yet: the card of its pipeline.
+                    let file = self.orchestrators.get(id)?;
+                    let pipeline = crate::pipeline::load(root, file).ok()?;
+                    return Some((*id, ready_card(&pipeline), vec![*id]));
+                };
                 let panes = card_tokens(run)
                     .iter()
                     .filter_map(|t| tokens.iter().find(|(_, x)| x == t).map(|(p, _)| *p))
@@ -575,6 +581,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (pill_fg, pill_bg) = match c.state {
+            CardState::Ready => (theme::TEXT_SECONDARY, theme::RAISED),
             CardState::Working => (theme::TEAL, theme::TEAL_TINT),
             CardState::NeedsYou => (theme::RED, theme::RED_TINT),
             CardState::Paused => (theme::AMBER, theme::AMBER_TINT),

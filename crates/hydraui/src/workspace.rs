@@ -202,6 +202,9 @@ pub struct Workspace {
     tasks_tabs: HashMap<PaneId, bool>,
     /// Orchestrators' Pipeline tabs (orchestrator spec §7.2).
     pipeline_tabs: HashMap<PaneId, pipeline_tab::PipelineTab>,
+    /// Orchestrators started from the launcher, with the pipeline file each runs: their cards
+    /// show before they have a ticket.
+    orchestrators: HashMap<PaneId, String>,
     /// Pipeline settings being edited, per orchestrator (orchestrator spec §7.4).
     pipeline_settings: HashMap<PaneId, pipeline_settings::SettingsDraft>,
     /// One board per project, shared by every Tasks tab on it; dropped when no tab uses it.
@@ -416,6 +419,7 @@ impl Workspace {
             tasks_tabs: HashMap::new(),
             pipeline_tabs: HashMap::new(),
             pipeline_settings: HashMap::new(),
+            orchestrators: HashMap::new(),
             boards: HashMap::new(),
             board_views: HashMap::new(),
             all_tasks: HashSet::new(),
@@ -1009,6 +1013,7 @@ impl Workspace {
     fn drop_pane(&mut self, id: PaneId) {
         self.pipeline_tabs.remove(&id);
         self.pipeline_settings.remove(&id);
+        self.orchestrators.remove(&id);
         // Dropping the view drops its Pane: the job ends the shell's whole process tree.
         self.panes.remove(&id);
         self.subs.remove(&id);

@@ -822,6 +822,107 @@ mod tests {
     }
 
     #[test]
+    fn a_two_stage_run_over_http() {
+        use crate::runs::Decided;
+        let home = tempfile::tempdir().unwrap();
+        write_two(home.path(), 80);
+        let server = Server::start().unwrap();
+        server.set_hydra_root(home.path().to_path_buf());
+        let register = |label: &str| {
+            server
+                .registry()
+                .lock()
+                .unwrap()
+                .register(label, home.path().to_path_buf())
+        };
+        let orch = register("orchestrator");
+        let post = |token: &str, body: Value| -> (u16, Value) {
+            let resp = ureq::post(server.url())
+                .set("Authorization", &format!("Bearer {token}"))
+                .set("Content-Type", "application/json")
+                .send_string(&body.to_string())
+                .unwrap();
+            let status = resp.status();
+            let text = resp.into_string().unwrap();
+            (status, serde_json::from_str(&text).unwrap_or(Value::Null))
+        };
+        let tool = |token: &str, name: &str, args: Value| -> (String, bool) {
+            let (_, v) = post(
+                token,
+                json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                       "params": {"name": name, "arguments": args}}),
+            );
+            let r = &v["result"];
+            (
+                r["content"][0]["text"].as_str().unwrap().to_string(),
+                r["isError"].as_bool().unwrap(),
+            )
+        };
+        let mut events = server.subscribe();
+        let mut next = || events.try_recv().ok();
+        // What the workspace does on StageStart: a terminal for the stage, linked to the run.
+        let open = |event: Option<McpEvent>| -> String {
+            let Some(McpEvent::StageStart(s)) = event else {
+                panic!("a stage start: {event:?}");
+            };
+            let name = format!("{} · {}", s.label, s.title);
+            let tok = register(&name);
+            server
+                .registry()
+                .lock()
+                .unwrap()
+                .runs
+                .link(&s.run, s.stage, &tok, &name);
+            tok
+        };
+
+        let args = json!({"pipeline": "two", "ticket": "INTH-9", "summary": "Rows dropped"});
+        let (text, err) = tool(&orch, "run_start", args);
+        assert!(!err, "{text}");
+        assert!(
+            matches!(next(), Some(McpEvent::RunChanged(c)) if c[0].what == Decided::RunStarted)
+        );
+        assert!(
+            !tool(
+                &orch,
+                "stage_start",
+                json!({"run": "INTH-9-1", "stage": "a"})
+            )
+            .1
+        );
+        let a = open(next());
+        let usage = json!({"jsonrpc": "2.0", "method": "hydraui/usage",
+                           "params": {"rate_limits": {"seven_day": {"used_percentage": 40}}}});
+        assert_eq!(post(&a, usage).0, 202);
+        assert!(matches!(next(), Some(McpEvent::Usage(t, _)) if t == a));
+        let (text, err) = tool(&a, "stage_report", report(90));
+        assert!(!err && text.contains("passed"), "{text}");
+        assert!(
+            matches!(next(), Some(McpEvent::RunChanged(c)) if c.iter().any(|c| c.what == Decided::Passed))
+        );
+        assert!(
+            !tool(
+                &orch,
+                "stage_start",
+                json!({"run": "INTH-9-1", "stage": "b"})
+            )
+            .1
+        );
+        let b = open(next());
+        let (text, err) = tool(&b, "stage_report", report(95));
+        assert!(!err, "{text}");
+        assert!(
+            matches!(next(), Some(McpEvent::RunChanged(c)) if c.iter().any(|c| c.what == Decided::RunFinished))
+        );
+        let (text, _) = tool(&orch, "run_status", json!({}));
+        let st: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(st["state"], "finished");
+        assert_eq!(st["week_used"], 40.0);
+        // A closed stage terminal after the run ended changes nothing.
+        assert!(server.registry().lock().unwrap().revoke(&b).is_empty());
+    }
+
+    #[test]
     fn speaks_json_rpc() {
         let dir = repo();
         let reg = Mutex::new(Registry::default());

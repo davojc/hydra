@@ -454,3 +454,29 @@ less than 30% of the seven-day Claude window is left; a person is called through
 Slack (Slack in phase 3); a person merges; the orchestrator view shows the current stage and every
 linked session with what it is doing; the views look and behave as the design handoff shows, and
 no gate can be skipped.
+
+## 12. As built
+
+The builder's calls above, answered (plan Tasks 1-15, branch `orchestrator-core`):
+- **Views (§7.1).** The Pipeline tab shares the Tasks tab's strip above the orchestrator's
+  terminal; Pipeline, Ticket history and Pipeline settings are its three views, reached from the
+  card and the two links under it. A newly opened stage is followed; clicking a session pins it.
+- **Opening a stage quietly (§3.2).** `EnvTabs::add_terminal_quietly` adds the terminal without
+  changing what is shown; its name is `s-NN · <stage>`. A shell that exits, or a Claude session
+  that ends, before reporting fails its stage.
+- **Wake-up wording (§6).** One line naming the run, the stage and the result, then what to do
+  (`Call run_status, then start the next stage.`; `Tell the user why and wait`). Sent through
+  `PaneView::type_prompt` with the reservation; a waiting one is retried each second.
+- **Step-in and re-run (§5.3).** Step-in focuses the stopped session's own terminal; **Hand back**
+  opens the re-run dialog. The note is a single-line field for now (the design's is taller).
+- **Skills (§7.4).** Folders holding a `SKILL.md` in `state/<env>/claude/skills` and the
+  project's `.claude/skills`, plus any skill the file already names.
+- **Look.** The design's colours are `orchestrator_theme`; gpui-component's sliders keep its
+  own colours, not the design's teal. hydraui's shell keeps its look (§1).
+- **History (§7.5).** The detail is the stop's reason or the last report's summary; a log with no
+  end whose run isn't live reads "hydraui closed before the run ended".
+
+Checked by hand on macOS: the card, the allowance meter, the escalation toast, the Pipeline
+tab's held banner, Pause and the status text, Pipeline settings and Ticket history, in a hydraui
+built from the branch. The live, report, step-in and done panels, and a ticket walked through
+every stage, wait for the end-to-end walkthrough on macOS and Windows.

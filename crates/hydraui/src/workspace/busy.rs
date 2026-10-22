@@ -106,6 +106,10 @@ impl Workspace {
             self.pane_name(id, cx),
             if resumed { " (resumed session)" } else { "" }
         ));
+        if state == SessionState::Ended {
+            // Claude ended without reporting: its stage fails (orchestrator spec §3.4).
+            self.stage_session_gone(token);
+        }
         // A card sent here has reached the session, or it moved on: no longer reserved.
         self.reserved.remove(&id);
         view.update(cx, |v, cx| v.set_claude(state, resumed, cx));

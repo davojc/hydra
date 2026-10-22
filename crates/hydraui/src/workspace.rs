@@ -7,6 +7,7 @@ mod busy;
 mod finder;
 mod launcher;
 mod layout_file;
+mod orchestrator;
 mod pickup;
 mod settings_tab;
 mod shortcuts;
@@ -323,20 +324,7 @@ impl Workspace {
                         } => ws.session_state(&token, state, resumed, window, cx),
                         McpEvent::Usage(token, usage) => ws.usage_reported(&token, usage, cx),
                         McpEvent::Verified(token) => ws.session_verified(&token, cx),
-                        // Stage terminals open in the orchestrator plan's Task 6; until then a
-                        // start fails rather than leaving its run waiting on a terminal.
-                        McpEvent::StageStart(s) => {
-                            if let Some(server) = crate::mcp::server::get() {
-                                let changes = crate::mcp::server::lock(server.registry())
-                                    .runs
-                                    .start_failed(
-                                        &s.run,
-                                        s.stage,
-                                        "hydraui can't open stage terminals yet",
-                                    );
-                                server.broadcast(McpEvent::RunChanged(changes));
-                            }
-                        }
+                        McpEvent::StageStart(s) => ws.start_stage(s, window, cx),
                         McpEvent::RunChanged(_) => cx.notify(),
                     });
                     if alive.is_err() {
@@ -596,6 +584,23 @@ impl Workspace {
         id
     }
 
+    /// A terminal running `request` in `env`'s open tab, added without taking focus or changing
+    /// what is shown (orchestrator spec §3.2); `None` when `env` has no tab.
+    pub(super) fn open_terminal_beside(
+        &mut self,
+        env: &str,
+        request: PaneRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<PaneId> {
+        self.envs.get(env)?;
+        let id = self.new_pane(request, window, cx);
+        self.envs.add_terminal_quietly(env, id);
+        self.autosave(window, cx);
+        cx.notify();
+        Some(id)
+    }
+
     /// Shows terminal `id` in the middle, selecting its environment, and focuses it.
     pub(super) fn show_terminal(
         &mut self,
@@ -666,6 +671,12 @@ impl Workspace {
                 if let PaneEvent::OpenPath(path, line, column) = ev {
                     ws.show_file_at(path.clone(), *line, *column, window, cx);
                     return;
+                }
+                if *ev == PaneEvent::Exited
+                    && let Some(token) = view.read(cx).mcp_token().map(str::to_string)
+                {
+                    // The shell died: a stage it ran fails even with its terminal open.
+                    ws.stage_session_gone(&token);
                 }
                 if *ev == PaneEvent::Focused {
                     // A click in a terminal shows it and selects its environment.

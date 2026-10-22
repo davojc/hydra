@@ -231,6 +231,16 @@ mod tests {
     }
 
     #[test]
+    fn a_run_gets_a_worktree_named_after_it() {
+        let Some((d, repo)) = repo() else {
+            return;
+        };
+        let wt = create(&repo, "INTH-1-1").unwrap();
+        assert_eq!(wt.branch, "task/inth-1-1");
+        assert_eq!(wt.path, d.path().join("repo-worktrees").join("inth-1-1"));
+    }
+
+    #[test]
     fn a_cards_worktree_is_made_merged_and_removed() {
         let Some((d, repo)) = repo() else {
             return;

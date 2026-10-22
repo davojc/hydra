@@ -437,6 +437,13 @@ impl Runs {
         })
     }
 
+    /// The worktree made for `run`'s first worktree stage, which its later ones reuse (§3.2).
+    pub fn set_worktree(&mut self, run: &str, path: PathBuf) {
+        if let Some(ri) = self.index(run) {
+            self.runs[ri].worktree = Some(path);
+        }
+    }
+
     /// The terminal for a starting stage opened: `token` is its latest attempt's session.
     pub fn link(&mut self, run: &str, stage: usize, token: &str, name: &str) {
         if let Some(s) = self
@@ -1185,6 +1192,17 @@ mod tests {
         );
         assert!(matches!(runs.run(&id).unwrap().state, RunState::Stopped(_)));
         assert!(runs.person(&id, retry("again")).is_err());
+    }
+
+    #[test]
+    fn a_run_keeps_its_worktree() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a"]);
+        runs.set_worktree(&id, "C:/r-worktrees/inth-1-1".into());
+        assert_eq!(
+            runs.run(&id).unwrap().worktree.as_deref(),
+            Some(std::path::Path::new("C:/r-worktrees/inth-1-1"))
+        );
     }
 
     #[test]

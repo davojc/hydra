@@ -23,6 +23,9 @@ use crate::orchestrator_theme::{self as theme, color};
 use crate::pipeline::{self, Edit, EditStage, validate};
 use crate::runs::MAX_ATTEMPTS;
 
+/// The width of a stage row's up/down arrows, so the prompt can line up under the title.
+const ARROWS_W: f32 = 44.;
+
 struct DraftStage {
     /// Keys its row's elements, stable while rows move.
     key: u64,
@@ -43,8 +46,6 @@ pub(super) struct SettingsDraft {
     file: String,
     saved: Edit,
     name: Entity<InputState>,
-    /// The pipeline's `feature_env` pattern.
-    feature_env: Entity<InputState>,
     bar: Entity<SliderState>,
     stages: Vec<DraftStage>,
     skills: Vec<String>,
@@ -74,8 +75,8 @@ impl SettingsDraft {
     fn edit(&self, cx: &App) -> Edit {
         Edit {
             name: self.name.read(cx).value().to_string(),
-            feature_env: Some(self.feature_env.read(cx).value().trim().to_string())
-                .filter(|f| !f.is_empty()),
+            // Not edited here: the pattern is the same for every ticket, so it stays as the file has it.
+            feature_env: self.saved.feature_env.clone(),
             bar: slider_value(&self.bar, cx),
             stages: self
                 .stages
@@ -168,17 +169,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> SettingsDraft {
         let name = cx.new(|cx| InputState::new(window, cx).default_value(saved.name.clone()));
-        let feature_env = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("https://fev2-solutions-{ticket_lower}.dev.iov42.net")
-                .default_value(saved.feature_env.clone().unwrap_or_default())
-        });
         let bar = slider(saved.bar, cx);
         let mut subs = vec![
             cx.subscribe_in(&name, window, |_, _, _: &InputEvent, _, cx| cx.notify()),
-            cx.subscribe_in(&feature_env, window, |_, _, _: &InputEvent, _, cx| {
-                cx.notify()
-            }),
             cx.subscribe_in(&bar, window, move |ws, _, _: &SliderEvent, window, cx| {
                 ws.default_bar_moved(orch, window, cx)
             }),
@@ -187,7 +180,6 @@ impl Workspace {
             file,
             saved: saved.clone(),
             name,
-            feature_env,
             bar,
             stages: Vec::new(),
             skills,
@@ -485,6 +477,7 @@ impl Workspace {
                             .child(
                                 h_flex()
                                     .flex_none()
+                                    .w(px(ARROWS_W))
                                     .child(
                                         Button::new(SharedString::from(format!("up-{key}")))
                                             .label("↑")
@@ -520,6 +513,8 @@ impl Workspace {
                                     ))
                                     .outline()
                                     .small()
+                                    .w(px(140.))
+                                    .flex_none()
                                     .on_click(cx.listener(move |ws, _, window, cx| {
                                         ws.pick_skill(orch, key, window, cx)
                                     })),
@@ -539,29 +534,38 @@ impl Workspace {
                                     })
                                     .outline()
                                     .small()
+                                    .w(px(190.))
+                                    .flex_none()
                                     .tooltip("The folder this stage's session starts in")
                                     .on_click(cx.listener(move |ws, _, window, cx| {
                                         ws.pick_folder(orch, key, window, cx)
                                     })),
                             )
-                            .when(s.folder.is_some(), |row| {
-                                row.child(
-                                    Button::new(SharedString::from(format!("folder-clear-{key}")))
-                                        .label("↺")
-                                        .ghost()
-                                        .xsmall()
-                                        .tooltip("Start in the orchestrator's folder")
-                                        .on_click(cx.listener(move |ws, _, _, cx| {
-                                            ws.with_draft(orch, cx, |d| {
-                                                if let Some(s) =
-                                                    d.stages.iter_mut().find(|s| s.key == key)
-                                                {
-                                                    s.folder = None;
-                                                }
-                                            })
-                                        })),
-                                )
-                            })
+                            .child(
+                                div()
+                                    .w(px(24.))
+                                    .flex_none()
+                                    .when(s.folder.is_some(), |slot| {
+                                        slot.child(
+                                            Button::new(SharedString::from(format!(
+                                                "folder-clear-{key}"
+                                            )))
+                                            .label("↺")
+                                            .ghost()
+                                            .xsmall()
+                                            .tooltip("Start in the orchestrator's folder")
+                                            .on_click(cx.listener(move |ws, _, _, cx| {
+                                                ws.with_draft(orch, cx, |d| {
+                                                    if let Some(s) =
+                                                        d.stages.iter_mut().find(|s| s.key == key)
+                                                    {
+                                                        s.folder = None;
+                                                    }
+                                                })
+                                            })),
+                                        )
+                                    }),
+                            )
                             .child(div().w(px(120.)).flex_none().child(Slider::new(&s.bar)))
                             .child(
                                 text(
@@ -602,21 +606,12 @@ impl Workspace {
                     )
                     // What the stage's session is asked; hydraui's note follows it.
                     .child(
-                        h_flex()
-                            .gap(px(10.))
-                            .pl(px(34.))
-                            .child(
-                                text(11.5, theme::TEXT_MUTED)
-                                    .flex_none()
-                                    .w(px(48.))
-                                    .child("Prompt"),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(Input::new(&s.prompt).small()),
-                            ),
+                        // Lined up under the title: past the number, the arrows and their gaps.
+                        div().pl(px(24. + 10. + ARROWS_W + 10.)).child(
+                            Input::new(&s.prompt)
+                                .small()
+                                .prefix(text(11.5, theme::TEXT_MUTED).pr(px(6.)).child("Prompt")),
+                        ),
                     ),
             );
         }
@@ -721,16 +716,6 @@ impl Workspace {
                                     .child(div().max_w(px(480.)).child(Input::new(&draft.name)))
                                     .child(text(12., theme::TEXT_MUTED).child(
                                         "Shown in the sidebar, notifications and Slack messages",
-                                    )),
-                            )
-                            .child(
-                                v_flex()
-                                    .gap_2()
-                                    .child(section("Feature environment"))
-                                    .child(div().max_w(px(480.)).child(Input::new(&draft.feature_env)))
-                                    .child(text(12., theme::TEXT_MUTED).child(
-                                        "Where a ticket's fix runs. {ticket} and {ticket_lower} are \
-                                         filled in; prompts use it as {feature_env}.",
                                     )),
                             )
                             .child(

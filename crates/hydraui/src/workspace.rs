@@ -328,6 +328,10 @@ impl Workspace {
                 cx.notify();
             }
         });
+        if let Some(server) = crate::mcp::server::get() {
+            // The weekly share a stage needs (orchestrator spec §5.1), from config.toml.
+            crate::mcp::server::lock(server.registry()).min_week_left = ui.min_week_left;
+        }
         let mcp_pump = crate::mcp::server::get().map(|server| {
             let mut rx = server.subscribe();
             cx.spawn_in(window, async move |this, cx| {

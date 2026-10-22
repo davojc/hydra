@@ -20,6 +20,17 @@ use crate::rating::{Outcome, Side};
 use crate::runs::{Change, Decided, MAX_ATTEMPTS, Role, Run, RunState, StageStatus, StartStage};
 use crate::worktrees;
 
+/// The first prompt of a terminal started as an orchestrator (spec §3.0, §9).
+pub fn orchestrator_prompt(pipeline: &str) -> String {
+    format!(
+        "You are the orchestrator for hydraui's pipeline \"{pipeline}\". You coordinate one \
+         ticket at a time through its stages and never do a stage's work yourself. Ask me which \
+         ticket to run. Then call run_start with pipeline \"{pipeline}\", the ticket and its \
+         title, and start each stage in order with stage_start. After each one, wait: hydraui \
+         tells you when it reports. When a run needs a person, tell me why and wait."
+    )
+}
+
 /// A stage terminal's name, e.g. `s-02 · Develop`.
 pub fn stage_title(label: &str, title: &str) -> String {
     format!("{label} · {title}")
@@ -850,6 +861,20 @@ mod tests {
         };
         assert!(wake_now(&ready, false));
         assert!(!wake_now(&ready, true));
+    }
+
+    #[test]
+    fn the_orchestrator_prompt_names_the_pipeline_and_its_role() {
+        let p = orchestrator_prompt("ticket");
+        for says in [
+            "\"ticket\"",
+            "run_start",
+            "stage_start",
+            "never do a stage's work",
+            "wait",
+        ] {
+            assert!(p.contains(says), "{says}: {p}");
+        }
     }
 
     #[test]

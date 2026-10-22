@@ -63,6 +63,9 @@ pub struct UiConfig {
     pub colors: ColorsConfig,
     /// Command name → keys, e.g. `new_terminal = "ctrl-alt-d"`; `""` unbinds.
     pub keys: BTreeMap<String, String>,
+    /// The share of the seven-day Claude limit, in percent, a pipeline stage needs left
+    /// (orchestrator spec §5.1).
+    pub min_week_left: u8,
 }
 
 impl Default for UiConfig {
@@ -76,6 +79,7 @@ impl Default for UiConfig {
             editor: None,
             colors: ColorsConfig::default(),
             keys: BTreeMap::new(),
+            min_week_left: crate::runs::MIN_WEEK_LEFT,
         }
     }
 }
@@ -126,6 +130,14 @@ pub fn parse(text: &str) -> (UiConfig, Vec<String>) {
             }),
             "editor" => get(value).map(|e| cfg.editor = Some(e)),
             "keys" => get(value).map(|k| cfg.keys = k),
+            "min_week_left" => get::<i64>(value).and_then(|n| {
+                let n = u8::try_from(n)
+                    .ok()
+                    .filter(|n| *n <= 100)
+                    .ok_or(format!("{n} must be between 0 and 100"))?;
+                cfg.min_week_left = n;
+                Ok(())
+            }),
             "colors" => match value {
                 toml::Value::Table(colors) => {
                     parse_colors(colors, &mut cfg.colors, &mut problems);
@@ -302,6 +314,7 @@ theme = "light"
 default_env = "work"
 default_shell = "bash"
 editor = "code"
+min_week_left = 25
 
 [colors]
 background = "#101010"
@@ -317,6 +330,7 @@ new_terminal = "ctrl-alt-d"
         assert_eq!(cfg.default_env.as_deref(), Some("work"));
         assert_eq!(cfg.default_shell.as_deref(), Some("bash"));
         assert_eq!(cfg.editor.as_deref(), Some("code"));
+        assert_eq!(cfg.min_week_left, 25);
         assert_eq!(cfg.colors.background.as_deref(), Some("#101010"));
         assert_eq!(cfg.colors.palette.as_ref().map(Vec::len), Some(2));
         assert_eq!(cfg.keys["new_terminal"], "ctrl-alt-d");
@@ -331,7 +345,7 @@ new_terminal = "ctrl-alt-d"
     fn one_bad_setting_keeps_the_rest() {
         let (cfg, problems) = parse(
             "font = \"Fira Code\"\nfontsize = 12\nfont_size = 200\ntheme = \"blue\"\n\
-             default_shell = \"fish\"\ndefault_env = \"work\"\n\
+             default_shell = \"fish\"\ndefault_env = \"work\"\nmin_week_left = 101\n\
              [colors]\nforground = \"#000000\"\nbackground = \"#101010\"\n",
         );
         assert_eq!(cfg.font, "Fira Code");
@@ -340,8 +354,16 @@ new_terminal = "ctrl-alt-d"
         assert_eq!(cfg.font_size, 14.0);
         assert_eq!(cfg.theme, ThemeChoice::Dark);
         assert_eq!(cfg.default_shell, None);
-        assert_eq!(problems.len(), 5, "{problems:?}");
-        for word in ["fontsize", "between 6 and 72", "theme", "fish", "forground"] {
+        assert_eq!(cfg.min_week_left, crate::runs::MIN_WEEK_LEFT);
+        assert_eq!(problems.len(), 6, "{problems:?}");
+        for word in [
+            "fontsize",
+            "between 6 and 72",
+            "theme",
+            "fish",
+            "forground",
+            "between 0 and 100",
+        ] {
             assert!(
                 problems.iter().any(|p| p.contains(word)),
                 "{word}: {problems:?}"

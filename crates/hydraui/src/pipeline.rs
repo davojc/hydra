@@ -136,6 +136,22 @@ pub fn folder(hydra_root: &Path) -> PathBuf {
     hydra_root.join("hydraui").join("pipelines")
 }
 
+/// The pipelines in `folder`, by file name without `.toml`, sorted.
+pub fn names(hydra_root: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(folder(hydra_root))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            (path.extension()? == "toml").then(|| path.file_stem()?.to_str().map(str::to_string))?
+        })
+        .filter(|n| plain_name(n))
+        .collect();
+    names.sort();
+    names
+}
+
 /// The pipeline `<name>.toml` in `folder`.
 pub fn load(hydra_root: &Path, name: &str) -> Result<Pipeline, String> {
     if !plain_name(name) {
@@ -347,6 +363,18 @@ mod tests {
             "Do the \"Check\" stage of ticket {ticket}."
         );
         assert_eq!(p.file, "");
+    }
+
+    #[test]
+    fn names_lists_the_pipeline_files() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(names(d.path()).is_empty());
+        let dir = folder(d.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["zeta.toml", "alpha.toml", "notes.md", "Bad Name.toml"] {
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        assert_eq!(names(d.path()), ["alpha", "zeta"]);
     }
 
     #[test]

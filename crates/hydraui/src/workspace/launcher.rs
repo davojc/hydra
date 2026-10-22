@@ -107,6 +107,15 @@ impl Workspace {
             Action::StartPage => {
                 let _ = crate::window_layout::spawn_hydraui(None);
             }
+            Action::StartOrchestrator => self.start_orchestrator(window, cx),
+            Action::EditPipelines => {
+                let root = self.hydra.paths.root().to_path_buf();
+                if let Err(e) = crate::pipeline::ensure_example(&root) {
+                    crate::action_log::write(format!("example pipeline: {e}"));
+                }
+                let _ = std::fs::create_dir_all(crate::pipeline::folder(&root));
+                cx.open_with_system(&crate::pipeline::folder(&root));
+            }
             Action::OpenConfigFolder => {
                 let dir = self.hydra.paths.root().join("hydraui");
                 let _ = std::fs::create_dir_all(&dir);
@@ -325,6 +334,18 @@ impl Workspace {
         then: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) + 'static,
     ) {
         let envs = self.hydra.env_names();
+        self.choose_env_from(envs, title, window, cx, then);
+    }
+
+    /// `choose_env` over `envs` only.
+    fn choose_env_from(
+        &mut self,
+        envs: Vec<String>,
+        title: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) + 'static,
+    ) {
         if envs.is_empty() {
             window.push_notification(
                 Notification::info("There are no environments yet.").title("Environments"),
@@ -357,6 +378,91 @@ impl Workspace {
                     }),
             )
         });
+    }
+
+    /// **Start orchestrator…** (orchestrator spec §3.0): an environment with Claude (the MCP
+    /// server is registered only there), then a pipeline, then a terminal titled `orchestrator`
+    /// running Claude with the orchestrator's first prompt.
+    fn start_orchestrator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let envs: Vec<String> = self
+            .hydra
+            .env_names()
+            .into_iter()
+            .filter(|e| self.hydra.sign_ins(e).iter().any(|t| t == "claude"))
+            .collect();
+        if envs.is_empty() {
+            window.push_notification(
+                Notification::info("No environment has Claude configured: add [claude] to one.")
+                    .title("Start orchestrator"),
+                cx,
+            );
+            return;
+        }
+        self.choose_env_from(
+            envs,
+            "Start orchestrator in",
+            window,
+            cx,
+            |ws, env, window, cx| ws.choose_pipeline(env, window, cx),
+        );
+    }
+
+    /// Picks the orchestrator's pipeline (the example is written when there is none); one
+    /// pipeline is taken without asking.
+    fn choose_pipeline(&mut self, env: String, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.hydra.paths.root().to_path_buf();
+        if let Err(e) = crate::pipeline::ensure_example(&root) {
+            crate::action_log::write(format!("example pipeline: {e}"));
+        }
+        let names = crate::pipeline::names(&root);
+        if let [only] = names.as_slice() {
+            let only = only.clone();
+            return self.open_orchestrator(&env, &only, window, cx);
+        }
+        let state = cx.new(|cx| CommandState::new(window, cx));
+        let workspace = cx.entity();
+        let first = Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first.replace(false) {
+                state.update(cx, |s, cx| s.focus(window, cx));
+            }
+            let (choices, workspace, env) = (names.clone(), workspace.clone(), env.clone());
+            dialog.title("Pipeline").child(
+                Command::new(&state)
+                    .items(names.iter().map(|n| CommandItem::new().label(n.clone())))
+                    .placeholder("Pipeline")
+                    .on_confirm(move |ix, window, cx| {
+                        if let Some(name) = choices.get(ix.row).cloned() {
+                            window.close_dialog(cx);
+                            workspace
+                                .update(cx, |ws, cx| ws.open_orchestrator(&env, &name, window, cx));
+                        }
+                    }),
+            )
+        });
+    }
+
+    fn open_orchestrator(
+        &mut self,
+        env: &str,
+        pipeline: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let shell = self.shell();
+        let mut request = crate::hydra::PaneRequest::new(env, self.env_cwd(env, cx), shell);
+        request.command = Some(crate::hydra::command_line(
+            shell,
+            &[
+                "claude".to_string(),
+                super::orchestrator::orchestrator_prompt(pipeline),
+            ],
+        ));
+        let id = self.open_terminal(env, request, window, cx);
+        if let Some(view) = self.panes.get(&id).cloned() {
+            view.update(cx, |v, cx| v.set_name(Some("orchestrator".into()), cx));
+        }
+        crate::action_log::write(format!("started an orchestrator for {pipeline} in {env}"));
     }
 
     /// Deletes `env` after a confirmation, as `hydra env rm` does (spec §7.4); its saved
@@ -611,6 +717,9 @@ impl Workspace {
         for env in envs {
             let tint = self.hydra.tint(&env);
             self.tints.insert(env, tint);
+        }
+        if let Some(server) = crate::mcp::server::get() {
+            crate::mcp::server::lock(server.registry()).min_week_left = ui.min_week_left;
         }
         self.ui = ui;
         if announce {

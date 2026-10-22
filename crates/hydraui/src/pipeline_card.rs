@@ -1,0 +1,259 @@
+//! The pipeline card (orchestrator spec §7.1, §7.2; the design's sidebar card): what it says
+//! about a run, which terminals sit under it, and the seven-day allowance meter.
+
+use crate::runs::{Run, RunState, StageStatus};
+
+/// The card's state pill (the design: Working, Needs you, Paused, Done; Polling comes with
+/// Linear in phase 2). `Stopped` is a ticket a person ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardState {
+    Working,
+    NeedsYou,
+    Paused,
+    Done,
+    Stopped,
+}
+
+impl CardState {
+    pub fn word(self) -> &'static str {
+        match self {
+            CardState::Working => "Working",
+            CardState::NeedsYou => "Needs you",
+            CardState::Paused => "Paused",
+            CardState::Done => "Done",
+            CardState::Stopped => "Stopped",
+        }
+    }
+}
+
+/// One stage's segment of the card's progress bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Segment {
+    Passed,
+    Running,
+    Stopped,
+    Pending,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Card {
+    /// The pipeline's name.
+    pub name: String,
+    /// `<ticket> · <current stage's first word>`, or `· Done`.
+    pub line: String,
+    pub state: CardState,
+    pub segments: Vec<Segment>,
+}
+
+/// What the card says about `run`.
+pub fn card(run: &Run) -> Card {
+    let state = match &run.state {
+        RunState::Finished => CardState::Done,
+        RunState::Stopped(_) => CardState::Stopped,
+        RunState::NeedsYou(_) => CardState::NeedsYou,
+        RunState::Running if run.paused => CardState::Paused,
+        RunState::Running => CardState::Working,
+    };
+    let current = run
+        .stages
+        .iter()
+        .position(|s| matches!(s.status, StageStatus::Starting | StageStatus::Running))
+        .or_else(|| {
+            run.stages
+                .iter()
+                .position(|s| s.status != StageStatus::Passed)
+        });
+    let stage = match (state, current) {
+        (CardState::Done, _) | (_, None) => "Done",
+        (_, Some(i)) => run.pipeline.stages[i]
+            .title
+            .split_whitespace()
+            .next()
+            .unwrap_or("?"),
+    };
+    let segments = run
+        .stages
+        .iter()
+        .map(|s| match s.status {
+            StageStatus::Passed => Segment::Passed,
+            StageStatus::Starting | StageStatus::Running => Segment::Running,
+            StageStatus::Stopped | StageStatus::Failed => Segment::Stopped,
+            StageStatus::Waiting => Segment::Pending,
+        })
+        .collect();
+    Card {
+        name: run.pipeline.name.clone(),
+        line: format!("{} · {stage}", run.ticket),
+        state,
+        segments,
+    }
+}
+
+/// The terminals grouped under the card, by token: the orchestrator's, then every attempt's
+/// session that opened, in stage and attempt order.
+pub fn card_tokens(run: &Run) -> Vec<String> {
+    std::iter::once(run.orchestrator.clone())
+        .chain(
+            run.stages
+                .iter()
+                .flat_map(|s| &s.attempts)
+                .filter_map(|a| a.session.clone()),
+        )
+        .collect()
+}
+
+/// The seven-day allowance meter (the design's footer): how much is left, 0 to 1, and whether
+/// that is below the floor at which no stage starts (§5.1).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Meter {
+    pub left: f32,
+    pub low: bool,
+}
+
+/// The meter for `week_used` percent used, with the floor at `floor` percent left; `None`
+/// before any session reported.
+pub fn meter(week_used: Option<f64>, floor: u8) -> Option<Meter> {
+    let left = (100.0 - week_used?).clamp(0.0, 100.0);
+    Some(Meter {
+        left: (left / 100.0) as f32,
+        low: left < f64::from(floor),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::runs::Runs;
+
+    fn runs_of(stages: &[(&str, &str)]) -> (Runs, String) {
+        let mut t = String::from("name = \"INTH SLA tickets\"\n");
+        for (id, title) in stages {
+            t += &format!("[[stage]]\nid = \"{id}\"\ntitle = \"{title}\"\n");
+        }
+        let mut runs = Runs::default();
+        let p = crate::pipeline::parse(&t).unwrap();
+        let id = runs
+            .start_run("orch", p, "INTH-482", "x")
+            .unwrap()
+            .id
+            .clone();
+        (runs, id)
+    }
+
+    fn start(runs: &mut Runs, id: &str, stage: &str, tok: &str) {
+        let s = runs.begin("orch", id, stage, "", 30).unwrap();
+        runs.link(id, s.stage, tok, tok);
+    }
+
+    fn rated(score: u8) -> crate::rating::Rating {
+        crate::rating::from_args(&json!({"outcome": "done", "score": score, "summary": "s",
+            "evidence": [{"kind": "note", "detail": "d"}],
+            "reasons": [{"side": "for", "text": "r"}]}))
+        .unwrap()
+    }
+
+    const STAGES: [(&str, &str); 3] = [
+        ("replicate", "Understand & replicate"),
+        ("develop", "Develop"),
+        ("verify", "Verify"),
+    ];
+
+    #[test]
+    fn the_card_names_the_ticket_and_current_stage() {
+        let (mut runs, id) = runs_of(&STAGES);
+        let c = card(runs.run(&id).unwrap());
+        assert_eq!(c.name, "INTH SLA tickets");
+        assert_eq!(c.line, "INTH-482 · Understand");
+        assert_eq!(c.state, CardState::Working);
+        start(&mut runs, &id, "replicate", "t1");
+        runs.report("t1", rated(92)).unwrap();
+        start(&mut runs, &id, "develop", "t2");
+        assert_eq!(card(runs.run(&id).unwrap()).line, "INTH-482 · Develop");
+        runs.pause(&id, true).unwrap();
+        assert_eq!(card(runs.run(&id).unwrap()).state, CardState::Paused);
+        runs.pause(&id, false).unwrap();
+        runs.report("t2", rated(10)).unwrap();
+        let c = card(runs.run(&id).unwrap());
+        assert_eq!(
+            (c.line.as_str(), c.state),
+            ("INTH-482 · Develop", CardState::NeedsYou)
+        );
+        runs.person(&id, crate::runs::Choice::Stop).unwrap();
+        assert_eq!(card(runs.run(&id).unwrap()).state, CardState::Stopped);
+    }
+
+    #[test]
+    fn a_finished_run_is_done() {
+        let (mut runs, id) = runs_of(&STAGES[..1]);
+        start(&mut runs, &id, "replicate", "t1");
+        runs.report("t1", rated(95)).unwrap();
+        let c = card(runs.run(&id).unwrap());
+        assert_eq!(
+            (c.line.as_str(), c.state),
+            ("INTH-482 · Done", CardState::Done)
+        );
+    }
+
+    #[test]
+    fn segments_follow_stage_statuses() {
+        use Segment::*;
+        let (mut runs, id) = runs_of(&STAGES);
+        assert_eq!(
+            card(runs.run(&id).unwrap()).segments,
+            [Pending, Pending, Pending]
+        );
+        start(&mut runs, &id, "replicate", "t1");
+        assert_eq!(
+            card(runs.run(&id).unwrap()).segments,
+            [Running, Pending, Pending]
+        );
+        runs.report("t1", rated(92)).unwrap();
+        start(&mut runs, &id, "develop", "t2");
+        runs.report("t2", rated(10)).unwrap();
+        assert_eq!(
+            card(runs.run(&id).unwrap()).segments,
+            [Passed, Stopped, Pending]
+        );
+    }
+
+    #[test]
+    fn card_tokens_follow_the_orchestrator() {
+        let (mut runs, id) = runs_of(&STAGES);
+        start(&mut runs, &id, "replicate", "t1");
+        runs.session_gone("t1");
+        start(&mut runs, &id, "replicate", "t2");
+        runs.report("t2", rated(92)).unwrap();
+        // Not linked yet: no token to show.
+        runs.begin("orch", &id, "develop", "", 30).unwrap();
+        assert_eq!(card_tokens(runs.run(&id).unwrap()), ["orch", "t1", "t2"]);
+    }
+
+    #[test]
+    fn the_meter_turns_red_below_the_floor() {
+        assert_eq!(meter(None, 30), None);
+        assert_eq!(
+            meter(Some(25.0), 30),
+            Some(Meter {
+                left: 0.75,
+                low: false
+            })
+        );
+        assert_eq!(
+            meter(Some(70.0), 30),
+            Some(Meter {
+                left: 0.3,
+                low: false
+            })
+        );
+        assert_eq!(meter(Some(71.0), 30).map(|m| m.low), Some(true));
+        assert_eq!(
+            meter(Some(130.0), 30),
+            Some(Meter {
+                left: 0.0,
+                low: true
+            })
+        );
+    }
+}

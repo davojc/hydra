@@ -72,7 +72,6 @@ impl Workspace {
     /// The selected environment's terminals, the shown one highlighted in the environment's
     /// colour; a row's tooltip is the title its program set, when it set one.
     pub(super) fn render_terminal_list(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let muted = cx.theme().muted_foreground;
         let mut list = v_flex()
             .id("terminal-list")
             .w(px(self.list_width))
@@ -112,7 +111,24 @@ impl Workspace {
                     .map(move |(i, id)| (g > 0 && i == 0, id))
             })
             .collect();
-        for (divided, id) in rows {
+        // A run's orchestrator and stage terminals sit under its pipeline card, not in the
+        // project groups (orchestrator spec §7.1).
+        let cards = self.pipeline_cards(cx);
+        let carded: std::collections::HashSet<PaneId> = cards
+            .iter()
+            .flat_map(|(_, _, panes)| panes.iter().copied())
+            .collect();
+        let shown = tab.shown.filter(|_| !all_tasks);
+        for (orch, card, panes) in &cards {
+            let active = panes.iter().any(|p| Some(*p) == shown);
+            list = list.child(self.render_pipeline_card(*orch, card, active, cx));
+            for id in panes {
+                if let Some(row) = self.terminal_row(*id, shown == Some(*id), tint, true, cx) {
+                    list = list.child(row);
+                }
+            }
+        }
+        for (divided, id) in rows.into_iter().filter(|(_, id)| !carded.contains(id)) {
             if divided {
                 list = list.child(
                     div()
@@ -123,105 +139,119 @@ impl Workspace {
                         .bg(tint.opacity(0.6)),
                 );
             }
-            let Some(view) = self.panes.get(&id) else {
-                continue;
-            };
-            let v = view.read(cx);
-            let (label, program) = (v.label(), v.program_title().map(str::to_string));
-            let activity = self.activity.get(&id).copied();
-            let dot = self.render_tab_dot(activity, tint, cx);
-            // What a Claude session here says it is doing (its hooks), beside its name.
-            let claude = activity.filter(|a| a.claude).map(|a| match a.state {
-                Activity::Working => ("working", muted),
-                Activity::Waiting => ("needs you", cx.theme().warning),
-                Activity::Idle => ("idle", muted),
-            });
-            // Keyed by the terminal, so element state stays with it when another closes.
-            let group = SharedString::from(format!("terminal-row-{id}"));
-            list = list.child(
-                h_flex()
-                    .id(SharedString::from(format!("terminal-{id}")))
-                    .group(group.clone())
-                    .px_2()
-                    .py_1()
-                    .gap_2()
-                    .rounded_md()
-                    .when(tab.shown == Some(id) && !all_tasks, |d| {
-                        d.bg(tint.opacity(0.25))
-                    })
-                    .hover(|d| d.bg(tint.opacity(0.15)))
-                    .on_click(
-                        cx.listener(move |ws, _, window, cx| ws.show_terminal(id, window, cx)),
-                    )
-                    .when_some(program, |d, title| {
-                        d.tooltip(move |window, cx| {
-                            gpui_component::tooltip::Tooltip::new(title.clone()).build(window, cx)
-                        })
-                    })
-                    .context_menu({
-                        let ws = cx.entity();
-                        move |menu, _, _| {
-                            let (tasks_ws, rename_ws, restart_ws, close_ws) =
-                                (ws.clone(), ws.clone(), ws.clone(), ws.clone());
-                            // Its project's board as a Tasks tab beside it (task-board §4).
-                            menu.item(PopupMenuItem::new("Tasks").on_click(move |_, window, cx| {
-                                tasks_ws.update(cx, |ws, cx| {
-                                    if ws.envs.active().and_then(|t| t.shown) != Some(id) {
-                                        ws.show_terminal(id, window, cx);
-                                    }
-                                    ws.open_tasks(id, window, cx);
-                                });
-                            }))
-                            .item(
-                                PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
-                                    rename_ws.update(cx, |ws, cx| ws.rename_dialog(id, window, cx));
-                                }),
-                            )
-                            .item(
-                                PopupMenuItem::new("Restart").on_click(move |_, window, cx| {
-                                    restart_ws
-                                        .update(cx, |ws, cx| ws.restart_terminal(id, window, cx));
-                                }),
-                            )
-                            .item(
-                                PopupMenuItem::new("Close").on_click(move |_, window, cx| {
-                                    close_ws.update(cx, |ws, cx| ws.close_terminal(id, window, cx));
-                                }),
-                            )
-                        }
-                    })
-                    .child(dot)
-                    .child(div().flex_1().min_w_0().text_sm().truncate().child(label))
-                    .children(claude.map(|(text, color)| {
-                        div().flex_none().text_xs().text_color(color).child(text)
-                    }))
-                    // Out of sight when its Claude session finished or asked for you.
-                    .when(self.attention.contains(&id), |d| {
-                        d.child(
-                            div()
-                                .flex_none()
-                                .size(px(7.))
-                                .rounded_full()
-                                .bg(cx.theme().warning),
-                        )
-                    })
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("terminal-close-{id}")))
-                            .px_1()
-                            .text_color(muted)
-                            .invisible()
-                            .group_hover(group, |d| d.visible())
-                            .hover(|d| d.text_color(tint))
-                            .child("×")
-                            .on_click(cx.listener(move |ws, _, window, cx| {
-                                cx.stop_propagation();
-                                ws.close_terminal(id, window, cx);
-                            })),
-                    ),
-            );
+            if let Some(row) = self.terminal_row(id, shown == Some(id), tint, false, cx) {
+                list = list.child(row);
+            }
+        }
+        if !cards.is_empty() {
+            list = list.children(self.render_allowance_meter(&tab.env));
         }
         list
+    }
+
+    /// Terminal `id`'s row: its activity dot, name, Claude's state and × on hover;
+    /// `highlighted` when it is the one shown, `indent` under a pipeline card.
+    fn terminal_row(
+        &self,
+        id: PaneId,
+        highlighted: bool,
+        tint: gpui::Hsla,
+        indent: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let muted = cx.theme().muted_foreground;
+        let view = self.panes.get(&id)?;
+        let v = view.read(cx);
+        let (label, program) = (v.label(), v.program_title().map(str::to_string));
+        let activity = self.activity.get(&id).copied();
+        let dot = self.render_tab_dot(activity, tint, cx);
+        // What a Claude session here says it is doing (its hooks), beside its name.
+        let claude = activity.filter(|a| a.claude).map(|a| match a.state {
+            Activity::Working => ("working", muted),
+            Activity::Waiting => ("needs you", cx.theme().warning),
+            Activity::Idle => ("idle", muted),
+        });
+        // Keyed by the terminal, so element state stays with it when another closes.
+        let group = SharedString::from(format!("terminal-row-{id}"));
+        Some(
+            h_flex()
+                .id(SharedString::from(format!("terminal-{id}")))
+                .group(group.clone())
+                .pl(px(if indent { 22. } else { 8. }))
+                .pr_2()
+                .py_1()
+                .gap_2()
+                .rounded_md()
+                .when(highlighted, |d| d.bg(tint.opacity(0.25)))
+                .hover(|d| d.bg(tint.opacity(0.15)))
+                .on_click(cx.listener(move |ws, _, window, cx| ws.show_terminal(id, window, cx)))
+                .when_some(program, |d, title| {
+                    d.tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(title.clone()).build(window, cx)
+                    })
+                })
+                .context_menu({
+                    let ws = cx.entity();
+                    move |menu, _, _| {
+                        let (tasks_ws, rename_ws, restart_ws, close_ws) =
+                            (ws.clone(), ws.clone(), ws.clone(), ws.clone());
+                        // Its project's board as a Tasks tab beside it (task-board §4).
+                        menu.item(PopupMenuItem::new("Tasks").on_click(move |_, window, cx| {
+                            tasks_ws.update(cx, |ws, cx| {
+                                if ws.envs.active().and_then(|t| t.shown) != Some(id) {
+                                    ws.show_terminal(id, window, cx);
+                                }
+                                ws.open_tasks(id, window, cx);
+                            });
+                        }))
+                        .item(
+                            PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
+                                rename_ws.update(cx, |ws, cx| ws.rename_dialog(id, window, cx));
+                            }),
+                        )
+                        .item(
+                            PopupMenuItem::new("Restart").on_click(move |_, window, cx| {
+                                restart_ws.update(cx, |ws, cx| ws.restart_terminal(id, window, cx));
+                            }),
+                        )
+                        .item(PopupMenuItem::new("Close").on_click(move |_, window, cx| {
+                            close_ws.update(cx, |ws, cx| ws.close_terminal(id, window, cx));
+                        }))
+                    }
+                })
+                .child(dot)
+                .child(div().flex_1().min_w_0().text_sm().truncate().child(label))
+                .children(
+                    claude.map(|(text, color)| {
+                        div().flex_none().text_xs().text_color(color).child(text)
+                    }),
+                )
+                // Out of sight when its Claude session finished or asked for you.
+                .when(self.attention.contains(&id), |d| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .size(px(7.))
+                            .rounded_full()
+                            .bg(cx.theme().warning),
+                    )
+                })
+                .child(
+                    div()
+                        .id(SharedString::from(format!("terminal-close-{id}")))
+                        .px_1()
+                        .text_color(muted)
+                        .invisible()
+                        .group_hover(group, |d| d.visible())
+                        .hover(|d| d.text_color(tint))
+                        .child("×")
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            cx.stop_propagation();
+                            ws.close_terminal(id, window, cx);
+                        })),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Asks for terminal `id`'s name (env-tabs design §2.2); Enter confirms, and an empty name

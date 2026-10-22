@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use gpui::prelude::*;
-use gpui::{Context, SharedString, Window, div, px};
+use gpui::{AnyElement, Context, SharedString, Window, div, px, relative};
 use gpui_component::WindowExt;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::notification::Notification;
@@ -15,6 +15,7 @@ use crate::hydra::{PaneRequest, command_line};
 use crate::mcp::server::{self, McpEvent};
 use crate::orchestrator_theme::{self as theme, color};
 use crate::pickup::{Session, ready_for_prompt};
+use crate::pipeline_card::{Card, CardState, Segment, card, card_tokens, meter};
 use crate::rating::{Outcome, Side};
 use crate::runs::{Change, Decided, MAX_ATTEMPTS, Role, Run, RunState, StageStatus, StartStage};
 use crate::worktrees;
@@ -430,6 +431,191 @@ impl Workspace {
                 self.pending_wakes.remove(&pane);
             }
         }
+    }
+
+    /// The selected environment's pipeline cards (§7.1): for each terminal that started a run,
+    /// its card and the terminals under it (itself first, then the stages' sessions).
+    pub(super) fn pipeline_cards(&self, cx: &gpui::App) -> Vec<(PaneId, Card, Vec<PaneId>)> {
+        let (Some(tab), Some(sv)) = (self.envs.active(), server::get()) else {
+            return Vec::new();
+        };
+        let token_of = |id: &PaneId| {
+            self.panes
+                .get(id)
+                .and_then(|v| v.read(cx).mcp_token().map(str::to_string))
+        };
+        let tokens: Vec<(PaneId, String)> = tab
+            .terminals
+            .iter()
+            .filter_map(|id| Some((*id, token_of(id)?)))
+            .collect();
+        let reg = server::lock(sv.registry());
+        tokens
+            .iter()
+            .filter_map(|(id, token)| {
+                let run = reg.runs.current(token)?;
+                let panes = card_tokens(run)
+                    .iter()
+                    .filter_map(|t| tokens.iter().find(|(_, x)| x == t).map(|(p, _)| *p))
+                    .collect();
+                Some((*id, card(run), panes))
+            })
+            .collect()
+    }
+
+    /// The design's pipeline card: the diamond and the pipeline's name, the ticket and stage
+    /// with the state pill, and one segment per stage. Clicking it shows the orchestrator (the
+    /// Pipeline view takes its place in plan Task 10).
+    pub(super) fn render_pipeline_card(
+        &self,
+        orchestrator: PaneId,
+        c: &Card,
+        active: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (pill_fg, pill_bg) = match c.state {
+            CardState::Working => (theme::TEAL, theme::TEAL_TINT),
+            CardState::NeedsYou => (theme::RED, theme::RED_TINT),
+            CardState::Paused => (theme::AMBER, theme::AMBER_TINT),
+            CardState::Done => (theme::GREEN, theme::GREEN_TINT),
+            CardState::Stopped => (theme::TEXT_SECONDARY, theme::RAISED),
+        };
+        let segments = c.segments.iter().map(|s| {
+            let fill = match s {
+                Segment::Passed => color(theme::TEAL),
+                Segment::Running => color(theme::TEAL).opacity(0.53),
+                Segment::Stopped => color(theme::RED),
+                Segment::Pending => color(theme::BORDER),
+            };
+            div().flex_1().h(px(3.)).rounded_full().bg(fill)
+        });
+        v_flex()
+            .id(SharedString::from(format!("pipeline-card-{orchestrator}")))
+            .mx_1()
+            .my_1()
+            .p(px(10.))
+            .gap(px(6.))
+            .rounded(px(8.))
+            .border_1()
+            .bg(color(if active {
+                theme::TEAL_TINT
+            } else {
+                theme::SURFACE
+            }))
+            .border_color(color(if active {
+                theme::TEAL_BORDER
+            } else {
+                theme::BORDER_SUBTLE
+            }))
+            .cursor_pointer()
+            .on_click(
+                cx.listener(move |ws, _, window, cx| ws.show_terminal(orchestrator, window, cx)),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().text_xs().text_color(color(theme::TEAL)).child("◆"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(color(theme::TEXT))
+                            .child(c.name.clone()),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .justify_between()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(color(theme::TEXT_SECONDARY))
+                            .child(c.line.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .px(px(6.))
+                            .py(px(2.))
+                            .rounded(px(4.))
+                            .text_xs()
+                            .bg(color(pill_bg))
+                            .text_color(color(pill_fg))
+                            .child(c.state.word()),
+                    ),
+            )
+            .child(h_flex().gap(px(3.)).children(segments))
+            .into_any_element()
+    }
+
+    /// The design's seven-day allowance meter at the foot of the list: what is left of the
+    /// environment's Claude week, red below the floor, with a tick at the floor. `None` before
+    /// any session in `env` reported its usage.
+    pub(super) fn render_allowance_meter(&self, env: &str) -> Option<AnyElement> {
+        let used = self
+            .usage
+            .get(env)
+            .and_then(|u| u.seven_day)
+            .map(|l| l.used);
+        let floor = server::get().map_or(crate::runs::MIN_WEEK_LEFT, |sv| {
+            server::lock(sv.registry()).min_week_left
+        });
+        let m = meter(used, floor)?;
+        let fill = color(if m.low { theme::RED } else { theme::GREEN });
+        Some(
+            v_flex()
+                .mx_2()
+                .mt_3()
+                .gap_1()
+                .child(
+                    h_flex()
+                        .justify_between()
+                        .text_xs()
+                        .text_color(color(theme::TEXT_MUTED))
+                        .child("Claude 7-day left")
+                        .child(format!("{:.0}%", m.left * 100.0)),
+                )
+                .child(
+                    div()
+                        .relative()
+                        .w_full()
+                        .h(px(4.))
+                        .rounded_full()
+                        .bg(color(theme::BORDER_SUBTLE))
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .h_full()
+                                .w(relative(m.left))
+                                .rounded_full()
+                                .bg(fill),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left(relative(f32::from(floor) / 100.0))
+                                .w(px(1.))
+                                .h_full()
+                                .bg(color(theme::TEXT_SECONDARY)),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(color(theme::TEXT_MUTED))
+                        .child(format!("Pipeline stops below {floor}%")),
+                )
+                .into_any_element(),
+        )
     }
 
     /// The shell or Claude session behind `token` ended: when it was running a stage, the stage

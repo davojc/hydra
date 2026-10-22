@@ -19,3 +19,13 @@ pub const RED: u32 = 0xe5705f;
 pub const RED_BORDER: u32 = 0x4a2620;
 /// The escalation toast's background.
 pub const TOAST: u32 = 0x171a1a;
+pub const SURFACE: u32 = 0x161919;
+pub const RAISED: u32 = 0x1c2020;
+pub const BORDER_SUBTLE: u32 = 0x252b2a;
+pub const TEAL_TINT: u32 = 0x10302b;
+pub const TEAL_BORDER: u32 = 0x1f5a50;
+pub const RED_TINT: u32 = 0x331916;
+pub const AMBER: u32 = 0xe5b53e;
+pub const AMBER_TINT: u32 = 0x2e2511;
+pub const GREEN: u32 = 0x62c98d;
+pub const GREEN_TINT: u32 = 0x12291c;

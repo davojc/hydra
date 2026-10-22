@@ -56,6 +56,21 @@ struct Snapshot {
     live: HashMap<String, SessionState>,
 }
 
+/// The muted line under a stage's title: its skill and the folder it starts in.
+fn stage_where(skill: Option<&str>, folder: Option<&str>) -> Option<String> {
+    let folder = folder.map(|f| {
+        let name = std::path::Path::new(f)
+            .file_name()
+            .map_or(f.to_string(), |n| n.to_string_lossy().into_owned());
+        format!("in {name}")
+    });
+    match (skill, folder) {
+        (Some(k), Some(f)) => Some(format!("{k} · {f}")),
+        (Some(k), None) => Some(k.to_string()),
+        (None, f) => f,
+    }
+}
+
 fn text(size: f32, hex: u32) -> Div {
     div().text_size(px(size)).text_color(color(hex))
 }
@@ -527,8 +542,7 @@ impl Workspace {
                                     .child(text(11.5, badge_hex).flex_none().child(badge)),
                             )
                             .children(
-                                spec.skill
-                                    .clone()
+                                stage_where(spec.skill.as_deref(), spec.folder.as_deref())
                                     .map(|k| text(11.5, theme::TEXT_MUTED).child(k)),
                             )
                             .child(sessions),

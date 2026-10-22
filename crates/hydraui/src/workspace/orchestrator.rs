@@ -189,6 +189,14 @@ impl Workspace {
         let Some((env, cwd)) = orchestrator else {
             return stage_failed(&s, "its orchestrator's terminal is gone".into());
         };
+        // A stage with a folder starts there: the project whose skills it needs.
+        if let Some(folder) = s.folder.clone() {
+            let path = hydra_core::paths::expand_tilde(&folder, &self.hydra.user_home);
+            if !path.is_dir() {
+                return stage_failed(&s, format!("its folder {} doesn't exist", path.display()));
+            }
+            return self.open_stage(s, &env, path, window, cx);
+        }
         if !s.worktree {
             return self.open_stage(s, &env, cwd, window, cx);
         }

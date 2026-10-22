@@ -29,6 +29,8 @@ struct DraftStage {
     id: Option<String>,
     title: Entity<InputState>,
     skill: Option<String>,
+    /// The folder its session starts in, as written (`~/…`).
+    folder: Option<String>,
     bar: Entity<SliderState>,
     /// The bar is the stage's own, not the pipeline's.
     own: bool,
@@ -76,6 +78,7 @@ impl SettingsDraft {
                     id: s.id.clone(),
                     title: s.title.read(cx).value().to_string(),
                     skill: s.skill.clone(),
+                    folder: s.folder.clone(),
                     bar: s.own.then(|| slider_value(&s.bar, cx)),
                 })
                 .collect(),
@@ -213,6 +216,7 @@ impl Workspace {
             id: s.id.clone(),
             title,
             skill: s.skill.clone(),
+            folder: s.folder.clone(),
             bar,
             own: s.bar.is_some(),
         }
@@ -262,6 +266,7 @@ impl Workspace {
                 id: None,
                 title: "New stage".into(),
                 skill,
+                folder: None,
                 bar: None,
             },
             default,
@@ -322,6 +327,22 @@ impl Workspace {
                         }
                     }),
             )
+        });
+    }
+
+    /// Picks the folder stage `key`'s session starts in, written with `~` for the home folder.
+    fn pick_folder(&mut self, orch: PaneId, key: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let home = self.hydra.user_home.clone();
+        self.open_dialog_path(true, window, cx, move |ws, path, _, cx| {
+            let folder = match path.strip_prefix(&home) {
+                Ok(rest) => format!("~/{}", rest.to_string_lossy().replace('\\', "/")),
+                Err(_) => path.to_string_lossy().into_owned(),
+            };
+            ws.with_draft(orch, cx, |d| {
+                if let Some(s) = d.stages.iter_mut().find(|s| s.key == key) {
+                    s.folder = Some(folder);
+                }
+            });
         });
     }
 
@@ -458,6 +479,41 @@ impl Workspace {
                                 ws.pick_skill(orch, key, window, cx)
                             })),
                     )
+                    .child(
+                        Button::new(SharedString::from(format!("folder-{key}")))
+                            .label(match &s.folder {
+                                Some(f) => format!(
+                                    "in {} ▾",
+                                    std::path::Path::new(f)
+                                        .file_name()
+                                        .map_or(f.clone(), |n| n.to_string_lossy().into_owned())
+                                ),
+                                None => "Orchestrator's folder ▾".into(),
+                            })
+                            .outline()
+                            .small()
+                            .tooltip("The folder this stage's session starts in")
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                ws.pick_folder(orch, key, window, cx)
+                            })),
+                    )
+                    .when(s.folder.is_some(), |row| {
+                        row.child(
+                            Button::new(SharedString::from(format!("folder-clear-{key}")))
+                                .label("↺")
+                                .ghost()
+                                .xsmall()
+                                .tooltip("Start in the orchestrator's folder")
+                                .on_click(cx.listener(move |ws, _, _, cx| {
+                                    ws.with_draft(orch, cx, |d| {
+                                        if let Some(s) = d.stages.iter_mut().find(|s| s.key == key)
+                                        {
+                                            s.folder = None;
+                                        }
+                                    })
+                                })),
+                        )
+                    })
                     .child(div().w(px(120.)).flex_none().child(Slider::new(&s.bar)))
                     .child(
                         text(

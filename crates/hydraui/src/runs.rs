@@ -144,6 +144,8 @@ pub struct StartStage {
     pub label: String,
     pub orchestrator: String,
     pub worktree: bool,
+    /// The folder its session starts in, as the pipeline writes it.
+    pub folder: Option<String>,
     pub title: String,
     pub prompt: String,
 }
@@ -433,6 +435,7 @@ impl Runs {
             label,
             orchestrator: r.orchestrator.clone(),
             worktree: spec.worktree,
+            folder: spec.folder.clone(),
             title: spec.title.clone(),
             prompt: render(&spec.prompt, &vars, &brief),
         })
@@ -857,6 +860,7 @@ mod tests {
             .unwrap();
         assert_eq!((s.stage, s.orchestrator.as_str()), (0, "orch"));
         assert_eq!(s.label, "s-01");
+        assert_eq!(s.folder, None);
         assert!(s.prompt.starts_with("do a."), "{}", s.prompt);
         assert!(s.prompt.contains("Look at the API."), "{}", s.prompt);
         assert_eq!(status(&runs, &id, 0), StageStatus::Starting);
@@ -865,6 +869,18 @@ mod tests {
         assert!(matches!(runs.role("tok-a"), Role::Stage(r, 0) if r.id == id));
         assert!(matches!(runs.role("orch"), Role::Orchestrator(r) if r.id == id));
         assert!(matches!(runs.role("other"), Role::Other));
+    }
+
+    #[test]
+    fn a_stage_starts_in_its_folder() {
+        let mut runs = Runs::default();
+        let p = pipeline::parse(
+            "name = \"t\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\nfolder = \"~/Projects/QA-Skills\"\n",
+        )
+        .unwrap();
+        let id = runs.start_run("orch", p, "INTH-1", "x").unwrap().id.clone();
+        let s = runs.begin("orch", &id, "a", "", 30).unwrap();
+        assert_eq!(s.folder.as_deref(), Some("~/Projects/QA-Skills"));
     }
 
     #[test]

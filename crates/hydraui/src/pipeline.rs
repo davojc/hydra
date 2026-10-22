@@ -24,6 +24,10 @@ pub struct Stage {
     pub bar: Option<u8>,
     /// The skill the stage's session uses, shown in the views.
     pub skill: Option<String>,
+    /// The folder its session starts in, as written (`~` allowed): a project whose skills and
+    /// instructions it needs, such as the QA or development one. Takes the place of the
+    /// orchestrator's folder and the run's worktree.
+    pub folder: Option<String>,
     /// Runs in the run's worktree (made for the first such stage, §3.2).
     pub worktree: bool,
     /// The stage session's first prompt, before `render` fills it in: the file's, or one made
@@ -60,6 +64,7 @@ struct FileStage {
     title: String,
     bar: Option<u8>,
     skill: Option<String>,
+    folder: Option<String>,
     #[serde(default)]
     worktree: bool,
     prompt: Option<String>,
@@ -114,11 +119,16 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
         let prompt = s
             .prompt
             .unwrap_or_else(|| default_prompt(&s.title, skill.as_deref()));
+        let folder = s
+            .folder
+            .map(|f| f.trim().to_string())
+            .filter(|f| !f.is_empty());
         stages.push(Stage {
             id: s.id,
             title: s.title,
             bar: s.bar,
             skill,
+            folder,
             worktree: s.worktree,
             prompt,
         });
@@ -150,6 +160,8 @@ pub struct EditStage {
     pub id: Option<String>,
     pub title: String,
     pub skill: Option<String>,
+    /// The folder its session starts in; `None`: the orchestrator's folder or the worktree.
+    pub folder: Option<String>,
     /// Its own bar; `None` follows the pipeline's.
     pub bar: Option<u8>,
 }
@@ -166,6 +178,7 @@ impl From<&Pipeline> for Edit {
                     id: Some(s.id.clone()),
                     title: s.title.clone(),
                     skill: s.skill.clone(),
+                    folder: s.folder.clone(),
                     bar: s.bar,
                 })
                 .collect(),
@@ -257,6 +270,12 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
             Some(skill) => table["skill"] = value(skill.as_str()),
             None => {
                 table.remove("skill");
+            }
+        }
+        match &s.folder {
+            Some(folder) => table["folder"] = value(folder.as_str()),
+            None => {
+                table.remove("folder");
             }
         }
         match s.bar {
@@ -555,6 +574,7 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
                 id: None,
                 title: title.into(),
                 skill: Some("Security review".into()),
+                folder: None,
                 bar: Some(90),
             });
         }
@@ -588,6 +608,35 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
         let p = load(d.path(), "tickets").unwrap();
         assert_eq!(p.stages.len(), 1);
         assert_eq!(p.stages[0].id, "replicate");
+    }
+
+    #[test]
+    fn a_stage_can_start_in_a_folder() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(
+            folder(d.path()).join("t.toml"),
+            "name = \"t\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\nfolder = \"~/Projects/QA-Skills\"\n\
+             [[stage]]\nid = \"b\"\ntitle = \"B\"\n",
+        )
+        .unwrap();
+        let p = load(d.path(), "t").unwrap();
+        assert_eq!(p.stages[0].folder.as_deref(), Some("~/Projects/QA-Skills"));
+        assert_eq!(p.stages[1].folder, None);
+        let mut edit = Edit::from(&p);
+        assert_eq!(
+            edit.stages[0].folder.as_deref(),
+            Some("~/Projects/QA-Skills")
+        );
+        edit.stages[0].folder = None;
+        edit.stages[1].folder = Some("~/Projects/iov42-agents".into());
+        save(d.path(), "t", &edit).unwrap();
+        let p = load(d.path(), "t").unwrap();
+        assert_eq!(p.stages[0].folder, None);
+        assert_eq!(
+            p.stages[1].folder.as_deref(),
+            Some("~/Projects/iov42-agents")
+        );
     }
 
     #[test]

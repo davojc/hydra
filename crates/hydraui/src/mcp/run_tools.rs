@@ -217,7 +217,7 @@ fn run_start(
                 .enumerate()
                 .map(|(i, s)| {
                     json!({"id": s.id, "title": s.title, "skill": s.skill,
-                           "bar": r.pipeline.bar_for(i)})
+                           "folder": s.folder, "bar": r.pipeline.bar_for(i)})
                 })
                 .collect();
             let reply = json!({
@@ -323,7 +323,7 @@ fn stage_brief(reg: &Registry, token: &str) -> Outcome {
         "ticket": r.ticket,
         "summary": r.summary,
         "stage": {"id": spec.id, "title": spec.title, "skill": spec.skill,
-                  "bar": r.pipeline.bar_for(i)},
+                  "folder": spec.folder, "bar": r.pipeline.bar_for(i)},
         "attempt": latest.map(|a| a.label.as_str()),
         "note": latest.and_then(|a| a.note.as_deref()),
         "previous": previous,

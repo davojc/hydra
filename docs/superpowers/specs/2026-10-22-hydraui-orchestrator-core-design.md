@@ -96,6 +96,10 @@ prompt = "..."
 - `id` is unique in the file, lower-case letters, digits and `-`. `title` is what the views show.
 - `bar` on a stage overrides the pipeline's for that stage (the user's decision: configurable per
   pipeline and per stage, 80 by default).
+- `folder` is optional: the folder the stage's session starts in, such as `~/Projects/QA-Skills`,
+  so the session loads that project's skills and instructions as when you start Claude there
+  yourself (the user's way of choosing them, added during the walkthrough). It takes the place of
+  the orchestrator's folder and the run's worktree; a folder that doesn't exist fails the start.
 - `skill` is optional. `prompt` is the stage session's first prompt; when left out (a stage added in
   Pipeline settings has none), it is `Use the {skill} skill for the "{title}" stage of ticket
   {ticket}.` (our call). `{ticket}`, `{run}`, `{stage}` and `{handoff}` (the previous stage's

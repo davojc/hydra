@@ -565,6 +565,62 @@ impl Workspace {
             .collect()
     }
 
+    /// Every run an orchestrator in this window started that is still open, in any environment.
+    pub(super) fn open_runs(&self, cx: &gpui::App) -> Vec<Run> {
+        let Some(sv) = server::get() else {
+            return Vec::new();
+        };
+        let reg = server::lock(sv.registry());
+        self.envs
+            .iter()
+            .flat_map(|t| t.terminals.iter())
+            .filter_map(|id| {
+                let token = self.panes.get(id)?.read(cx).mcp_token()?.to_string();
+                reg.runs.current(&token).filter(|r| r.state.open()).cloned()
+            })
+            .collect()
+    }
+
+    /// Asks before closing the window while `warning`'s tickets are open; **Close anyway**
+    /// closes it (after any unsaved edits are dealt with).
+    pub(super) fn confirm_close_runs(
+        &mut self,
+        warning: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ws = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let ws = ws.clone();
+            dialog
+                .title("A ticket is still running")
+                .child(div().whitespace_normal().child(warning.clone()))
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("keep-open")
+                                .label("Keep open")
+                                .primary()
+                                .on_click(|_, w, cx| w.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("close-anyway")
+                                .label("Close anyway")
+                                .danger()
+                                .on_click(move |_, w, cx| {
+                                    w.close_dialog(cx);
+                                    ws.update(cx, |ws, cx| {
+                                        let all: Vec<PaneId> = ws.files.keys().copied().collect();
+                                        ws.confirm_unsaved(all, w, cx, |_, w, _| w.remove_window());
+                                    });
+                                }),
+                        ),
+                )
+        });
+    }
+
     /// The selected environment's orchestrator and its run, for the title and status bars:
     /// the first card's whose run is still open, else the first card's.
     pub(super) fn shown_run(&self, cx: &gpui::App) -> Option<(PaneId, Run)> {

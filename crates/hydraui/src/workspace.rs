@@ -466,6 +466,11 @@ impl Workspace {
                 if !saved {
                     return false;
                 }
+                // A ticket still running or waiting for a person ends with the window: ask.
+                if let Some(warning) = crate::pipeline_card::quit_warning(&ws.open_runs(cx)) {
+                    ws.confirm_close_runs(warning, window, cx);
+                    return false;
+                }
                 // Unsaved edits: ask first, and close from the dialog (spec §7.8).
                 let all: Vec<PaneId> = ws.files.keys().copied().collect();
                 if ws.unsaved_in(&all, cx).is_empty() {

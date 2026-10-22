@@ -62,6 +62,8 @@ pub fn session_line(
     if latest && s.status == StageStatus::Running {
         let doing = match live {
             Some(SessionState::Waiting) => "Asking",
+            // Between turns, not reported yet: waiting on something, not working.
+            Some(SessionState::Idle) => "Idle",
             _ => "Working",
         };
         return format!("{doing} · {}", elapsed(a.started, now));
@@ -224,6 +226,11 @@ mod tests {
         assert_eq!(
             session_line(r, 0, 0, Some(SessionState::Working), now),
             "Working · 2m 15s"
+        );
+        // Its turn over, waiting on something (a deploy, a monitor) before it reports.
+        assert_eq!(
+            session_line(r, 0, 0, Some(SessionState::Idle), now),
+            "Idle · 2m 15s"
         );
         runs.report("t1", rated(92, "done")).unwrap();
         let r = runs.run(&id).unwrap();

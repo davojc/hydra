@@ -116,6 +116,25 @@ pub fn card_tokens(run: &Run) -> Vec<String> {
         .collect()
 }
 
+/// What closing hydraui would end (the window asks first): each run still open, by its status
+/// line; `None` when nothing is running or waiting for a person.
+pub fn quit_warning(runs: &[Run]) -> Option<String> {
+    let open: Vec<String> = runs
+        .iter()
+        .filter(|r| r.state.open())
+        .map(|r| status_text(r).0)
+        .collect();
+    let what = match open.len() {
+        0 => return None,
+        1 => "this ticket's run",
+        _ => "these tickets' runs",
+    };
+    Some(format!(
+        "Closing hydraui ends {what}: its sessions stop, and a restart won't pick it up again.\n{}",
+        open.join("\n")
+    ))
+}
+
 /// The orchestrator's line in the status bar (the design's status text): the pipeline, the
 /// ticket, and what the run is doing or why it waits; `true` when it needs a person (red).
 pub fn status_text(run: &Run) -> (String, bool) {
@@ -292,6 +311,23 @@ mod tests {
         // Not linked yet: no token to show.
         runs.begin("orch", &id, "develop", "", 30).unwrap();
         assert_eq!(card_tokens(runs.run(&id).unwrap()), ["orch", "t1", "t2"]);
+    }
+
+    #[test]
+    fn closing_warns_only_while_a_ticket_is_open() {
+        let (mut runs, id) = runs_of(&STAGES);
+        start(&mut runs, &id, "replicate", "t1");
+        let open = runs.run(&id).unwrap().clone();
+        let warning = quit_warning(std::slice::from_ref(&open)).unwrap();
+        assert!(warning.contains("INTH-482"), "{warning}");
+        assert!(
+            warning.contains("1. Understand & replicate working"),
+            "{warning}"
+        );
+        let mut done = open.clone();
+        done.state = RunState::Finished;
+        assert_eq!(quit_warning(&[done]), None);
+        assert_eq!(quit_warning(&[]), None);
     }
 
     #[test]

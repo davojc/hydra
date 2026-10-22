@@ -53,7 +53,11 @@ impl Workspace {
     }
 
     /// The sessions, each draft that may have been cleared settled from its screen first.
-    fn fresh_sessions(&mut self, window: &Window, cx: &mut Context<Self>) -> Vec<Session> {
+    pub(super) fn fresh_sessions(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<Session> {
         let now = Instant::now();
         let live = &self.panes;
         self.reserved

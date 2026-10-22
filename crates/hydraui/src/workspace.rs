@@ -214,6 +214,9 @@ pub struct Workspace {
     /// Terminals a card was just sent to, and when: not candidates for another until their
     /// next hook state, or 30 s (auto-pickup design §6).
     reserved: HashMap<PaneId, Instant>,
+    /// Each orchestrator's wake-up waiting to be typed, with its run (orchestrator spec §6): the
+    /// newest only.
+    pending_wakes: HashMap<PaneId, (String, String)>,
     /// Cards being offered or just sent, so one card never goes to two sessions.
     in_flight: crate::pickup::InFlight,
     /// Listens for board files the MCP server's sessions create.
@@ -273,7 +276,11 @@ impl Workspace {
                     .timer(std::time::Duration::from_secs(1))
                     .await;
                 if this
-                    .update_in(cx, |ws, window, cx| ws.sync_shown_lanes(window, cx))
+                    .update_in(cx, |ws, window, cx| {
+                        ws.sync_shown_lanes(window, cx);
+                        // A draft cleared without a hook: a waiting wake-up may go now.
+                        ws.send_wakes(window, cx);
+                    })
                     .is_err()
                 {
                     break;
@@ -325,7 +332,7 @@ impl Workspace {
                         McpEvent::Usage(token, usage) => ws.usage_reported(&token, usage, cx),
                         McpEvent::Verified(token) => ws.session_verified(&token, cx),
                         McpEvent::StageStart(s) => ws.start_stage(s, window, cx),
-                        McpEvent::RunChanged(_) => cx.notify(),
+                        McpEvent::RunChanged(changes) => ws.runs_changed(changes, window, cx),
                     });
                     if alive.is_err() {
                         break;
@@ -395,6 +402,7 @@ impl Workspace {
             board_focus: HashMap::new(),
             board_events: HashMap::new(),
             reserved: HashMap::new(),
+            pending_wakes: HashMap::new(),
             in_flight: Default::default(),
             _mcp_pump: mcp_pump,
             _activation: activation,

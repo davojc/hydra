@@ -114,6 +114,9 @@ impl Workspace {
         self.reserved.remove(&id);
         view.update(cx, |v, cx| v.set_claude(state, resumed, cx));
         self.tick_activity(cx);
+        if self.pending_wakes.contains_key(&id) {
+            self.send_wakes(window, cx);
+        }
         if let Some(alert) = alert_for(before, state) {
             self.alert(id, alert, window, cx);
         }

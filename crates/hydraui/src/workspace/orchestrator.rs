@@ -6,14 +6,88 @@ use gpui::prelude::*;
 use gpui::{Context, Window};
 
 use super::Workspace;
+use crate::envs::PaneId;
 use crate::hydra::{PaneRequest, command_line};
 use crate::mcp::server::{self, McpEvent};
-use crate::runs::{Change, Role, StartStage};
+use crate::pickup::{Session, ready_for_prompt};
+use crate::runs::{Change, Decided, MAX_ATTEMPTS, Role, Run, StartStage};
 use crate::worktrees;
 
 /// A stage terminal's name, e.g. `s-02 · Develop`.
 pub fn stage_title(label: &str, title: &str) -> String {
     format!("{label} · {title}")
+}
+
+/// What hydraui types into the orchestrator's terminal after `changes` to `run` (§6): the run,
+/// the stage and the result, and what to do next; `None` when nothing calls for it (a pause).
+pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
+    let id = &run.id;
+    let stage = |i: usize| run.pipeline.stages[i].id.as_str();
+    let (mut finished, mut needs, mut ended, mut failed, mut passed) =
+        (false, None, None, None, None);
+    let (mut retrying, mut run_resumed, mut resumed) = (None, false, false);
+    for c in changes.iter().filter(|c| &c.run == id) {
+        match (&c.what, c.stage) {
+            (Decided::RunFinished, _) => finished = true,
+            (Decided::RunNeedsYou(why), _) => needs = Some(why),
+            (Decided::RunStopped(why), _) => ended = Some(why),
+            (Decided::Failed(why), Some(i)) => failed = Some((i, why)),
+            (Decided::Passed, Some(i)) => passed = Some(i),
+            (Decided::Retrying, Some(i)) => retrying = Some(i),
+            (Decided::RunResumed, _) => run_resumed = true,
+            (Decided::Resumed, _) => resumed = true,
+            _ => {}
+        }
+    }
+    Some(if finished {
+        format!(
+            "Run {id} finished: every stage passed. Tell the user, then wait for them to ask for \
+             the next ticket."
+        )
+    } else if let Some(why) = ended {
+        format!(
+            "Run {id} was stopped: {why}. That ticket is over: tell the user, and start the next \
+             ticket only when they ask."
+        )
+    } else if let Some(why) = needs {
+        format!(
+            "Run {id} needs a person: {why}. Tell the user why and wait: nothing you can call \
+             moves it on."
+        )
+    } else if let Some((i, why)) = failed {
+        format!(
+            "Run {id}: stage {} failed ({why}), attempt {} of {MAX_ATTEMPTS}. Call run_status, \
+             then start it again with stage_start.",
+            stage(i),
+            run.stages[i].attempts.len()
+        )
+    } else if let Some(i) = passed {
+        let score = run.stages[i].rating().map_or(0, |r| r.score);
+        format!(
+            "Run {id}: stage {} passed ({score}, bar {}). Call run_status, then start the next \
+             stage.",
+            stage(i),
+            run.pipeline.bar_for(i)
+        )
+    } else if let Some(i) = retrying {
+        format!(
+            "Run {id}: a person re-ran stage {} with a note. Start it again with stage_start; its \
+             session gets the note.",
+            stage(i)
+        )
+    } else if run_resumed {
+        format!("Run {id}: a person resumed it. Call run_status, then start the next stage.")
+    } else if resumed {
+        format!("Run {id}: the user resumed the run. Call run_status and carry on.")
+    } else {
+        return None;
+    })
+}
+
+/// Whether a waiting wake-up may be typed into `orchestrator` now (§6): ready for a prompt, and
+/// its run not paused (§5.4).
+pub fn wake_now(orchestrator: &Session, paused: bool) -> bool {
+    !paused && ready_for_prompt(orchestrator)
 }
 
 /// Writes `changes` to their runs' logs and tells the app (its views, and the orchestrator).
@@ -131,6 +205,78 @@ impl Workspace {
         }
     }
 
+    /// Runs changed: each one's orchestrator gets its wake-up, typed now if it can take it, else
+    /// once it can (§6).
+    pub(super) fn runs_changed(
+        &mut self,
+        changes: Vec<Change>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut wakes = Vec::new();
+        if let Some(sv) = server::get() {
+            let reg = server::lock(sv.registry());
+            let mut ids: Vec<&str> = changes.iter().map(|c| c.run.as_str()).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            for run in ids.into_iter().filter_map(|id| reg.runs.run(id)) {
+                if let Some(message) = wake_message(run, &changes) {
+                    wakes.push((run.orchestrator.clone(), run.id.clone(), message));
+                }
+            }
+        }
+        for (token, run, message) in wakes {
+            let pane = self
+                .panes
+                .iter()
+                .find(|(_, v)| v.read(cx).mcp_token() == Some(token.as_str()))
+                .map(|(id, _)| *id);
+            if let Some(pane) = pane {
+                self.pending_wakes.insert(pane, (run, message));
+            }
+        }
+        self.send_wakes(window, cx);
+        cx.notify();
+    }
+
+    /// Types each waiting wake-up whose orchestrator can take it now; a closed one's is dropped.
+    pub(super) fn send_wakes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_wakes.is_empty() {
+            return;
+        }
+        let sessions = self.fresh_sessions(window, cx);
+        let pending: Vec<(PaneId, String, String)> = self
+            .pending_wakes
+            .iter()
+            .map(|(p, (r, m))| (*p, r.clone(), m.clone()))
+            .collect();
+        for (pane, run, message) in pending {
+            let Some(session) = sessions.iter().find(|s| s.pane == pane) else {
+                self.pending_wakes.remove(&pane);
+                continue;
+            };
+            let paused = server::get().is_some_and(|sv| {
+                server::lock(sv.registry())
+                    .runs
+                    .run(&run)
+                    .is_some_and(|r| r.paused)
+            });
+            if !wake_now(session, paused) {
+                continue;
+            }
+            let typed = self
+                .panes
+                .get(&pane)
+                .cloned()
+                .is_some_and(|v| v.update(cx, |v, cx| v.type_prompt(&message, cx)));
+            if typed {
+                crate::action_log::write(format!("run {run}: woke the orchestrator: {message}"));
+                self.reserved.insert(pane, std::time::Instant::now());
+                self.pending_wakes.remove(&pane);
+            }
+        }
+    }
+
     /// The shell or Claude session behind `token` ended: when it was running a stage, the stage
     /// fails (§3.4). An orchestrator's run stops only when its terminal closes.
     pub(super) fn stage_session_gone(&mut self, token: &str) {
@@ -161,7 +307,115 @@ fn stage_failed(s: &StartStage, why: String) {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
+    use crate::runs::{Choice, Runs};
+
+    fn runs_of(stages: &[&str]) -> (Runs, String) {
+        let mut t = String::from("name = \"t\"\n");
+        for s in stages {
+            t += &format!("[[stage]]\nid = \"{s}\"\ntitle = \"{s}\"\n");
+        }
+        let mut runs = Runs::default();
+        let p = crate::pipeline::parse(&t).unwrap();
+        let id = runs.start_run("orch", p, "INTH-1", "x").unwrap().id.clone();
+        (runs, id)
+    }
+
+    fn start(runs: &mut Runs, id: &str, stage: &str, tok: &str) {
+        let s = runs.begin("orch", id, stage, "", 30).unwrap();
+        runs.link(id, s.stage, tok, tok);
+    }
+
+    fn rated(score: u8) -> crate::rating::Rating {
+        crate::rating::from_args(&json!({"outcome": "done", "score": score, "summary": "s",
+            "evidence": [{"kind": "note", "detail": "d"}],
+            "reasons": [{"side": "against", "text": "Not tried on mobile."}]}))
+        .unwrap()
+    }
+
+    fn wake(runs: &Runs, id: &str, changes: &[Change]) -> String {
+        wake_message(runs.run(id).unwrap(), changes).unwrap()
+    }
+
+    #[test]
+    fn wake_messages_name_run_stage_and_result() {
+        let (mut runs, id) = runs_of(&["a", "b"]);
+        start(&mut runs, &id, "a", "t1");
+        let passed = runs.report("t1", rated(86)).unwrap();
+        let m = wake(&runs, &id, &passed);
+        assert!(
+            m.starts_with("Run INTH-1-1: stage a passed (86, bar 80)."),
+            "{m}"
+        );
+        assert!(m.contains("run_status") && m.contains("next stage"), "{m}");
+
+        start(&mut runs, &id, "b", "t2");
+        let failed = runs.session_gone("t2");
+        let m = wake(&runs, &id, &failed);
+        assert!(
+            m.contains("stage b failed") && m.contains("attempt 1 of 3"),
+            "{m}"
+        );
+        assert!(m.contains("start it again"), "{m}");
+
+        start(&mut runs, &id, "b", "t3");
+        let stopped = runs.report("t3", rated(40)).unwrap();
+        let m = wake(&runs, &id, &stopped);
+        assert!(
+            m.contains("needs a person") && m.contains("40, bar 80"),
+            "{m}"
+        );
+        assert!(m.contains("Tell the user why and wait"), "{m}");
+
+        let resumed = runs
+            .person(
+                &id,
+                Choice::Retry {
+                    note: "Use staging.".into(),
+                },
+            )
+            .unwrap();
+        let m = wake(&runs, &id, &resumed);
+        assert!(
+            m.contains("re-ran stage b") && m.contains("stage_start"),
+            "{m}"
+        );
+
+        start(&mut runs, &id, "b", "t4");
+        let finished = runs.report("t4", rated(95)).unwrap();
+        let m = wake(&runs, &id, &finished);
+        assert!(m.contains("finished") && m.contains("Tell the user"), "{m}");
+        assert!(!m.contains("next stage"), "{m}");
+    }
+
+    #[test]
+    fn some_changes_wake_nobody() {
+        let (mut runs, id) = runs_of(&["a"]);
+        let paused = runs.pause(&id, true).unwrap();
+        assert_eq!(wake_message(runs.run(&id).unwrap(), &paused), None);
+        let resumed = runs.pause(&id, false).unwrap();
+        assert!(wake(&runs, &id, &resumed).contains("resumed"));
+        let stopped = runs.person(&id, Choice::Stop).unwrap();
+        assert!(wake(&runs, &id, &stopped).contains("stopped by you"));
+    }
+
+    #[test]
+    fn a_paused_run_wakes_nobody() {
+        let ready = crate::pickup::Session {
+            pane: 1,
+            project_root: None,
+            cwd: "C:/w".into(),
+            claude: Some(crate::mcp::SessionState::Idle),
+            focused: false,
+            reserved: false,
+            draft: false,
+            finished: true,
+        };
+        assert!(wake_now(&ready, false));
+        assert!(!wake_now(&ready, true));
+    }
 
     #[test]
     fn the_stage_terminal_title_names_label_and_stage() {

@@ -26,6 +26,7 @@ pub mod mcp;
 pub mod open_files;
 pub mod openapi;
 pub mod openapi_view;
+pub mod orchestrator_theme;
 pub mod palette;
 pub mod pane_view;
 pub mod pickup;

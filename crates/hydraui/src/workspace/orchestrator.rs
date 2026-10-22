@@ -3,14 +3,20 @@
 use std::path::PathBuf;
 
 use gpui::prelude::*;
-use gpui::{Context, Window};
+use gpui::{Context, SharedString, Window, div, px};
+use gpui_component::WindowExt;
+use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::notification::Notification;
+use gpui_component::{h_flex, v_flex};
 
 use super::Workspace;
 use crate::envs::PaneId;
 use crate::hydra::{PaneRequest, command_line};
 use crate::mcp::server::{self, McpEvent};
+use crate::orchestrator_theme::{self as theme, color};
 use crate::pickup::{Session, ready_for_prompt};
-use crate::runs::{Change, Decided, MAX_ATTEMPTS, Role, Run, StartStage};
+use crate::rating::{Outcome, Side};
+use crate::runs::{Change, Decided, MAX_ATTEMPTS, Role, Run, RunState, StageStatus, StartStage};
 use crate::worktrees;
 
 /// A stage terminal's name, e.g. `s-02 · Develop`.
@@ -81,6 +87,52 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
         format!("Run {id}: the user resumed the run. Call run_status and carry on.")
     } else {
         return None;
+    })
+}
+
+/// Keys a run's escalation toast, so a newer one for the same run replaces it.
+struct RunAlert;
+
+/// What the escalation toast says about a run that needs a person (the design's "Pipeline
+/// stopped · needs you", spec §5.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Escalation {
+    /// `<ticket> stopped at <stage>`.
+    pub title: String,
+    /// The score against the bar, why it was blocked, or the failure or usage reason.
+    pub body: String,
+    /// The first reason against, when the stage gave one.
+    pub reason: Option<String>,
+}
+
+/// The toast for `run`, when it needs a person; `None` otherwise.
+pub fn escalation(run: &Run) -> Option<Escalation> {
+    let RunState::NeedsYou(why) = &run.state else {
+        return None;
+    };
+    let i = run
+        .stages
+        .iter()
+        .position(|s| s.status != StageStatus::Passed)?;
+    let stage = &run.stages[i];
+    let rating = (stage.status == StageStatus::Stopped)
+        .then(|| stage.rating())
+        .flatten();
+    let body = match rating {
+        Some(r) if r.outcome == Outcome::Blocked => format!("Blocked: {}", r.summary),
+        Some(r) => format!("Rated {}%, bar is {}%.", r.score, run.pipeline.bar_for(i)),
+        None => why.clone(),
+    };
+    let reason = rating.and_then(|r| {
+        r.reasons
+            .iter()
+            .find(|x| x.side == Side::Against)
+            .map(|x| x.text.clone())
+    });
+    Some(Escalation {
+        title: format!("{} stopped at {}", run.ticket, run.pipeline.stages[i].title),
+        body,
+        reason,
     })
 }
 
@@ -236,7 +288,110 @@ impl Workspace {
             }
         }
         self.send_wakes(window, cx);
+        let mut needs_you: Vec<&str> = changes
+            .iter()
+            .filter(|c| matches!(c.what, Decided::RunNeedsYou(_)))
+            .map(|c| c.run.as_str())
+            .collect();
+        needs_you.sort_unstable();
+        needs_you.dedup();
+        for run in needs_you {
+            self.escalate(run, window, cx);
+        }
         cx.notify();
+    }
+
+    /// Run `run_id` needs a person (§5.3): its orchestrator's terminal is badged, the window
+    /// flashes when in the background, and the design's escalation toast stays until closed.
+    /// **Open ticket** shows the stopped stage's session (the Pipeline view, plan Task 10, will
+    /// take its place).
+    fn escalate(&mut self, run_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let found = server::get().and_then(|sv| {
+            let reg = server::lock(sv.registry());
+            let run = reg.runs.run(run_id)?;
+            let session = run
+                .stages
+                .iter()
+                .find(|s| s.status != StageStatus::Passed)
+                .and_then(|s| s.latest())
+                .and_then(|a| a.session.clone());
+            Some((escalation(run)?, run.orchestrator.clone(), session))
+        });
+        let Some((e, orchestrator, session)) = found else {
+            return;
+        };
+        let pane_of = |token: &str| {
+            self.panes
+                .iter()
+                .find(|(_, v)| v.read(cx).mcp_token() == Some(token))
+                .map(|(id, _)| *id)
+        };
+        let Some(orch) = pane_of(&orchestrator) else {
+            return;
+        };
+        let target = session.as_deref().and_then(pane_of).unwrap_or(orch);
+        crate::action_log::write(format!("run {run_id}: needs you: {} · {}", e.title, e.body));
+        self.attention.insert(orch);
+        if !window.is_window_active() {
+            crate::claim::flash(crate::claim::hwnd_of(window));
+        }
+        let ws = cx.entity();
+        let note = Notification::new()
+            .id1::<RunAlert>(SharedString::from(format!("run-{run_id}")))
+            .autohide(false)
+            .w(px(360.))
+            .bg(color(theme::TOAST))
+            .border_color(color(theme::RED_BORDER))
+            .content(move |_, _, cx| {
+                let ws = ws.clone();
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(color(theme::RED))
+                            .child("PIPELINE STOPPED · NEEDS YOU"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(color(theme::TEXT))
+                            .child(e.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(color(theme::TEXT_SECONDARY))
+                            .child(e.body.clone()),
+                    )
+                    .children(e.reason.clone().map(|r| {
+                        div()
+                            .text_xs()
+                            .text_color(color(theme::TEXT_SECONDARY))
+                            .child(format!("− {r}"))
+                    }))
+                    .child(
+                        h_flex()
+                            .pt_2()
+                            .gap_2()
+                            .child(
+                                Button::new("open-ticket")
+                                    .label("Open ticket")
+                                    .primary()
+                                    .on_click(cx.listener(move |note, _, window, cx| {
+                                        note.dismiss(window, cx);
+                                        ws.update(cx, |ws, cx| {
+                                            ws.show_terminal(target, window, cx)
+                                        });
+                                    })),
+                            )
+                            .child(Button::new("later").label("Later").ghost().on_click(
+                                cx.listener(|note, _, window, cx| note.dismiss(window, cx)),
+                            )),
+                    )
+                    .into_any_element()
+            });
+        window.push_notification(note, cx);
     }
 
     /// Types each waiting wake-up whose orchestrator can take it now; a closed one's is dropped.
@@ -399,6 +554,60 @@ mod tests {
         assert!(wake(&runs, &id, &resumed).contains("resumed"));
         let stopped = runs.person(&id, Choice::Stop).unwrap();
         assert!(wake(&runs, &id, &stopped).contains("stopped by you"));
+    }
+
+    fn reasoned(score: u8, outcome: &str) -> crate::rating::Rating {
+        crate::rating::from_args(&json!({"outcome": outcome, "score": score,
+            "summary": "No account to test with.",
+            "evidence": [{"kind": "note", "detail": "d"}],
+            "reasons": [{"side": "for", "text": "Steps are clear."},
+                        {"side": "against", "text": "The dialog may paginate on its own."}]}))
+        .unwrap()
+    }
+
+    #[test]
+    fn escalations_name_the_ticket_stage_score_bar_and_reason() {
+        // A low score.
+        let (mut runs, id) = runs_of(&["replicate", "develop"]);
+        assert_eq!(
+            escalation(runs.run(&id).unwrap()),
+            None,
+            "running: nothing to say"
+        );
+        start(&mut runs, &id, "replicate", "t1");
+        runs.report("t1", reasoned(64, "done")).unwrap();
+        let e = escalation(runs.run(&id).unwrap()).unwrap();
+        assert_eq!(e.title, "INTH-1 stopped at replicate");
+        assert_eq!(e.body, "Rated 64%, bar is 80%.");
+        assert_eq!(
+            e.reason.as_deref(),
+            Some("The dialog may paginate on its own.")
+        );
+
+        // Blocked, whatever the score.
+        let (mut runs, id) = runs_of(&["replicate"]);
+        start(&mut runs, &id, "replicate", "t1");
+        runs.report("t1", reasoned(95, "blocked")).unwrap();
+        let e = escalation(runs.run(&id).unwrap()).unwrap();
+        assert_eq!(e.body, "Blocked: No account to test with.");
+
+        // Failed three times.
+        let (mut runs, id) = runs_of(&["develop"]);
+        for n in 1..=3 {
+            start(&mut runs, &id, "develop", &format!("t{n}"));
+            runs.session_gone(&format!("t{n}"));
+        }
+        let e = escalation(runs.run(&id).unwrap()).unwrap();
+        assert_eq!(e.title, "INTH-1 stopped at develop");
+        assert!(e.body.contains("failed 3 times"), "{}", e.body);
+        assert_eq!(e.reason, None);
+
+        // The weekly limit, before the stage started.
+        let (mut runs, id) = runs_of(&["develop"]);
+        runs.usage("orch", 80.0);
+        let _ = runs.begin("orch", &id, "develop", "", 30);
+        let e = escalation(runs.run(&id).unwrap()).unwrap();
+        assert!(e.body.contains("20%"), "{}", e.body);
     }
 
     #[test]

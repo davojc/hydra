@@ -29,6 +29,15 @@ fn by_project<P: PartialEq + Clone>(terminals: &[(PaneId, P)]) -> Vec<(P, Vec<Pa
     groups
 }
 
+/// Where a row sits in the list: on its own, as a pipeline's orchestrator, or as one of the
+/// sessions that orchestrator started.
+#[derive(Clone, Copy, PartialEq)]
+enum Nest {
+    Plain,
+    Orchestrator,
+    Stage,
+}
+
 /// The terminal `by` steps from `shown` in `order`, wrapping; the first when `shown` isn't in it.
 fn step(order: &[PaneId], shown: Option<PaneId>, by: isize) -> Option<PaneId> {
     let at = shown
@@ -120,14 +129,25 @@ impl Workspace {
             .flat_map(|(_, _, panes)| panes.iter().copied())
             .collect();
         let shown = tab.shown.filter(|_| !all_tasks);
+        // Each orchestrator is one framed block: its card, links, its own row, then the sessions
+        // it started nested under it, so several pipelines' sessions never mix.
         for (orch, card, panes) in &cards {
             let active = panes.iter().any(|p| Some(*p) == shown);
-            list = list.child(self.render_pipeline_card(*orch, card, active, cx));
+            let mut block = v_flex()
+                .id(SharedString::from(format!("pipeline-block-{orch}")))
+                .mx_1()
+                .my_1()
+                .pb_1()
+                .gap_0p5()
+                .rounded(px(10.))
+                .border_1()
+                .border_color(tint.opacity(if active { 0.45 } else { 0.2 }))
+                .child(self.render_pipeline_card(*orch, card, active, cx));
             let orch = *orch;
             let history_shown = self.pipeline_shown(orch)
                 && self.pipeline_tabs.get(&orch).map(|t| t.view)
                     == Some(super::pipeline_tab::TabView::History);
-            list = list.child(
+            block = block.child(
                 div()
                     .id(SharedString::from(format!("pipeline-history-link-{orch}")))
                     .ml(px(26.))
@@ -153,7 +173,7 @@ impl Workspace {
             let settings_shown = self.pipeline_shown(orch)
                 && self.pipeline_tabs.get(&orch).map(|t| t.view)
                     == Some(super::pipeline_tab::TabView::Settings);
-            list = list.child(
+            block = block.child(
                 div()
                     .id(SharedString::from(format!("pipeline-settings-link-{orch}")))
                     .ml(px(26.))
@@ -171,11 +191,30 @@ impl Workspace {
                         ws.open_pipeline_settings(orch, window, cx)
                     })),
             );
-            for id in panes {
-                if let Some(row) = self.terminal_row(*id, shown == Some(*id), tint, true, cx) {
-                    list = list.child(row);
-                }
+            if let Some(row) =
+                self.terminal_row(orch, shown == Some(orch), tint, Nest::Orchestrator, cx)
+            {
+                block = block.child(row);
             }
+            let stage_rows: Vec<_> = panes
+                .iter()
+                .filter(|id| **id != orch)
+                .filter_map(|id| self.terminal_row(*id, shown == Some(*id), tint, Nest::Stage, cx))
+                .collect();
+            if !stage_rows.is_empty() {
+                // A guide line down from the orchestrator ties its sessions to it.
+                block = block.child(
+                    v_flex()
+                        .ml(px(18.))
+                        .mr_1()
+                        .pl(px(6.))
+                        .gap_0p5()
+                        .border_l_2()
+                        .border_color(tint.opacity(0.35))
+                        .children(stage_rows),
+                );
+            }
+            list = list.child(block);
         }
         for (divided, id) in rows.into_iter().filter(|(_, id)| !carded.contains(id)) {
             if divided {
@@ -188,7 +227,7 @@ impl Workspace {
                         .bg(tint.opacity(0.6)),
                 );
             }
-            if let Some(row) = self.terminal_row(id, shown == Some(id), tint, false, cx) {
+            if let Some(row) = self.terminal_row(id, shown == Some(id), tint, Nest::Plain, cx) {
                 list = list.child(row);
             }
         }
@@ -203,13 +242,13 @@ impl Workspace {
     }
 
     /// Terminal `id`'s row: its activity dot, name, Claude's state and × on hover;
-    /// `highlighted` when it is the one shown, `indent` under a pipeline card.
+    /// `highlighted` when it is the one shown; `nest` sets how it sits in a pipeline's block.
     fn terminal_row(
         &self,
         id: PaneId,
         highlighted: bool,
         tint: gpui::Hsla,
-        indent: bool,
+        nest: Nest,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let muted = cx.theme().muted_foreground;
@@ -230,7 +269,8 @@ impl Workspace {
             h_flex()
                 .id(SharedString::from(format!("terminal-{id}")))
                 .group(group.clone())
-                .pl(px(if indent { 22. } else { 8. }))
+                .pl(px(8.))
+                .when(nest == Nest::Orchestrator, |d| d.mx_1())
                 .pr_2()
                 .py_1()
                 .gap_2()
@@ -280,7 +320,23 @@ impl Workspace {
                     }
                 })
                 .child(dot)
-                .child(div().flex_1().min_w_0().text_sm().truncate().child(label))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .map(|d| match nest {
+                            // The orchestrator leads its block; its sessions read as under it.
+                            Nest::Orchestrator => {
+                                d.text_sm().font_weight(gpui::FontWeight::SEMIBOLD)
+                            }
+                            Nest::Stage => d
+                                .text_size(px(13.))
+                                .when(!highlighted, |d| d.text_color(muted)),
+                            Nest::Plain => d.text_sm(),
+                        })
+                        .child(label),
+                )
                 .children(
                     claude.map(|(text, color)| {
                         div().flex_none().text_xs().text_color(color).child(text)

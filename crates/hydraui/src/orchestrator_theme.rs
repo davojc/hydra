@@ -29,3 +29,10 @@ pub const AMBER: u32 = 0xe5b53e;
 pub const AMBER_TINT: u32 = 0x2e2511;
 pub const GREEN: u32 = 0x62c98d;
 pub const GREEN_TINT: u32 = 0x12291c;
+pub const BORDER_STRONG: u32 = 0x2f3635;
+/// The stopped banner's background.
+pub const BANNER: u32 = 0x1a1311;
+/// A selected session row that waits for you.
+pub const WAITING_TINT: u32 = 0x1c1513;
+/// The right panel's background, as a terminal's.
+pub const PANEL: u32 = 0x0a0b0b;

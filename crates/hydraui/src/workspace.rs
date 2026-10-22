@@ -9,6 +9,7 @@ mod launcher;
 mod layout_file;
 mod orchestrator;
 mod pickup;
+mod pipeline_tab;
 mod settings_tab;
 mod shortcuts;
 mod start_page;
@@ -197,6 +198,8 @@ pub struct Workspace {
     /// Terminals with a Tasks tab, and whether it's the one shown (`true`) or the terminal
     /// (task-board design §4).
     tasks_tabs: HashMap<PaneId, bool>,
+    /// Orchestrators' Pipeline tabs (orchestrator spec §7.2).
+    pipeline_tabs: HashMap<PaneId, pipeline_tab::PipelineTab>,
     /// One board per project, shared by every Tasks tab on it; dropped when no tab uses it.
     boards: HashMap<PathBuf, (Entity<TaskBoard>, Subscription)>,
     /// One view per terminal's Tasks tab.
@@ -280,6 +283,15 @@ impl Workspace {
                         ws.sync_shown_lanes(window, cx);
                         // A draft cleared without a hook: a waiting wake-up may go now.
                         ws.send_wakes(window, cx);
+                        // The Pipeline tab's session times tick.
+                        if ws
+                            .envs
+                            .active()
+                            .and_then(|t| t.shown)
+                            .is_some_and(|id| ws.pipeline_shown(id))
+                        {
+                            cx.notify();
+                        }
                     })
                     .is_err()
                 {
@@ -394,6 +406,7 @@ impl Workspace {
             start: None,
             settings: None,
             tasks_tabs: HashMap::new(),
+            pipeline_tabs: HashMap::new(),
             boards: HashMap::new(),
             board_views: HashMap::new(),
             all_tasks: HashSet::new(),
@@ -731,6 +744,18 @@ impl Workspace {
             view.update(cx, |f, cx| f.focus_content(window, cx));
             return;
         }
+        // A terminal showing its Pipeline tab: the session the user stepped into, else none of
+        // the hidden terminal.
+        if self.pipeline_shown(id) {
+            match self.pipeline_focus(id, cx).and_then(|p| self.panes.get(&p)) {
+                Some(view) => {
+                    let handle = view.read(cx).focus_handle(cx);
+                    window.focus(&handle, cx);
+                }
+                None => window.focus(&self.focus, cx),
+            }
+            return;
+        }
         // A terminal showing its Tasks tab: the board.
         if let Some(board) = self.shown_board(id) {
             let handle = board.read(cx).focus_handle(cx);
@@ -973,6 +998,7 @@ impl Workspace {
     }
 
     fn drop_pane(&mut self, id: PaneId) {
+        self.pipeline_tabs.remove(&id);
         // Dropping the view drops its Pane: the job ends the shell's whole process tree.
         self.panes.remove(&id);
         self.subs.remove(&id);
@@ -1521,9 +1547,12 @@ impl Workspace {
                 self.render_all_tasks(tint, muted, border, cx)
             }
             // With a Tasks tab: its strip above the terminal or its board (task-board §4).
-            Some((id, view)) if self.tasks_tabs.contains_key(&id) => {
+            Some((id, view))
+                if self.tasks_tabs.contains_key(&id) || self.pipeline_tabs.contains_key(&id) =>
+            {
                 let label = view.read(cx).label();
                 let content = match self.shown_board(id) {
+                    _ if self.pipeline_shown(id) => self.render_pipeline(id, cx),
                     Some(board) => board.clone().into_any_element(),
                     None => view.clone().into_any_element(),
                 };

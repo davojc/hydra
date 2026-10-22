@@ -32,6 +32,7 @@ pub mod pane_view;
 pub mod pickup;
 pub mod pipeline;
 pub mod pipeline_card;
+pub mod pipeline_view;
 pub mod quick_open;
 pub mod rating;
 pub mod readiness;

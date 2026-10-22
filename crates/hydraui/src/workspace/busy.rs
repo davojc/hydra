@@ -146,6 +146,7 @@ impl Workspace {
             && !self.all_tasks_shown()
             && self.envs.active().and_then(|t| t.shown) == Some(id)
             && self.tasks_tabs.get(&id) != Some(&true)
+            && !self.pipeline_shown(id)
     }
 
     /// Tells you a terminal out of sight needs you: its environment tab gets a badge until it

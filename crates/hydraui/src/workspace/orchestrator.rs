@@ -122,7 +122,7 @@ pub fn escalation(run: &Run) -> Option<Escalation> {
     let body = match rating {
         Some(r) if r.outcome == Outcome::Blocked => format!("Blocked: {}", r.summary),
         Some(r) => format!("Rated {}%, bar is {}%.", r.score, run.pipeline.bar_for(i)),
-        None => why.clone(),
+        None => crate::pipeline_view::sentence(why),
     };
     let reason = rating.and_then(|r| {
         r.reasons
@@ -144,7 +144,7 @@ pub fn wake_now(orchestrator: &Session, paused: bool) -> bool {
 }
 
 /// Writes `changes` to their runs' logs and tells the app (its views, and the orchestrator).
-fn tell(changes: Vec<Change>) {
+pub(super) fn tell(changes: Vec<Change>) {
     let Some(server) = server::get() else {
         return;
     };
@@ -252,6 +252,17 @@ impl Workspace {
                     .runs
                     .link(&s.run, s.stage, &token, &taker);
                 crate::action_log::write(format!("run {}: {taker} opened", s.run));
+                // An open Pipeline tab follows the run to the new session (the design).
+                let orch = self
+                    .panes
+                    .iter()
+                    .find(|(_, v)| v.read(cx).mcp_token() == Some(s.orchestrator.as_str()))
+                    .map(|(id, _)| *id);
+                if let Some(tab) = orch.and_then(|o| self.pipeline_tabs.get_mut(&o)) {
+                    tab.selected = None;
+                    tab.stepped_in = false;
+                    tab.confirm_stop = false;
+                }
                 cx.notify();
             }
             _ => stage_failed(&s, "its terminal has no MCP token".into()),
@@ -304,21 +315,14 @@ impl Workspace {
 
     /// Run `run_id` needs a person (§5.3): its orchestrator's terminal is badged, the window
     /// flashes when in the background, and the design's escalation toast stays until closed.
-    /// **Open ticket** shows the stopped stage's session (the Pipeline view, plan Task 10, will
-    /// take its place).
+    /// **Open ticket** opens the Pipeline tab at the stopped session.
     fn escalate(&mut self, run_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let found = server::get().and_then(|sv| {
             let reg = server::lock(sv.registry());
             let run = reg.runs.run(run_id)?;
-            let session = run
-                .stages
-                .iter()
-                .find(|s| s.status != StageStatus::Passed)
-                .and_then(|s| s.latest())
-                .and_then(|a| a.session.clone());
-            Some((escalation(run)?, run.orchestrator.clone(), session))
+            Some((escalation(run)?, run.orchestrator.clone()))
         });
-        let Some((e, orchestrator, session)) = found else {
+        let Some((e, orchestrator)) = found else {
             return;
         };
         let pane_of = |token: &str| {
@@ -330,7 +334,6 @@ impl Workspace {
         let Some(orch) = pane_of(&orchestrator) else {
             return;
         };
-        let target = session.as_deref().and_then(pane_of).unwrap_or(orch);
         crate::action_log::write(format!("run {run_id}: needs you: {} · {}", e.title, e.body));
         self.attention.insert(orch);
         if !window.is_window_active() {
@@ -381,9 +384,7 @@ impl Workspace {
                                     .primary()
                                     .on_click(cx.listener(move |note, _, window, cx| {
                                         note.dismiss(window, cx);
-                                        ws.update(cx, |ws, cx| {
-                                            ws.show_terminal(target, window, cx)
-                                        });
+                                        ws.update(cx, |ws, cx| ws.open_pipeline(orch, window, cx));
                                     })),
                             )
                             .child(Button::new("later").label("Later").ghost().on_click(
@@ -509,7 +510,7 @@ impl Workspace {
             }))
             .cursor_pointer()
             .on_click(
-                cx.listener(move |ws, _, window, cx| ws.show_terminal(orchestrator, window, cx)),
+                cx.listener(move |ws, _, window, cx| ws.open_pipeline(orchestrator, window, cx)),
             )
             .child(
                 h_flex()

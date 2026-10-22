@@ -71,7 +71,7 @@ impl Workspace {
                 .active()
                 .and_then(|t| t.shown)
                 .filter(|_| !self.all_tasks_shown()),
-            |id| self.tasks_tabs.get(&id) == Some(&true),
+            |id| self.tasks_tabs.get(&id) == Some(&true) || self.pipeline_shown(id),
         );
         self.sessions(focused, cx)
     }

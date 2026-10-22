@@ -46,7 +46,8 @@ impl StageStatus {
         }
     }
 
-    fn busy(self) -> bool {
+    /// Starting or running: its session is at work.
+    pub fn busy(self) -> bool {
         matches!(self, StageStatus::Starting | StageStatus::Running)
     }
 }

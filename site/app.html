@@ -193,7 +193,7 @@
 
     <section id="accounts">
       <h2>Accounts</h2>
-      <p>The status bar lists the shown environment's tools, each with a ✓ when its login matches and a ✗ when it's missing or wrong. Click the environment's name for the details, checked again as it opens:</p>
+      <p>The status bar lists the shown environment's tools, each with a ✓ when its login matches and a ✗ when it's missing or wrong. Click the environment's name to open its page in Settings, with the details checked again as it opens:</p>
       <figure class="shot narrow">
         <img src="img/hydraui-accounts.png" width="751" height="223" alt="The Accounts in work popover: github not signed in, git signed in as sam@work.example, with Refresh and Add account…" loading="lazy">
       </figure>
@@ -203,6 +203,13 @@
         <li><strong>Switch account…</strong> on a tool runs its sign-in again in a new terminal, to move the environment to another account.</li>
         <li>On a Claude Pro or Max account, the status bar also shows how much of Claude's limits the environment has used: <strong>claude 5h 42% · 7d 18%</strong>, amber from 80% and red from 95%. Hover it for the account and when each limit resets; click it for the accounts. The numbers come from Claude's own status line, which hydra passes to hydraui; if you have a status line of your own, hydra keeps it and runs it for you.</li>
         <li>A borrowed login says which environment it comes from.</li>
+      </ul>
+      <h3>Settings</h3>
+      <p>The gear in the tab strip (or the launcher's <strong>Settings</strong>) opens Settings in the middle, in place of the terminal; pick a terminal or <strong>Close</strong> to go back.</p>
+      <ul>
+        <li><strong>General</strong>: default environment and shell, editor, theme, terminal font and size, keyboard shortcuts, the Jev key and questions for auto-pickup, version and updates. Each change is written to <code>config.toml</code> and applies at once.</li>
+        <li><strong>Each environment</strong>: its label, colour and home, its accounts (as above), its <code>[env]</code> variables, and Delete. A plain value whose name looks secret is masked, with a nudge to store it as a secret.</li>
+        <li><strong>Credentials</strong>: hydraui's own Jev key, then each environment's secrets with where each is used and whether it is stored, with Set… or Replace…. A secret that becomes a variable has <strong>Agents can see</strong>: turn it on and describe what it is for, and Claude sessions in that environment find it with the <code>hydra_access</code> tool, which lists the environment's tools and those credentials but never a value. <strong>What agents see</strong> shows that reply. It is saved as <code>[agents]</code> in env.toml.</li>
       </ul>
     </section>
 

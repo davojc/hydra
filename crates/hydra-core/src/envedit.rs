@@ -260,6 +260,22 @@ pub fn remove_tool(text: &str, tool: &str) -> Result<(String, bool), String> {
     Ok((doc.to_string(), true))
 }
 
+/// Sets a top-level string setting (`label`, `color`, `home`), or removes it with `None`,
+/// keeping the rest of the file and the setting's comment.
+pub fn set_top(text: &str, key: &str, value: Option<&str>) -> Result<String, String> {
+    let mut doc = parse(text)?;
+    match value {
+        Some(v) => {
+            // A new key goes before the first table, where top-level settings live.
+            set_value(doc.as_table_mut(), key, Value::from(v));
+        }
+        None => {
+            doc.remove(key);
+        }
+    }
+    Ok(doc.to_string())
+}
+
 /// Tells the environment's agents about variable `var` with `about` (`[agents]`), or with
 /// `None` stops telling them; an emptied `[agents]` goes. Keeps the rest of the file.
 pub fn set_agent(text: &str, var: &str, about: Option<&str>) -> Result<String, String> {
@@ -313,6 +329,29 @@ mod tests {
 
     fn vals() -> ToolValues {
         ToolValues::default()
+    }
+
+    #[test]
+    fn a_top_level_setting_changes_in_place_keeping_its_comment() {
+        let src = "label = \"w\" # mine
+color = \"#111111\"
+
+[git]
+name = \"A\"
+";
+        let out = set_top(src, "label", Some("Work")).unwrap();
+        assert_eq!(out, src.replace("\"w\"", "\"Work\""));
+        let home = set_top(src, "home", Some("E:/p")).unwrap();
+        assert!(
+            home.contains(
+                "home = \"E:/p\"
+"
+            ),
+            "{home}"
+        );
+        let cfg: EnvConfig = toml::from_str(&home).unwrap();
+        assert_eq!(cfg.home.as_deref(), Some("E:/p"));
+        assert!(!set_top(src, "color", None).unwrap().contains("color"));
     }
 
     #[test]

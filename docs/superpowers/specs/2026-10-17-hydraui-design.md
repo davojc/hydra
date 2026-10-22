@@ -334,7 +334,8 @@ disabled.
   hydra's whoami logic (cached, refreshed on focus change and every 60 s;
   info-only checks left out; the details are in the accounts popover), and its
   current folder.
-- Clicking the environment's name opens its accounts: one row per provider
+- Clicking the environment's name opens its page in the Settings tab (§7.13),
+  whose Accounts group lists one row per provider
   check (✓ ok, ! mismatch, ✗ missing, · info, with the detail, such as an AWS
   ARN or a GitHub login), and Refresh to check again now. Its "Add account…"
   picker turns a tool on in env.toml (as `hydra add`) for the tools that need
@@ -368,7 +369,8 @@ built-in default theme.
 - Scrolled up into the history, a round ↓ button shows at the pane's bottom
   right; clicking it jumps to the latest output, and it goes once at the
   bottom. New output doesn't move a view that is scrolled up.
-- Opening the accounts popover (§7.1) checks the accounts again, as Refresh.
+- Opening an environment's Settings page (§7.1) checks its accounts again, as
+  Refresh.
 
 ### 7.3 File tree
 
@@ -917,3 +919,32 @@ empty or unreadable session is just deleted.
   so commits are attributed correctly. Accepted by the user.
 - **Shell integration vs user profiles.** Heavily customised prompts can
   break OSC 133; the features that need it degrade as in §6.3.
+
+### 7.13 Settings tab
+
+The gear in the tab strip, the launcher's Settings, or an environment's name in
+the status bar opens Settings in the middle, in place of the terminal (over the
+start page when it shows); picking a terminal, Tasks: all projects or Close
+leaves it. A side list picks the page:
+
+- **General**: config.toml's settings with controls (default environment and
+  shell, editor, theme, font, font size), each written with comments kept and
+  applied at once as Reload config does; keys and colours stay in the file.
+  Keyboard shortcuts, auto-pickup's Jev key and questions, version, updates,
+  the log and the config folder.
+- **An environment**: label, colour (eight swatches) and home, written to its
+  env.toml; its accounts (§7.1); its `[env]` variables, a plain value whose name
+  looks secret (`*KEY`, `*SECRET*`, `*TOKEN*`, `*PASSWORD*`) masked with a nudge
+  to store it as a secret; Delete.
+- **Credentials**: hydraui's own Jev key (never in a terminal, so never offered
+  to agents), then per environment every secret its env.toml refers to and any
+  others stored under it, with where each is used and whether it is stored.
+  A secret that becomes a variable has **Agents can see**: on writes
+  `[agents] VAR = "<what it is for>"` (hydra's own variables start with a
+  description), and **Describe…** edits the text. **What agents see** shows the
+  `hydra_access` reply.
+
+`hydra_access` (hydraui's MCP server, pre-approved like the task tools) answers
+for the calling terminal's environment: its tools on (and where borrowed from)
+and its `[agents]` entries, variable and description. It never returns a value;
+the variable is already in the terminal's environment.

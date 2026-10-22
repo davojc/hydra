@@ -1,71 +1,51 @@
-//! The environment's name in the status bar opens its accounts: what each provider is signed
+//! An environment's accounts, on its Settings page (the status bar's name opens it): what each provider is signed
 //! in as, checked again on demand; and adding one, by signing in or borrowing another
 //! environment's login.
 use std::cell::Cell;
 
 use gpui::prelude::*;
-use gpui::{Anchor, App, Context, Hsla, SharedString, Window, div, px, rgb};
+use gpui::{App, Context, Hsla, SharedString, Window, div, px, rgb};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandItem, CommandState};
 use gpui_component::input::{Input, InputState};
 use gpui_component::notification::Notification;
-use gpui_component::popover::Popover;
 use gpui_component::{ActiveTheme, Disableable, Sizable, WindowExt, h_flex, v_flex};
 use hydra_core::envedit::ToolValues;
 use hydra_core::provider::Status;
 
 use super::Workspace;
+use super::settings_tab::Section;
 use crate::accounts::{AddChoice, FormResult, form_fields, form_values, rows};
 
 impl Workspace {
-    /// The status bar's environment name, opening the accounts popover.
+    /// The status bar's environment name, opening its page in the Settings tab.
     pub(super) fn render_env_accounts(
         &self,
         env: String,
         tint: Hsla,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let ws = cx.entity();
-        let on_change = ws.clone();
-        Popover::new("env-accounts")
-            .anchor(Anchor::BottomLeft)
-            .open(self.accounts_open)
-            .trigger(
-                // The name as a child, not a label: the button's own text colour would
-                // replace the environment's colour when it isn't open.
-                Button::new("env-name")
-                    .ghost()
-                    .xsmall()
-                    .child(div().text_color(tint).child(env.clone())),
-            )
-            .on_open_change(move |open, window, cx| {
-                on_change.update(cx, |ws, cx| {
-                    ws.accounts_open = *open;
-                    cx.notify();
-                    if *open {
-                        // Opening the popover checks again now (as Refresh does).
-                        if let Some(env) = ws.focused().map(|v| v.read(cx).env().to_string()) {
-                            ws.recheck_accounts(&env, cx);
-                        }
-                    } else {
-                        ws.focus_active(window, cx);
-                    }
-                });
-            })
-            .content(move |_, _, cx| accounts_list(&ws, &env, cx))
+        // The name as a child, not a label: the button's own text colour would replace the
+        // environment's colour.
+        Button::new("env-name")
+            .ghost()
+            .xsmall()
+            .tooltip("Settings for this environment")
+            .child(div().text_color(tint).child(env.clone()))
+            .on_click(cx.listener(move |ws, _, window, cx| {
+                ws.open_settings(Section::Env(env.clone()), window, cx)
+            }))
     }
 
     /// Checks the focused environment's accounts now, whatever the cache says.
-    fn recheck_accounts(&mut self, env: &str, cx: &mut Context<Self>) {
+    pub(super) fn recheck_accounts(&mut self, env: &str, cx: &mut Context<Self>) {
         self.status.expire(env);
-        self.refresh_status(cx);
+        self.refresh_status_of(env.to_string(), cx);
         cx.notify();
     }
 
     /// Picks an account to add to `env`: a sign-in, or another environment's login.
     fn pick_account(&mut self, env: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.accounts_open = false;
-        cx.notify();
         let choices = self.hydra.account_choices(&env);
         if choices.is_empty() {
             window.push_notification(
@@ -154,8 +134,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.accounts_open = false;
-        cx.notify();
         let swatches: Vec<(String, Hsla)> = lenders
             .iter()
             .map(|e| (e.clone(), rgb(self.hydra.tint(e)).into()))
@@ -306,10 +284,12 @@ fn reopen(env: &str) -> String {
     format!("Terminals already open in {env} see it once reopened.")
 }
 
-fn accounts_list(
+/// `w` is the workspace `ws` holds, passed in since this draws while it renders.
+pub(super) fn accounts_list(
+    w: &Workspace,
     ws: &gpui::Entity<Workspace>,
     env: &str,
-    cx: &mut App,
+    cx: &App,
 ) -> impl IntoElement + use<> {
     let theme = cx.theme();
     let (ok, warn, bad, muted) = (
@@ -318,7 +298,6 @@ fn accounts_list(
         theme.danger,
         theme.muted_foreground,
     );
-    let w = ws.read(cx);
     let found = w.status.get(env).map(rows);
     let checking = w.refreshing.contains(env);
     let borrowing = w.borrowing.get(env).cloned().unwrap_or_default();
@@ -385,10 +364,7 @@ fn accounts_list(
                             .ghost()
                             .xsmall()
                             .on_click(move |_, window, cx| {
-                                ws.update(cx, |ws, cx| {
-                                    ws.accounts_open = false;
-                                    ws.sign_in(&env, &tool, window, cx)
-                                });
+                                ws.update(cx, |ws, cx| ws.sign_in(&env, &tool, window, cx));
                             }),
                     )
                 })
@@ -436,7 +412,7 @@ fn accounts_list(
             }),
     );
     v_flex()
-        .w(px(520.))
+        .w_full()
         .gap_2()
         .text_sm()
         .child(header)

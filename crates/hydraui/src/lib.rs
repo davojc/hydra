@@ -33,6 +33,7 @@ pub mod quick_open;
 pub mod readiness;
 pub mod save_dialog;
 pub mod search;
+pub mod settings;
 pub mod start_page;
 pub mod task_board;
 pub mod task_board_view;

@@ -178,9 +178,76 @@ pub fn load(paths: &HydraPaths) -> (UiConfig, Vec<String>) {
     }
 }
 
+/// `text` with top-level setting `key` set to `value`, or removed with `None`, keeping
+/// comments and every other setting. Refused when the result has a problem with `key`.
+pub fn with_setting(
+    text: &str,
+    key: &str,
+    value: Option<toml_edit::Value>,
+) -> Result<String, String> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|e: toml_edit::TomlError| e.to_string())?;
+    match value {
+        Some(v) => match doc.get_mut(key).and_then(toml_edit::Item::as_value_mut) {
+            Some(old) => {
+                let decor = old.decor().clone();
+                *old = v;
+                *old.decor_mut() = decor;
+            }
+            None => {
+                doc.insert(key, toml_edit::Item::Value(v));
+            }
+        },
+        None => {
+            doc.remove(key);
+        }
+    }
+    let out = doc.to_string();
+    let (_, problems) = parse(&out);
+    match problems
+        .into_iter()
+        .find(|p| p.starts_with(&format!("{key}:")))
+    {
+        Some(p) => Err(p),
+        None => Ok(out),
+    }
+}
+
+/// Writes one setting to `paths`' config.toml (made if missing), as `with_setting` does.
+pub fn set(paths: &HydraPaths, key: &str, value: Option<toml_edit::Value>) -> Result<(), String> {
+    let path = config_file(paths);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("can't read {}: {e}", path.display())),
+    };
+    let out = with_setting(&text, key, value)?;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(&path, out).map_err(|e| format!("can't write {}: {e}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_setting_changes_in_place_and_a_bad_one_is_refused() {
+        let src = "# mine\ntheme = \"dark\" # look\nfont_size = 13\n\n[keys]\nnew_terminal = \"ctrl-t\"\n";
+        let out = with_setting(src, "theme", Some("light".into())).unwrap();
+        assert_eq!(out, src.replace("\"dark\"", "\"light\""));
+        let size = with_setting(src, "font_size", Some(15.0.into())).unwrap();
+        assert_eq!(clean(&size).font_size, 15.0);
+        let editor = with_setting(src, "editor", Some("code".into())).unwrap();
+        assert_eq!(clean(&editor).editor.as_deref(), Some("code"));
+        assert!(editor.contains("[keys]"));
+        assert!(!with_setting(src, "theme", None).unwrap().contains("theme"));
+        assert!(with_setting(src, "font_size", Some(200.0.into())).is_err());
+        assert!(with_setting("", "default_shell", Some("pwsh".into())).is_ok());
+    }
 
     fn clean(text: &str) -> UiConfig {
         let (cfg, problems) = parse(text);

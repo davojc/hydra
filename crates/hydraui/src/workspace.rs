@@ -8,6 +8,7 @@ mod finder;
 mod launcher;
 mod layout_file;
 mod pickup;
+mod settings_tab;
 mod shortcuts;
 mod start_page;
 mod tasks_tab;
@@ -172,7 +173,6 @@ pub struct Workspace {
     blink: bool,
     _activity_tick: Task<()>,
     /// Whether the status bar's accounts popover is open.
-    accounts_open: bool,
     /// Each environment's latest Claude usage, from its sessions' status lines.
     usage: HashMap<String, crate::mcp::Usage>,
     /// The title bar's Update button (spec §7.11).
@@ -191,6 +191,8 @@ pub struct Workspace {
     opening: bool,
     /// The start page, while it shows (spec §7.12).
     start: Option<start_page::StartPage>,
+    /// The Settings tab, shown in the middle in place of a terminal.
+    settings: Option<settings_tab::SettingsTab>,
     /// Terminals with a Tasks tab, and whether it's the one shown (`true`) or the terminal
     /// (task-board design §4).
     tasks_tabs: HashMap<PaneId, bool>,
@@ -372,7 +374,6 @@ impl Workspace {
             attention: HashSet::new(),
             blink: true,
             _activity_tick: activity_tick,
-            accounts_open: false,
             usage: HashMap::new(),
             update: Default::default(),
             _update_checks: None,
@@ -381,6 +382,7 @@ impl Workspace {
             unopened: Default::default(),
             opening: false,
             start: None,
+            settings: None,
             tasks_tabs: HashMap::new(),
             boards: HashMap::new(),
             board_views: HashMap::new(),
@@ -590,7 +592,8 @@ impl Workspace {
         let left = self
             .envs
             .env_of(id)
-            .is_some_and(|env| self.all_tasks.remove(env));
+            .is_some_and(|env| self.all_tasks.remove(env))
+            | self.settings.take().is_some();
         if self.envs.show(id) || left {
             self.shown_changed(window, cx);
         }
@@ -899,6 +902,10 @@ impl Workspace {
     /// Focuses the selected environment's file pane when it had the focus, else its shown
     /// terminal; with neither, the window.
     fn focus_active(&self, window: &mut Window, cx: &mut App) {
+        if self.settings_shown() {
+            window.focus(&self.focus, cx);
+            return;
+        }
         if self.all_tasks_shown() {
             match self.all_tasks_focus(cx) {
                 Some(handle) => window.focus(&handle, cx),
@@ -1141,9 +1148,13 @@ impl Workspace {
     }
 
     fn refresh_status(&mut self, cx: &mut Context<Self>) {
-        let Some(env) = self.focused().map(|v| v.read(cx).env().to_string()) else {
-            return;
-        };
+        if let Some(env) = self.focused().map(|v| v.read(cx).env().to_string()) {
+            self.refresh_status_of(env, cx);
+        }
+    }
+
+    /// Checks `env`'s accounts in the background unless a recent check stands.
+    fn refresh_status_of(&mut self, env: String, cx: &mut Context<Self>) {
         if self.status.is_fresh(&env, Instant::now()) || !self.refreshing.insert(env.clone()) {
             return;
         }
@@ -1698,6 +1709,21 @@ impl Workspace {
                     .on_click(cx.listener(|ws, _, window, cx| ws.pick_env(window, cx))),
             )
             .child(div().flex_1())
+            .child(
+                Button::new("open-settings")
+                    .icon(IconName::Settings)
+                    .ghost()
+                    .small()
+                    .selected(self.settings.is_some())
+                    .tooltip("Settings")
+                    .on_click(cx.listener(|ws, _, window, cx| {
+                        if ws.settings_shown() {
+                            ws.close_settings(window, cx)
+                        } else {
+                            ws.open_settings(settings_tab::Section::General, window, cx)
+                        }
+                    })),
+            )
             // The file tree, as Ctrl+B, at the end nearest the tree; highlighted while open.
             .child(
                 Button::new("toggle-file-tree")
@@ -1780,6 +1806,8 @@ impl Render for Workspace {
             theme.tab_bar,
         );
         let body = match self.envs.active() {
+            // Settings opened from the start page shows over it; closing it goes back.
+            _ if self.settings.is_some() => self.render_settings(cx),
             _ if self.start.is_some() => self.render_start_page(cx),
             Some(tab) => self.render_env(tab, border, muted, cx),
             None => div()

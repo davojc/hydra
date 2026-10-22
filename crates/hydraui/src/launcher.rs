@@ -41,6 +41,8 @@ pub enum Action {
     AllBoards,
     /// The list of every key hydraui answers to.
     Shortcuts,
+    /// The Settings tab.
+    Settings,
     /// Store the Jev API key, typed in the dialog.
     SetJevKey,
     /// Forget the stored Jev API key, after asking.
@@ -100,6 +102,7 @@ pub fn entries(
     add("Check for updates".into(), Action::CheckForUpdates);
     add("Tasks: all projects".into(), Action::AllBoards);
     add("Keyboard shortcuts".into(), Action::Shortcuts);
+    add("Settings".into(), Action::Settings);
     add("Set Jev API key…".into(), Action::SetJevKey);
     add("Edit Jev questions".into(), Action::EditJevQuestions);
     if jev_set {
@@ -143,6 +146,7 @@ mod tests {
                 "Check for updates",
                 "Tasks: all projects",
                 "Keyboard shortcuts",
+                "Settings",
                 "Set Jev API key…",
                 "Edit Jev questions",
             ]
@@ -192,6 +196,7 @@ mod tests {
                 "Check for updates",
                 "Tasks: all projects",
                 "Keyboard shortcuts",
+                "Settings",
                 "Set Jev API key…",
                 "Edit Jev questions"
             ]

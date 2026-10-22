@@ -72,6 +72,7 @@ impl Workspace {
             return;
         };
         self.all_tasks.insert(env.clone());
+        self.settings = None;
         self.sync_lanes(&env, window, cx);
         self.sync_boards(window, cx);
         self.focus_active(window, cx);

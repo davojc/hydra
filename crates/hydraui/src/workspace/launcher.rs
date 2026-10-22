@@ -76,7 +76,7 @@ impl Workspace {
         });
     }
 
-    fn run(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn run(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
         match action {
             Action::OpenEnv(env) => self.add_env(&env, window, cx),
             Action::EditEnv(env) => match hydra_core::name::EnvName::parse(&env) {
@@ -123,6 +123,9 @@ impl Workspace {
             Action::CheckForUpdates => self.check_for_updates(window, cx),
             Action::AllBoards => self.show_all_tasks(window, cx),
             Action::Shortcuts => self.shortcuts(window, cx),
+            Action::Settings => {
+                self.open_settings(super::settings_tab::Section::General, window, cx)
+            }
             Action::SetJevKey => self.set_jev_key_dialog(window, cx),
             Action::RemoveJevKey => self.remove_jev_key_dialog(window, cx),
             Action::EditJevQuestions => {
@@ -314,7 +317,7 @@ impl Workspace {
     }
 
     /// Asks which environment (each with its colour, as on its tabs), then calls `then`.
-    fn choose_env(
+    pub(super) fn choose_env(
         &mut self,
         title: &'static str,
         window: &mut Window,
@@ -358,7 +361,12 @@ impl Workspace {
 
     /// Deletes `env` after a confirmation, as `hydra env rm` does (spec §7.4); its saved
     /// logins go too only when ticked. Refused while hydraui has its terminals open.
-    fn delete_env_dialog(&mut self, env: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn delete_env_dialog(
+        &mut self,
+        env: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let open = self
             .panes
             .values()
@@ -467,7 +475,12 @@ impl Workspace {
     }
 
     /// Asks for a folder, then makes it `env`'s home and binds it to `env`.
-    fn set_env_home(&mut self, env: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn set_env_home(
+        &mut self,
+        env: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_dialog_path(true, window, cx, move |ws, dir, window, cx| {
             match ws.hydra.set_env_home(&env, &dir) {
                 Ok(()) => {
@@ -556,6 +569,17 @@ impl Workspace {
     /// changes apply at the next start, since rebinding would also clear gpui-component's
     /// own keys.
     fn reload_config(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_config(true, window, cx);
+    }
+
+    /// Applies config.toml as Reload config does; `announce` says so in a toast. Problems are
+    /// always shown.
+    pub(super) fn apply_config(
+        &mut self,
+        announce: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (ui, mut problems) = config::load(&self.hydra.paths);
         let (palette, colour_problems) = Palette::from_config(&ui.colors);
         problems.extend(colour_problems);
@@ -589,7 +613,9 @@ impl Workspace {
             self.tints.insert(env, tint);
         }
         self.ui = ui;
-        window.push_notification(Notification::info("Settings reloaded").title("hydraui"), cx);
+        if announce {
+            window.push_notification(Notification::info("Settings reloaded").title("hydraui"), cx);
+        }
         for p in problems {
             window.push_notification(Notification::warning(p).title("hydraui settings"), cx);
         }

@@ -383,6 +383,52 @@ impl Hydra {
         Ok(text.strip_prefix('\u{feff}').unwrap_or(&text).to_string())
     }
 
+    /// Writes `new_text` as `env`'s env.toml once it parses as a whole (borrows included).
+    fn write_env(&self, env: &str, new_text: String) -> Result<(), String> {
+        let name = EnvName::parse(env).map_err(|e| e.to_string())?;
+        parse_env(&self.paths, &name, &new_text).map_err(|e| e.to_string())?;
+        let file = self.paths.env_file(&name);
+        std::fs::write(&file, new_text).map_err(|e| format!("can't write {}: {e}", file.display()))
+    }
+
+    /// `env`'s label, colour and home as its env.toml sets them.
+    pub fn env_basics(&self, env: &str) -> (Option<String>, Option<String>, Option<String>) {
+        let get = |t: &toml::Table, k: &str| t.get(k).and_then(|v| v.as_str()).map(String::from);
+        match self
+            .env_text(env)
+            .ok()
+            .and_then(|t| toml::from_str::<toml::Table>(&t).ok())
+        {
+            Some(t) => (get(&t, "label"), get(&t, "color"), get(&t, "home")),
+            None => (None, None, None),
+        }
+    }
+
+    /// Sets `env`'s `label` or `color` (`None` removes it).
+    pub fn set_env_basic(&self, env: &str, key: &str, value: Option<&str>) -> Result<(), String> {
+        let text = self.env_text(env)?;
+        self.write_env(env, envedit::set_top(&text, key, value)?)
+    }
+
+    /// `env`'s `[env]` variables, secrets as their `secret:` reference.
+    pub fn env_variables(&self, env: &str) -> Vec<(String, String)> {
+        self.env_text(env)
+            .map(|t| crate::settings::variables(&t))
+            .unwrap_or_default()
+    }
+
+    /// The secrets `env` uses or holds, for the Settings tab's Credentials.
+    pub fn credentials(&self, env: &str) -> Vec<crate::settings::Credential> {
+        let text = self.env_text(env).unwrap_or_default();
+        crate::settings::credentials(env, &text, &self.env_secrets(env))
+    }
+
+    /// Tells `env`'s agents about variable `var` with `about`, or stops with `None`.
+    pub fn set_agent(&self, env: &str, var: &str, about: Option<&str>) -> Result<(), String> {
+        let text = self.env_text(env)?;
+        self.write_env(env, envedit::set_agent(&text, var, about)?)
+    }
+
     /// Turns `tool` on for `env` with `values`, as `hydra add` does (`from` borrows another
     /// environment's login). Key and kubeconfig paths must exist; the edited env.toml is
     /// checked first; nothing is written if either fails.
@@ -397,10 +443,7 @@ impl Hydra {
             }
         }
         let (new_text, _) = envedit::add_tool(&text, tool, values)?;
-        let name = EnvName::parse(env).map_err(|e| e.to_string())?;
-        parse_env(&self.paths, &name, &new_text).map_err(|e| e.to_string())?;
-        let file = self.paths.env_file(&name);
-        std::fs::write(&file, new_text).map_err(|e| format!("can't write {}: {e}", file.display()))
+        self.write_env(env, new_text)
     }
 
     /// An API-key tool (gemini, jev) for `env`: the key stored as the secret `<env>/<tool>`,
@@ -909,6 +952,42 @@ mod tests {
         let req = PaneRequest::new("work", f.free.clone(), ShellKind::Pwsh);
         assert!(f.hydra.prepare(&req).is_ok());
         assert!(f.hydra.add_api_key("personal", "gemini", "  ").is_err());
+    }
+
+    #[test]
+    fn settings_edit_the_basics_and_what_agents_are_told() {
+        let f = fx("");
+        f.hydra
+            .set_env_basic("work", "label", Some("Work"))
+            .unwrap();
+        f.hydra
+            .set_env_basic("work", "color", Some("#3b82f6"))
+            .unwrap();
+        let (label, colour, home) = f.hydra.env_basics("work");
+        assert_eq!(label.as_deref(), Some("Work"));
+        assert_eq!(colour.as_deref(), Some("#3b82f6"));
+        assert_eq!(home, None);
+        assert!(
+            f.hydra
+                .set_env_basic("work", "color", Some("blue"))
+                .is_err()
+        );
+        f.hydra.add_api_key("work", "jev", "ts-key").unwrap();
+        f.hydra
+            .set_agent("work", "JEV_API_KEY", Some("Jev"))
+            .unwrap();
+        let c = f.hydra.credentials("work");
+        assert_eq!(c[0].secret, "work/jev");
+        assert_eq!(c[0].agents.as_deref(), Some("Jev"));
+        f.hydra.set_agent("work", "JEV_API_KEY", None).unwrap();
+        assert_eq!(f.hydra.credentials("work")[0].agents, None);
+        assert_eq!(
+            f.hydra.env_variables("keyed")[0],
+            (
+                "LINEAR_API_KEY".to_string(),
+                "secret:keyed/linear".to_string()
+            )
+        );
     }
 
     #[test]

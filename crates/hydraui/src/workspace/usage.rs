@@ -115,9 +115,11 @@ impl Workspace {
                 .cursor_pointer()
                 .child(format!("claude {text}"))
                 .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                .on_click(cx.listener(|ws, _, _, cx| {
-                    ws.accounts_open = true;
-                    cx.notify();
+                .on_click(cx.listener({
+                    let env = env.to_string();
+                    move |ws, _, window, cx| {
+                        ws.open_settings(super::settings_tab::Section::Env(env.clone()), window, cx)
+                    }
                 }))
                 .into_any_element(),
         )

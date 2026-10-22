@@ -61,7 +61,9 @@ hydraui runs the same environments as the CLI, in one window. Start it from the 
 
 - **Environments and terminals.** One tab per environment, tinted with its colour, and its terminals listed down the left, grouped by project. Each terminal has the same isolation as `hydra shell`. Activity dots show which terminals are working, waiting or idle; in a terminal running Claude, the dot follows what Claude says it is doing.
 - **Claude alerts.** When a Claude session you aren't looking at asks you something or finishes, its environment tab gets a badge, the taskbar flashes and a toast names the terminal; click it to go there. The status bar shows how much of the account's usage limits the session has used.
-- **Accounts.** The status bar lists the environment's tools with a ✓ or ✗. Click the environment's name to add a tool, sign in, switch account, or borrow another environment's login.
+- **Accounts.** The status bar lists the environment's tools with a ✓ or ✗. Click the environment's name to open its page in **Settings**, where you can add a tool, sign in, switch account, or borrow another environment's login.
+- **Settings.** The gear in the tab strip, or the launcher's Settings, opens a Settings tab in the middle: hydraui's own settings (written to `config.toml` as you change them), a page per environment (label, colour, home, accounts, variables), and **Credentials**, every secret each environment uses, with whether it is stored.
+- **What agents can use.** On a credential that becomes a variable (say `[jev]`'s `JEV_API_KEY`), turn on **Agents can see** and describe what it is for. Claude sessions in that environment then find it with hydraui's `hydra_access` tool, which lists the environment's tools and those credentials. It never returns a value: the key stays in the terminal's own variables. This is saved as `[agents]` in env.toml.
 - **Files.** `Ctrl+B` shows a file tree with git status marks; `Show changes` opens a side-by-side diff. Files open in a file pane beside the terminal: an editor, rendered Markdown, OpenAPI specs as API docs, or PNG, JPEG, GIF, ICO and SVG images. `Ctrl+Shift+O` opens a file by name, `Ctrl+Shift+F` searches in files, and `Ctrl+click` opens a path printed in the terminal.
 - **Task board.** Right-click a terminal and choose **Tasks** for its project's board: Backlog, Pickup, InProgress, Verify and Done. Cards live in `.hydra/tasks.md` in the project, as plain Markdown. Claude sessions in hydraui terminals see the board through a local tool server hydra sets up for them: they take cards from Pickup, work on them, commit, and move them to Verify with the commit, for you to check and move to Done. **Take in new worktree** gives a card its own branch, worktree and Claude terminal.
 - **Auto-pickup.** Moving a card into Pickup types it into a free Claude session of that project. A session is free when it is new or has just moved a card to Verify; with a Jev API key (TypeSafe's decision model, set from the launcher), Jev also judges whether a session that finished other work is ready for a new task. That sends the session's last 60 terminal lines to TypeSafe's API. A Pickup card's right-click menu also has **Send to a free session** and **Send to ▸**. The launcher's **Open hydraui log** shows why a card went where it did. If hydraui ever closes by itself, the same log has the error that closed it.
@@ -155,6 +157,9 @@ Turn tools on with `hydra add <tool> [env]`. Inside a hydra terminal you can lea
 [env]
 REGION = "eu-west"
 LINEAR_API_KEY = "secret:work/linear"   # store it with: hydra secret set work/linear
+
+[agents]                                # what Claude sessions are told they can use (hydra_access)
+LINEAR_API_KEY = "Linear's API, for reading and updating issues"
 ```
 
 ## Borrowing a login

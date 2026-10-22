@@ -22,7 +22,8 @@ gpui-component = { version = "=0.7.3", features = [
     "tree-sitter-markdown-inline", "tree-sitter-javascript", "tree-sitter-typescript",
     "tree-sitter-tsx", "tree-sitter-python", "tree-sitter-bash", "tree-sitter-yaml",
     "tree-sitter-css", "tree-sitter-html", "tree-sitter-go", "tree-sitter-c",
-    "tree-sitter-cpp", "tree-sitter-csharp", "tree-sitter-make",
+    "tree-sitter-cpp", "tree-sitter-csharp", "tree-sitter-make", "tree-sitter-java",
+    "tree-sitter-sql", "tree-sitter-graphql", "tree-sitter-proto",
 ] }
 gpui-kit-assets = "=0.7.3"
 futures = "0.3"

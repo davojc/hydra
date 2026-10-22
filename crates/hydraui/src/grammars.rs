@@ -58,11 +58,43 @@ pub fn hcl() -> LanguageConfig {
     LanguageConfig::new("hcl", HCL.into(), vec![], HCL_HIGHLIGHTS, "", "")
 }
 
+/// GraphQL: gpui-component ships the grammar (github.com/joowani/tree-sitter-graphql, MIT)
+/// with no colour rules, so these are nvim-treesitter's (Apache-2.0).
+const GRAPHQL_HIGHLIGHTS: &str = include_str!("../grammars/graphql/queries/highlights.scm");
+
+pub fn graphql() -> LanguageConfig {
+    LanguageConfig::new(
+        "graphql",
+        tree_sitter_graphql::LANGUAGE.into(),
+        vec![],
+        GRAPHQL_HIGHLIGHTS,
+        "",
+        "",
+    )
+}
+
+/// Protobuf: as for GraphQL, the grammar's own colour rules, which its crate leaves out.
+const PROTO_HIGHLIGHTS: &str = include_str!("../grammars/proto/queries/highlights.scm");
+
+pub fn proto() -> LanguageConfig {
+    LanguageConfig::new(
+        "proto",
+        tree_sitter_proto::LANGUAGE.into(),
+        vec![],
+        PROTO_HIGHLIGHTS,
+        "",
+        "",
+    )
+}
+
 /// Adds the grammars to the editor's highlighter; call once at startup.
 pub fn register() {
     LanguageRegistry::singleton().register("typespec", &typespec());
     LanguageRegistry::singleton().register("dockerfile", &dockerfile());
     LanguageRegistry::singleton().register("hcl", &hcl());
+    // Replace gpui-component's colourless built-ins.
+    LanguageRegistry::singleton().register("graphql", &graphql());
+    LanguageRegistry::singleton().register("proto", &proto());
 }
 
 #[cfg(test)]
@@ -246,6 +278,90 @@ EOT
         ] {
             let want = (want.0, want.1.to_string());
             assert!(shown.contains(&want), "{want:?} missing from {shown:?}");
+        }
+    }
+
+    const GRAPHQL_SAMPLE: &str = r#""""A user."""
+type User implements Node @key(fields: "id") {
+  id: ID!
+  name(upper: Boolean = false): String
+}
+
+query Get($id: ID!) {
+  user(id: $id) { ...Bits }
+}
+"#;
+
+    #[test]
+    fn graphql_parses_and_shows_the_right_colours() {
+        let shown = shown(
+            tree_sitter_graphql::LANGUAGE,
+            GRAPHQL_HIGHLIGHTS,
+            GRAPHQL_SAMPLE,
+        );
+        for want in [
+            ("type", "keyword.type"),
+            ("implements", "keyword"),
+            ("query", "keyword"),
+            ("User", "type"),
+            ("ID", "type"),
+            ("name", "property"),
+            ("upper", "variable.parameter"),
+            ("false", "boolean"),
+            ("\"\"\"A user.\"\"\"", "comment.doc"),
+            ("\"id\"", "string"),
+            ("Get", "variable"),
+        ] {
+            let want = (want.0, want.1.to_string());
+            assert!(shown.contains(&want), "{want:?} missing from {shown:?}");
+        }
+    }
+
+    const PROTO_SAMPLE: &str = r#"syntax = "proto3";
+package demo;
+
+// A pet.
+message Pet {
+  string name = 1;
+  repeated int32 ids = 2;
+}
+
+service Pets {
+  rpc Get (Pet) returns (stream Pet);
+}
+"#;
+
+    #[test]
+    fn proto_parses_and_shows_the_right_colours() {
+        let shown = shown(tree_sitter_proto::LANGUAGE, PROTO_HIGHLIGHTS, PROTO_SAMPLE);
+        for want in [
+            ("syntax", "keyword"),
+            ("message", "keyword"),
+            ("repeated", "keyword"),
+            ("rpc", "keyword"),
+            ("Pet", "type"),
+            ("Pets", "type"),
+            ("\"proto3\"", "string"),
+            ("1", "number"),
+            ("// A pet.", "comment"),
+            ("Get", "function"),
+            ("stream", "keyword"),
+        ] {
+            let want = (want.0, want.1.to_string());
+            assert!(shown.contains(&want), "{want:?} missing from {shown:?}");
+        }
+    }
+
+    /// The built-ins this file relies on gpui-component for.
+    #[test]
+    fn java_and_sql_come_from_gpui_component() {
+        for name in ["java", "sql"] {
+            assert!(
+                gpui_component::highlighter::LanguageRegistry::singleton()
+                    .language(name)
+                    .is_some(),
+                "{name}"
+            );
         }
     }
 }

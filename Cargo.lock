@@ -753,9 +753,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.6.0"
+version = "1.2.67"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f74872d07caf508b30a21f6836e7d7016a2eaf7d9ff4f48deaa58cd8a0407630"
+checksum = "e17dd265a7d0f31ef544e1b20e03add05d3b45b491b633b10d67145d2acc1a38"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -2179,13 +2179,17 @@ dependencies = [
  "tree-sitter-cpp",
  "tree-sitter-css",
  "tree-sitter-go",
+ "tree-sitter-graphql",
  "tree-sitter-html",
+ "tree-sitter-java",
  "tree-sitter-javascript",
  "tree-sitter-json",
  "tree-sitter-make",
  "tree-sitter-md",
+ "tree-sitter-proto",
  "tree-sitter-python",
  "tree-sitter-rust",
+ "tree-sitter-sequel",
  "tree-sitter-toml-ng",
  "tree-sitter-typescript",
  "tree-sitter-yaml",
@@ -3022,7 +3026,9 @@ dependencies = [
  "tiny_http",
  "toml 0.8.23",
  "tree-sitter",
+ "tree-sitter-graphql",
  "tree-sitter-language",
+ "tree-sitter-proto",
  "ureq",
  "windows 0.61.3",
  "windows-sys 0.61.2",
@@ -6487,7 +6493,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -6922,10 +6928,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-graphql"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "efedc4cac157161cc23a0adc4553a2cedc908e1cd754b6cd033a919bb81ce5d6"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-html"
 version = "0.23.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "261b708e5d92061ede329babaaa427b819329a9d427a1d710abb0f67bbef63ee"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-java"
+version = "0.23.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0aa6cbcdc8c679b214e616fd3300da67da0e492e066df01bcf5a5921a71e90d6"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -6978,6 +7004,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-proto"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e4360b434b5980fc397137ef29e1988619fef4159ac86fa7ac5777d459d3924"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-python"
 version = "0.23.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6992,6 +7028,16 @@ name = "tree-sitter-rust"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "439e577dbe07423ec2582ac62c7531120dbfccfa6e5f92406f93dd271a120e45"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-sequel"
+version = "0.3.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d198ad3c319c02e43c21efa1ec796b837afcb96ffaef1a40c1978fbdcec7d17"
 dependencies = [
  "cc",
  "tree-sitter-language",

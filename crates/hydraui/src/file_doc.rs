@@ -200,6 +200,10 @@ pub fn language(path: &Path) -> &'static str {
         Some("tsp") => "typespec",
         Some("dockerfile" | "containerfile") => "dockerfile",
         Some("hcl" | "tf" | "tfvars" | "tofu") => "hcl",
+        Some("java") => "java",
+        Some("sql") => "sql",
+        Some("graphql" | "gql" | "graphqls") => "graphql",
+        Some("proto") => "proto",
         _ => "text",
     };
     // Variants like `Dockerfile.dev`, unless the suffix is a known type (`Dockerfile.md`).
@@ -495,6 +499,11 @@ mod tests {
         assert_eq!(language(Path::new("prod.tfvars")), "hcl");
         assert_eq!(language(Path::new("config.hcl")), "hcl");
         assert_eq!(language(Path::new("main.tofu")), "hcl");
+        assert_eq!(language(Path::new("Main.java")), "java");
+        assert_eq!(language(Path::new("schema.sql")), "sql");
+        assert_eq!(language(Path::new("schema.graphql")), "graphql");
+        assert_eq!(language(Path::new("query.gql")), "graphql");
+        assert_eq!(language(Path::new("api.proto")), "proto");
     }
 
     fn doc(t: &str) -> FileDoc {

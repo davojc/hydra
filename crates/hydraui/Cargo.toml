@@ -42,6 +42,9 @@ ureq.workspace = true
 # For the grammars hydraui builds itself (src/grammars.rs); the versions gpui-component uses.
 tree-sitter = "0.26"
 tree-sitter-language = "0.1"
+# gpui-component's GraphQL and Protobuf grammars, which it ships without colour rules.
+tree-sitter-graphql = "0.1"
+tree-sitter-proto = "0.2"
 
 [dev-dependencies]
 hydra-update = { workspace = true, features = ["fake"] }

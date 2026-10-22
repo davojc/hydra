@@ -232,7 +232,14 @@ impl Workspace {
                 .rounded_md()
                 .when(highlighted, |d| d.bg(tint.opacity(0.25)))
                 .hover(|d| d.bg(tint.opacity(0.15)))
-                .on_click(cx.listener(move |ws, _, window, cx| ws.show_terminal(id, window, cx)))
+                .on_click(cx.listener(move |ws, _, window, cx| {
+                    ws.show_terminal(id, window, cx);
+                    // A row is the terminal itself: an orchestrator's Pipeline tab is the
+                    // card's (orchestrator spec §7.1).
+                    if ws.pipeline_shown(id) {
+                        ws.show_pipeline(id, false, window, cx);
+                    }
+                }))
                 .when_some(program, |d, title| {
                     d.tooltip(move |window, cx| {
                         gpui_component::tooltip::Tooltip::new(title.clone()).build(window, cx)

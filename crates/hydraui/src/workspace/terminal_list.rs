@@ -122,6 +122,28 @@ impl Workspace {
         for (orch, card, panes) in &cards {
             let active = panes.iter().any(|p| Some(*p) == shown);
             list = list.child(self.render_pipeline_card(*orch, card, active, cx));
+            let orch = *orch;
+            let settings_shown = self.pipeline_shown(orch)
+                && self.pipeline_tabs.get(&orch).map(|t| t.view)
+                    == Some(super::pipeline_tab::TabView::Settings);
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("pipeline-settings-link-{orch}")))
+                    .ml(px(26.))
+                    .mr_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_size(px(12.5))
+                    .text_color(cx.theme().muted_foreground)
+                    .when(settings_shown, |d| d.bg(tint.opacity(0.2)))
+                    .hover(|d| d.bg(tint.opacity(0.12)))
+                    .cursor_pointer()
+                    .child("Pipeline settings")
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.open_pipeline_settings(orch, window, cx)
+                    })),
+            );
             for id in panes {
                 if let Some(row) = self.terminal_row(*id, shown == Some(*id), tint, true, cx) {
                     list = list.child(row);

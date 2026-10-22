@@ -23,9 +23,18 @@ use crate::pipeline_view::{Panel, Tone, elapsed, gate_badge, panel_for, session_
 use crate::rating::{Outcome, Rating, Side};
 use crate::runs::{Choice, Run, RunState, StageStatus};
 
+/// What a Pipeline tab shows: the run, or the pipeline's settings (the design's sub-links).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum TabView {
+    #[default]
+    Pipeline,
+    Settings,
+}
+
 /// A terminal's Pipeline tab.
 #[derive(Debug, Clone, Default)]
 pub(super) struct PipelineTab {
+    pub view: TabView,
     /// The tab is shown, rather than the terminal.
     pub shown: bool,
     /// The session the user picked, by label; `None` follows the run.
@@ -74,6 +83,26 @@ impl Workspace {
         }
         self.sync_boards(window, cx);
         self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// Shows orchestrator `orch`'s Pipeline tab at `view`, opening the tab when it has none.
+    pub(super) fn show_pipeline_view(
+        &mut self,
+        orch: PaneId,
+        view: TabView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.pipeline_tabs.contains_key(&orch) {
+            self.open_pipeline(orch, window, cx);
+        } else {
+            self.show_terminal(orch, window, cx);
+            self.show_pipeline(orch, true, window, cx);
+        }
+        if let Some(tab) = self.pipeline_tabs.get_mut(&orch) {
+            tab.view = view;
+        }
         cx.notify();
     }
 
@@ -298,6 +327,9 @@ impl Workspace {
     pub(super) fn render_pipeline(&self, orch: PaneId, cx: &mut Context<Self>) -> AnyElement {
         let snap = self.pipeline_snapshot(orch, cx);
         let tab = self.pipeline_tabs.get(&orch).cloned().unwrap_or_default();
+        if tab.view == TabView::Settings && self.pipeline_settings.contains_key(&orch) {
+            return self.render_pipeline_settings(orch, cx);
+        }
         let Some(run) = snap.run.as_ref() else {
             return self.render_quiet(
                 "No ticket in progress",

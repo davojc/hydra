@@ -136,6 +136,147 @@ pub fn folder(hydra_root: &Path) -> PathBuf {
     hydra_root.join("hydraui").join("pipelines")
 }
 
+/// A pipeline as Pipeline settings edits it (spec §7.4): what the view shows, nothing else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Edit {
+    pub name: String,
+    pub bar: u8,
+    pub stages: Vec<EditStage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditStage {
+    /// The stage's id in the file; `None` for a stage added in the view.
+    pub id: Option<String>,
+    pub title: String,
+    pub skill: Option<String>,
+    /// Its own bar; `None` follows the pipeline's.
+    pub bar: Option<u8>,
+}
+
+impl From<&Pipeline> for Edit {
+    fn from(p: &Pipeline) -> Self {
+        Edit {
+            name: p.name.clone(),
+            bar: p.bar,
+            stages: p
+                .stages
+                .iter()
+                .map(|s| EditStage {
+                    id: Some(s.id.clone()),
+                    title: s.title.clone(),
+                    skill: s.skill.clone(),
+                    bar: s.bar,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// What keeps `edit` from being saved, as the design's save bar says it.
+pub fn validate(edit: &Edit) -> Result<(), &'static str> {
+    if edit.name.trim().is_empty() {
+        return Err("Give the orchestrator a name");
+    }
+    if edit.stages.is_empty() {
+        return Err("Add at least one stage");
+    }
+    if edit.stages.iter().any(|s| s.title.trim().is_empty()) {
+        return Err("Every stage needs a name");
+    }
+    Ok(())
+}
+
+/// An id for a new stage titled `title`: its words in lowercase joined by `-`, numbered when
+/// `taken` has it.
+fn new_id(title: &str, taken: &[String]) -> String {
+    let words: Vec<String> = title
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let base = if words.is_empty() {
+        "stage".to_string()
+    } else {
+        words.join("-")
+    };
+    if !taken.contains(&base) {
+        return base;
+    }
+    (2..)
+        .map(|n| format!("{base}-{n}"))
+        .find(|id| !taken.contains(id))
+        .expect("an unbounded range has a free id")
+}
+
+/// Writes `edit` into the pipeline file `<name>.toml`, keeping everything the view doesn't
+/// show: comments, each kept stage's prompt and worktree, unknown keys stay refused by
+/// `parse`. Stages are written in `edit`'s order; one it dropped goes. Written whole, then
+/// moved into place, so a reader never sees half a file.
+pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
+    use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
+    if !plain_name(name) {
+        return Err(std::io::Error::other(format!(
+            "{name:?} isn't a pipeline name"
+        )));
+    }
+    let file = folder(hydra_root).join(format!("{name}.toml"));
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    let mut doc: DocumentMut = text.parse().map_err(std::io::Error::other)?;
+    doc["name"] = value(edit.name.trim());
+    doc["bar"] = value(i64::from(edit.bar));
+    let old: Vec<Table> = doc
+        .get("stage")
+        .and_then(Item::as_array_of_tables)
+        .map(|a| a.iter().cloned().collect())
+        .unwrap_or_default();
+    let mut taken: Vec<String> = edit.stages.iter().filter_map(|s| s.id.clone()).collect();
+    let mut stages = ArrayOfTables::new();
+    for s in &edit.stages {
+        let (mut table, id) = match &s.id {
+            Some(id) => (
+                old.iter()
+                    .find(|t| t.get("id").and_then(Item::as_str) == Some(id.as_str()))
+                    .cloned()
+                    .unwrap_or_default(),
+                id.clone(),
+            ),
+            None => {
+                let id = new_id(&s.title, &taken);
+                taken.push(id.clone());
+                (Table::new(), id)
+            }
+        };
+        table["id"] = value(id);
+        table["title"] = value(s.title.trim());
+        match &s.skill {
+            Some(skill) => table["skill"] = value(skill.as_str()),
+            None => {
+                table.remove("skill");
+            }
+        }
+        match s.bar {
+            Some(bar) => table["bar"] = value(i64::from(bar)),
+            None => {
+                table.remove("bar");
+            }
+        }
+        // Parsed tables are written by their place in the old file: number them afresh so
+        // the file follows `edit`'s order.
+        table.set_position(stages.len() + 1_000);
+        stages.push(table);
+    }
+    doc["stage"] = Item::ArrayOfTables(stages);
+    std::fs::create_dir_all(folder(hydra_root))?;
+    let fresh = file.with_extension("toml.saving");
+    std::fs::write(&fresh, doc.to_string())?;
+    std::fs::rename(&fresh, &file)
+}
+
 /// The pipelines in `folder`, by file name without `.toml`, sorted.
 pub fn names(hydra_root: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(folder(hydra_root))
@@ -363,6 +504,103 @@ mod tests {
             "Do the \"Check\" stage of ticket {ticket}."
         );
         assert_eq!(p.file, "");
+    }
+
+    const COMMENTED: &str = "# The team's pipeline.\nname = \"Tickets\"\nbar = 80\n\n\
+# Reproduce first.\n[[stage]]\nid = \"replicate\"\ntitle = \"Replicate\"\nworktree = false\n\
+prompt = \"\"\"\nRead {ticket}.\n\"\"\"\n\n[[stage]]\nid = \"develop\"\ntitle = \"Develop\"\n\
+bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
+
+    fn edit_of(p: &Pipeline) -> Edit {
+        Edit::from(p)
+    }
+
+    #[test]
+    fn saving_keeps_prompts_and_comments() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        let file = folder(d.path()).join("tickets.toml");
+        std::fs::write(&file, COMMENTED).unwrap();
+        let mut edit = edit_of(&load(d.path(), "tickets").unwrap());
+        edit.name = "INTH SLA tickets".into();
+        edit.bar = 75;
+        edit.stages[0].skill = Some("QA-Skills".into());
+        edit.stages[1].bar = None;
+        save(d.path(), "tickets", &edit).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        for kept in [
+            "# The team's pipeline.",
+            "# Reproduce first.",
+            "Read {ticket}.",
+            "Fix it.",
+            "worktree = true",
+        ] {
+            assert!(text.contains(kept), "{kept}: {text}");
+        }
+        let p = load(d.path(), "tickets").unwrap();
+        assert_eq!((p.name.as_str(), p.bar), ("INTH SLA tickets", 75));
+        assert_eq!(p.stages[0].skill.as_deref(), Some("QA-Skills"));
+        assert_eq!(p.stages[1].bar, None);
+        assert!(p.stages[1].worktree);
+    }
+
+    #[test]
+    fn a_new_stage_gets_a_unique_id_from_its_title() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(folder(d.path()).join("tickets.toml"), COMMENTED).unwrap();
+        let mut edit = edit_of(&load(d.path(), "tickets").unwrap());
+        for title in ["Security review", "Develop"] {
+            edit.stages.push(EditStage {
+                id: None,
+                title: title.into(),
+                skill: Some("Security review".into()),
+                bar: Some(90),
+            });
+        }
+        save(d.path(), "tickets", &edit).unwrap();
+        let p = load(d.path(), "tickets").unwrap();
+        let ids: Vec<&str> = p.stages.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["replicate", "develop", "security-review", "develop-2"]
+        );
+        assert_eq!(
+            p.stages[2].prompt,
+            "Use the Security review skill for the \"Security review\" stage of ticket {ticket}."
+        );
+        assert_eq!(p.bar_for(2), 90);
+    }
+
+    #[test]
+    fn reordering_and_removing_stages() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(folder(d.path()).join("tickets.toml"), COMMENTED).unwrap();
+        let mut edit = edit_of(&load(d.path(), "tickets").unwrap());
+        edit.stages.swap(0, 1);
+        save(d.path(), "tickets", &edit).unwrap();
+        let p = load(d.path(), "tickets").unwrap();
+        assert_eq!(p.stages[0].id, "develop");
+        assert_eq!(p.stages[1].prompt.trim(), "Read {ticket}.");
+        edit.stages.remove(0);
+        save(d.path(), "tickets", &edit).unwrap();
+        let p = load(d.path(), "tickets").unwrap();
+        assert_eq!(p.stages.len(), 1);
+        assert_eq!(p.stages[0].id, "replicate");
+    }
+
+    #[test]
+    fn validation_names_what_is_missing() {
+        let mut edit = edit_of(&parse(COMMENTED).unwrap());
+        assert_eq!(validate(&edit), Ok(()));
+        edit.stages[1].title = " ".into();
+        assert_eq!(validate(&edit), Err("Every stage needs a name"));
+        edit.name = "".into();
+        assert_eq!(validate(&edit), Err("Give the orchestrator a name"));
+        edit.name = "x".into();
+        edit.stages.clear();
+        assert_eq!(validate(&edit), Err("Add at least one stage"));
     }
 
     #[test]

@@ -41,6 +41,7 @@ pub mod runs;
 pub mod save_dialog;
 pub mod search;
 pub mod settings;
+pub mod skills_list;
 pub mod start_page;
 pub mod task_board;
 pub mod task_board_view;

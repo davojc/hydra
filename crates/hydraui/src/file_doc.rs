@@ -199,6 +199,7 @@ pub fn language(path: &Path) -> &'static str {
         Some("cs") => "csharp",
         Some("tsp") => "typespec",
         Some("dockerfile" | "containerfile") => "dockerfile",
+        Some("hcl" | "tf" | "tfvars" | "tofu") => "hcl",
         _ => "text",
     };
     // Variants like `Dockerfile.dev`, unless the suffix is a known type (`Dockerfile.md`).
@@ -490,6 +491,10 @@ mod tests {
         assert_eq!(language(Path::new("Dockerfile.dev")), "dockerfile");
         assert_eq!(language(Path::new("Dockerfile.md")), "markdown");
         assert_eq!(language(Path::new("dockerfile-notes.txt")), "text");
+        assert_eq!(language(Path::new("main.tf")), "hcl");
+        assert_eq!(language(Path::new("prod.tfvars")), "hcl");
+        assert_eq!(language(Path::new("config.hcl")), "hcl");
+        assert_eq!(language(Path::new("main.tofu")), "hcl");
     }
 
     fn doc(t: &str) -> FileDoc {

@@ -7,6 +7,7 @@ use tree_sitter_language::LanguageFn;
 unsafe extern "C" {
     fn tree_sitter_typespec() -> *const ();
     fn tree_sitter_dockerfile() -> *const ();
+    fn tree_sitter_hcl() -> *const ();
 }
 
 /// TypeSpec (`.tsp`), from github.com/happenslol/tree-sitter-typespec (MIT).
@@ -47,10 +48,21 @@ pub fn dockerfile() -> LanguageConfig {
     )
 }
 
+/// HCL and Terraform, from github.com/tree-sitter-grammars/tree-sitter-hcl (Apache-2.0),
+/// with nvim-treesitter's colour rules (Apache-2.0).
+const HCL: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_hcl) };
+
+const HCL_HIGHLIGHTS: &str = include_str!("../grammars/hcl/queries/highlights.scm");
+
+pub fn hcl() -> LanguageConfig {
+    LanguageConfig::new("hcl", HCL.into(), vec![], HCL_HIGHLIGHTS, "", "")
+}
+
 /// Adds the grammars to the editor's highlighter; call once at startup.
 pub fn register() {
     LanguageRegistry::singleton().register("typespec", &typespec());
     LanguageRegistry::singleton().register("dockerfile", &dockerfile());
+    LanguageRegistry::singleton().register("hcl", &hcl());
 }
 
 #[cfg(test)]
@@ -156,5 +168,84 @@ CMD ["./server", "--port", "8080"]
                 && text.contains("apt-get install -y curl")),
             "{caught:?}"
         );
+    }
+
+    /// What the editor shows for each node, following gpui-component's highlighter: captures
+    /// in match order, where one on the same node as the capture just before it takes that
+    /// capture's name, and a later capture of a node overrides an earlier one.
+    fn shown<'a>(lang: LanguageFn, query: &str, src: &'a str) -> Vec<(&'a str, String)> {
+        let lang: tree_sitter::Language = lang.into();
+        let mut parser = Parser::new();
+        parser.set_language(&lang).unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{}",
+            tree.root_node().to_sexp()
+        );
+        let query = Query::new(&lang, query).unwrap();
+        let mut cursor = QueryCursor::new();
+        let mut items: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+        let mut matches = cursor.matches(&query, tree.root_node(), src.as_bytes());
+        while let Some(m) = matches.next() {
+            for c in m.captures {
+                let range = c.node.byte_range();
+                let name = match items.last() {
+                    Some((r, name)) if *r == range => name.clone(),
+                    _ => query.capture_names()[c.index as usize].to_string(),
+                };
+                items.push((range, name));
+            }
+        }
+        let mut shown: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+        for (range, name) in items {
+            match shown.iter_mut().find(|(r, _)| *r == range) {
+                Some(seen) => seen.1 = name,
+                None => shown.push((range, name)),
+            }
+        }
+        shown.into_iter().map(|(r, name)| (&src[r], name)).collect()
+    }
+
+    const HCL_SAMPLE: &str = r#"# A bucket.
+resource "aws_s3_bucket" "logs" {
+  bucket = "logs-${var.env}"
+  count  = 2
+  tags   = { team = "infra" }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+output "name" {
+  value = upper(aws_s3_bucket.logs.id)
+  doc   = <<EOT
+hello
+EOT
+}
+"#;
+
+    #[test]
+    fn hcl_parses_and_shows_the_right_colours() {
+        let shown = shown(HCL, HCL_HIGHLIGHTS, HCL_SAMPLE);
+        for want in [
+            ("resource", "keyword"),
+            ("output", "keyword"),
+            ("lifecycle", "type"),
+            ("bucket", "property"),
+            ("prevent_destroy", "property"),
+            ("team", "property"),
+            ("var", "variable.special"),
+            ("env", "property"),
+            ("upper", "function"),
+            ("2", "number"),
+            ("true", "boolean"),
+            ("# A bucket.", "comment"),
+            ("\"", "string"),
+        ] {
+            let want = (want.0, want.1.to_string());
+            assert!(shown.contains(&want), "{want:?} missing from {shown:?}");
+        }
     }
 }

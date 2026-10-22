@@ -11,6 +11,12 @@ fn main() {
         .file("grammars/dockerfile/src/scanner.c")
         .warnings(false)
         .compile("tree-sitter-dockerfile");
+    cc::Build::new()
+        .include("grammars/hcl/src")
+        .file("grammars/hcl/src/parser.c")
+        .file("grammars/hcl/src/scanner.c")
+        .warnings(false)
+        .compile("tree-sitter-hcl");
     println!("cargo:rerun-if-changed=grammars");
     // hydraui's version info follows the release (HYDRA_VERSION) like hydra.exe's.
     println!("cargo:rerun-if-env-changed=HYDRA_VERSION");

@@ -30,6 +30,22 @@ pub struct Evidence {
     pub detail: String,
 }
 
+/// Which way a reason pulls the score (the design's `+` and `−`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Side {
+    /// What makes the score this high.
+    For,
+    /// What keeps it from higher.
+    Against,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Reason {
+    pub side: Side,
+    pub text: String,
+}
+
 /// What a stage session reported at its end.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Rating {
@@ -38,13 +54,14 @@ pub struct Rating {
     pub score: u8,
     pub summary: String,
     pub evidence: Vec<Evidence>,
-    /// Why this score: what makes it this high and what keeps it from higher.
-    pub reasons: String,
+    /// Why this score: at least one reason for or against.
+    pub reasons: Vec<Reason>,
     /// What the next stage needs to know; may be empty.
     pub handoff: String,
 }
 
-/// Most evidence items in one report, and the longest detail (characters).
+/// Most evidence items (and reasons) in one report, and the longest detail or reason
+/// (characters).
 pub const MAX_EVIDENCE: usize = 20;
 pub const MAX_DETAIL: usize = 500;
 
@@ -65,6 +82,52 @@ fn evidence_kind(s: &str) -> Option<EvidenceKind> {
         "note" => EvidenceKind::Note,
         _ => return None,
     })
+}
+
+/// Reads `reasons`, adding what's wrong with them to `problems`.
+fn reasons(args: &Value, problems: &mut Vec<String>) -> Vec<Reason> {
+    let items = args
+        .get("reasons")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if items.is_empty() {
+        problems
+            .push("reasons is empty: give at least one, each {side: for or against, text}".into());
+    } else if items.len() > MAX_EVIDENCE {
+        problems.push(format!(
+            "reasons has {} items; at most {MAX_EVIDENCE}",
+            items.len()
+        ));
+    }
+    let mut out = Vec::new();
+    for (i, item) in items.iter().take(MAX_EVIDENCE).enumerate() {
+        let side_text = text(item, "side");
+        let side = match side_text.as_str() {
+            "for" => Some(Side::For),
+            "against" => Some(Side::Against),
+            _ => {
+                problems.push(format!(
+                    "reason {}: side {side_text:?} must be for or against",
+                    i + 1
+                ));
+                None
+            }
+        };
+        let text = text(item, "text");
+        if text.is_empty() {
+            problems.push(format!("reason {}: text is empty", i + 1));
+        } else if text.chars().count() > MAX_DETAIL {
+            problems.push(format!(
+                "reason {}: text is over {MAX_DETAIL} characters",
+                i + 1
+            ));
+        }
+        if let Some(side) = side {
+            out.push(Reason { side, text });
+        }
+    }
+    out
 }
 
 /// Reads `stage_report`'s arguments, naming every problem at once so the session can fix them
@@ -93,10 +156,7 @@ pub fn from_args(args: &Value) -> Result<Rating, String> {
     if summary.is_empty() {
         problems.push("summary is empty".into());
     }
-    let reasons = text(args, "reasons");
-    if reasons.is_empty() {
-        problems.push("reasons is empty: say why this score".into());
-    }
+    let reasons = reasons(args, &mut problems);
     let items = args
         .get("evidence")
         .and_then(Value::as_array)
@@ -160,7 +220,8 @@ mod tests {
     fn good() -> Value {
         json!({"outcome": "done", "score": 86, "summary": "Reproduced.",
                "evidence": [{"kind": "test", "detail": "e2e: 1 failing"}],
-               "reasons": "Fails three runs out of three.", "handoff": "Fix save()."})
+               "reasons": [{"side": "for", "text": "Fails three runs out of three."}],
+               "handoff": "Fix save()."})
     }
 
     #[test]
@@ -200,6 +261,44 @@ mod tests {
         let mut a = good();
         a["score"] = json!(85.5);
         assert!(from_args(&a).unwrap_err().contains("score"));
+    }
+
+    #[test]
+    fn reasons_need_a_side_and_text() {
+        let mut a = good();
+        a["reasons"] = json!([{"side": "for", "text": "Three runs out of three."},
+                              {"side": "against", "text": "Not tried on mobile."}]);
+        let r = from_args(&a).unwrap();
+        assert_eq!(
+            r.reasons[1],
+            Reason {
+                side: Side::Against,
+                text: "Not tried on mobile.".into()
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&r).unwrap()["reasons"][1]["side"],
+            "against"
+        );
+        for (reasons, says) in [
+            (json!([]), "reasons"),
+            (json!("Because."), "reasons"),
+            (json!([{"side": "maybe", "text": "x"}]), "maybe"),
+            (json!([{"side": "for", "text": " "}]), "reason 1: text"),
+            (json!([{"side": "for", "text": "x".repeat(501)}]), "500"),
+            (
+                json!(
+                    (0..21)
+                        .map(|_| json!({"side": "for", "text": "x"}))
+                        .collect::<Vec<_>>()
+                ),
+                "20",
+            ),
+        ] {
+            a["reasons"] = reasons;
+            let e = from_args(&a).unwrap_err();
+            assert!(e.contains(says), "{says}: {e}");
+        }
     }
 
     #[test]

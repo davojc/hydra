@@ -268,18 +268,18 @@ Spec revision of 2026-10-22 (the design handoff). Reworks Tasks 2, 1 and 3 befor
 
 **Interfaces:**
 - `rating`: `reasons: Vec<Reason>` with `pub struct Reason { pub side: Side, pub text: String }`, `pub enum Side { For, Against }` (serde lowercase); at least one, at most `MAX_EVIDENCE`, each `text` at most `MAX_DETAIL` (spec §4).
-- `pipeline`: `Stage { skill: Option<String>, prompt: Option<String>, .. }`; `pub fn prompt_for(stage: &Stage) -> String` — the stage's prompt or `Use the {skill} skill for the "<title>" stage of ticket {ticket}.` (no skill: `Do the "<title>" stage of ticket {ticket}.`) (spec §2). `EXAMPLE` names a skill per stage and the pipeline `INTH SLA tickets`.
+- `pipeline`: `Stage { skill: Option<String>, .. }`; a stage with no `prompt` gets `Use the {skill} skill for the "<title>" stage of ticket {ticket}.` (no skill: `Do the "<title>" stage of ticket {ticket}.`) at parse (spec §2); `Pipeline.file` is the file name `load` was given (for re-reading its bars). `EXAMPLE` stays generic and mentions `skill` in its comment.
 - `runs`:
   - `StageStatus` loses `Overridden`; `cleared()` is `Passed` only.
   - `pub struct Attempt { pub label: String /* s-01 */, pub session: Option<String> /* token */, pub session_name: Option<String>, pub started: SystemTime, pub note: Option<String>, pub rating: Option<Rating> }`; `StageRun { status, attempts: Vec<Attempt>, note: Option<String> /* for the next attempt */ }`; `Run.sessions: u32` numbers labels across the run; `Run.started: SystemTime`; `Run.paused: bool`.
-  - `RunState { Running, NeedsYou(String), Finished, Stopped(String) }` — `Stopped` is final (spec §3.5); `start_run` is refused while a `Running` or `NeedsYou` run is the orchestrator's.
+  - `RunState { Running, NeedsYou(String), Finished, Stopped(String) }` and `Decided::{RunNeedsYou, RunStopped}` — `Stopped` is final (spec §3.5); `start_run` is refused while a `Running` or `NeedsYou` run is the orchestrator's.
   - `Choice { Retry { note: String }, Stop }`; `Retry` needs a non-empty note and works on a `NeedsYou` run (stopped, failed past the limit, or a usage stop); `Stop` works on a `Running` or `NeedsYou` run and ends it `Stopped("stopped by you at <stage>")`.
   - A re-run's prompt carries the previous attempt's report: `Your previous attempt (s-NN) reported <score>: <summary>` plus its reasons, then `Note from you: <note>`.
   - `pub fn pause(&mut self, run: &str, paused: bool) -> Result<Vec<Change>, String>`; gate rule 2 refuses while paused. `Decided` gains `Paused`, `Resumed`; loses `Overridden`.
-  - `report(&mut self, token: &str, rating: Rating, current: Option<&Pipeline>) -> Result<Vec<Change>, String>` — the bar is `current`'s for the stage's id when it has one, else the run's (spec §5.1, last paragraph).
+  - `pub fn refresh_bars(&mut self, file: &str, now: &Pipeline)` — open runs of that file take its bars for the stages they share (their stage lists stay); `report` then uses the run's bars (spec §5.1, last paragraph).
   - Only a stage's latest attempt's token has the stage role.
   - `status_json` gives `paused`, `state` (`running`, `needs_you`, `finished`, `stopped`), each stage's `skill`, `bar`, `status` and `attempts: [{label, session, live, started, note, rating}]`.
-- [ ] **Step 1: Tests** (updated and new): `reasons_need_a_side_and_text`; `a_stage_without_a_prompt_gets_one_from_its_skill`; `a_person_retries_with_a_note_or_stops` (replaces the continue test; note required; stop is final and lets a new run start); `attempts_are_numbered_across_the_run_and_kept`; `an_earlier_attempt_cannot_report`; `a_paused_run_starts_nothing`; `a_bar_changed_since_the_start_applies_at_the_gate`; `a_rerun_prompt_carries_the_previous_report_and_the_note`.
+- [ ] **Step 1: Tests** (updated and new): `reasons_need_a_side_and_text`; `a_stage_without_a_prompt_gets_one_from_its_skill`; `a_person_retries_with_a_note_or_stops` (replaces the continue test; note required; stop is final and lets a new run start); `attempts_are_numbered_across_the_run_and_kept`; `an_earlier_attempt_cannot_report`; `a_paused_run_starts_nothing`; `a_bar_changed_since_the_start_applies_at_the_gate`; nothing passes a failed stage while the run is still running; `a_rerun_prompt_carries_the_previous_report_and_the_note`.
 - [ ] **Step 2: Run** red. **Step 3: Implement.** **Step 4: Run** `cargo test -p hydraui` green; mutation-check the no-override and the latest-attempt rules.
 - [ ] **Step 5: Commit** `feat(hydraui): runs follow the orchestrator design`
 
@@ -300,7 +300,7 @@ Spec revision of 2026-10-22 (the design handoff). Reworks Tasks 2, 1 and 3 befor
   - `fn run_tool(reg: &mut Registry, token: &str, hydra_root: &Path, name: &str, args: &Value) -> Option<(Outcome, Option<McpEvent>)>` in `tools.rs` — `None` for any other name (so `call_with` keeps the task tools). Called from `reply_to` under the registry lock, before `call_with`.
   - `Registry::revoke` returns the `Vec<Change>` from `runs.session_gone(token)`; `McpTerminal`'s `Drop` sends them as `RunChanged` through the server (`Server::broadcast(McpEvent)`, a new `pub fn`).
   - The server needs the hydra root for pipelines and logs: `Server::start` gains `hydra_root: PathBuf` (from `main.rs`, where `hydra.paths` is known), stored on the server and passed to `run_tool`.
-  - `stage_report` reads the run's pipeline file again (`pipeline::load`) and passes it to `runs.report` for the bar (Task 4b); a file that no longer loads falls back to the run's own.
+  - `stage_report` reads the run's pipeline file again (`pipeline::load(root, &run.pipeline.file)`) and calls `runs.refresh_bars` before `runs.report` (Task 4b); a file that no longer loads leaves the run's bars as they are.
 
 - [ ] **Step 1: Write the failing tests:**
   - In `tools.rs`: `the_list_offers_exactly_the_pre_approved_tools` keeps passing once both lists hold the ten names (update its expected array).
@@ -427,7 +427,7 @@ Spec revision of 2026-10-22 (the design handoff). Reworks Tasks 2, 1 and 3 befor
 - Create: `crates/hydraui/src/skills_list.rs` (`pub fn installed(claude_config: Option<&Path>, project: &Path) -> Vec<String>`: the `skills/*/SKILL.md` names under each)
 
 **Interfaces:**
-- Produces: `pub struct Edit { name: String, bar: u8, stages: Vec<EditStage { id: Option<String> /* None = new */, title, skill: Option<String>, bar: Option<u8> }> }`; `pub fn validate(edit: &Edit) -> Result<(), &'static str>` ("Give the orchestrator a name", "Every stage needs a name", at least one stage); `save` keeps every key and comment it doesn't own, each kept stage's `prompt` and `worktree`, orders stages as given, gives new stages an id slugged from the title and unique; on save, running runs pick up the new bars at their next gate (Task 4b reads the file there). The view as spec §7.4 and the design (sliders 50–100, Reset, ↑/↓, ×, + Add stage, the Done row, the limits, the save bar).
+- Produces: `pub struct Edit { name: String, bar: u8, stages: Vec<EditStage { id: Option<String> /* None = new */, title, skill: Option<String>, bar: Option<u8> }> }`; `pub fn validate(edit: &Edit) -> Result<(), &'static str>` ("Give the orchestrator a name", "Every stage needs a name", at least one stage); `save` keeps every key and comment it doesn't own, each kept stage's `prompt` and `worktree`, orders stages as given, gives new stages an id slugged from the title and unique; on save, `runs.refresh_bars` so open runs show and use the new bars at once (Task 4b). The view as spec §7.4 and the design (sliders 50–100, Reset, ↑/↓, ×, + Add stage, the Done row, the limits, the save bar).
 - [ ] **Step 1: Tests:** `saving_keeps_prompts_and_comments`, `a_new_stage_gets_a_unique_id_from_its_title`, `reordering_and_removing_stages`, `validation_names_what_is_missing`, `installed_skills_are_listed_once_sorted`.
 - [ ] **Steps 2–4**; by hand: change a bar mid-run and see the next gate use it. **Step 5: Commit** `feat(hydraui): pipeline settings`
 

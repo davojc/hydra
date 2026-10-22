@@ -8,7 +8,10 @@ use serde::Deserialize;
 /// A pipeline as `run_start` reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pipeline {
+    /// The name the views, notifications and Slack show (the design's orchestrator name).
     pub name: String,
+    /// The file's name without `.toml`, as `load` was given it; empty from `parse` alone.
+    pub file: String,
     /// The bar every stage must clear unless it sets its own, 0 to 100.
     pub bar: u8,
     pub stages: Vec<Stage>,
@@ -19,9 +22,12 @@ pub struct Stage {
     pub id: String,
     pub title: String,
     pub bar: Option<u8>,
+    /// The skill the stage's session uses, shown in the views.
+    pub skill: Option<String>,
     /// Runs in the run's worktree (made for the first such stage, §3.2).
     pub worktree: bool,
-    /// The stage session's first prompt, before `render` fills it in.
+    /// The stage session's first prompt, before `render` fills it in: the file's, or one made
+    /// from the skill and title when it has none (§2).
     pub prompt: String,
 }
 
@@ -53,9 +59,20 @@ struct FileStage {
     id: String,
     title: String,
     bar: Option<u8>,
+    skill: Option<String>,
     #[serde(default)]
     worktree: bool,
-    prompt: String,
+    prompt: Option<String>,
+}
+
+/// The prompt of a stage that has none (§2): a stage added in Pipeline settings.
+fn default_prompt(title: &str, skill: Option<&str>) -> String {
+    match skill {
+        Some(skill) => {
+            format!("Use the {skill} skill for the \"{title}\" stage of ticket {{ticket}}.")
+        }
+        None => format!("Do the \"{title}\" stage of ticket {{ticket}}."),
+    }
 }
 
 fn plain_name(s: &str) -> bool {
@@ -90,16 +107,25 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
             return Err(format!("stage id {:?} is used twice", s.id));
         }
         check_bar(s.bar, &format!("stage {}", s.id))?;
+        let skill = s
+            .skill
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty());
+        let prompt = s
+            .prompt
+            .unwrap_or_else(|| default_prompt(&s.title, skill.as_deref()));
         stages.push(Stage {
             id: s.id,
             title: s.title,
             bar: s.bar,
+            skill,
             worktree: s.worktree,
-            prompt: s.prompt,
+            prompt,
         });
     }
     Ok(Pipeline {
         name: file.name,
+        file: String::new(),
         bar: file.bar.unwrap_or(DEFAULT_BAR),
         stages,
     })
@@ -120,7 +146,9 @@ pub fn load(hydra_root: &Path, name: &str) -> Result<Pipeline, String> {
     let file = folder(hydra_root).join(format!("{name}.toml"));
     let text = std::fs::read_to_string(&file)
         .map_err(|e| format!("can't read pipeline {name} ({}): {e}", file.display()))?;
-    parse(&text).map_err(|e| format!("pipeline {name}: {e}"))
+    let mut pipeline = parse(&text).map_err(|e| format!("pipeline {name}: {e}"))?;
+    pipeline.file = name.to_string();
+    Ok(pipeline)
 }
 
 /// Writes `ticket.toml` when the folder holds no pipeline yet (§2).
@@ -176,7 +204,8 @@ pub fn render(prompt: &str, vars: &PromptVars, brief: &str) -> String {
 /// The pipeline written when there is none: the four stages of the ticket pipeline with plain
 /// prompts, enough to walk a ticket through by hand (phase 1's gate).
 pub const EXAMPLE: &str = r#"# A ticket through four stages. Each stage is a fresh Claude session; it ends with
-# stage_report, and the next stage starts only when the rating clears the bar.
+# stage_report, and the next stage starts only when the rating clears the bar. A stage may
+# name the skill its session uses (skill = "..."); a stage with no prompt gets one from it.
 name = "ticket"
 bar = 80
 
@@ -290,10 +319,34 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         ensure_example(d.path()).unwrap();
         let file = folder(d.path()).join("ticket.toml");
-        assert_eq!(load(d.path(), "ticket").unwrap().name, "ticket");
+        let loaded = load(d.path(), "ticket").unwrap();
+        assert_eq!(
+            (loaded.name.as_str(), loaded.file.as_str()),
+            ("ticket", "ticket")
+        );
         std::fs::write(&file, "edited").unwrap();
         ensure_example(d.path()).unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "edited");
+    }
+
+    #[test]
+    fn a_stage_without_a_prompt_gets_one_from_its_skill() {
+        let p = parse(
+            "name = \"t\"\n[[stage]]\nid = \"a\"\ntitle = \"Replicate\"\nskill = \"QA-Skills\"\n\
+             [[stage]]\nid = \"b\"\ntitle = \"Check\"\n",
+        )
+        .unwrap();
+        assert_eq!(p.stages[0].skill.as_deref(), Some("QA-Skills"));
+        assert_eq!(
+            p.stages[0].prompt,
+            "Use the QA-Skills skill for the \"Replicate\" stage of ticket {ticket}."
+        );
+        assert_eq!(p.stages[1].skill, None);
+        assert_eq!(
+            p.stages[1].prompt,
+            "Do the \"Check\" stage of ticket {ticket}."
+        );
+        assert_eq!(p.file, "");
     }
 
     #[test]

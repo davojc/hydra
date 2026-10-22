@@ -207,7 +207,11 @@ fn run_start(
             );
         }
     };
-    let (id, reply) = match reg.runs.start_run(token, p, ticket, summary) {
+    let logged = |id: &str| run_log::file_for(root, id).exists();
+    let (id, reply) = match reg
+        .runs
+        .start_run_avoiding(token, p, ticket, summary, logged)
+    {
         Err(e) => return (Outcome::err(e), None),
         Ok(r) => {
             let stages: Vec<Value> = r

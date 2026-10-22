@@ -422,6 +422,14 @@ impl Workspace {
             let only = only.clone();
             return self.open_orchestrator(&env, &only, window, cx);
         }
+        // Each file by its name and the name the views show, so they're told apart.
+        let labels: Vec<String> = names
+            .iter()
+            .map(|n| match crate::pipeline::load(&root, n) {
+                Ok(p) if p.name != *n => format!("{n} · {}", p.name),
+                _ => n.clone(),
+            })
+            .collect();
         let state = cx.new(|cx| CommandState::new(window, cx));
         let workspace = cx.entity();
         let first = Cell::new(true);
@@ -432,7 +440,7 @@ impl Workspace {
             let (choices, workspace, env) = (names.clone(), workspace.clone(), env.clone());
             dialog.title("Pipeline").child(
                 Command::new(&state)
-                    .items(names.iter().map(|n| CommandItem::new().label(n.clone())))
+                    .items(labels.iter().map(|l| CommandItem::new().label(l.clone())))
                     .placeholder("Pipeline")
                     .on_confirm(move |ix, window, cx| {
                         if let Some(name) = choices.get(ix.row).cloned() {

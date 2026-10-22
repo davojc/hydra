@@ -381,7 +381,7 @@ impl Workspace {
                 let fresh = self.new_draft(orch, file, Edit::from(&p), skills, window, cx);
                 self.pipeline_settings.insert(orch, fresh);
                 window.push_notification(
-                    Notification::success("Stage changes apply from the next ticket.")
+                    Notification::success("A stage's settings apply when it next starts.")
                         .title("Pipeline saved"),
                     cx,
                 );
@@ -553,49 +553,50 @@ impl Workspace {
                     ),
             );
         }
-        let save_bar = if dirty {
-            let (message, hex) = match invalid {
-                Some(why) => (why.to_string(), theme::RED),
-                None => (
-                    format!("Unsaved changes · {count} stages · apply from the next ticket"),
-                    theme::TEXT_SECONDARY,
-                ),
-            };
-            h_flex()
+        let save_bar =
+            if dirty {
+                let (message, hex) = match invalid {
+                    Some(why) => (why.to_string(), theme::RED),
+                    None => (
+                        format!("Unsaved changes · {count} stages"),
+                        theme::TEXT_SECONDARY,
+                    ),
+                };
+                h_flex()
+                    .px(px(28.))
+                    .py(px(12.))
+                    .gap_3()
+                    .border_t_1()
+                    .border_color(color(theme::BORDER_SUBTLE))
+                    .bg(color(theme::SURFACE))
+                    .child(div().size(px(8.)).rounded_full().bg(color(theme::AMBER)))
+                    .child(text(12.5, hex).flex_1().child(message))
+                    .child(
+                        Button::new("settings-discard")
+                            .label("Discard")
+                            .ghost()
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                ws.discard_settings(orch, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("settings-save")
+                            .label("Save changes")
+                            .primary()
+                            .disabled(invalid.is_some())
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                ws.save_settings(orch, window, cx)
+                            })),
+                    )
+            } else {
+                h_flex()
                 .px(px(28.))
                 .py(px(12.))
-                .gap_3()
-                .border_t_1()
-                .border_color(color(theme::BORDER_SUBTLE))
-                .bg(color(theme::SURFACE))
-                .child(div().size(px(8.)).rounded_full().bg(color(theme::AMBER)))
-                .child(text(12.5, hex).flex_1().child(message))
-                .child(
-                    Button::new("settings-discard")
-                        .label("Discard")
-                        .ghost()
-                        .on_click(cx.listener(move |ws, _, window, cx| {
-                            ws.discard_settings(orch, window, cx)
-                        })),
-                )
-                .child(
-                    Button::new("settings-save")
-                        .label("Save changes")
-                        .primary()
-                        .disabled(invalid.is_some())
-                        .on_click(
-                            cx.listener(move |ws, _, window, cx| {
-                                ws.save_settings(orch, window, cx)
-                            }),
-                        ),
-                )
-        } else {
-            h_flex().px(px(28.)).py(px(12.)).child(
-                text(12., theme::TEXT_MUTED).child(
-                    "Stage changes apply from the next ticket. Bars apply at the next gate.",
-                ),
-            )
-        };
+                .child(text(12., theme::TEXT_MUTED).child(
+                "Adding, removing or reordering stages applies from the next ticket; a stage's own \
+                 settings apply when it next starts.",
+            ))
+            };
         let limit = |label: &str, value: String| {
             v_flex()
                 .flex_1()

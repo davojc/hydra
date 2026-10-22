@@ -742,6 +742,18 @@ mod tests {
     }
 
     #[test]
+    fn a_run_id_already_in_the_logs_is_not_reused() {
+        let (home, reg, orch) = with_pipeline();
+        let old = crate::run_log::file_for(home.path(), "INTH-7-1");
+        crate::run_log::append(&old, "run started", json!({"ticket": "INTH-7"})).unwrap();
+        let args = json!({"pipeline": "two", "ticket": "INTH-7", "summary": "Again"});
+        let (text, err, _) = call(&reg, &orch, "run_start", args);
+        assert!(!err, "{text}");
+        let started: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(started["run"], "INTH-7-2");
+    }
+
+    #[test]
     fn a_report_missing_reasons_is_refused_and_changes_nothing() {
         let (_home, reg, orch) = with_pipeline();
         let stage = first_stage_open(&reg, &orch);

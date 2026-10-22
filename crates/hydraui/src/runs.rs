@@ -252,6 +252,19 @@ impl Runs {
         ticket: &str,
         summary: &str,
     ) -> Result<&Run, String> {
+        self.start_run_avoiding(orchestrator, pipeline, ticket, summary, |_| false)
+    }
+
+    /// `start_run`, skipping ids `taken` says are in use already (a run logged by an earlier
+    /// hydraui, §8), so two runs never share a log.
+    pub fn start_run_avoiding(
+        &mut self,
+        orchestrator: &str,
+        pipeline: Pipeline,
+        ticket: &str,
+        summary: &str,
+        taken: impl Fn(&str) -> bool,
+    ) -> Result<&Run, String> {
         let ticket = ticket.trim();
         if ticket.is_empty() {
             return Err("name the ticket".into());
@@ -269,10 +282,13 @@ impl Runs {
                 r.id
             ));
         }
-        let n = self.runs.iter().filter(|r| r.ticket == ticket).count() + 1;
+        let id = (self.runs.iter().filter(|r| r.ticket == ticket).count() + 1..)
+            .map(|n| format!("{ticket}-{n}"))
+            .find(|id| !taken(id) && self.run(id).is_none())
+            .expect("an unbounded range has a free id");
         let stages = vec![StageRun::default(); pipeline.stages.len()];
         self.runs.push(Run {
-            id: format!("{ticket}-{n}"),
+            id,
             ticket: ticket.to_string(),
             summary: summary.trim().to_string(),
             pipeline,
@@ -606,8 +622,8 @@ impl Runs {
     /// The pipeline file `file` now reads `now` (Pipeline settings saved it, or a stage is about
     /// to report): open runs of it take its bars for the stages they share. Their stage lists
     /// The pipeline file `file` now reads `now` (Pipeline settings saved it, or a stage is about
-    /// to report): open runs of it take its name and its bars for the stages they share. Their
-    /// stage lists stay as they started (§2).
+    /// to report): open runs of it take its name, its bar, and each stage's settings for the
+    /// stages they share. Their stage lists stay as they started (§2).
     pub fn refresh_from_file(&mut self, file: &str, now: &Pipeline) {
         for r in self
             .runs
@@ -616,9 +632,11 @@ impl Runs {
         {
             r.pipeline.name = now.name.clone();
             r.pipeline.bar = now.bar;
+            // A stage's own settings reach it from its next start; only the list (adding,
+            // removing, reordering) waits for the next ticket.
             for stage in &mut r.pipeline.stages {
                 if let Some(same) = now.stages.iter().find(|s| s.id == stage.id) {
-                    stage.bar = same.bar;
+                    *stage = same.clone();
                 }
             }
         }
@@ -1215,6 +1233,36 @@ mod tests {
         );
         assert!(matches!(runs.run(&id).unwrap().state, RunState::Stopped(_)));
         assert!(runs.person(&id, retry("again")).is_err());
+    }
+
+    #[test]
+    fn stage_settings_reach_stages_not_yet_started() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b"]);
+        let mut now = pipeline(&["a", "b"]);
+        now.stages[1].folder = Some("~/Projects/QA-Skills".into());
+        now.stages[1].skill = Some("qa".into());
+        now.stages[1].prompt = "Use the qa skill.".into();
+        runs.refresh_from_file("t", &now);
+        started(&mut runs, &id, "a", "tok-a");
+        runs.report("tok-a", rated(90)).unwrap();
+        let b = runs.begin("orch", &id, "b", "", 30).unwrap();
+        assert_eq!(b.folder.as_deref(), Some("~/Projects/QA-Skills"));
+        assert!(b.prompt.starts_with("Use the qa skill."), "{}", b.prompt);
+        assert_eq!(
+            runs.run(&id).unwrap().pipeline.stages[1].skill.as_deref(),
+            Some("qa")
+        );
+    }
+
+    #[test]
+    fn run_ids_skip_ones_already_logged() {
+        let mut runs = Runs::default();
+        let taken = |id: &str| id == "INTH-1-1" || id == "INTH-1-2";
+        let r = runs
+            .start_run_avoiding("orch", pipeline(&["a"]), "INTH-1", "x", taken)
+            .unwrap();
+        assert_eq!(r.id, "INTH-1-3");
     }
 
     #[test]

@@ -13,6 +13,10 @@ use crate::rating::{Rating, Side, passes};
 /// Attempts a failed stage gets before it waits for a person (§5.2, the user's decision).
 pub const MAX_ATTEMPTS: usize = 3;
 
+/// The share of the seven-day Claude limit a stage needs left, in percent, unless hydraui's
+/// config sets `min_week_left` (§5.1, the user's decision).
+pub const MIN_WEEK_LEFT: u8 = 30;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StageStatus {
@@ -146,6 +150,7 @@ pub struct StartStage {
 /// What happened to a run or one of its stages, for the app to show and tell the orchestrator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decided {
+    RunStarted,
     Passed,
     Stopped(String),
     Failed(String),

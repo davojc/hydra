@@ -1,10 +1,12 @@
 //! `<HYDRA_HOME>/hydraui/runs/<run>.jsonl` (orchestrator spec §8): every change to a run, one JSON
-//! object a line, appended as it happens. The audit trail; nothing reads it back.
+//! object a line, appended as it happens. The audit trail, which Ticket history reads (§7.5).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
+
+use crate::runs::{Change, Decided, Runs};
 
 /// The log of run `run`. Characters other than letters, digits, `-` and `_` become `_`, so an
 /// id can't leave the folder.
@@ -42,6 +44,43 @@ pub fn append(file: &Path, event: &str, fields: Value) -> std::io::Result<()> {
         .append(true)
         .open(file)?;
     writeln!(out, "{}", Value::Object(line))
+}
+
+/// Appends what `changes` did to each run's log (§8), noting a failed write in hydraui's log.
+/// `run started` and `report` are written where they happen, with their details.
+pub fn record(hydra_root: &Path, runs: &Runs, changes: &[Change]) {
+    for c in changes {
+        let Some(run) = runs.run(&c.run) else {
+            continue;
+        };
+        let stage = c.stage.map(|i| run.pipeline.stages[i].id.as_str());
+        let scores = || -> Vec<Value> {
+            run.pipeline
+                .stages
+                .iter()
+                .zip(&run.stages)
+                .map(|(spec, s)| json!({"stage": spec.id, "score": s.rating().map(|r| r.score)}))
+                .collect()
+        };
+        let (event, fields) = match &c.what {
+            Decided::RunStarted | Decided::RunResumed => continue,
+            Decided::Passed => ("stage passed", json!({"stage": stage})),
+            Decided::Stopped(why) => ("stage stopped", json!({"stage": stage, "reason": why})),
+            Decided::Failed(why) => ("stage failed", json!({"stage": stage, "reason": why})),
+            Decided::Retrying => ("re-run", json!({"stage": stage})),
+            Decided::Paused => ("paused", json!({})),
+            Decided::Resumed => ("resumed", json!({})),
+            Decided::RunNeedsYou(why) => ("needs you", json!({"reason": why})),
+            Decided::RunFinished => ("run ended", json!({"outcome": "done", "scores": scores()})),
+            Decided::RunStopped(why) => (
+                "run ended",
+                json!({"outcome": "stopped", "reason": why, "scores": scores()}),
+            ),
+        };
+        if let Err(e) = append(&file_for(hydra_root, &c.run), event, fields) {
+            crate::action_log::write(format!("run log {}: {e}", c.run));
+        }
+    }
 }
 
 #[cfg(test)]

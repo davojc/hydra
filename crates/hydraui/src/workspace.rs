@@ -323,6 +323,21 @@ impl Workspace {
                         } => ws.session_state(&token, state, resumed, window, cx),
                         McpEvent::Usage(token, usage) => ws.usage_reported(&token, usage, cx),
                         McpEvent::Verified(token) => ws.session_verified(&token, cx),
+                        // Stage terminals open in the orchestrator plan's Task 6; until then a
+                        // start fails rather than leaving its run waiting on a terminal.
+                        McpEvent::StageStart(s) => {
+                            if let Some(server) = crate::mcp::server::get() {
+                                let changes = crate::mcp::server::lock(server.registry())
+                                    .runs
+                                    .start_failed(
+                                        &s.run,
+                                        s.stage,
+                                        "hydraui can't open stage terminals yet",
+                                    );
+                                server.broadcast(McpEvent::RunChanged(changes));
+                            }
+                        }
+                        McpEvent::RunChanged(_) => cx.notify(),
                     });
                     if alive.is_err() {
                         break;

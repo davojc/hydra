@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use super::SessionState;
+use crate::runs::{Change, MIN_WEEK_LEFT, Runs};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Terminal {
@@ -23,11 +24,28 @@ pub struct Peer {
     pub state: SessionState,
 }
 
-#[derive(Default)]
 pub struct Registry {
     terminals: HashMap<String, Terminal>,
     /// What each terminal's Claude session last said it is doing (its status hooks).
     sessions: HashMap<String, SessionState>,
+    /// The orchestrator's runs (orchestrator spec §3), behind the same lock as the tokens.
+    pub runs: Runs,
+    /// The share of the seven-day Claude limit a stage needs left (orchestrator spec §5.1).
+    pub min_week_left: u8,
+    /// `<HYDRA_HOME>`, where pipelines and run logs live; the run tools refuse without it.
+    pub hydra_root: Option<PathBuf>,
+}
+
+impl Default for Registry {
+    fn default() -> Self {
+        Registry {
+            terminals: HashMap::new(),
+            sessions: HashMap::new(),
+            runs: Runs::default(),
+            min_week_left: MIN_WEEK_LEFT,
+            hydra_root: None,
+        }
+    }
 }
 
 /// A label made safe as a taker: whitespace runs become one space, `]` becomes `)`, an empty
@@ -92,9 +110,17 @@ impl Registry {
         }
     }
 
-    pub fn revoke(&mut self, token: &str) {
+    /// The terminal holding `token` closed: forgets it, and returns what that changed for the
+    /// runs (a stage it was running fails, a run it orchestrated stops).
+    pub fn revoke(&mut self, token: &str) -> Vec<Change> {
         self.terminals.remove(token);
         self.sessions.remove(token);
+        self.runs.session_gone(token)
+    }
+
+    /// What `token`'s Claude session last said it is doing.
+    pub fn session(&self, token: &str) -> Option<SessionState> {
+        self.sessions.get(token).copied()
     }
 
     /// The Claude session in `token`'s terminal is in `state`; `Ended` forgets it.

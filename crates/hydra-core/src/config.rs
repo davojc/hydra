@@ -51,7 +51,8 @@ pub struct EnvConfig {
     pub gws: Option<GwsConfig>,
     pub kube: Option<KubeConfig>,
     pub codex: Option<Empty>,
-    pub gemini: Option<GeminiConfig>,
+    pub gemini: Option<ApiKeyConfig>,
+    pub jev: Option<ApiKeyConfig>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     /// Tools borrowed from another environment (tool id -> owner). Filled by `parse_env`.
@@ -116,9 +117,10 @@ pub struct KubeConfig {
     pub config: Option<String>,
 }
 
+/// A section holding just an API key, e.g. `[gemini]` or `[jev]`.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct GeminiConfig {
+pub struct ApiKeyConfig {
     pub api_key: String,
 }
 
@@ -204,6 +206,9 @@ impl EnvConfig {
         }
         if let Some(g) = &self.gemini {
             require_secret("[gemini] api_key", &g.api_key, "secret:work/gemini")?;
+        }
+        if let Some(j) = &self.jev {
+            require_secret("[jev] api_key", &j.api_key, "secret:work/jev")?;
         }
         Ok(())
     }
@@ -424,6 +429,21 @@ LINEAR_API_KEY = "secret:work/linear"
                 .unwrap_err()
                 .to_string()
                 .contains("[gemini] api_key")
+        );
+    }
+
+    #[test]
+    fn jev_key_must_be_a_secret() {
+        let (_d, paths, name) = setup(
+            "[jev]
+api_key = \"plain-key\"
+",
+        );
+        assert!(
+            load_env(&paths, &name)
+                .unwrap_err()
+                .to_string()
+                .contains("[jev] api_key")
         );
     }
 

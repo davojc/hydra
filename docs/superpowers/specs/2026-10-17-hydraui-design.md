@@ -342,8 +342,8 @@ disabled.
   in a new tab; or borrows a tool another environment has with its own login
   (`from = "<env>"`). Tools that need values first have a form: git (name,
   email; optional SSH and signing key paths, which must exist), aws
-  (profile; then its sign-in), gemini (the API key, stored as the secret
-  `<env>/gemini` and referenced from env.toml), kube (an optional kubeconfig
+  (profile; then its sign-in), gemini and jev (the API key, stored as the
+  secret `<env>/gemini` or `<env>/jev` and referenced from env.toml), kube (an optional kubeconfig
   path; empty gives the environment its own). A form shows what's wrong and
   stays open; nothing is written until the values check out. aws's private
   config files, claude's MCP exclusions and github's owner/strict settings

@@ -145,6 +145,7 @@ Turn tools on with `hydra add <tool> [env]`. Inside a hydra terminal you can lea
 | `kube` | Its own kubeconfig | `--kubeconfig <path>` |
 | `codex` | Its own Codex CLI login | |
 | `gemini` | `GEMINI_API_KEY` from a stored secret | `--api-key-secret <env/key>` (required) |
+| `jev` | `JEV_API_KEY` (TypeSafe's Jev) from a stored secret, separate from hydraui's own Jev key | `--api-key-secret <env/key>` (required) |
 
 - `hydra add` with no tool lists tools and which ones are on.
 - `hydra remove <tool> [env]` turns one off. Its saved logins are kept.

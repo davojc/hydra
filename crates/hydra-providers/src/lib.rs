@@ -10,6 +10,7 @@ pub mod gemini;
 pub mod git;
 pub mod github;
 pub mod gws;
+pub mod jev;
 pub mod kube;
 pub mod report;
 #[cfg(test)]
@@ -28,6 +29,7 @@ pub fn all() -> Vec<Box<dyn Provider>> {
         Box::new(kube::Kube),
         Box::new(dir::CODEX),
         Box::new(gemini::Gemini),
+        Box::new(jev::Jev),
         Box::new(envvars::EnvVars),
     ]
 }

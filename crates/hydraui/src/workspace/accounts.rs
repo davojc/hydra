@@ -211,7 +211,7 @@ impl Workspace {
         self.recheck_accounts(env, cx);
     }
 
-    /// The form for a tool that needs values first (git, aws, gemini, kube). It stays open,
+    /// The form for a tool that needs values first (git, aws, gemini, jev, kube). It stays open,
     /// showing what's wrong, until the values check out.
     fn set_up_form(
         &mut self,
@@ -281,7 +281,9 @@ impl Workspace {
                                 let result =
                                     ws.update(cx, |ws, _| match form_values(&tool, &typed)? {
                                         FormResult::Values(v) => ws.hydra.add_tool(&env, &tool, &v),
-                                        FormResult::Gemini(key) => ws.hydra.add_gemini(&env, &key),
+                                        FormResult::ApiKey(key) => {
+                                            ws.hydra.add_api_key(&env, &tool, &key)
+                                        }
                                     });
                                 match result {
                                     Ok(()) => {

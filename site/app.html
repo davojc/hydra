@@ -198,7 +198,7 @@
         <img src="img/hydraui-accounts.png" width="751" height="223" alt="The Accounts in work popover: github not signed in, git signed in as sam@work.example, with Refresh and Add account…" loading="lazy">
       </figure>
       <ul>
-        <li><strong>Add account…</strong> turns a tool on for the environment, as <code>hydra add</code> does. Tools that only need a sign-in (Claude Code, GitHub, Azure, Google Cloud, Codex, Google Workspace) sign in straight away in a new terminal; git, AWS, Gemini and Kubernetes ask for their settings first.</li>
+        <li><strong>Add account…</strong> turns a tool on for the environment, as <code>hydra add</code> does. Tools that only need a sign-in (Claude Code, GitHub, Azure, Google Cloud, Codex, Google Workspace) sign in straight away in a new terminal; git, AWS, Gemini, Jev and Kubernetes ask for their settings first (Gemini's and Jev's API key is stored as a hydra secret).</li>
         <li><strong>Use from…</strong> on a tool borrows another environment's login for it, so you sign in once and use it in both.</li>
         <li><strong>Switch account…</strong> on a tool runs its sign-in again in a new terminal, to move the environment to another account.</li>
         <li>On a Claude Pro or Max account, the status bar also shows how much of Claude's limits the environment has used: <strong>claude 5h 42% · 7d 18%</strong>, amber from 80% and red from 95%. Hover it for the account and when each limit resets; click it for the accounts. The numbers come from Claude's own status line, which hydra passes to hydraui; if you have a status line of your own, hydra keeps it and runs it for you.</li>

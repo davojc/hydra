@@ -403,18 +403,18 @@ impl Hydra {
         std::fs::write(&file, new_text).map_err(|e| format!("can't write {}: {e}", file.display()))
     }
 
-    /// Gemini for `env`: the key stored as the secret `<env>/gemini`, and env.toml pointing
-    /// at it. Nothing is written when the key can't be stored.
-    pub fn add_gemini(&self, env: &str, api_key: &str) -> Result<(), String> {
+    /// An API-key tool (gemini, jev) for `env`: the key stored as the secret `<env>/<tool>`,
+    /// and env.toml pointing at it. Nothing is written when the key can't be stored.
+    pub fn add_api_key(&self, env: &str, tool: &str, api_key: &str) -> Result<(), String> {
         self.env_text(env)?;
-        let path = format!("{env}/gemini");
+        let path = format!("{env}/{tool}");
         self.set_secret(&path, api_key.trim())?;
         let r = SecretRef::parse_path(&path).map_err(|e| e.to_string())?;
         let values = ToolValues {
             api_key: Some(r.to_value()),
             ..Default::default()
         };
-        self.add_tool(env, "gemini", &values)
+        self.add_tool(env, tool, &values)
     }
 
     /// Where `env`'s logins come from and who could lend each tool.
@@ -895,7 +895,9 @@ mod tests {
     #[test]
     fn gemini_stores_the_key_as_a_secret_and_refers_to_it() {
         let f = fx("");
-        f.hydra.add_gemini("work", "AIza-test-key").unwrap();
+        f.hydra
+            .add_api_key("work", "gemini", "AIza-test-key")
+            .unwrap();
         let file = f.hydra.paths.env_file(&EnvName::parse("work").unwrap());
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(text.contains("secret:work/gemini"), "{text}");
@@ -906,7 +908,25 @@ mod tests {
         // A pane needs its secrets: this one starts now.
         let req = PaneRequest::new("work", f.free.clone(), ShellKind::Pwsh);
         assert!(f.hydra.prepare(&req).is_ok());
-        assert!(f.hydra.add_gemini("personal", "  ").is_err());
+        assert!(f.hydra.add_api_key("personal", "gemini", "  ").is_err());
+    }
+
+    #[test]
+    fn jev_stores_the_key_as_a_secret_and_refers_to_it() {
+        let f = fx("");
+        f.hydra.add_api_key("work", "jev", "ts-test-key").unwrap();
+        let file = f.hydra.paths.env_file(&EnvName::parse("work").unwrap());
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            text.contains("[jev]") && text.contains("secret:work/jev"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("ts-test-key"),
+            "the key never goes in the file"
+        );
+        let req = PaneRequest::new("work", f.free.clone(), ShellKind::Pwsh);
+        assert!(f.hydra.prepare(&req).is_ok());
     }
 
     #[test]

@@ -51,7 +51,7 @@ It is a personal tool with two goals:
 hydra/
   crates/
     hydra-core/       # config, env model, provider trait, resolution, bindings, merge — no I/O to OS-specific APIs
-    hydra-providers/  # claude, github, git, aws, azure, gcloud, gws, kube, codex, gemini, env
+    hydra-providers/  # claude, github, git, aws, azure, gcloud, gws, kube, codex, gemini, jev, env
     hydra-platform/   # SecretStore + ShellLauncher traits; windows impl now
     hydra-cli/        # `hydra` binary
 ```
@@ -125,6 +125,7 @@ Names must match `^[a-z0-9][a-z0-9-]{0,31}$` (e.g. `work`, `client-acme`). Folde
 | `kube` | `KUBECONFIG=state/<env>/kube/config` (or a configured path). |
 | `codex` | `CODEX_HOME=state/<env>/codex`. |
 | `gemini` | `GEMINI_API_KEY` from `api_key`, which must be a `secret:` reference. |
+| `jev` | `JEV_API_KEY` from `api_key`, which must be a `secret:` reference. |
 | `env` | Arbitrary variables; values are literals or `secret:` references. |
 
 `whoami` groups `gcloud` and `gws` under one `google` line when both are configured.

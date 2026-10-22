@@ -41,6 +41,8 @@ pub(super) struct SettingsDraft {
     file: String,
     saved: Edit,
     name: Entity<InputState>,
+    /// The pipeline's `feature_env` pattern.
+    feature_env: Entity<InputState>,
     bar: Entity<SliderState>,
     stages: Vec<DraftStage>,
     skills: Vec<String>,
@@ -70,6 +72,8 @@ impl SettingsDraft {
     fn edit(&self, cx: &App) -> Edit {
         Edit {
             name: self.name.read(cx).value().to_string(),
+            feature_env: Some(self.feature_env.read(cx).value().trim().to_string())
+                .filter(|f| !f.is_empty()),
             bar: slider_value(&self.bar, cx),
             stages: self
                 .stages
@@ -161,9 +165,17 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> SettingsDraft {
         let name = cx.new(|cx| InputState::new(window, cx).default_value(saved.name.clone()));
+        let feature_env = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("https://fev2-solutions-{ticket_lower}.dev.iov42.net")
+                .default_value(saved.feature_env.clone().unwrap_or_default())
+        });
         let bar = slider(saved.bar, cx);
         let mut subs = vec![
             cx.subscribe_in(&name, window, |_, _, _: &InputEvent, _, cx| cx.notify()),
+            cx.subscribe_in(&feature_env, window, |_, _, _: &InputEvent, _, cx| {
+                cx.notify()
+            }),
             cx.subscribe_in(&bar, window, move |ws, _, _: &SliderEvent, window, cx| {
                 ws.default_bar_moved(orch, window, cx)
             }),
@@ -172,6 +184,7 @@ impl Workspace {
             file,
             saved: saved.clone(),
             name,
+            feature_env,
             bar,
             stages: Vec::new(),
             skills,
@@ -669,6 +682,16 @@ impl Workspace {
                                     .child(div().max_w(px(480.)).child(Input::new(&draft.name)))
                                     .child(text(12., theme::TEXT_MUTED).child(
                                         "Shown in the sidebar, notifications and Slack messages",
+                                    )),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_2()
+                                    .child(section("Feature environment"))
+                                    .child(div().max_w(px(480.)).child(Input::new(&draft.feature_env)))
+                                    .child(text(12., theme::TEXT_MUTED).child(
+                                        "Where a ticket's fix runs. {ticket} and {ticket_lower} are \
+                                         filled in; prompts use it as {feature_env}.",
                                     )),
                             )
                             .child(

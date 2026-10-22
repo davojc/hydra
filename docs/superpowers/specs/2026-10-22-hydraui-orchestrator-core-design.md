@@ -103,11 +103,17 @@ prompt = "..."
   so the session loads that project's skills and instructions as when you start Claude there
   yourself (the user's way of choosing them, added during the walkthrough). It takes the place of
   the orchestrator's folder and the run's worktree; a folder that doesn't exist fails the start.
-- `skill` is optional. `prompt` is the stage session's first prompt; when left out (a stage added in
-  Pipeline settings has none), it is `Use the {skill} skill for the "{title}" stage of ticket
-  {ticket}.` (our call). `{ticket}`, `{run}`, `{stage}` and `{handoff}` (the previous stage's
-  handoff, §4) are filled in. Every prompt gets the same closing paragraph from hydraui, telling the
-  session to finish with `stage_report` (§3.3), so a pipeline file can't leave it out.
+- `skill` is optional. `prompt` is the stage session's first prompt, as short as you would type
+  it yourself (`replicate {ticket}`): the skill knows what to do. When left out it is `Do the
+  "{title}" stage of ticket {ticket}.`. `{ticket}`, `{ticket_lower}`, `{run}`, `{stage}`,
+  `{handoff}` (the previous stage's handoff, §4) and `{feature_env}` are filled in.
+- `feature_env` (pipeline-wide, optional) is where a ticket's fix runs, as a pattern with
+  `{ticket}`/`{ticket_lower}`, e.g. `https://fev2-solutions-{ticket_lower}.dev.iov42.net`.
+- After the prompt, hydraui adds one short note of its own, so a pipeline file can't leave it
+  out: the pipeline, ticket and stage (n of m), the stage's skill, which stages came before (with
+  their scores) and which come after, and to finish with `stage_report` (`stage_brief` has what
+  earlier stages handed over). It replaced a longer preamble and closing after the walkthrough,
+  where the user found the prompts too large and rigid for skills that need only a line.
 - A file that doesn't parse, or has no stages, is refused by `run_start` with the reason.
 - hydraui writes `ticket.toml`, the example pipeline with the four stages above and plain prompts,
   when the folder is empty (our call). Pipeline settings (§7.4) edit the file; the launcher's

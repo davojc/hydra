@@ -468,11 +468,13 @@ impl Runs {
             skills: Vec::new(),
         });
         let spec = &r.pipeline.stages[i];
+        let feature_env = r.pipeline.feature_env_for(&r.ticket);
         let vars = PromptVars {
             ticket: &r.ticket,
             run: &r.id,
             stage: &spec.id,
             handoff: &handoff,
+            feature_env: &feature_env,
         };
         let name = session_name(i, &spec.title, r.stages[i].attempts.len() - 1);
         Ok(StartStage {
@@ -485,17 +487,11 @@ impl Runs {
             skill: spec.skill.clone(),
             folder: spec.folder.clone(),
             title: spec.title.clone(),
-            prompt: {
-                let mut text = String::new();
-                if let Some(skill) = &spec.skill {
-                    text.push_str(&crate::pipeline::skill_line(skill));
-                    text.push_str("\n\n");
-                }
-                text.push_str(&stage_map(r, i));
-                text.push_str("\n\n");
-                text.push_str(&render(&spec.prompt, &vars, &brief));
-                text
-            },
+            prompt: format!(
+                "{}\n\n{}",
+                render(&spec.prompt, &vars, &brief),
+                stage_note(r, i)
+            ),
         })
     }
 
@@ -858,35 +854,46 @@ impl Runs {
     }
 }
 
-/// Where stage `i` sits in `run`'s pipeline, for the top of its session's prompt: every stage,
-/// what the earlier ones found, and that later ones do their own work, so a stage neither
-/// repeats nor runs ahead (seen in the walkthrough: a develop stage replicating and verifying).
-fn stage_map(run: &Run, i: usize) -> String {
-    let n = run.stages.len();
-    let mut text = format!(
-        "You are stage {} of {n} ({}) in the \"{}\" pipeline for ticket {}. Each stage is a \
-         session of its own:",
-        i + 1,
-        run.pipeline.stages[i].title,
-        run.pipeline.name,
-        run.ticket
-    );
-    for (j, (spec, s)) in run.pipeline.stages.iter().zip(&run.stages).enumerate() {
-        let what = match (j.cmp(&i), s.rating()) {
-            (std::cmp::Ordering::Equal, _) => "this stage. Do only this.".to_string(),
-            (std::cmp::Ordering::Less, Some(r)) => format!("done ({}): {}", r.score, r.summary),
-            (std::cmp::Ordering::Less, None) => "done".to_string(),
-            (std::cmp::Ordering::Greater, _) => {
-                "comes after you; leave its work to it.".to_string()
-            }
-        };
-        text.push_str(&format!("\n- {}. {}: {what}", j + 1, spec.title));
+/// What hydraui adds after a stage's own prompt, kept short so the skill's own way of working
+/// leads: where the stage sits, its skill, and how to report (the user's request in the
+/// walkthrough: the skills know what to do from a short prompt).
+fn stage_note(run: &Run, i: usize) -> String {
+    let spec = &run.pipeline.stages[i];
+    let skill = spec
+        .skill
+        .as_deref()
+        .map_or(String::new(), |k| format!(" · use the {k} skill"));
+    let earlier: Vec<String> = run.stages[..i]
+        .iter()
+        .zip(&run.pipeline.stages)
+        .enumerate()
+        .map(|(j, (s, spec))| match s.rating() {
+            Some(r) => format!("{}. {} passed ({})", j + 1, spec.title, r.score),
+            None => format!("{}. {} done", j + 1, spec.title),
+        })
+        .collect();
+    let later: Vec<String> = run.pipeline.stages[i + 1..]
+        .iter()
+        .enumerate()
+        .map(|(k, spec)| format!("{}. {}", i + k + 2, spec.title))
+        .collect();
+    let mut around = String::new();
+    if !earlier.is_empty() {
+        around.push_str(&format!("Earlier: {}. ", earlier.join(", ")));
     }
-    text.push_str(
-        "\nDon't repeat what earlier stages did (what they handed over is below) and don't do \
-         what later stages will.",
-    );
-    text
+    if !later.is_empty() {
+        around.push_str(&format!("Later: {}. ", later.join(", ")));
+    }
+    format!(
+        "---\nhydraui pipeline \"{}\" · {} · stage {} of {}: {}{skill}.\n{around}Do only this \
+         stage. When it's done, call stage_report (score, evidence, reasons for and against, \
+         handoff); stage_brief has what earlier stages handed over.",
+        run.pipeline.name,
+        run.ticket,
+        i + 1,
+        run.stages.len(),
+        spec.title
+    )
 }
 
 /// What a re-run's session is told about the attempt before it (§5.3).
@@ -977,13 +984,7 @@ mod tests {
         assert_eq!((s.stage, s.orchestrator.as_str()), (0, "orch"));
         assert_eq!(s.label, "s-01");
         assert_eq!(s.folder, None);
-        // The pipeline map first, then the stage's own prompt.
-        assert!(
-            s.prompt.starts_with("You are stage 1 of 2 (a)"),
-            "{}",
-            s.prompt
-        );
-        assert!(s.prompt.contains("\n\ndo a."), "{}", s.prompt);
+        assert!(s.prompt.starts_with("do a."), "{}", s.prompt);
         assert!(s.prompt.contains("Look at the API."), "{}", s.prompt);
         assert_eq!(status(&runs, &id, 0), StageStatus::Starting);
         runs.link(&id, 0, "tok-a", "s-01 · a");
@@ -1021,9 +1022,9 @@ mod tests {
         .unwrap();
         let id = runs.start_run("orch", p, "INTH-1", "x").unwrap().id.clone();
         let s = runs.begin("orch", &id, "a", "", 30).unwrap();
-        // The settings' skill comes first, whatever the prompt says.
-        assert!(s.prompt.starts_with("Use the qa skill"), "{}", s.prompt);
-        assert!(s.prompt.contains("Replicate INTH-1."), "{}", s.prompt);
+        // The prompt as written, then the note naming the settings' skill.
+        assert!(s.prompt.starts_with("Replicate INTH-1."), "{}", s.prompt);
+        assert!(s.prompt.contains("use the qa skill"), "{}", s.prompt);
         runs.link(&id, 0, "tok", "1. A");
         let refused = runs.report("tok", rated(95)).unwrap_err();
         assert!(refused.contains("qa"), "{refused}");
@@ -1042,20 +1043,24 @@ mod tests {
     }
 
     #[test]
-    fn a_stage_is_told_where_it_sits_in_the_pipeline() {
+    fn a_stage_prompt_is_the_pipelines_with_a_short_note() {
         let mut runs = Runs::default();
         let id = run(&mut runs, &["replicate", "develop", "verify"]);
         started(&mut runs, &id, "replicate", "t1");
         runs.report("t1", rated(88)).unwrap();
         let p = runs.begin("orch", &id, "develop", "", 30).unwrap().prompt;
+        // The pipeline's own words first, as the user would type them.
+        assert!(p.starts_with("do develop. after 88"), "{p}");
+        let note = &p[p.find("\n\n---\n").expect("a note after the prompt")..];
+        assert!(note.len() < 500, "{} chars: {note}", note.len());
         for says in [
-            "stage 2 of 3 (develop)",
-            "1. replicate: done (88): s",
-            "2. develop: this stage",
-            "3. verify: comes after you",
-            "Don't repeat what earlier stages did",
+            "stage 2 of 3: develop",
+            "Earlier: 1. replicate passed (88)",
+            "Later: 3. verify",
+            "stage_report",
+            "stage_brief",
         ] {
-            assert!(p.contains(says), "{says}: {p}");
+            assert!(note.contains(says), "{says}: {note}");
         }
     }
 
@@ -1418,13 +1423,9 @@ mod tests {
         runs.report("tok-a", rated(90)).unwrap();
         let b = runs.begin("orch", &id, "b", "", 30).unwrap();
         assert_eq!(b.folder.as_deref(), Some("~/Projects/QA-Skills"));
-        // The skill instruction first, then the stage's own prompt.
-        assert!(
-            b.prompt.starts_with(&crate::pipeline::skill_line("qa")),
-            "{}",
-            b.prompt
-        );
-        assert!(b.prompt.contains("\n\nUse the qa skill.\n"), "{}", b.prompt);
+        // The stage's new prompt, then the note naming its new skill.
+        assert!(b.prompt.starts_with("Use the qa skill."), "{}", b.prompt);
+        assert!(b.prompt.contains("use the qa skill"), "{}", b.prompt);
         assert_eq!(
             runs.run(&id).unwrap().pipeline.stages[1].skill.as_deref(),
             Some("qa")

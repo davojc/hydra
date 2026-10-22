@@ -12,6 +12,10 @@ pub struct Pipeline {
     pub name: String,
     /// The file's name without `.toml`, as `load` was given it; empty from `parse` alone.
     pub file: String,
+    /// Where a ticket's fix runs, as a pattern: `{ticket}` and `{ticket_lower}` are filled
+    /// in, e.g. `https://fev2-solutions-{ticket_lower}.dev.iov42.net` (a branch deploy). Prompts
+    /// use it as `{feature_env}`.
+    pub feature_env: Option<String>,
     /// The bar every stage must clear unless it sets its own, 0 to 100.
     pub bar: u8,
     pub stages: Vec<Stage>,
@@ -36,6 +40,17 @@ pub struct Stage {
 }
 
 impl Pipeline {
+    /// `feature_env` for `ticket`; empty when the pipeline names none.
+    pub fn feature_env_for(&self, ticket: &str) -> String {
+        self.feature_env
+            .as_deref()
+            .map_or(String::new(), |pattern| {
+                pattern
+                    .replace("{ticket_lower}", &ticket.to_lowercase())
+                    .replace("{ticket}", ticket)
+            })
+    }
+
     /// The bar stage `stage` must clear: its own, else the pipeline's.
     pub fn bar_for(&self, stage: usize) -> u8 {
         self.stages
@@ -53,6 +68,7 @@ pub const DEFAULT_BAR: u8 = 80;
 struct File {
     name: String,
     bar: Option<u8>,
+    feature_env: Option<String>,
     #[serde(default, rename = "stage")]
     stages: Vec<FileStage>,
 }
@@ -74,16 +90,6 @@ struct FileStage {
 /// first anyway (`skill_line`).
 fn default_prompt(title: &str) -> String {
     format!("Do the \"{title}\" stage of ticket {{ticket}}.")
-}
-
-/// What opens the prompt of a stage with a skill, whatever its own prompt says: the skill set
-/// in the pipeline is the one its session uses, and its report is refused until it has.
-pub fn skill_line(skill: &str) -> String {
-    format!(
-        "Use the {skill} skill for this stage: invoke it with the Skill tool before anything \
-         else, and do the stage with it rather than any other workflow. hydraui won't accept \
-         your stage_report until this session has used it."
-    )
 }
 
 fn plain_name(s: &str) -> bool {
@@ -140,6 +146,10 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
     Ok(Pipeline {
         name: file.name,
         file: String::new(),
+        feature_env: file
+            .feature_env
+            .map(|f| f.trim().to_string())
+            .filter(|f| !f.is_empty()),
         bar: file.bar.unwrap_or(DEFAULT_BAR),
         stages,
     })
@@ -155,6 +165,7 @@ pub fn folder(hydra_root: &Path) -> PathBuf {
 pub struct Edit {
     pub name: String,
     pub bar: u8,
+    pub feature_env: Option<String>,
     pub stages: Vec<EditStage>,
 }
 
@@ -175,6 +186,7 @@ impl From<&Pipeline> for Edit {
         Edit {
             name: p.name.clone(),
             bar: p.bar,
+            feature_env: p.feature_env.clone(),
             stages: p
                 .stages
                 .iter()
@@ -246,6 +258,17 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
     let mut doc: DocumentMut = text.parse().map_err(std::io::Error::other)?;
     doc["name"] = value(edit.name.trim());
     doc["bar"] = value(i64::from(edit.bar));
+    match edit
+        .feature_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+    {
+        Some(f) => doc["feature_env"] = value(f),
+        None => {
+            doc.remove("feature_env");
+        }
+    }
     let old: Vec<Table> = doc
         .get("stage")
         .and_then(Item::as_array_of_tables)
@@ -353,31 +376,27 @@ pub struct PromptVars<'a> {
     pub stage: &'a str,
     /// The previous stage's handoff (§4); empty for the first stage.
     pub handoff: &'a str,
+    /// The pipeline's `feature_env` for the ticket; empty without one.
+    pub feature_env: &'a str,
 }
 
-/// Added to every stage prompt, so a pipeline file can't leave it out (§2).
-pub const CLOSING: &str = "When this stage is finished, or you find it can't be done, call \
-stage_report once: outcome done or blocked, a score from 0 to 100 for your confidence that the \
-stage is done well, a short summary, the evidence (tests, commands, files, links) and the reasons \
-for the score, and a handoff for the next stage. Report blocked rather than guess. Do only this \
-stage's work.";
-
-/// The stage session's first prompt: `prompt` with its placeholders filled, the orchestrator's
-/// `brief` when it gave one, then `CLOSING`.
+/// The stage session's first prompt as the pipeline writes it: its placeholders filled, then
+/// the orchestrator's `brief` when it gave one. hydraui adds a short note of its own after it
+/// (`runs`).
 pub fn render(prompt: &str, vars: &PromptVars, brief: &str) -> String {
     let mut text = prompt
         .trim_end()
+        .replace("{ticket_lower}", &vars.ticket.to_lowercase())
         .replace("{ticket}", vars.ticket)
         .replace("{run}", vars.run)
         .replace("{stage}", vars.stage)
-        .replace("{handoff}", vars.handoff);
+        .replace("{handoff}", vars.handoff)
+        .replace("{feature_env}", vars.feature_env);
     let brief = brief.trim();
     if !brief.is_empty() {
         text.push_str("\n\n");
         text.push_str(brief);
     }
-    text.push_str("\n\n");
-    text.push_str(CLOSING);
     text
 }
 
@@ -474,23 +493,56 @@ mod tests {
     }
 
     #[test]
-    fn a_prompt_gets_its_values_the_brief_and_always_the_closing() {
+    fn a_prompt_gets_its_values_and_the_brief() {
         let p = parse(TWO).unwrap();
         let vars = PromptVars {
             ticket: "INTH-1",
             run: "INTH-1-1",
             stage: "replicate",
             handoff: "see log",
+            feature_env: "",
         };
         let text = render(&p.stages[0].prompt, &vars, "Focus on the API.");
-        assert!(
-            text.starts_with("Read INTH-1 (INTH-1-1, replicate). see log"),
-            "{text}"
+        assert_eq!(
+            text,
+            "Read INTH-1 (INTH-1-1, replicate). see log\n\nFocus on the API."
         );
-        assert!(text.contains("\n\nFocus on the API.\n"), "{text}");
-        assert!(text.ends_with(CLOSING), "{text}");
-        let bare = render("Go.", &vars, "  ");
-        assert_eq!(bare, format!("Go.\n\n{CLOSING}"));
+        assert_eq!(render("Go.", &vars, "  "), "Go.");
+    }
+
+    #[test]
+    fn the_feature_env_follows_the_ticket() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(
+            folder(d.path()).join("t.toml"),
+            "name = \"t\"\nfeature_env = \"https://fev2-solutions-{ticket_lower}.dev.iov42.net\"\n\
+             [[stage]]\nid = \"verify\"\ntitle = \"Verify\"\nprompt = \"test {ticket} against {feature_env}\"\n",
+        )
+        .unwrap();
+        let p = load(d.path(), "t").unwrap();
+        let env = p.feature_env_for("INTH-161");
+        assert_eq!(env, "https://fev2-solutions-inth-161.dev.iov42.net");
+        let vars = PromptVars {
+            ticket: "INTH-161",
+            run: "INTH-161-1",
+            stage: "verify",
+            handoff: "",
+            feature_env: &env,
+        };
+        assert_eq!(
+            render(&p.stages[0].prompt, &vars, ""),
+            "test INTH-161 against https://fev2-solutions-inth-161.dev.iov42.net"
+        );
+        // Settings keep it, change it and clear it.
+        let mut edit = Edit::from(&p);
+        assert_eq!(
+            edit.feature_env.as_deref(),
+            Some("https://fev2-solutions-{ticket_lower}.dev.iov42.net")
+        );
+        edit.feature_env = None;
+        save(d.path(), "t", &edit).unwrap();
+        assert_eq!(load(d.path(), "t").unwrap().feature_env_for("INTH-161"), "");
     }
 
     #[test]

@@ -505,3 +505,35 @@ Checked by hand on macOS: the card, the allowance meter, the escalation toast, t
 tab's held banner, Pause and the status text, Pipeline settings and Ticket history, in a hydraui
 built from the branch. The live, report, step-in and done panels, and a ticket walked through
 every stage, wait for the end-to-end walkthrough on macOS and Windows.
+
+## 13. Picking a run back up after a restart
+
+Closing hydraui used to end its runs: the orchestrator and the stage sessions die with their
+terminals, and only the log was left (§8, "hydraui closed before the run ended"). Jordan's
+decisions (2026-10-22): a run that was open when hydraui closed comes back as a card with
+**Resume** (nothing starts until it's clicked); Resume reopens the orchestrator's own
+conversation and the interrupted stage's own conversation (`claude --resume`), so neither
+starts over and the stage doesn't use up an attempt.
+
+- **What the log gains.** The hooks pass Claude's `session_id` with each state
+  (`hydraui/status`), and hydraui writes `claude session {who, id}` when a run's orchestrator or
+  stage session first reports one (`who` is `orchestrator` or the attempt's label). When a run
+  starts, the app writes `orchestrator {env, folder, pid}`; when a stage's terminal opens,
+  `stage folder {label, folder}`; when a worktree is made, `worktree {path}`.
+- **Which runs come back.** At launch hydraui reads every log whose run never ended, whose
+  `orchestrator` line names a hydraui that is no longer alive (so a second window never takes
+  another's live run), and that recorded the orchestrator's Claude session. Older logs without
+  these lines stay as they are in Ticket history.
+- **Rebuilding a run.** The log is replayed through the same `Runs` calls that made it
+  (`start_run`, `begin` + `link`, `skill_used`, `report`, `session_gone`, `person`, `pause`),
+  with the pipeline as its file is now, so the gate's rules and the card come out as they would
+  have live.
+- **The card.** An interrupted run shows in its environment's list as its pipeline's card,
+  pill **Interrupted**, with **Resume** and **Stop ticket**. Stop ticket writes `run ended`
+  (stopped, "hydraui closed") and the card goes.
+- **Resume.** Opens a terminal titled `orchestrator` in the logged folder running
+  `claude --resume <its session> "<note>"`, the note saying hydraui restarted, where the run
+  is, and what to do next (wait for the stage, or start the next one). The run is moved to the
+  new terminal's token. A stage that was running reopens the same way in its logged folder,
+  told to carry on and call `stage_report`, and its latest attempt moves to the new token. A
+  stage whose Claude session wasn't logged ends as if its session had gone (§5.2).

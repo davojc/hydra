@@ -2993,6 +2993,7 @@ name = "hydraui"
 version = "0.6.0"
 dependencies = [
  "anyhow",
+ "cc",
  "dirs 6.0.0",
  "futures",
  "getrandom 0.3.4",
@@ -3020,6 +3021,8 @@ dependencies = [
  "tempfile",
  "tiny_http",
  "toml 0.8.23",
+ "tree-sitter",
+ "tree-sitter-language",
  "ureq",
  "windows 0.61.3",
  "windows-sys 0.61.2",

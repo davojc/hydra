@@ -1,4 +1,11 @@
 fn main() {
+    // Grammars gpui-component doesn't ship (src/grammars.rs).
+    cc::Build::new()
+        .include("grammars/typespec/src")
+        .file("grammars/typespec/src/parser.c")
+        .warnings(false)
+        .compile("tree-sitter-typespec");
+    println!("cargo:rerun-if-changed=grammars");
     // hydraui's version info follows the release (HYDRA_VERSION) like hydra.exe's.
     println!("cargo:rerun-if-env-changed=HYDRA_VERSION");
     println!("cargo:rerun-if-changed=../../assets/hydra.ico");

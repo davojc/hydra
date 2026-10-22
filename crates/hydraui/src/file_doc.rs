@@ -194,6 +194,7 @@ pub fn language(path: &Path) -> &'static str {
         Some("c" | "h") => "c",
         Some("cpp" | "cc" | "cxx" | "hpp" | "hh") => "cpp",
         Some("cs") => "csharp",
+        Some("tsp") => "typespec",
         _ => "text",
     }
 }
@@ -472,6 +473,7 @@ mod tests {
         assert_eq!(language(Path::new("a.ps1")), "text");
         assert_eq!(language(Path::new("Makefile")), "make");
         assert_eq!(language(Path::new("x.tsx")), "tsx");
+        assert_eq!(language(Path::new("main.tsp")), "typespec");
     }
 
     fn doc(t: &str) -> FileDoc {

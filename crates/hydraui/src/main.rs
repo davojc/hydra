@@ -64,6 +64,7 @@ fn main() {
         .with_assets(hydraui::assets::AppAssets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
+            hydraui::grammars::register();
             let mode = match ui.theme {
                 ThemeChoice::Dark => ThemeMode::Dark,
                 ThemeChoice::Light => ThemeMode::Light,

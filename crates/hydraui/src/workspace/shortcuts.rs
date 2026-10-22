@@ -34,7 +34,11 @@ impl Workspace {
                             div()
                                 .w(px(160.))
                                 .flex_none()
-                                .font_family("Consolas")
+                                .font_family(if cfg!(windows) {
+                                    "Consolas"
+                                } else {
+                                    crate::config::DEFAULT_FONT
+                                })
                                 .text_sm()
                                 .child(keys.clone()),
                         )

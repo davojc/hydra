@@ -575,7 +575,7 @@ impl Workspace {
         };
         Theme::change(mode, None, cx);
         self.style = Arc::new(TermStyle {
-            font: ui.font.clone().into(),
+            font: crate::config::terminal_font(&ui.font, &cx.text_system().all_font_names()).into(),
             font_size: px(ui.font_size),
             palette,
         });

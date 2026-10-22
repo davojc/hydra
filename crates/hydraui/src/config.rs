@@ -29,6 +29,26 @@ pub struct ColorsConfig {
     pub palette: Option<Vec<String>>,
 }
 
+/// The terminal font when config.toml names none: a monospace font the platform ships.
+pub const DEFAULT_FONT: &str = if cfg!(windows) {
+    "Cascadia Mono"
+} else if cfg!(target_os = "macos") {
+    "Menlo"
+} else {
+    "DejaVu Sans Mono"
+};
+
+/// The font the terminal draws with: `configured` when it is installed, else
+/// `DEFAULT_FONT`. A missing font would fall back to a proportional one, whose letters sit
+/// unevenly on the fixed grid. Windows keeps the configured font as it always has.
+pub fn terminal_font(configured: &str, installed: &[String]) -> String {
+    if cfg!(windows) || installed.iter().any(|f| f.eq_ignore_ascii_case(configured)) {
+        configured.to_string()
+    } else {
+        DEFAULT_FONT.to_string()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiConfig {
     pub font: String,
@@ -48,7 +68,7 @@ pub struct UiConfig {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            font: "Cascadia Mono".into(),
+            font: DEFAULT_FONT.into(),
             font_size: 14.0,
             theme: ThemeChoice::Dark,
             default_env: None,
@@ -171,8 +191,38 @@ mod tests {
     #[test]
     fn an_empty_file_is_the_defaults() {
         assert_eq!(clean(""), UiConfig::default());
-        assert_eq!(UiConfig::default().font, "Cascadia Mono");
+        let font = if cfg!(windows) {
+            "Cascadia Mono"
+        } else if cfg!(target_os = "macos") {
+            "Menlo"
+        } else {
+            "DejaVu Sans Mono"
+        };
+        assert_eq!(UiConfig::default().font, font);
+        assert_eq!(DEFAULT_FONT, font);
         assert_eq!(UiConfig::default().font_size, 14.0);
+    }
+
+    /// A font that isn't installed would fall back to a proportional font, whose letters sit
+    /// unevenly on the terminal's fixed grid: use the monospace default instead (not on
+    /// Windows, where the configured font is used as it always was).
+    #[test]
+    fn a_terminal_font_that_isnt_installed_falls_back_to_the_monospace_default() {
+        let installed = ["Menlo".to_string(), "JetBrains Mono".to_string()];
+        assert_eq!(
+            terminal_font("JetBrains Mono", &installed),
+            "JetBrains Mono"
+        );
+        assert_eq!(
+            terminal_font("jetbrains mono", &installed),
+            "jetbrains mono"
+        );
+        let missing = terminal_font("Cascadia Mono", &installed);
+        if cfg!(windows) {
+            assert_eq!(missing, "Cascadia Mono");
+        } else {
+            assert_eq!(missing, DEFAULT_FONT);
+        }
     }
 
     #[test]

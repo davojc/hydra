@@ -55,6 +55,10 @@ pub struct EnvConfig {
     pub jev: Option<ApiKeyConfig>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// `[agents]`: variables the environment's agents are told about (hydraui's
+    /// `hydra_access`), each with what it is for. Values never go to agents this way.
+    #[serde(default)]
+    pub agents: BTreeMap<String, String>,
     /// Tools borrowed from another environment (tool id -> owner). Filled by `parse_env`.
     #[serde(skip)]
     pub borrowed: BTreeMap<String, EnvName>,
@@ -189,6 +193,11 @@ impl EnvConfig {
             }
             seen.push(k);
             SecretRef::parse_value(v).map_err(|e| format!("[env] {k}: {e}"))?;
+        }
+        for k in self.agents.keys() {
+            if !valid_var_name(k) {
+                return Err(format!("[agents] {k:?} isn't a valid variable name"));
+            }
         }
         if self.claude.is_some()
             && self
@@ -429,6 +438,28 @@ LINEAR_API_KEY = "secret:work/linear"
                 .unwrap_err()
                 .to_string()
                 .contains("[gemini] api_key")
+        );
+    }
+
+    #[test]
+    fn agents_name_variables_with_what_they_are_for() {
+        let (_d, paths, name) = setup(
+            "[agents]
+JEV_API_KEY = \"Jev\"
+",
+        );
+        let c = load_env(&paths, &name).unwrap();
+        assert_eq!(c.agents["JEV_API_KEY"], "Jev");
+        let (_d, paths, name) = setup(
+            "[agents]
+\"NOT A VAR\" = \"x\"
+",
+        );
+        assert!(
+            load_env(&paths, &name)
+                .unwrap_err()
+                .to_string()
+                .contains("[agents]")
         );
     }
 

@@ -114,13 +114,19 @@ pub struct McpTerminal {
 }
 
 impl McpTerminal {
-    /// Registers a terminal started in `cwd`; `None` when the server isn't running.
-    pub fn register(cwd: PathBuf) -> Option<McpTerminal> {
-        Some(McpTerminal::register_on(server::get()?.clone(), cwd))
+    /// Registers a terminal started in `cwd` in environment `env`; `None` when the server
+    /// isn't running.
+    pub fn register(cwd: PathBuf, env: &str) -> Option<McpTerminal> {
+        Some(McpTerminal::register_on(
+            server::get()?.clone(),
+            cwd,
+            Some(env.to_string()),
+        ))
     }
 
-    fn register_on(server: Arc<server::Server>, cwd: PathBuf) -> McpTerminal {
-        let token = server::lock(server.registry()).register(&label_for(None, &cwd), cwd.clone());
+    fn register_on(server: Arc<server::Server>, cwd: PathBuf, env: Option<String>) -> McpTerminal {
+        let token =
+            server::lock(server.registry()).register_in(&label_for(None, &cwd), cwd.clone(), env);
         McpTerminal {
             server,
             token,
@@ -216,7 +222,7 @@ mod tests {
     #[test]
     fn a_terminal_gets_the_servers_address_and_a_token_that_dies_with_it() {
         let server = server::init().expect("server starts");
-        let term = McpTerminal::register(PathBuf::from("C:/w/work")).unwrap();
+        let term = McpTerminal::register(PathBuf::from("C:/w/work"), "work").unwrap();
         let env = term.env();
         assert_eq!(
             env[0],
@@ -240,7 +246,7 @@ mod tests {
     #[test]
     fn clearing_the_name_goes_back_to_the_start_folders() {
         let server = server::Server::start().unwrap();
-        let term = McpTerminal::register_on(server.clone(), PathBuf::from("C:/w/web"));
+        let term = McpTerminal::register_on(server.clone(), PathBuf::from("C:/w/web"), None);
         term.rename(Some("api"));
         term.set_cwd(PathBuf::from("C:/w/other"));
         term.rename(None);
@@ -252,7 +258,7 @@ mod tests {
     #[test]
     fn a_closed_terminals_token_dies_even_after_a_panic() {
         let server = server::Server::start().unwrap();
-        let term = McpTerminal::register_on(server.clone(), PathBuf::from("C:/w/web"));
+        let term = McpTerminal::register_on(server.clone(), PathBuf::from("C:/w/web"), None);
         let token = term.env()[1].1.clone();
         let poisoner = server.clone();
         let _ = std::thread::spawn(move || {

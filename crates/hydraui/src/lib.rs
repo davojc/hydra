@@ -3,6 +3,7 @@
 pub mod accounts;
 pub mod action_log;
 pub mod activity;
+pub mod agent_access;
 pub mod assets;
 pub mod claim;
 pub mod config;

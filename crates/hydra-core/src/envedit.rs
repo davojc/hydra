@@ -260,6 +260,36 @@ pub fn remove_tool(text: &str, tool: &str) -> Result<(String, bool), String> {
     Ok((doc.to_string(), true))
 }
 
+/// Tells the environment's agents about variable `var` with `about` (`[agents]`), or with
+/// `None` stops telling them; an emptied `[agents]` goes. Keeps the rest of the file.
+pub fn set_agent(text: &str, var: &str, about: Option<&str>) -> Result<String, String> {
+    let mut doc = parse(text)?;
+    match about {
+        Some(about) => {
+            if !doc.contains_key("agents") {
+                doc.insert("agents", Item::Table(Table::new()));
+            }
+            let Some(t) = doc.get_mut("agents").and_then(Item::as_table_like_mut) else {
+                return Err("agents in env.toml isn't a table".to_string());
+            };
+            set_value(t, var, Value::from(about));
+        }
+        None => {
+            let empty = match doc.get_mut("agents").and_then(Item::as_table_like_mut) {
+                Some(t) => {
+                    t.remove(var);
+                    t.is_empty()
+                }
+                None => false,
+            };
+            if empty {
+                doc.remove("agents");
+            }
+        }
+    }
+    Ok(doc.to_string())
+}
+
 /// Which of TOOLS have a table in this env.toml text.
 pub fn tools_in(text: &str) -> Result<Vec<&'static str>, String> {
     let doc = parse(text)?;
@@ -283,6 +313,35 @@ mod tests {
 
     fn vals() -> ToolValues {
         ToolValues::default()
+    }
+
+    #[test]
+    fn agents_are_told_about_a_variable_then_not() {
+        let src = "label = \"w\"
+
+[jev]
+api_key = \"secret:w/jev\" # key
+";
+        let on = set_agent(src, "JEV_API_KEY", Some("Jev: judgement calls")).unwrap();
+        assert!(on.starts_with(src), "{on}");
+        assert!(
+            on.contains(
+                "[agents]
+JEV_API_KEY = \"Jev: judgement calls\"
+"
+            ),
+            "{on}"
+        );
+        let changed = set_agent(&on, "JEV_API_KEY", Some("Jev")).unwrap();
+        assert!(
+            changed.contains(
+                "JEV_API_KEY = \"Jev\"
+"
+            ),
+            "{changed}"
+        );
+        assert_eq!(set_agent(&changed, "JEV_API_KEY", None).unwrap(), src);
+        assert_eq!(set_agent(src, "NOPE", None).unwrap(), src);
     }
 
     #[test]

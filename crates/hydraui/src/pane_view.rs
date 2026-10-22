@@ -220,7 +220,7 @@ impl PaneView {
         let focus = cx.focus_handle();
         let on_focus = cx.on_focus(&focus, window, |_, _, cx| cx.emit(PaneEvent::Focused));
         let warnings: Vec<String> = request.note.iter().cloned().collect();
-        let mcp = McpTerminal::register(request.cwd.clone());
+        let mcp = McpTerminal::register(request.cwd.clone(), &request.env);
         let mut view = Self {
             id,
             cwd: request.cwd.clone(),

@@ -11,6 +11,8 @@ pub struct Terminal {
     /// Unique among registered terminals, and fits `[name]` in the board file.
     pub name: String,
     pub cwd: PathBuf,
+    /// The hydra environment it runs in; `None` outside one (tests).
+    pub env: Option<String>,
 }
 
 /// Another terminal with a Claude session running, as `tasks_read` reports it.
@@ -63,11 +65,17 @@ impl Registry {
 
     /// Adds a terminal and returns its token: 128 random bits as 32 hex characters.
     pub fn register(&mut self, label: &str, cwd: PathBuf) -> String {
+        self.register_in(label, cwd, None)
+    }
+
+    /// As `register`, for a terminal in environment `env`.
+    pub fn register_in(&mut self, label: &str, cwd: PathBuf, env: Option<String>) -> String {
         let mut bytes = [0u8; 16];
         getrandom::fill(&mut bytes).expect("the OS has a random source");
         let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         let name = self.unique_name(&token, label);
-        self.terminals.insert(token.clone(), Terminal { name, cwd });
+        self.terminals
+            .insert(token.clone(), Terminal { name, cwd, env });
         token
     }
 

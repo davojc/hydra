@@ -29,7 +29,9 @@ are any, and you are not already in a worktree of your own, do your card's work 
 so you don't change files under them: `git worktree add ../<repo>-worktrees/<slug> -b \
 task/<slug>`, work and commit there (the board is shared, so tasks_verify still finds your card), \
 and tell the user the branch to merge.
-- You cannot move cards into Pickup or Done, edit, reorder or delete them: those are the user's.";
+- You cannot move cards into Pickup or Done, edit, reorder or delete them: those are the user's.
+
+hydra_access says what this terminal's hydra environment gives you: the tools it has signed in and the credentials (environment variables already set in your shell) the user lets agents use, each with what it is for. Check it before asking the user for an API key or account.";
 
 /// The `tools` array of `tools/list`.
 pub fn list() -> Value {
@@ -92,6 +94,11 @@ pub fn list() -> Value {
             "name": "tasks_mine",
             "description": "List the InProgress cards you took (your own name on them), to recall \
                 what this session is working on.",
+            "inputSchema": none,
+        },
+        {
+            "name": "hydra_access",
+            "description": "What this terminal's hydra environment gives you: the tools it has                 on (github, aws, claude, ...) and the credentials the user lets agents use. Each                 credential is an environment variable already set in your shell, with what it is                 for and how to use it; the value itself is never returned. Check it before                 asking the user for an API key or account.",
             "inputSchema": none,
         },
     ])
@@ -184,6 +191,18 @@ pub fn call_with(terminal: &Terminal, peers: &[Peer], name: &str, args: &Value) 
                 });
                 Outcome::ok(serde_json::to_string_pretty(&doc).expect("json serialises"))
             }
+        },
+        "hydra_access" => match &terminal.env {
+            None => Outcome::err("this terminal isn't in a hydra environment"),
+            Some(env) => match hydra_core::paths::HydraPaths::discover()
+                .map_err(|e| e.to_string())
+                .and_then(|paths| crate::agent_access::describe(&paths, env))
+            {
+                Ok(doc) => {
+                    Outcome::ok(serde_json::to_string_pretty(&doc).expect("json serialises"))
+                }
+                Err(e) => Outcome::err(format!("can't read environment {env}: {e}")),
+            },
         },
         "tasks_mine" => match load(&project) {
             Err(e) => Outcome::err(format!("can't read the board: {e}")),
@@ -278,6 +297,7 @@ mod tests {
         let t = Terminal {
             name: "claude".into(),
             cwd: d.path().join("src"),
+            env: None,
         };
         std::fs::create_dir(&t.cwd).unwrap();
         std::fs::create_dir(d.path().join(".hydra")).unwrap();
@@ -337,6 +357,7 @@ mod tests {
         let t = Terminal {
             name: "claude".into(),
             cwd: d.path().into(),
+            env: None,
         };
         std::fs::create_dir(d.path().join(".hydra")).unwrap();
         std::fs::write(
@@ -384,6 +405,7 @@ mod tests {
         let t = Terminal {
             name: "c".into(),
             cwd: d.path().into(),
+            env: None,
         };
         let read = call(&t, "tasks_read", &json!({})).unwrap();
         assert!(!read.is_error && read.text.contains("\"you\": \"c\""));
@@ -402,6 +424,7 @@ mod tests {
         let t = Terminal {
             name: "c".into(),
             cwd: d.path().into(),
+            env: None,
         };
         assert!(call(&t, "tasks_move", &json!({})).is_none());
         assert!(call(&t, "tasks_add", &json!({"text": 5})).unwrap().is_error);
@@ -428,7 +451,8 @@ mod tests {
                 "tasks_add",
                 "tasks_take",
                 "tasks_verify",
-                "tasks_mine"
+                "tasks_mine",
+                "hydra_access"
             ]
         );
         assert_eq!(names, hydra_providers::claude_files::HYDRAUI_TOOLS);
@@ -440,6 +464,7 @@ mod tests {
         let t = Terminal {
             name: "c".into(),
             cwd: d.path().into(),
+            env: None,
         };
         assert_eq!(
             call(&t, "tasks_add", &json!({"text": "x"}))
@@ -462,6 +487,7 @@ mod tests {
         let me = Terminal {
             name: "me".into(),
             cwd: d.path().into(),
+            env: None,
         };
         // A linked worktree of the same repository, and another project.
         std::fs::create_dir_all(d.path().join(".git/worktrees/wt")).unwrap();
@@ -508,6 +534,7 @@ mod tests {
         let t = Terminal {
             name: "c".into(),
             cwd: d.path().into(),
+            env: None,
         };
         std::fs::create_dir(d.path().join(".hydra")).unwrap();
         std::fs::write(

@@ -321,7 +321,49 @@ impl Workspace {
         for run in needs_you {
             self.escalate(run, window, cx);
         }
+        // A run that ended lets its worktree go when nothing in it is uncommitted (spec §8).
+        let ended: Vec<PathBuf> = server::get()
+            .map(|sv| {
+                let reg = server::lock(sv.registry());
+                changes
+                    .iter()
+                    .filter(|c| matches!(c.what, Decided::RunFinished | Decided::RunStopped(_)))
+                    .filter_map(|c| reg.runs.run(&c.run)?.worktree.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for path in ended {
+            self.remove_run_worktree(path, window, cx);
+        }
         cx.notify();
+    }
+
+    /// Removes an ended run's worktree off the UI thread; one with uncommitted work is kept and
+    /// the user is told where it is.
+    fn remove_run_worktree(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |_, cx| {
+            let target = path.clone();
+            let removed = cx
+                .background_spawn(async move { worktrees::remove_if_clean(&target) })
+                .await;
+            let shown = path.display().to_string();
+            match removed {
+                Ok(true) => crate::action_log::write(format!("removed run worktree {shown}")),
+                Ok(false) => {
+                    let _ = cx.update(|window, cx| {
+                        window.push_notification(
+                            Notification::warning(format!(
+                                "{shown} has uncommitted work, so it stays."
+                            ))
+                            .title("Worktree kept"),
+                            cx,
+                        );
+                    });
+                }
+                Err(e) => crate::action_log::write(format!("run worktree {shown}: {e}")),
+            }
+        })
+        .detach();
     }
 
     /// Run `run_id` needs a person (§5.3): its orchestrator's terminal is badged, the window

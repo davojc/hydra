@@ -9,6 +9,7 @@ mod launcher;
 mod layout_file;
 mod orchestrator;
 mod pickup;
+mod pipeline_history;
 mod pipeline_settings;
 mod pipeline_tab;
 mod settings_tab;

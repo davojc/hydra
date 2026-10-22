@@ -123,6 +123,32 @@ impl Workspace {
             let active = panes.iter().any(|p| Some(*p) == shown);
             list = list.child(self.render_pipeline_card(*orch, card, active, cx));
             let orch = *orch;
+            let history_shown = self.pipeline_shown(orch)
+                && self.pipeline_tabs.get(&orch).map(|t| t.view)
+                    == Some(super::pipeline_tab::TabView::History);
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("pipeline-history-link-{orch}")))
+                    .ml(px(26.))
+                    .mr_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_size(px(12.5))
+                    .text_color(cx.theme().muted_foreground)
+                    .when(history_shown, |d| d.bg(tint.opacity(0.2)))
+                    .hover(|d| d.bg(tint.opacity(0.12)))
+                    .cursor_pointer()
+                    .child("Ticket history")
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.show_pipeline_view(
+                            orch,
+                            super::pipeline_tab::TabView::History,
+                            window,
+                            cx,
+                        )
+                    })),
+            );
             let settings_shown = self.pipeline_shown(orch)
                 && self.pipeline_tabs.get(&orch).map(|t| t.view)
                     == Some(super::pipeline_tab::TabView::Settings);

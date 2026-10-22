@@ -29,12 +29,16 @@ pub(super) enum TabView {
     #[default]
     Pipeline,
     Settings,
+    History,
 }
 
 /// A terminal's Pipeline tab.
 #[derive(Debug, Clone, Default)]
 pub(super) struct PipelineTab {
     pub view: TabView,
+    /// Ticket history's filter chip and expanded row.
+    pub history_filter: super::pipeline_history::HistoryFilter,
+    pub open_row: Option<String>,
     /// The tab is shown, rather than the terminal.
     pub shown: bool,
     /// The session the user picked, by label; `None` follows the run.
@@ -329,6 +333,9 @@ impl Workspace {
         let tab = self.pipeline_tabs.get(&orch).cloned().unwrap_or_default();
         if tab.view == TabView::Settings && self.pipeline_settings.contains_key(&orch) {
             return self.render_pipeline_settings(orch, cx);
+        }
+        if tab.view == TabView::History {
+            return self.render_history(orch, cx);
         }
         let Some(run) = snap.run.as_ref() else {
             return self.render_quiet(

@@ -36,6 +36,7 @@ pub mod pipeline_view;
 pub mod quick_open;
 pub mod rating;
 pub mod readiness;
+pub mod run_history;
 pub mod run_log;
 pub mod runs;
 pub mod save_dialog;

@@ -359,7 +359,7 @@ fn stage_report(
     };
     // Bars follow the file to the gate (§5.1); one that no longer reads keeps the run's.
     if let Ok(now) = pipeline::load(root, &file) {
-        reg.runs.refresh_bars(&file, &now);
+        reg.runs.refresh_from_file(&file, &now);
     }
     let logged = serde_json::to_value(&rating).expect("json serialises");
     let changes = match reg.runs.report(token, rating) {

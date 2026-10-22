@@ -602,13 +602,16 @@ impl Runs {
 
     /// The pipeline file `file` now reads `now` (Pipeline settings saved it, or a stage is about
     /// to report): open runs of it take its bars for the stages they share. Their stage lists
-    /// stay as they started (§2).
-    pub fn refresh_bars(&mut self, file: &str, now: &Pipeline) {
+    /// The pipeline file `file` now reads `now` (Pipeline settings saved it, or a stage is about
+    /// to report): open runs of it take its name and its bars for the stages they share. Their
+    /// stage lists stay as they started (§2).
+    pub fn refresh_from_file(&mut self, file: &str, now: &Pipeline) {
         for r in self
             .runs
             .iter_mut()
             .filter(|r| r.pipeline.file == file && r.state.open())
         {
+            r.pipeline.name = now.name.clone();
             r.pipeline.bar = now.bar;
             for stage in &mut r.pipeline.stages {
                 if let Some(same) = now.stages.iter().find(|s| s.id == stage.id) {
@@ -1147,7 +1150,10 @@ mod tests {
         started(&mut runs, &id, "a", "tok-a");
         let mut now = pipeline(&["b", "a", "c"]);
         now.stages[1].bar = Some(95);
-        runs.refresh_bars("t", &now);
+        now.name = "Renamed".into();
+        runs.refresh_from_file("t", &now);
+        // A new name shows at once (the design: the card follows Save).
+        assert_eq!(runs.run(&id).unwrap().pipeline.name, "Renamed");
         // A stage list change waits for the next run; the bar applies now.
         let r = runs.run(&id).unwrap();
         assert_eq!(r.pipeline.stages[0].id, "a");
@@ -1157,7 +1163,7 @@ mod tests {
         // Another pipeline's file changes nothing.
         let mut other = pipeline(&["a"]);
         other.stages[0].bar = Some(10);
-        runs.refresh_bars("other", &other);
+        runs.refresh_from_file("other", &other);
         assert_eq!(runs.run(&id).unwrap().pipeline.bar_for(0), 95);
     }
 

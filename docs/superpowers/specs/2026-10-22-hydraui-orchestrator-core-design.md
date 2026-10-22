@@ -66,9 +66,9 @@ Slack review loop and Slack escalation come in later phases on top of it.
 ## 2. Pipelines
 
 A pipeline is a TOML file, `<HYDRA_HOME>/hydraui/pipelines/<name>.toml`. Its stage list is copied
-when a run starts (an added, removed or reordered stage applies to the next ticket); its bars are
-read again at every gate (§5.1), so a bar changed in Pipeline settings applies at the next gate,
-running ticket included (the design).
+when a run starts (an added, removed or reordered stage applies to the next ticket); its name and
+bars are read again on Save and at every gate (§5.1), so a new name shows on the running ticket's
+card at once and a changed bar applies at its next gate (the design).
 
 ```toml
 name = "INTH SLA tickets"     # the orchestrator's name in the views, notifications and Slack

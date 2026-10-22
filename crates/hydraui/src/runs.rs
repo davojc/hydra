@@ -485,13 +485,16 @@ impl Runs {
             skill: spec.skill.clone(),
             folder: spec.folder.clone(),
             title: spec.title.clone(),
-            prompt: match &spec.skill {
-                Some(skill) => format!(
-                    "{}\n\n{}",
-                    crate::pipeline::skill_line(skill),
-                    render(&spec.prompt, &vars, &brief)
-                ),
-                None => render(&spec.prompt, &vars, &brief),
+            prompt: {
+                let mut text = String::new();
+                if let Some(skill) = &spec.skill {
+                    text.push_str(&crate::pipeline::skill_line(skill));
+                    text.push_str("\n\n");
+                }
+                text.push_str(&stage_map(r, i));
+                text.push_str("\n\n");
+                text.push_str(&render(&spec.prompt, &vars, &brief));
+                text
             },
         })
     }
@@ -855,6 +858,37 @@ impl Runs {
     }
 }
 
+/// Where stage `i` sits in `run`'s pipeline, for the top of its session's prompt: every stage,
+/// what the earlier ones found, and that later ones do their own work, so a stage neither
+/// repeats nor runs ahead (seen in the walkthrough: a develop stage replicating and verifying).
+fn stage_map(run: &Run, i: usize) -> String {
+    let n = run.stages.len();
+    let mut text = format!(
+        "You are stage {} of {n} ({}) in the \"{}\" pipeline for ticket {}. Each stage is a \
+         session of its own:",
+        i + 1,
+        run.pipeline.stages[i].title,
+        run.pipeline.name,
+        run.ticket
+    );
+    for (j, (spec, s)) in run.pipeline.stages.iter().zip(&run.stages).enumerate() {
+        let what = match (j.cmp(&i), s.rating()) {
+            (std::cmp::Ordering::Equal, _) => "this stage. Do only this.".to_string(),
+            (std::cmp::Ordering::Less, Some(r)) => format!("done ({}): {}", r.score, r.summary),
+            (std::cmp::Ordering::Less, None) => "done".to_string(),
+            (std::cmp::Ordering::Greater, _) => {
+                "comes after you; leave its work to it.".to_string()
+            }
+        };
+        text.push_str(&format!("\n- {}. {}: {what}", j + 1, spec.title));
+    }
+    text.push_str(
+        "\nDon't repeat what earlier stages did (what they handed over is below) and don't do \
+         what later stages will.",
+    );
+    text
+}
+
 /// What a re-run's session is told about the attempt before it (§5.3).
 fn rerun_context(previous: Option<&Attempt>) -> String {
     let Some(a) = previous else {
@@ -943,7 +977,13 @@ mod tests {
         assert_eq!((s.stage, s.orchestrator.as_str()), (0, "orch"));
         assert_eq!(s.label, "s-01");
         assert_eq!(s.folder, None);
-        assert!(s.prompt.starts_with("do a."), "{}", s.prompt);
+        // The pipeline map first, then the stage's own prompt.
+        assert!(
+            s.prompt.starts_with("You are stage 1 of 2 (a)"),
+            "{}",
+            s.prompt
+        );
+        assert!(s.prompt.contains("\n\ndo a."), "{}", s.prompt);
         assert!(s.prompt.contains("Look at the API."), "{}", s.prompt);
         assert_eq!(status(&runs, &id, 0), StageStatus::Starting);
         runs.link(&id, 0, "tok-a", "s-01 · a");
@@ -999,6 +1039,24 @@ mod tests {
             ["angular", "iov42:QA"]
         );
         assert!(runs.report("tok", rated(95)).is_ok());
+    }
+
+    #[test]
+    fn a_stage_is_told_where_it_sits_in_the_pipeline() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["replicate", "develop", "verify"]);
+        started(&mut runs, &id, "replicate", "t1");
+        runs.report("t1", rated(88)).unwrap();
+        let p = runs.begin("orch", &id, "develop", "", 30).unwrap().prompt;
+        for says in [
+            "stage 2 of 3 (develop)",
+            "1. replicate: done (88): s",
+            "2. develop: this stage",
+            "3. verify: comes after you",
+            "Don't repeat what earlier stages did",
+        ] {
+            assert!(p.contains(says), "{says}: {p}");
+        }
     }
 
     #[test]

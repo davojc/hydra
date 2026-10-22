@@ -102,6 +102,34 @@ pub fn card_tokens(run: &Run) -> Vec<String> {
         .collect()
 }
 
+/// The orchestrator's line in the status bar (the design's status text): the pipeline, the
+/// ticket, and what the run is doing or why it waits; `true` when it needs a person (red).
+pub fn status_text(run: &Run) -> (String, bool) {
+    let busy = run
+        .stages
+        .iter()
+        .position(|s| s.status.busy())
+        .and_then(|i| Some((i, run.stages[i].latest()?)));
+    let (what, red) = match (&run.state, busy) {
+        (RunState::NeedsYou(why), _) => (format!("needs you: {why}"), true),
+        (RunState::Finished, _) => ("done: every stage passed".to_string(), false),
+        (RunState::Stopped(why), _) => (format!("stopped: {why}"), false),
+        (RunState::Running, _) if run.paused => (
+            "paused: no stage starts until you resume".to_string(),
+            false,
+        ),
+        (RunState::Running, Some((i, a))) => (
+            format!("{} ({}) working", run.pipeline.stages[i].title, a.label),
+            false,
+        ),
+        (RunState::Running, None) => ("waiting for the orchestrator".to_string(), false),
+    };
+    (
+        format!("{} · {} · {what}", run.pipeline.name, run.ticket),
+        red,
+    )
+}
+
 /// The seven-day allowance meter (the design's footer): how much is left, 0 to 1, and whether
 /// that is below the floor at which no stage starts (§5.1).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -228,6 +256,64 @@ mod tests {
         // Not linked yet: no token to show.
         runs.begin("orch", &id, "develop", "", 30).unwrap();
         assert_eq!(card_tokens(runs.run(&id).unwrap()), ["orch", "t1", "t2"]);
+    }
+
+    #[test]
+    fn status_text_names_the_stage_or_why_it_waits() {
+        let (mut runs, id) = runs_of(&STAGES);
+        let st = |runs: &Runs| status_text(runs.run(&id).unwrap());
+        assert_eq!(
+            st(&runs),
+            (
+                "INTH SLA tickets · INTH-482 · waiting for the orchestrator".to_string(),
+                false
+            )
+        );
+        start(&mut runs, &id, "replicate", "t1");
+        assert_eq!(
+            st(&runs),
+            (
+                "INTH SLA tickets · INTH-482 · Understand & replicate (s-01) working".to_string(),
+                false
+            )
+        );
+        runs.pause(&id, true).unwrap();
+        assert_eq!(
+            st(&runs),
+            (
+                "INTH SLA tickets · INTH-482 · paused: no stage starts until you resume"
+                    .to_string(),
+                false
+            )
+        );
+        runs.pause(&id, false).unwrap();
+        runs.report("t1", rated(40)).unwrap();
+        let (text, red) = st(&runs);
+        assert!(
+            red && text.starts_with("INTH SLA tickets · INTH-482 · needs you: "),
+            "{text}"
+        );
+        assert!(text.contains("40, bar 80"), "{text}");
+        runs.person(&id, crate::runs::Choice::Stop).unwrap();
+        let (text, red) = st(&runs);
+        assert!(
+            !red && text.ends_with("stopped: stopped by you at Understand & replicate"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_finished_run_says_done() {
+        let (mut runs, id) = runs_of(&STAGES[..1]);
+        start(&mut runs, &id, "replicate", "t1");
+        runs.report("t1", rated(95)).unwrap();
+        assert_eq!(
+            status_text(runs.run(&id).unwrap()),
+            (
+                "INTH SLA tickets · INTH-482 · done: every stage passed".to_string(),
+                false
+            )
+        );
     }
 
     #[test]

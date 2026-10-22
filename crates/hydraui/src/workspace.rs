@@ -1840,8 +1840,19 @@ impl Workspace {
                 }
                 _ => None,
             };
+            // The orchestrator's state (the design's status text), red when it needs you.
+            let orchestrator = self.shown_run(cx).map(|(_, run)| {
+                let (text, red) = crate::pipeline_card::status_text(&run);
+                div()
+                    .flex_none()
+                    .max_w(px(520.))
+                    .truncate()
+                    .when(red, |d| d.text_color(cx.theme().danger))
+                    .child(text)
+            });
             bar = bar
                 .child(env_name)
+                .children(orchestrator)
                 .child(div().flex_1().min_w_0().overflow_hidden().child(accounts))
                 .when_some(usage, |b, u| b.child(u))
                 .when_some(git, |b, line| b.child(line))

@@ -464,6 +464,45 @@ impl Workspace {
             .collect()
     }
 
+    /// The selected environment's orchestrator and its run, for the title and status bars:
+    /// the first card's whose run is still open, else the first card's.
+    pub(super) fn shown_run(&self, cx: &gpui::App) -> Option<(PaneId, Run)> {
+        let sv = server::get()?;
+        let runs: Vec<(PaneId, Run)> = {
+            let tokens: Vec<(PaneId, String)> = self
+                .pipeline_cards(cx)
+                .into_iter()
+                .filter_map(|(id, _, _)| {
+                    Some((id, self.panes.get(&id)?.read(cx).mcp_token()?.to_string()))
+                })
+                .collect();
+            let reg = server::lock(sv.registry());
+            tokens
+                .into_iter()
+                .filter_map(|(id, t)| Some((id, reg.runs.current(&t)?.clone())))
+                .collect()
+        };
+        let open = runs.iter().position(|(_, r)| r.state.open()).unwrap_or(0);
+        runs.into_iter().nth(open)
+    }
+
+    /// **Pause orchestrator** / **Resume orchestrator** (§5.4): no stage starts and no wake-up
+    /// is typed while paused; resuming tells the orchestrator.
+    pub(super) fn set_paused(&mut self, run: &str, paused: bool) {
+        let changes = server::get().map(|sv| server::lock(sv.registry()).runs.pause(run, paused));
+        match changes {
+            Some(Ok(changes)) => {
+                crate::action_log::write(format!(
+                    "run {run}: {} by the user",
+                    if paused { "paused" } else { "resumed" }
+                ));
+                tell(changes);
+            }
+            Some(Err(e)) => crate::action_log::write(format!("run {run}: {e}")),
+            None => {}
+        }
+    }
+
     /// The design's pipeline card: the diamond and the pipeline's name, the ticket and stage
     /// with the state pill, and one segment per stage. Clicking it shows the orchestrator (the
     /// Pipeline view takes its place in plan Task 10).

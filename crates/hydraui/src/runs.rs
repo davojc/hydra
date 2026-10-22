@@ -142,6 +142,8 @@ pub struct StartStage {
     pub stage: usize,
     /// The attempt's label, `s-NN`.
     pub label: String,
+    /// What its terminal is called (`session_name`).
+    pub name: String,
     pub orchestrator: String,
     pub worktree: bool,
     /// The folder its session starts in, as the pipeline writes it.
@@ -187,6 +189,15 @@ pub enum Choice {
     Retry { note: String },
     /// Stop the ticket.
     Stop,
+}
+
+/// What people see a session called: its stage's number and title, and which try it is after
+/// the first, e.g. `2. Develop · try 2`. `label` (`s-02`) stays the run's own id for it.
+pub fn session_name(stage: usize, title: &str, attempt: usize) -> String {
+    match attempt {
+        0 => format!("{}. {title}", stage + 1),
+        n => format!("{}. {title} · try {}", stage + 1, n + 1),
+    }
 }
 
 /// Seconds since the epoch, for `run_status`.
@@ -445,10 +456,12 @@ impl Runs {
             stage: &spec.id,
             handoff: &handoff,
         };
+        let name = session_name(i, &spec.title, r.stages[i].attempts.len() - 1);
         Ok(StartStage {
             run: r.id.clone(),
             stage: i,
             label,
+            name,
             orchestrator: r.orchestrator.clone(),
             worktree: spec.worktree,
             folder: spec.folder.clone(),
@@ -887,6 +900,24 @@ mod tests {
         assert!(matches!(runs.role("tok-a"), Role::Stage(r, 0) if r.id == id));
         assert!(matches!(runs.role("orch"), Role::Orchestrator(r) if r.id == id));
         assert!(matches!(runs.role("other"), Role::Other));
+    }
+
+    #[test]
+    fn a_session_is_named_after_its_stage() {
+        assert_eq!(
+            session_name(0, "Understand and replicate", 0),
+            "1. Understand and replicate"
+        );
+        assert_eq!(session_name(1, "Develop", 1), "2. Develop · try 2");
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b"]);
+        let s = runs.begin("orch", &id, "a", "", 30).unwrap();
+        assert_eq!(s.name, "1. a");
+        runs.start_failed(&id, 0, "no terminal");
+        assert_eq!(
+            runs.begin("orch", &id, "a", "", 30).unwrap().name,
+            "1. a · try 2"
+        );
     }
 
     #[test]

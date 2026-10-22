@@ -21,7 +21,7 @@ use crate::mcp::{SessionState, server};
 use crate::orchestrator_theme::{self as theme, color};
 use crate::pipeline_view::{Panel, Tone, elapsed, gate_badge, panel_for, session_line};
 use crate::rating::{Outcome, Rating, Side};
-use crate::runs::{Choice, Run, RunState, StageStatus};
+use crate::runs::{Choice, Run, RunState, StageStatus, session_name};
 
 /// What a Pipeline tab shows: the run, or the pipeline's settings (the design's sub-links).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -504,7 +504,7 @@ impl Workspace {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .child(format!("{} · {skill}", a.label)),
+                                .child(format!("Try {} · {skill}", ai + 1)),
                         )
                         .child(text(11.5, theme::TEXT_MUTED).flex_none().child(line)),
                 );
@@ -669,7 +669,7 @@ impl Workspace {
                     .size_full()
                     .child(self.panel_header(
                         theme::TEAL,
-                        format!("{} · {}", a.label, spec.title),
+                        session_name(si, &spec.title, ai),
                         format!(
                             "{} · {}",
                             spec.skill.clone().unwrap_or_else(|| spec.title.clone()),
@@ -706,12 +706,9 @@ impl Workspace {
                                             ),
                                     ),
                             )
-                            .child(
-                                text(11.5, theme::TEXT_MUTED).child(format!(
-                                    "Rated when {} ends · {next} at ≥{bar}%",
-                                    a.label
-                                )),
-                            ),
+                            .child(text(11.5, theme::TEXT_MUTED).child(format!(
+                                "Rated when this session ends · {next} at ≥{bar}%"
+                            ))),
                     )
                     .into_any_element()
             }
@@ -748,7 +745,7 @@ impl Workspace {
                     .size_full()
                     .child(self.panel_header(
                         theme::TEXT_MUTED,
-                        format!("{} · {}", a.label, spec.title),
+                        session_name(si, &spec.title, ai),
                         session_line(run, si, ai, None, now),
                     ))
                     .child(body)
@@ -757,7 +754,6 @@ impl Workspace {
             }
             Panel::Stopped(si, ai) if tab.stepped_in => {
                 let spec = &run.pipeline.stages[si];
-                let a = &run.stages[si].attempts[ai];
                 let (run_id, title, bar) =
                     (run.id.clone(), spec.title.clone(), run.pipeline.bar_for(si));
                 v_flex()
@@ -773,10 +769,10 @@ impl Workspace {
                             .child(
                                 v_flex()
                                     .flex_1()
-                                    .child(
-                                        text(13., theme::TEXT)
-                                            .child(format!("{} · you're in control", a.label)),
-                                    )
+                                    .child(text(13., theme::TEXT).child(format!(
+                                        "{} · you're in control",
+                                        session_name(si, &spec.title, ai)
+                                    )))
                                     .child(text(11.5, theme::TEXT_MUTED).child(
                                         "The orchestrator waits while you work in this session",
                                     )),
@@ -1018,9 +1014,7 @@ impl Workspace {
                 reason.clone(),
             ),
         };
-        let label = ai
-            .and_then(|ai| s.attempts.get(ai))
-            .map(|a| a.label.clone());
+        let label = ai.map(|ai| session_name(si, &spec.title, ai));
         let can_step_in = ai.is_some_and(|ai| self.pane_of_session(run, si, ai, cx).is_some());
         let (run_id, title) = (run.id.clone(), spec.title.clone());
         let rerun_label = if ai.is_some() {

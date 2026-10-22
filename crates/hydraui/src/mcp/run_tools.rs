@@ -276,9 +276,9 @@ fn stage_start(
                 json!({"stage": stage, "label": s.label}),
             );
             let text = format!(
-                "Stage {stage} of run {} is starting as {}: its session opens beside the user. \
-                 You'll be told when it reports, or check run_status.",
-                s.run, s.label
+                "Stage {stage} of run {} is starting as {} ({}): its session opens beside the \
+                 user. You'll be told when it reports, or check run_status.",
+                s.run, s.name, s.label
             );
             (Outcome::ok(text), Some(McpEvent::StageStart(s)))
         }

@@ -31,11 +31,6 @@ pub fn orchestrator_prompt(pipeline: &str) -> String {
     )
 }
 
-/// A stage terminal's name, e.g. `s-02 · Develop`.
-pub fn stage_title(label: &str, title: &str) -> String {
-    format!("{label} · {title}")
-}
-
 /// What hydraui types into the orchestrator's terminal after `changes` to `run` (§6): the run,
 /// the stage and the result, and what to do next; `None` when nothing calls for it (a pause).
 pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
@@ -261,7 +256,7 @@ impl Workspace {
         let Some(view) = self.panes.get(&id).cloned() else {
             return stage_failed(&s, "its terminal didn't open".into());
         };
-        let name = stage_title(&s.label, &s.title);
+        let name = s.name.clone();
         view.update(cx, |v, cx| v.set_name(Some(name.clone()), cx));
         let token = view.read(cx).mcp_token().map(str::to_string);
         let taker = view.read(cx).taker_name().unwrap_or(name);
@@ -932,10 +927,5 @@ mod tests {
         ] {
             assert!(p.contains(says), "{says}: {p}");
         }
-    }
-
-    #[test]
-    fn the_stage_terminal_title_names_label_and_stage() {
-        assert_eq!(stage_title("s-02", "Develop"), "s-02 · Develop");
     }
 }

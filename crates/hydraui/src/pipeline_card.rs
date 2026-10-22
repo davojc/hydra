@@ -132,8 +132,15 @@ pub fn status_text(run: &Run) -> (String, bool) {
             "paused: no stage starts until you resume".to_string(),
             false,
         ),
-        (RunState::Running, Some((i, a))) => (
-            format!("{} ({}) working", run.pipeline.stages[i].title, a.label),
+        (RunState::Running, Some((i, _))) => (
+            format!(
+                "{} working",
+                crate::runs::session_name(
+                    i,
+                    &run.pipeline.stages[i].title,
+                    run.stages[i].attempts.len().saturating_sub(1)
+                )
+            ),
             false,
         ),
         (RunState::Running, None) => ("waiting for the orchestrator".to_string(), false),
@@ -302,7 +309,7 @@ mod tests {
         assert_eq!(
             st(&runs),
             (
-                "INTH SLA tickets · INTH-482 · Understand & replicate (s-01) working".to_string(),
+                "INTH SLA tickets · INTH-482 · 1. Understand & replicate working".to_string(),
                 false
             )
         );

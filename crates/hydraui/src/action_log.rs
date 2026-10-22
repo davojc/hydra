@@ -104,7 +104,7 @@ fn entry(stamp: &str, pid: u32, text: &str) -> String {
 
 /// The local time as `2026-10-21 08:45:12.345`.
 #[cfg(windows)]
-fn now() -> String {
+pub(crate) fn now() -> String {
     use windows_sys::Win32::System::SystemInformation::GetLocalTime;
     // SAFETY: GetLocalTime only fills in the struct it is given.
     let t = unsafe {
@@ -120,7 +120,7 @@ fn now() -> String {
 
 /// The local time as `2026-10-21 08:45:12.345`.
 #[cfg(unix)]
-fn now() -> String {
+pub(crate) fn now() -> String {
     let since = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();

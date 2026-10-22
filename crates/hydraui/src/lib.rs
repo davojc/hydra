@@ -29,6 +29,7 @@ pub mod openapi_view;
 pub mod palette;
 pub mod pane_view;
 pub mod pickup;
+pub mod pipeline;
 pub mod quick_open;
 pub mod readiness;
 pub mod save_dialog;

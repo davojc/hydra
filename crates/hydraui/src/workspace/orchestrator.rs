@@ -184,6 +184,26 @@ impl Workspace {
         let Some((env, cwd)) = orchestrator else {
             return stage_failed(&s, "its orchestrator's terminal is gone".into());
         };
+        // The skill set in the pipeline must be one its session can use (§4): checked where
+        // the session will look, before anything opens.
+        if let Some(skill) = s.skill.clone() {
+            let folder = s.folder.as_deref().map_or(cwd.clone(), |f| {
+                hydra_core::paths::expand_tilde(f, &self.hydra.user_home)
+            });
+            let claude = hydra_core::name::EnvName::parse(&env)
+                .ok()
+                .map(|n| self.hydra.paths.state_dir(&n).join("claude"));
+            if !crate::skills_list::is_installed(&skill, claude.as_deref(), &folder) {
+                return stage_failed(
+                    &s,
+                    format!(
+                        "its skill {skill} isn't installed for a session in {}: add it there or \
+                         to ~/.claude/skills, or change the stage's skill",
+                        folder.display()
+                    ),
+                );
+            }
+        }
         // A stage with a folder starts there: the project whose skills it needs.
         if let Some(folder) = s.folder.clone() {
             let path = hydra_core::paths::expand_tilde(&folder, &self.hydra.user_home);

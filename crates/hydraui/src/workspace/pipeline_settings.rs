@@ -113,8 +113,15 @@ impl Workspace {
         let claude = hydra_core::name::EnvName::parse(&env)
             .ok()
             .map(|n| self.hydra.paths.state_dir(&n).join("claude"));
-        let project = crate::tasks_project::project_root(&cwd);
-        let mut skills = crate::skills_list::installed(claude.as_deref(), &project);
+        // What the stages' sessions could use: from the orchestrator's project and each stage's
+        // own folder, plus the environment's, synced and plugin skills.
+        let mut folders = vec![crate::tasks_project::project_root(&cwd)];
+        folders.extend(saved.stages.iter().filter_map(|s| {
+            s.folder
+                .as_deref()
+                .map(|f| hydra_core::paths::expand_tilde(f, &self.hydra.user_home))
+        }));
+        let mut skills = crate::skills_list::available(claude.as_deref(), &folders);
         for s in saved.stages.iter().filter_map(|s| s.skill.clone()) {
             if !skills.contains(&s) {
                 skills.push(s);
@@ -338,10 +345,18 @@ impl Workspace {
                 Ok(rest) => format!("~/{}", rest.to_string_lossy().replace('\\', "/")),
                 Err(_) => path.to_string_lossy().into_owned(),
             };
+            // The new folder's own skills join the picker.
+            let found = crate::skills_list::installed(None, &path);
             ws.with_draft(orch, cx, |d| {
                 if let Some(s) = d.stages.iter_mut().find(|s| s.key == key) {
                     s.folder = Some(folder);
                 }
+                for skill in found {
+                    if !d.skills.contains(&skill) {
+                        d.skills.push(skill);
+                    }
+                }
+                d.skills.sort();
             });
         });
     }

@@ -228,6 +228,18 @@ opens a new session that reports afresh; the earlier attempts keep their ratings
 
 The rating is the user's decision: a score, the evidence and the reasons.
 
+**The stage's skill is enforced** (added after the walkthrough, the user's requirement: "absolutely
+sure that it uses the skills set in the pipeline settings"):
+- before a stage with a `skill` starts, hydraui checks the skill is installed where its session
+  will look (the stage's folder's `.claude/skills`, the environment's skills, claude.ai's synced
+  skills, or a plugin's); if not, the start fails with that reason;
+- its prompt opens with an instruction to use that skill, put there by hydraui whatever the
+  prompt's own text says;
+- hydra's Claude hooks report every skill a session invokes (`PreToolUse` on the Skill tool runs
+  `hydra hook skill`, which sends `hydraui/skill`), and `stage_report` is refused until the
+  stage's latest session has used its skill (by name, ignoring case; a plugin's `name:skill`
+  counts). Each use is written to the run log.
+
 ## 5. The gate
 
 ### 5.1 When a stage may start

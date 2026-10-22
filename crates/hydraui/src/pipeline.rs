@@ -70,14 +70,20 @@ struct FileStage {
     prompt: Option<String>,
 }
 
-/// The prompt of a stage that has none (§2): a stage added in Pipeline settings.
-fn default_prompt(title: &str, skill: Option<&str>) -> String {
-    match skill {
-        Some(skill) => {
-            format!("Use the {skill} skill for the \"{title}\" stage of ticket {{ticket}}.")
-        }
-        None => format!("Do the \"{title}\" stage of ticket {{ticket}}."),
-    }
+/// The prompt of a stage that has none (§2): a stage added in Pipeline settings. Its skill comes
+/// first anyway (`skill_line`).
+fn default_prompt(title: &str) -> String {
+    format!("Do the \"{title}\" stage of ticket {{ticket}}.")
+}
+
+/// What opens the prompt of a stage with a skill, whatever its own prompt says: the skill set
+/// in the pipeline is the one its session uses, and its report is refused until it has.
+pub fn skill_line(skill: &str) -> String {
+    format!(
+        "Use the {skill} skill for this stage: invoke it with the Skill tool before anything \
+         else, and do the stage with it rather than any other workflow. hydraui won't accept \
+         your stage_report until this session has used it."
+    )
 }
 
 fn plain_name(s: &str) -> bool {
@@ -116,9 +122,7 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
             .skill
             .map(|k| k.trim().to_string())
             .filter(|k| !k.is_empty());
-        let prompt = s
-            .prompt
-            .unwrap_or_else(|| default_prompt(&s.title, skill.as_deref()));
+        let prompt = s.prompt.unwrap_or_else(|| default_prompt(&s.title));
         let folder = s
             .folder
             .map(|f| f.trim().to_string())
@@ -515,7 +519,7 @@ mod tests {
         assert_eq!(p.stages[0].skill.as_deref(), Some("QA-Skills"));
         assert_eq!(
             p.stages[0].prompt,
-            "Use the QA-Skills skill for the \"Replicate\" stage of ticket {ticket}."
+            "Do the \"Replicate\" stage of ticket {ticket}."
         );
         assert_eq!(p.stages[1].skill, None);
         assert_eq!(
@@ -587,7 +591,7 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
         );
         assert_eq!(
             p.stages[2].prompt,
-            "Use the Security review skill for the \"Security review\" stage of ticket {ticket}."
+            "Do the \"Security review\" stage of ticket {ticket}."
         );
         assert_eq!(p.bar_for(2), 90);
     }

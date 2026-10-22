@@ -39,6 +39,9 @@ pub enum McpEvent {
     StageStart(crate::runs::StartStage),
     /// Runs changed: re-draw them, and tell their orchestrators (orchestrator spec §6).
     RunChanged(Vec<crate::runs::Change>),
+    /// A Claude session invoked a skill (`hydra hook skill`): the terminal's token and the
+    /// skill's name.
+    Skill(String, String),
 }
 
 /// What `handle` answers: an HTTP status and, for 200, the JSON body.
@@ -115,6 +118,25 @@ fn reply_to(
     let (reply, event) = answer(terminal, token, &peers, body);
     match &event {
         Some(McpEvent::Session { token, state, .. }) => lock(registry).set_session(token, *state),
+        // A stage reports only after using its skill (orchestrator §4); the run log keeps it.
+        Some(McpEvent::Skill(token, skill)) => {
+            let mut reg = lock(registry);
+            reg.runs.skill_used(token, skill);
+            let stage = match reg.runs.role(token) {
+                crate::runs::Role::Stage(r, i) => {
+                    Some((r.id.clone(), r.pipeline.stages[i].id.clone()))
+                }
+                _ => None,
+            };
+            if let (Some((run, stage)), Some(root)) = (stage, reg.hydra_root.clone()) {
+                let file = crate::run_log::file_for(&root, &run);
+                let _ = crate::run_log::append(
+                    &file,
+                    "skill used",
+                    json!({"stage": stage, "skill": skill}),
+                );
+            }
+        }
         // The weekly check reads what the run's sessions last reported (orchestrator §5.1).
         Some(McpEvent::Usage(token, usage)) => {
             if let Some(week) = usage.seven_day {
@@ -216,6 +238,10 @@ pub fn answer(
                     resumed,
                 }),
             Some("hydraui/usage") => Some(McpEvent::Usage(token.to_string(), Usage::parse(params))),
+            Some("hydraui/skill") => params
+                .get("skill")
+                .and_then(Value::as_str)
+                .map(|s| McpEvent::Skill(token.to_string(), s.to_string())),
             _ => None,
         };
         return (status(202), event);
@@ -620,6 +646,8 @@ mod tests {
         let name = format!("{} · {}", s.label, s.title);
         let tok = r.register(&name, PathBuf::from("."));
         r.runs.link(&s.run, s.stage, &tok, &name);
+        // A real session invokes its stage's skill first (`hydra hook skill`).
+        r.runs.skill_used(&tok, "QA-Skills");
         tok
     }
 
@@ -903,6 +931,13 @@ mod tests {
             .1
         );
         let a = open(next());
+        // Stage a's skill is reported over HTTP, as `hydra hook skill` does.
+        let (_, refused) = tool(&a, "stage_report", report(90));
+        assert!(refused, "no report before the stage's skill is used");
+        let skill = json!({"jsonrpc": "2.0", "method": "hydraui/skill",
+                           "params": {"skill": "QA-Skills"}});
+        assert_eq!(post(&a, skill).0, 202);
+        assert!(matches!(next(), Some(McpEvent::Skill(t, k)) if t == a && k == "QA-Skills"));
         let usage = json!({"jsonrpc": "2.0", "method": "hydraui/usage",
                            "params": {"rate_limits": {"seven_day": {"used_percentage": 40}}}});
         assert_eq!(post(&a, usage).0, 202);

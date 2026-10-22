@@ -356,6 +356,7 @@ impl Workspace {
                         McpEvent::Verified(token) => ws.session_verified(&token, cx),
                         McpEvent::StageStart(s) => ws.start_stage(s, window, cx),
                         McpEvent::RunChanged(changes) => ws.runs_changed(changes, window, cx),
+                        McpEvent::Skill(..) => cx.notify(),
                     });
                     if alive.is_err() {
                         break;

@@ -64,6 +64,8 @@ pub struct Attempt {
     /// The person's note it was started with (§5.3).
     pub note: Option<String>,
     pub rating: Option<Rating>,
+    /// The skills its session invoked (`hydra hook skill`), in order.
+    pub skills: Vec<String>,
 }
 
 /// One stage of a run.
@@ -146,6 +148,8 @@ pub struct StartStage {
     pub name: String,
     pub orchestrator: String,
     pub worktree: bool,
+    /// The skill its session must use (§4), checked as installed before it opens.
+    pub skill: Option<String>,
     /// The folder its session starts in, as the pipeline writes it.
     pub folder: Option<String>,
     pub title: String,
@@ -189,6 +193,19 @@ pub enum Choice {
     Retry { note: String },
     /// Stop the ticket.
     Stop,
+}
+
+/// Whether `used`, a skill a session invoked, is `wanted`: the same name, ignoring case, or a
+/// plugin's copy of it (`plugin:name`).
+fn same_skill(used: &str, wanted: &str) -> bool {
+    let bare = |s: &str| {
+        s.rsplit(':')
+            .next()
+            .unwrap_or(s)
+            .trim()
+            .to_ascii_lowercase()
+    };
+    bare(used) == bare(wanted)
 }
 
 /// What people see a session called: its stage's number and title, and which try it is after
@@ -448,6 +465,7 @@ impl Runs {
             started: SystemTime::now(),
             note,
             rating: None,
+            skills: Vec::new(),
         });
         let spec = &r.pipeline.stages[i];
         let vars = PromptVars {
@@ -464,9 +482,17 @@ impl Runs {
             name,
             orchestrator: r.orchestrator.clone(),
             worktree: spec.worktree,
+            skill: spec.skill.clone(),
             folder: spec.folder.clone(),
             title: spec.title.clone(),
-            prompt: render(&spec.prompt, &vars, &brief),
+            prompt: match &spec.skill {
+                Some(skill) => format!(
+                    "{}\n\n{}",
+                    crate::pipeline::skill_line(skill),
+                    render(&spec.prompt, &vars, &brief)
+                ),
+                None => render(&spec.prompt, &vars, &brief),
+            },
         })
     }
 
@@ -554,6 +580,19 @@ impl Runs {
         if r.stages[si].status != StageStatus::Running {
             return Err("this stage has already reported, or isn't running".into());
         }
+        // The skill the pipeline set must have been used by this session (§4).
+        if let Some(skill) = &r.pipeline.stages[si].skill {
+            let used = r.stages[si]
+                .latest()
+                .is_some_and(|a| a.skills.iter().any(|u| same_skill(u, skill)));
+            if !used {
+                return Err(format!(
+                    "Not recorded: this stage's skill is {skill}, and this session hasn't used \
+                     it. Invoke the {skill} skill (the Skill tool), do the stage with it, then \
+                     report again."
+                ));
+            }
+        }
         let bar = r.pipeline.bar_for(si);
         let id = r.pipeline.stages[si].id.clone();
         let passed = passes(&rating, bar);
@@ -615,6 +654,17 @@ impl Runs {
             changes.extend(self.end(ri, "the orchestrator's terminal closed".into()));
         }
         changes
+    }
+
+    /// The session holding `token` invoked `skill`: kept on its stage's latest attempt, which
+    /// may report only once it has used the stage's skill (§4).
+    pub fn skill_used(&mut self, token: &str, skill: &str) {
+        if let Some((ri, si)) = self.stage_of(token)
+            && let Some(a) = self.runs[ri].stages[si].attempts.last_mut()
+            && !a.skills.iter().any(|s| s == skill)
+        {
+            a.skills.push(skill.to_string());
+        }
     }
 
     /// A session reported its seven-day usage: kept on the open run it belongs to.
@@ -759,6 +809,7 @@ impl Runs {
                             "live": a.session.as_deref().and_then(&live),
                             "started": secs(a.started),
                             "note": a.note,
+                            "skills": a.skills,
                             "rating": a.rating,
                         })
                     })
@@ -918,6 +969,36 @@ mod tests {
             runs.begin("orch", &id, "a", "", 30).unwrap().name,
             "1. a · try 2"
         );
+    }
+
+    #[test]
+    fn a_stage_with_a_skill_reports_only_after_using_it() {
+        let mut runs = Runs::default();
+        let p = pipeline::parse(
+            "name = \"t\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\nskill = \"qa\"\n\
+             prompt = \"Replicate {ticket}.\"\n",
+        )
+        .unwrap();
+        let id = runs.start_run("orch", p, "INTH-1", "x").unwrap().id.clone();
+        let s = runs.begin("orch", &id, "a", "", 30).unwrap();
+        // The settings' skill comes first, whatever the prompt says.
+        assert!(s.prompt.starts_with("Use the qa skill"), "{}", s.prompt);
+        assert!(s.prompt.contains("Replicate INTH-1."), "{}", s.prompt);
+        runs.link(&id, 0, "tok", "1. A");
+        let refused = runs.report("tok", rated(95)).unwrap_err();
+        assert!(refused.contains("qa"), "{refused}");
+        assert_eq!(status(&runs, &id, 0), StageStatus::Running);
+        // Another skill, or another session using this one, doesn't count.
+        runs.skill_used("tok", "angular");
+        runs.skill_used("someone-else", "qa");
+        assert!(runs.report("tok", rated(95)).is_err());
+        // A plugin's copy of it does.
+        runs.skill_used("tok", "iov42:QA");
+        assert_eq!(
+            runs.run(&id).unwrap().stages[0].attempts[0].skills,
+            ["angular", "iov42:QA"]
+        );
+        assert!(runs.report("tok", rated(95)).is_ok());
     }
 
     #[test]
@@ -1279,7 +1360,13 @@ mod tests {
         runs.report("tok-a", rated(90)).unwrap();
         let b = runs.begin("orch", &id, "b", "", 30).unwrap();
         assert_eq!(b.folder.as_deref(), Some("~/Projects/QA-Skills"));
-        assert!(b.prompt.starts_with("Use the qa skill."), "{}", b.prompt);
+        // The skill instruction first, then the stage's own prompt.
+        assert!(
+            b.prompt.starts_with(&crate::pipeline::skill_line("qa")),
+            "{}",
+            b.prompt
+        );
+        assert!(b.prompt.contains("\n\nUse the qa skill.\n"), "{}", b.prompt);
         assert_eq!(
             runs.run(&id).unwrap().pipeline.stages[1].skill.as_deref(),
             Some("qa")

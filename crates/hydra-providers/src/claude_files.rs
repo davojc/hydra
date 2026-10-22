@@ -220,7 +220,7 @@ pub fn add_status_line(settings_json: &str, hydra: &str) -> Result<String, Strin
 /// source: a new session (`startup`, `/clear`) is idle and fresh, a resumed one (`claude -c`,
 /// `claude -r`, `/resume`) is `resumed`, idle but not fresh. `compact` is left out: compacting
 /// changes neither what the session is doing nor whether it is new.
-pub const STATUS_HOOKS: [(&str, Option<&str>, &str); 8] = [
+pub const STATUS_HOOKS: [(&str, Option<&str>, &str); 9] = [
     ("SessionStart", Some("startup|clear"), "idle"),
     ("SessionStart", Some("resume"), "resumed"),
     ("UserPromptSubmit", None, "working"),
@@ -230,6 +230,9 @@ pub const STATUS_HOOKS: [(&str, Option<&str>, &str); 8] = [
         Some("AskUserQuestion|ExitPlanMode"),
         "waiting",
     ),
+    // A skill being invoked: `hydra hook skill` names it (from the hook's input), so a
+    // pipeline stage can be held to the skill it was given (orchestrator spec §4).
+    ("PreToolUse", Some("Skill"), "skill"),
     // A tool ran: any question or permission before it has been answered.
     ("PostToolUse", Some("*"), "working"),
     (
@@ -535,6 +538,18 @@ mod tests {
             });
             assert!(found, "{event} {matcher:?} {state}");
         }
+        // Every skill a session invokes is reported, so hydraui can hold a pipeline stage to
+        // the skill it was given.
+        assert!(
+            v["hooks"]["PreToolUse"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e
+                    == &json!({"matcher": "Skill",
+                           "hooks": [{"type": "command", "command": "hydra hook skill"}]}))
+        );
+        assert!(is_status_hook("hydra hook skill"));
         assert!(!is_status_hook("hydra hook later"));
         assert!(!is_status_hook("\"C:/h/hydra.exe\" guard claude"));
     }

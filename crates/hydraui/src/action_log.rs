@@ -55,6 +55,41 @@ pub fn write(text: impl AsRef<str>) {
     }
 }
 
+/// Logs every panic, with its backtrace, before the usual handling. hydraui has no console,
+/// so a panic on the UI thread otherwise closes the window leaving nothing behind.
+pub fn log_panics() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "(no message)".to_string());
+        let location = info.location().map(|l| l.to_string());
+        write(panic_report(
+            std::thread::current().name(),
+            &message,
+            location.as_deref(),
+            &std::backtrace::Backtrace::force_capture().to_string(),
+        ));
+        previous(info);
+    }));
+}
+
+fn panic_report(
+    thread: Option<&str>,
+    message: &str,
+    location: Option<&str>,
+    backtrace: &str,
+) -> String {
+    format!(
+        "PANIC on thread {} at {}: {message}\n{backtrace}",
+        thread.unwrap_or("<unnamed>"),
+        location.unwrap_or("<unknown>"),
+    )
+}
+
 /// One log entry: `<stamp> [<pid>] <text>`, each further line of `text` indented under it.
 fn entry(stamp: &str, pid: u32, text: &str) -> String {
     let mut lines = text.trim_end().lines();
@@ -126,6 +161,41 @@ mod tests {
             entry("T", 1, "Jev was sent:\n  first row  \nsecond row\n\n"),
             "T [1] Jev was sent:\n      first row\n    second row\n"
         );
+    }
+
+    #[test]
+    fn a_panic_report_says_where_and_why_then_the_backtrace() {
+        assert_eq!(
+            panic_report(
+                Some("main"),
+                "index out of bounds",
+                Some("crates/hydraui/src/x.rs:10:5"),
+                "   0: hydraui::x\n   1: main\n"
+            ),
+            "PANIC on thread main at crates/hydraui/src/x.rs:10:5: index out of bounds\n   0: hydraui::x\n   1: main\n"
+        );
+        assert_eq!(
+            panic_report(None, "boom", None, ""),
+            "PANIC on thread <unnamed> at <unknown>: boom\n"
+        );
+    }
+
+    /// The only test that sets the log file, which is once per process.
+    #[test]
+    fn a_panic_is_logged_with_its_thread_and_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hydraui.log");
+        init(path.clone());
+        log_panics();
+        let joined = std::thread::Builder::new()
+            .name("worker".into())
+            .spawn(|| panic!("boom {}", 42))
+            .unwrap()
+            .join();
+        assert!(joined.is_err());
+        let log = std::fs::read_to_string(&path).unwrap();
+        assert!(log.contains("PANIC on thread worker at "), "{log}");
+        assert!(log.contains(": boom 42\n"), "{log}");
     }
 
     #[test]

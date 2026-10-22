@@ -179,6 +179,8 @@ pub struct EditStage {
     pub folder: Option<String>,
     /// Its own bar; `None` follows the pipeline's.
     pub bar: Option<u8>,
+    /// What its session is asked, before hydraui's note; empty: the default prompt.
+    pub prompt: String,
 }
 
 impl From<&Pipeline> for Edit {
@@ -196,6 +198,7 @@ impl From<&Pipeline> for Edit {
                     skill: s.skill.clone(),
                     folder: s.folder.clone(),
                     bar: s.bar,
+                    prompt: s.prompt.clone(),
                 })
                 .collect(),
         }
@@ -310,6 +313,13 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
             None => {
                 table.remove("bar");
             }
+        }
+        // An emptied prompt goes back to the default one (§2).
+        match s.prompt.trim() {
+            "" => {
+                table.remove("prompt");
+            }
+            _ => table["prompt"] = value(s.prompt.trim_end()),
         }
         // Parsed tables are written by their place in the old file: number them afresh so
         // the file follows `edit`'s order.
@@ -632,6 +642,7 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
                 skill: Some("Security review".into()),
                 folder: None,
                 bar: Some(90),
+                prompt: String::new(),
             });
         }
         save(d.path(), "tickets", &edit).unwrap();
@@ -692,6 +703,38 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
         assert_eq!(
             p.stages[1].folder.as_deref(),
             Some("~/Projects/iov42-agents")
+        );
+    }
+
+    #[test]
+    fn settings_edit_each_stages_prompt() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(folder(d.path()).join("tickets.toml"), COMMENTED).unwrap();
+        let mut edit = edit_of(&load(d.path(), "tickets").unwrap());
+        // What the stage uses now is what the settings show.
+        assert_eq!(edit.stages[0].prompt.trim(), "Read {ticket}.");
+        assert_eq!(edit.stages[1].prompt, "Fix it.");
+        edit.stages[0].prompt = "replicate {ticket}".into();
+        edit.stages.push(EditStage {
+            id: None,
+            title: "Verify".into(),
+            skill: None,
+            folder: None,
+            bar: None,
+            prompt: "test {ticket} against {feature_env}".into(),
+        });
+        save(d.path(), "tickets", &edit).unwrap();
+        let p = load(d.path(), "tickets").unwrap();
+        assert_eq!(p.stages[0].prompt, "replicate {ticket}");
+        assert_eq!(p.stages[2].prompt, "test {ticket} against {feature_env}");
+        // A prompt left empty falls back to the default one.
+        let mut edit = edit_of(&p);
+        edit.stages[1].prompt = "  ".into();
+        save(d.path(), "tickets", &edit).unwrap();
+        assert_eq!(
+            load(d.path(), "tickets").unwrap().stages[1].prompt,
+            "Do the \"Develop\" stage of ticket {ticket}."
         );
     }
 

@@ -34,6 +34,8 @@ struct DraftStage {
     bar: Entity<SliderState>,
     /// The bar is the stage's own, not the pipeline's.
     own: bool,
+    /// What its session is asked, before hydraui's note.
+    prompt: Entity<InputState>,
 }
 
 /// The settings being edited for one orchestrator's pipeline file.
@@ -84,6 +86,7 @@ impl SettingsDraft {
                     skill: s.skill.clone(),
                     folder: s.folder.clone(),
                     bar: s.own.then(|| slider_value(&s.bar, cx)),
+                    prompt: s.prompt.read(cx).value().to_string(),
                 })
                 .collect(),
         }
@@ -219,6 +222,12 @@ impl Workspace {
         });
         let bar = slider(s.bar.unwrap_or(default), cx);
         subs.push(cx.subscribe_in(&title, window, |_, _, _: &InputEvent, _, cx| cx.notify()));
+        let prompt = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("e.g. replicate {ticket}")
+                .default_value(s.prompt.clone())
+        });
+        subs.push(cx.subscribe_in(&prompt, window, |_, _, _: &InputEvent, _, cx| cx.notify()));
         subs.push(
             cx.subscribe_in(&bar, window, move |ws, _, _: &SliderEvent, _, cx| {
                 if let Some(stage) = ws
@@ -239,6 +248,7 @@ impl Workspace {
             folder: s.folder.clone(),
             bar,
             own: s.bar.is_some(),
+            prompt,
         }
     }
 
@@ -288,6 +298,7 @@ impl Workspace {
                 skill,
                 folder: None,
                 bar: None,
+                prompt: String::new(),
             },
             default,
             window,
@@ -444,9 +455,9 @@ impl Workspace {
             let key = s.key;
             let value = slider_value(&s.bar, cx);
             stages = stages.child(
-                h_flex()
+                v_flex()
                     .id(SharedString::from(format!("settings-stage-{orch}-{key}")))
-                    .gap(px(10.))
+                    .gap_2()
                     .px(px(14.))
                     .py(px(12.))
                     .rounded(px(10.))
@@ -454,130 +465,158 @@ impl Workspace {
                     .border_1()
                     .border_color(color(0x1f2524))
                     .child(
-                        div()
-                            .size(px(24.))
-                            .flex_none()
-                            .rounded_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .border_1()
-                            .border_color(color(theme::BORDER_STRONG))
-                            .child(text(11.5, theme::TEXT_SECONDARY).child(format!("{}", i + 1))),
-                    )
-                    .child(
                         h_flex()
-                            .flex_none()
+                            .gap(px(10.))
                             .child(
-                                Button::new(SharedString::from(format!("up-{key}")))
-                                    .label("↑")
-                                    .ghost()
-                                    .xsmall()
-                                    .disabled(i == 0)
-                                    .on_click(cx.listener(move |ws, _, _, cx| {
-                                        ws.with_draft(orch, cx, |d| d.stages.swap(i, i - 1))
+                                div()
+                                    .size(px(24.))
+                                    .flex_none()
+                                    .rounded_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .border_1()
+                                    .border_color(color(theme::BORDER_STRONG))
+                                    .child(
+                                        text(11.5, theme::TEXT_SECONDARY)
+                                            .child(format!("{}", i + 1)),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .flex_none()
+                                    .child(
+                                        Button::new(SharedString::from(format!("up-{key}")))
+                                            .label("↑")
+                                            .ghost()
+                                            .xsmall()
+                                            .disabled(i == 0)
+                                            .on_click(cx.listener(move |ws, _, _, cx| {
+                                                ws.with_draft(orch, cx, |d| d.stages.swap(i, i - 1))
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new(SharedString::from(format!("down-{key}")))
+                                            .label("↓")
+                                            .ghost()
+                                            .xsmall()
+                                            .disabled(i + 1 == count)
+                                            .on_click(cx.listener(move |ws, _, _, cx| {
+                                                ws.with_draft(orch, cx, |d| d.stages.swap(i, i + 1))
+                                            })),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(120.))
+                                    .child(Input::new(&s.title).small()),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("skill-{key}")))
+                                    .label(format!(
+                                        "{} ▾",
+                                        s.skill.clone().unwrap_or_else(|| "No skill".into())
+                                    ))
+                                    .outline()
+                                    .small()
+                                    .on_click(cx.listener(move |ws, _, window, cx| {
+                                        ws.pick_skill(orch, key, window, cx)
                                     })),
                             )
                             .child(
-                                Button::new(SharedString::from(format!("down-{key}")))
-                                    .label("↓")
+                                Button::new(SharedString::from(format!("folder-{key}")))
+                                    .label(match &s.folder {
+                                        Some(f) => format!(
+                                            "in {} ▾",
+                                            std::path::Path::new(f)
+                                                .file_name()
+                                                .map_or(f.clone(), |n| n
+                                                    .to_string_lossy()
+                                                    .into_owned())
+                                        ),
+                                        None => "Orchestrator's folder ▾".into(),
+                                    })
+                                    .outline()
+                                    .small()
+                                    .tooltip("The folder this stage's session starts in")
+                                    .on_click(cx.listener(move |ws, _, window, cx| {
+                                        ws.pick_folder(orch, key, window, cx)
+                                    })),
+                            )
+                            .when(s.folder.is_some(), |row| {
+                                row.child(
+                                    Button::new(SharedString::from(format!("folder-clear-{key}")))
+                                        .label("↺")
+                                        .ghost()
+                                        .xsmall()
+                                        .tooltip("Start in the orchestrator's folder")
+                                        .on_click(cx.listener(move |ws, _, _, cx| {
+                                            ws.with_draft(orch, cx, |d| {
+                                                if let Some(s) =
+                                                    d.stages.iter_mut().find(|s| s.key == key)
+                                                {
+                                                    s.folder = None;
+                                                }
+                                            })
+                                        })),
+                                )
+                            })
+                            .child(div().w(px(120.)).flex_none().child(Slider::new(&s.bar)))
+                            .child(
+                                text(
+                                    12.5,
+                                    if s.own {
+                                        theme::AMBER
+                                    } else {
+                                        theme::TEXT_SECONDARY
+                                    },
+                                )
+                                .w(px(36.))
+                                .flex_none()
+                                .child(format!("{value}%")),
+                            )
+                            .child(div().w(px(44.)).flex_none().when(s.own, |d| {
+                                d.child(
+                                    Button::new(SharedString::from(format!("reset-{key}")))
+                                        .label("Reset")
+                                        .ghost()
+                                        .xsmall()
+                                        .on_click(cx.listener(move |ws, _, window, cx| {
+                                            ws.reset_bar(orch, key, window, cx)
+                                        })),
+                                )
+                            }))
+                            .child(
+                                Button::new(SharedString::from(format!("remove-{key}")))
+                                    .label("×")
                                     .ghost()
                                     .xsmall()
-                                    .disabled(i + 1 == count)
+                                    .disabled(count == 1)
                                     .on_click(cx.listener(move |ws, _, _, cx| {
-                                        ws.with_draft(orch, cx, |d| d.stages.swap(i, i + 1))
+                                        ws.with_draft(orch, cx, |d| {
+                                            d.stages.retain(|s| s.key != key);
+                                        })
                                     })),
                             ),
                     )
+                    // What the stage's session is asked; hydraui's note follows it.
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(120.))
-                            .child(Input::new(&s.title).small()),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("skill-{key}")))
-                            .label(format!(
-                                "{} ▾",
-                                s.skill.clone().unwrap_or_else(|| "No skill".into())
-                            ))
-                            .outline()
-                            .small()
-                            .on_click(cx.listener(move |ws, _, window, cx| {
-                                ws.pick_skill(orch, key, window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("folder-{key}")))
-                            .label(match &s.folder {
-                                Some(f) => format!(
-                                    "in {} ▾",
-                                    std::path::Path::new(f)
-                                        .file_name()
-                                        .map_or(f.clone(), |n| n.to_string_lossy().into_owned())
-                                ),
-                                None => "Orchestrator's folder ▾".into(),
-                            })
-                            .outline()
-                            .small()
-                            .tooltip("The folder this stage's session starts in")
-                            .on_click(cx.listener(move |ws, _, window, cx| {
-                                ws.pick_folder(orch, key, window, cx)
-                            })),
-                    )
-                    .when(s.folder.is_some(), |row| {
-                        row.child(
-                            Button::new(SharedString::from(format!("folder-clear-{key}")))
-                                .label("↺")
-                                .ghost()
-                                .xsmall()
-                                .tooltip("Start in the orchestrator's folder")
-                                .on_click(cx.listener(move |ws, _, _, cx| {
-                                    ws.with_draft(orch, cx, |d| {
-                                        if let Some(s) = d.stages.iter_mut().find(|s| s.key == key)
-                                        {
-                                            s.folder = None;
-                                        }
-                                    })
-                                })),
-                        )
-                    })
-                    .child(div().w(px(120.)).flex_none().child(Slider::new(&s.bar)))
-                    .child(
-                        text(
-                            12.5,
-                            if s.own {
-                                theme::AMBER
-                            } else {
-                                theme::TEXT_SECONDARY
-                            },
-                        )
-                        .w(px(36.))
-                        .flex_none()
-                        .child(format!("{value}%")),
-                    )
-                    .child(div().w(px(44.)).flex_none().when(s.own, |d| {
-                        d.child(
-                            Button::new(SharedString::from(format!("reset-{key}")))
-                                .label("Reset")
-                                .ghost()
-                                .xsmall()
-                                .on_click(cx.listener(move |ws, _, window, cx| {
-                                    ws.reset_bar(orch, key, window, cx)
-                                })),
-                        )
-                    }))
-                    .child(
-                        Button::new(SharedString::from(format!("remove-{key}")))
-                            .label("×")
-                            .ghost()
-                            .xsmall()
-                            .disabled(count == 1)
-                            .on_click(cx.listener(move |ws, _, _, cx| {
-                                ws.with_draft(orch, cx, |d| {
-                                    d.stages.retain(|s| s.key != key);
-                                })
-                            })),
+                        h_flex()
+                            .gap(px(10.))
+                            .pl(px(34.))
+                            .child(
+                                text(11.5, theme::TEXT_MUTED)
+                                    .flex_none()
+                                    .w(px(48.))
+                                    .child("Prompt"),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(Input::new(&s.prompt).small()),
+                            ),
                     ),
             );
         }
@@ -720,6 +759,12 @@ impl Workspace {
                                     .child(section(&format!(
                                         "Stages · run top to bottom · {count} stages"
                                     )))
+                                    .child(text(12., theme::TEXT_MUTED).child(
+                                        "Prompts can use {ticket}, {ticket_lower}, {feature_env} \
+                                         and {handoff}. After each one, hydraui adds a short note: \
+                                         where the stage sits, its skill, and to finish with \
+                                         stage_report.",
+                                    ))
                                     .child(stages)
                                     .child(
                                         div()

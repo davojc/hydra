@@ -517,6 +517,35 @@ impl Runs {
         }
     }
 
+    /// Puts back a run rebuilt from its log (§13), replacing one with its id.
+    pub fn restore(&mut self, run: Run) {
+        match self.index(&run.id) {
+            Some(i) => self.runs[i] = run,
+            None => self.runs.push(run),
+        }
+    }
+
+    /// Run `run` now belongs to the orchestrator terminal `orchestrator` (§13: a reopened
+    /// orchestrator).
+    pub fn adopt(&mut self, run: &str, orchestrator: &str) {
+        if let Some(ri) = self.index(run) {
+            self.runs[ri].orchestrator = orchestrator.to_string();
+        }
+    }
+
+    /// Stage `stage`'s latest attempt goes on in the terminal `token` (§13: its session
+    /// reopened), not as a new attempt.
+    pub fn relink(&mut self, run: &str, stage: usize, token: &str, name: &str) {
+        if let Some(a) = self
+            .index(run)
+            .and_then(|ri| self.runs[ri].stages.get_mut(stage))
+            .and_then(|s| s.attempts.last_mut())
+        {
+            a.session = Some(token.to_string());
+            a.session_name = Some(name.to_string());
+        }
+    }
+
     /// A starting stage's terminal or worktree couldn't be made.
     pub fn start_failed(&mut self, run: &str, stage: usize, why: &str) -> Vec<Change> {
         match self.index(run) {
@@ -992,6 +1021,37 @@ mod tests {
         assert!(matches!(runs.role("tok-a"), Role::Stage(r, 0) if r.id == id));
         assert!(matches!(runs.role("orch"), Role::Orchestrator(r) if r.id == id));
         assert!(matches!(runs.role("other"), Role::Other));
+    }
+
+    #[test]
+    fn a_restored_run_moves_to_its_new_terminals() {
+        let mut old = Runs::default();
+        let id = run(&mut old, &["a", "b"]);
+        started(&mut old, &id, "a", "s-01");
+        let replayed = old.run(&id).unwrap().clone();
+
+        let mut runs = Runs::default();
+        runs.restore(replayed);
+        runs.adopt(&id, "orch-2");
+        runs.relink(&id, 0, "tok-2", "1. a");
+        assert!(matches!(runs.role("orch-2"), Role::Orchestrator(r) if r.id == id));
+        assert!(matches!(runs.role("tok-2"), Role::Stage(r, 0) if r.id == id));
+        assert!(
+            matches!(runs.role("s-01"), Role::Other),
+            "the old session has no say"
+        );
+        assert_eq!(status(&runs, &id, 0), StageStatus::Running);
+        assert_eq!(
+            runs.run(&id).unwrap().stages[0].attempts.len(),
+            1,
+            "not a new attempt"
+        );
+        // The new stage session reports, and the run goes on as before.
+        runs.report("tok-2", rated(95)).unwrap();
+        assert_eq!(status(&runs, &id, 0), StageStatus::Passed);
+        // Restoring it again replaces it rather than adding a second.
+        runs.restore(old.run(&id).unwrap().clone());
+        assert_eq!(runs.all().count(), 1);
     }
 
     #[test]

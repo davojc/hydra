@@ -34,6 +34,8 @@ pub struct Registry {
     pub min_week_left: u8,
     /// `<HYDRA_HOME>`, where pipelines and run logs live; the run tools refuse without it.
     pub hydra_root: Option<PathBuf>,
+    /// Claude session ids already written to a run's log, as (run, who, id) (§13).
+    logged_claude: std::collections::HashSet<(String, String, String)>,
 }
 
 impl Default for Registry {
@@ -44,6 +46,7 @@ impl Default for Registry {
             runs: Runs::default(),
             min_week_left: MIN_WEEK_LEFT,
             hydra_root: None,
+            logged_claude: Default::default(),
         }
     }
 }
@@ -130,6 +133,20 @@ impl Registry {
         } else {
             self.sessions.insert(token.to_string(), state);
         }
+    }
+
+    /// Claude session `id` reported from `token`'s terminal: the run and who it is there
+    /// (`orchestrator`, or the stage attempt's label) the first time that run hears of it, so
+    /// its log can keep it for a restart (orchestrator spec §13); `None` otherwise.
+    pub fn claude_session(&mut self, token: &str, id: &str) -> Option<(String, String)> {
+        let (run, who) = match self.runs.role(token) {
+            crate::runs::Role::Orchestrator(r) => (r.id.clone(), "orchestrator".to_string()),
+            crate::runs::Role::Stage(r, i) => (r.id.clone(), r.stages[i].latest()?.label.clone()),
+            crate::runs::Role::Other => return None,
+        };
+        self.logged_claude
+            .insert((run.clone(), who.clone(), id.to_string()))
+            .then_some((run, who))
     }
 
     /// The terminals other than `token`'s with a Claude session running, by name.

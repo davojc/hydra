@@ -129,6 +129,17 @@ impl Workspace {
             .flat_map(|(_, _, panes)| panes.iter().copied())
             .collect();
         let shown = tab.shown.filter(|_| !all_tasks);
+        // Runs an earlier hydraui closed on, in this environment, to pick back up (§13).
+        let interrupted: Vec<usize> = self
+            .interrupted
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| i.env == tab.env)
+            .map(|(idx, _)| idx)
+            .collect();
+        for idx in interrupted {
+            list = list.child(self.render_interrupted_card(idx, cx));
+        }
         // Each orchestrator is one framed block: its card, links, its own row, then the sessions
         // it started nested under it, so several pipelines' sessions never mix.
         for (orch, card, panes) in &cards {

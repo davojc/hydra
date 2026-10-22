@@ -2,18 +2,27 @@
 //! is doing, so its terminal list can show it, and `hydra hook skill` which skill it invokes.
 //! Outside hydraui (no `HYDRA_MCP_URL`) it does nothing; every failure is silent, so a hook
 //! never gets in the session's way.
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::time::Duration;
 
 /// How long hydraui gets to take the message; it is on this machine.
 const TIMEOUT: Duration = Duration::from_millis(500);
 
-/// The JSON-RPC notification hydraui's server reads for `state`.
-pub fn message(state: &str) -> String {
+/// The JSON-RPC notification hydraui's server reads for `state`, with Claude's `session_id` from the hook's input, when it has one, so
+/// hydraui can reopen the session after a restart (orchestrator spec §13).
+pub fn status_message(state: &str, hook_input: &str) -> String {
+    let session = serde_json::from_str::<serde_json::Value>(hook_input)
+        .ok()
+        .and_then(|v| v.get("session_id")?.as_str().map(str::to_string))
+        .filter(|s| !s.is_empty());
+    let mut params = serde_json::json!({"state": state});
+    if let Some(session) = session {
+        params["session"] = session.into();
+    }
     serde_json::json!({
         "jsonrpc": "2.0",
         "method": "hydraui/status",
-        "params": {"state": state},
+        "params": params,
     })
     .to_string()
 }
@@ -46,15 +55,18 @@ pub fn run(state: &str) {
     ) else {
         return;
     };
-    let body = if state == "skill" {
-        let mut input = String::new();
+    // Claude pipes the hook's input as JSON; run by hand from a terminal there is none to wait for.
+    let mut input = String::new();
+    if !std::io::stdin().is_terminal() {
         let _ = std::io::stdin().take(1 << 20).read_to_string(&mut input);
+    }
+    let body = if state == "skill" {
         match skill_message(&input) {
             Some(body) => body,
             None => return,
         }
     } else {
-        message(state)
+        status_message(state, &input)
     };
     let _ = ureq::post(&url)
         .timeout(TIMEOUT)
@@ -85,9 +97,21 @@ mod tests {
 
     #[test]
     fn the_message_is_a_status_notification() {
-        let v: serde_json::Value = serde_json::from_str(&message("waiting")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&status_message("waiting", "")).unwrap();
         assert_eq!(v["method"], "hydraui/status");
         assert_eq!(v["params"]["state"], "waiting");
         assert!(v.get("id").is_none(), "a notification has no id");
+        assert!(v["params"].get("session").is_none());
+    }
+
+    #[test]
+    fn the_status_carries_claudes_session_id_from_the_hook_input() {
+        let input = r#"{"session_id":"5c1e-77","hook_event_name":"Stop"}"#;
+        let v: serde_json::Value = serde_json::from_str(&status_message("idle", input)).unwrap();
+        assert_eq!(v["params"]["state"], "idle");
+        assert_eq!(v["params"]["session"], "5c1e-77");
+        // No input (or not JSON): the state alone.
+        let v: serde_json::Value = serde_json::from_str(&status_message("idle", "")).unwrap();
+        assert!(v["params"].get("session").is_none());
     }
 }

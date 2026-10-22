@@ -28,6 +28,8 @@ pub enum McpEvent {
         token: String,
         state: SessionState,
         resumed: bool,
+        /// Claude's own session id, when the hook passed it (orchestrator spec §13).
+        claude: Option<String>,
     },
     /// A Claude session's status line (`hydra statusline`) said how much of its account's
     /// limits are used: the terminal's token and the usage.
@@ -117,7 +119,27 @@ fn reply_to(
     let peers = lock(registry).peers(token);
     let (reply, event) = answer(terminal, token, &peers, body);
     match &event {
-        Some(McpEvent::Session { token, state, .. }) => lock(registry).set_session(token, *state),
+        Some(McpEvent::Session {
+            token,
+            state,
+            claude,
+            ..
+        }) => {
+            let mut reg = lock(registry);
+            reg.set_session(token, *state);
+            let new = claude
+                .as_deref()
+                .and_then(|id| reg.claude_session(token, id));
+            if let (Some((run, who)), Some(root)) = (new, reg.hydra_root.clone()) {
+                let file = crate::run_log::file_for(&root, &run);
+                let id = claude.as_deref().unwrap_or_default();
+                if let Err(e) =
+                    crate::run_log::append(&file, "claude session", json!({"who": who, "id": id}))
+                {
+                    crate::action_log::write(format!("run log {run}: {e}"));
+                }
+            }
+        }
         // A stage reports only after using its skill (orchestrator §4); the run log keeps it.
         Some(McpEvent::Skill(token, skill)) => {
             let mut reg = lock(registry);
@@ -236,6 +258,11 @@ pub fn answer(
                     token: token.to_string(),
                     state,
                     resumed,
+                    claude: params
+                        .get("session")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
                 }),
             Some("hydraui/usage") => Some(McpEvent::Usage(token.to_string(), Usage::parse(params))),
             Some("hydraui/skill") => params
@@ -543,7 +570,8 @@ mod tests {
             Some(McpEvent::Session {
                 token: token.clone(),
                 state: SessionState::Waiting,
-                resumed: false
+                resumed: false,
+                claude: None,
             })
         );
         let (_, event) =
@@ -553,7 +581,8 @@ mod tests {
             Some(McpEvent::Session {
                 token: token.clone(),
                 state: SessionState::Idle,
-                resumed: true
+                resumed: true,
+                claude: None,
             }),
             "a resumed session is idle, but not a new one"
         );
@@ -767,6 +796,31 @@ mod tests {
                 "{event}: {log}"
             );
         }
+    }
+
+    #[test]
+    fn claudes_session_ids_go_to_the_run_log_once() {
+        let (home, reg, orch) = with_pipeline();
+        let stage = first_stage_open(&reg, &orch);
+        let status = |token: &str, session: &str| {
+            let body = json!({"jsonrpc": "2.0", "method": "hydraui/status",
+                              "params": {"state": "working", "session": session}})
+            .to_string();
+            let auth = format!("Bearer {token}");
+            handle(&reg, "POST", "/mcp", Some(&auth), None, &body)
+        };
+        status(&orch, "orch-1");
+        status(&orch, "orch-1");
+        status(&stage, "stage-1");
+        let log =
+            std::fs::read_to_string(crate::run_log::file_for(home.path(), "INTH-7-1")).unwrap();
+        let lines: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains("\"claude session\""))
+            .collect();
+        assert_eq!(lines.len(), 2, "{log}");
+        assert!(lines[0].contains("\"who\":\"orchestrator\"") && lines[0].contains("orch-1"));
+        assert!(lines[1].contains("\"who\":\"s-01\"") && lines[1].contains("stage-1"));
     }
 
     #[test]

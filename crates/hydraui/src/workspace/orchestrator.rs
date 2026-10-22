@@ -7,7 +7,7 @@ use gpui::{AnyElement, Context, SharedString, Window, div, px, relative};
 use gpui_component::WindowExt;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::notification::Notification;
-use gpui_component::{h_flex, v_flex};
+use gpui_component::{Sizable, h_flex, v_flex};
 
 use super::Workspace;
 use crate::envs::PaneId;
@@ -49,6 +49,21 @@ pub fn orchestrator_folder(
         cwd.to_path_buf()
     }
 }
+
+/// What a reopened orchestrator is told (§13): hydraui restarted, which run it has back, and to
+/// carry on from the run's status.
+pub fn resume_prompt(run: &str, ticket: &str) -> String {
+    format!(
+        "hydraui restarted, and you're picking run {run} ({ticket}) back up as its \
+         orchestrator. Call run_status to see where it is, then carry on as before: start the \
+         next stage when one is due, wait while a stage runs (hydraui tells you when it \
+         reports), and when the run needs a person, tell me why and wait."
+    )
+}
+
+/// What a reopened stage session is told (§13).
+pub const STAGE_RESUME_PROMPT: &str = "hydraui restarted and reopened this session. Please \
+     carry on with your stage where you left off, and call stage_report when it's done.";
 
 /// What hydraui types into the orchestrator's terminal after `changes` to `run` (§6): the run,
 /// the stage and the result, and what to do next; `None` when nothing calls for it (a pause).
@@ -185,6 +200,18 @@ pub(super) fn tell(changes: Vec<Change>) {
     server.broadcast(McpEvent::RunChanged(changes));
 }
 
+/// Writes `event` to run `run`'s log (§8), noting a failure in hydraui's log: what only the app
+/// knows, which a restart needs to pick the run back up (§13).
+fn note_run(run: &str, event: &str, fields: serde_json::Value) {
+    let Some(root) = server::get().and_then(|sv| server::lock(sv.registry()).hydra_root.clone())
+    else {
+        return;
+    };
+    if let Err(e) = crate::run_log::append(&crate::run_log::file_for(&root, run), event, fields) {
+        crate::action_log::write(format!("run log {run}: {e}"));
+    }
+}
+
 impl Workspace {
     /// The gate let stage `s` start: find its orchestrator's environment and folder, make the
     /// run's worktree when the stage wants one and the run has none (off the UI thread), then
@@ -265,12 +292,239 @@ impl Workspace {
                             .runs
                             .set_worktree(&s.run, wt.path.clone());
                     }
+                    note_run(
+                        &s.run,
+                        "worktree",
+                        serde_json::json!({"path": wt.path.display().to_string()}),
+                    );
                     ws.open_stage(s, &env, wt.path, window, cx);
                 }
                 Err(e) => stage_failed(&s, format!("couldn't make its worktree: {e}")),
             });
         })
         .detach();
+    }
+
+    /// **Resume** on interrupted run `idx` (§13): reopens its orchestrator's conversation in a
+    /// terminal of its own, moves the run to it, then reopens the stage that was running (or
+    /// ends it as if its session had gone when that session wasn't logged).
+    pub(super) fn resume_run(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if idx >= self.interrupted.len() {
+            return;
+        }
+        let i = self.interrupted.remove(idx);
+        let run_id = i.run.id.clone();
+        let shell = self.shell();
+        let folder = if i.folder.is_dir() {
+            i.folder.clone()
+        } else {
+            self.env_cwd(&i.env, cx)
+        };
+        let mut request = PaneRequest::new(&i.env, folder.clone(), shell);
+        request.command = Some(command_line(
+            shell,
+            &[
+                "claude".into(),
+                "--resume".into(),
+                i.claude.clone(),
+                resume_prompt(&run_id, &i.run.ticket),
+            ],
+        ));
+        let id = self.open_terminal(&i.env, request, window, cx);
+        let Some(view) = self.panes.get(&id).cloned() else {
+            return;
+        };
+        view.update(cx, |v, cx| v.set_name(Some("orchestrator".into()), cx));
+        self.orchestrators.insert(id, i.run.pipeline.file.clone());
+        let (Some(token), Some(sv)) =
+            (view.read(cx).mcp_token().map(str::to_string), server::get())
+        else {
+            window.push_notification(
+                Notification::error("Its terminal has no MCP token.").title("Resume"),
+                cx,
+            );
+            return;
+        };
+        {
+            let mut reg = server::lock(sv.registry());
+            reg.runs.restore(i.run.clone());
+            reg.runs.adopt(&run_id, &token);
+        }
+        note_run(
+            &run_id,
+            "orchestrator",
+            serde_json::json!({"env": i.env, "folder": folder.display().to_string(),
+                               "pid": std::process::id()}),
+        );
+        note_run(&run_id, "resumed after restart", serde_json::json!({}));
+        crate::action_log::write(format!("run {run_id}: resumed after a restart"));
+        // The stage that was at work when hydraui closed.
+        let busy = i.run.stages.iter().position(|s| s.status.busy());
+        if let Some(si) = busy {
+            let attempt = i.run.stages[si].latest().cloned();
+            let label = attempt
+                .as_ref()
+                .map(|a| a.label.clone())
+                .unwrap_or_default();
+            match i.stages.get(&label) {
+                Some((Some(dir), Some(claude))) if dir.is_dir() => {
+                    let mut request = PaneRequest::new(&i.env, dir.clone(), shell);
+                    request.command = Some(command_line(
+                        shell,
+                        &[
+                            "claude".into(),
+                            "--resume".into(),
+                            claude.clone(),
+                            STAGE_RESUME_PROMPT.into(),
+                        ],
+                    ));
+                    let name = crate::runs::session_name(
+                        si,
+                        &i.run.pipeline.stages[si].title,
+                        i.run.stages[si].attempts.len().saturating_sub(1),
+                    );
+                    let opened = self
+                        .open_terminal_beside(&i.env, request, window, cx)
+                        .and_then(|sid| self.panes.get(&sid).cloned());
+                    if let Some(sview) = opened {
+                        sview.update(cx, |v, cx| v.set_name(Some(name.clone()), cx));
+                        let stoken = sview.read(cx).mcp_token().map(str::to_string);
+                        let taker = sview.read(cx).taker_name().unwrap_or(name);
+                        if let Some(stoken) = stoken {
+                            server::lock(sv.registry())
+                                .runs
+                                .relink(&run_id, si, &stoken, &taker);
+                        }
+                    }
+                }
+                _ => {
+                    let changes = {
+                        let mut reg = server::lock(sv.registry());
+                        let changes = reg.runs.session_gone(&label);
+                        if let Some(root) = reg.hydra_root.clone() {
+                            crate::run_log::record(&root, &reg.runs, &changes);
+                        }
+                        changes
+                    };
+                    self.runs_changed(changes, window, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// **Stop ticket** on interrupted run `idx` (§13): its log ends, and its card goes.
+    pub(super) fn stop_interrupted(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if idx >= self.interrupted.len() {
+            return;
+        }
+        let i = self.interrupted.remove(idx);
+        note_run(
+            &i.run.id,
+            "run ended",
+            serde_json::json!({"outcome": "stopped", "reason": "hydraui closed while it ran"}),
+        );
+        crate::action_log::write(format!("run {}: stopped after a restart", i.run.id));
+        cx.notify();
+    }
+
+    /// Interrupted run `idx`'s card (§13): its pipeline card with an **Interrupted** pill, and
+    /// **Resume** and **Stop ticket**.
+    pub(super) fn render_interrupted_card(&self, idx: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(i) = self.interrupted.get(idx) else {
+            return div().into_any_element();
+        };
+        let c = card(&i.run);
+        let segments = c.segments.iter().map(|s| {
+            let fill = match s {
+                Segment::Passed => color(theme::TEAL),
+                Segment::Running => color(theme::AMBER),
+                Segment::Stopped => color(theme::RED),
+                Segment::Pending => color(theme::BORDER),
+            };
+            div().flex_1().h(px(3.)).rounded_full().bg(fill)
+        });
+        v_flex()
+            .id(SharedString::from(format!("interrupted-{}", i.run.id)))
+            .mx_1()
+            .my_1()
+            .p(px(10.))
+            .gap(px(6.))
+            .rounded(px(10.))
+            .border_1()
+            .bg(color(theme::SURFACE))
+            .border_color(color(theme::AMBER).opacity(0.5))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().text_xs().text_color(color(theme::AMBER)).child("◆"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(color(theme::TEXT))
+                            .child(c.name.clone()),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .justify_between()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(color(theme::TEXT_SECONDARY))
+                            .child(c.line.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .px(px(7.))
+                            .py(px(2.))
+                            .rounded(px(5.))
+                            .text_xs()
+                            .bg(color(theme::AMBER_TINT))
+                            .text_color(color(theme::AMBER))
+                            .child("Interrupted"),
+                    ),
+            )
+            .child(h_flex().gap(px(3.)).children(segments))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(color(theme::TEXT_SECONDARY))
+                    .child("hydraui closed while this ran."),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new(SharedString::from(format!("resume-{}", i.run.id)))
+                            .label("Resume")
+                            .primary()
+                            .small()
+                            .on_click(
+                                cx.listener(move |ws, _, window, cx| {
+                                    ws.resume_run(idx, window, cx)
+                                }),
+                            ),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("stop-{}", i.run.id)))
+                            .label("Stop ticket")
+                            .ghost()
+                            .small()
+                            .on_click(
+                                cx.listener(move |ws, _, _, cx| ws.stop_interrupted(idx, cx)),
+                            ),
+                    ),
+            )
+            .into_any_element()
     }
 
     /// Opens stage `s`'s terminal in `cwd` running Claude with its prompt, names it and links its
@@ -284,6 +538,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let shell = self.shell();
+        note_run(
+            &s.run,
+            "stage folder",
+            serde_json::json!({"label": s.label, "folder": cwd.display().to_string()}),
+        );
         let mut request = PaneRequest::new(env, cwd, shell);
         request.command = Some(command_line(
             shell,
@@ -330,6 +589,34 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Where a new run's orchestrator is, and which hydraui drives it (§13).
+        let started: Vec<(String, String)> = server::get()
+            .map(|sv| {
+                let reg = server::lock(sv.registry());
+                changes
+                    .iter()
+                    .filter(|c| matches!(c.what, Decided::RunStarted))
+                    .filter_map(|c| {
+                        let r = reg.runs.run(&c.run)?;
+                        Some((r.id.clone(), r.orchestrator.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (run, token) in started {
+            let found = self.panes.values().find_map(|v| {
+                let v = v.read(cx);
+                (v.mcp_token() == Some(token.as_str()))
+                    .then(|| (v.request.env.clone(), v.cwd().display().to_string()))
+            });
+            if let Some((env, folder)) = found {
+                note_run(
+                    &run,
+                    "orchestrator",
+                    serde_json::json!({"env": env, "folder": folder, "pid": std::process::id()}),
+                );
+            }
+        }
         let mut wakes = Vec::new();
         if let Some(sv) = server::get() {
             let reg = server::lock(sv.registry());
@@ -1020,6 +1307,17 @@ mod tests {
         );
         let project = std::path::Path::new("/Users/me/Projects/app");
         assert_eq!(orchestrator_folder(project, home, root, "inth"), project);
+    }
+
+    #[test]
+    fn a_reopened_session_is_told_hydraui_restarted_and_what_to_do() {
+        let p = resume_prompt("INTH-7-2", "INTH-7");
+        for says in ["restarted", "INTH-7-2", "INTH-7", "run_status", "wait"] {
+            assert!(p.contains(says), "{says}: {p}");
+        }
+        for says in ["restarted", "carry on", "stage_report"] {
+            assert!(STAGE_RESUME_PROMPT.contains(says), "{says}");
+        }
     }
 
     #[test]

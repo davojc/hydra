@@ -205,6 +205,8 @@ pub struct Workspace {
     /// Orchestrators started from the launcher, with the pipeline file each runs: their cards
     /// show before they have a ticket.
     orchestrators: HashMap<PaneId, String>,
+    /// Runs open when an earlier hydraui closed, offered back as cards (orchestrator §13).
+    interrupted: Vec<crate::run_resume::Interrupted>,
     /// Pipeline settings being edited, per orchestrator (orchestrator spec §7.4).
     pipeline_settings: HashMap<PaneId, pipeline_settings::SettingsDraft>,
     /// One board per project, shared by every Tasks tab on it; dropped when no tab uses it.
@@ -351,6 +353,7 @@ impl Workspace {
                             token,
                             state,
                             resumed,
+                            ..
                         } => ws.session_state(&token, state, resumed, window, cx),
                         McpEvent::Usage(token, usage) => ws.usage_reported(&token, usage, cx),
                         McpEvent::Verified(token) => ws.session_verified(&token, cx),
@@ -369,6 +372,7 @@ impl Workspace {
             let _ = this.update_in(cx, |ws, window, cx| ws.startup(problems, start, window, cx));
         })
         .detach();
+        let interrupted = crate::run_resume::interrupted(hydra.paths.root(), crate::claim::alive);
         Self {
             hydra,
             keymap: crate::keys::keymap(&ui.keys).0,
@@ -421,6 +425,7 @@ impl Workspace {
             pipeline_tabs: HashMap::new(),
             pipeline_settings: HashMap::new(),
             orchestrators: HashMap::new(),
+            interrupted,
             boards: HashMap::new(),
             board_views: HashMap::new(),
             all_tasks: HashSet::new(),
@@ -447,6 +452,17 @@ impl Workspace {
         self.start_update_checks(cx);
         for p in problems {
             window.push_notification(Notification::warning(p).title("hydraui settings"), cx);
+        }
+        // A ticket left mid-run waits on its environment's card (orchestrator §13).
+        for i in &self.interrupted {
+            window.push_notification(
+                Notification::info(format!(
+                    "{} was running when hydraui closed. Open {} to resume it.",
+                    i.run.ticket, i.env
+                ))
+                .title(i.run.pipeline.name.clone()),
+                cx,
+            );
         }
         // The page first: opening a file leaves it; a file that fails to open leaves the
         // page and its toast (§7.12 Command line); a file another window took meanwhile

@@ -31,6 +31,7 @@ pub mod pane_view;
 pub mod pickup;
 pub mod pipeline;
 pub mod quick_open;
+pub mod rating;
 pub mod readiness;
 pub mod save_dialog;
 pub mod search;

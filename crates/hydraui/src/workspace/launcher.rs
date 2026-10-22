@@ -392,8 +392,11 @@ impl Workspace {
             .collect();
         if envs.is_empty() {
             window.push_notification(
-                Notification::info("No environment has Claude configured: add [claude] to one.")
-                    .title("Start orchestrator"),
+                Notification::info(
+                    "No environment has Claude set up in hydra. Run `hydra add claude <env>`, \
+                     then Reload config and sign in from a new terminal.",
+                )
+                .title("Start orchestrator"),
                 cx,
             );
             return;

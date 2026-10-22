@@ -718,7 +718,7 @@ impl Workspace {
                         } else {
                             format!("Below the {bar}% bar")
                         };
-                        self.rating_report(r, passed, verdict)
+                        self.rating_report(r, passed, verdict, true)
                     }
                     None => v_flex()
                         .px(px(28.))
@@ -872,7 +872,14 @@ impl Workspace {
     }
 
     /// A rating as the design's report shows it: the score, the verdict, Reasons and Evidence.
-    fn rating_report(&self, r: &Rating, passed: bool, verdict: String) -> AnyElement {
+    /// `summary` is false where the summary already shows (the stopped banner's headline).
+    fn rating_report(
+        &self,
+        r: &Rating,
+        passed: bool,
+        verdict: String,
+        summary: bool,
+    ) -> AnyElement {
         let reasons = r.reasons.iter().map(|x| {
             let (sign, hex) = match x.side {
                 Side::For => ("+", theme::GREEN),
@@ -882,7 +889,13 @@ impl Workspace {
                 .items_start()
                 .gap_2()
                 .child(text(12.5, hex).flex_none().child(sign))
-                .child(text(12.5, theme::TEXT).child(x.text.clone()))
+                // A width it can't grow past, so a long reason wraps inside its column.
+                .child(
+                    text(12.5, theme::TEXT)
+                        .flex_1()
+                        .min_w_0()
+                        .child(x.text.clone()),
+                )
         });
         let evidence = r.evidence.iter().map(|e| {
             h_flex()
@@ -928,9 +941,13 @@ impl Workspace {
                     )
                     .child(
                         v_flex()
+                            .flex_1()
+                            .min_w_0()
                             .pb_2()
                             .child(text(13., theme::TEXT).child(verdict))
-                            .child(text(12., theme::TEXT_SECONDARY).child(r.summary.clone())),
+                            .when(summary, |d| {
+                                d.child(text(12., theme::TEXT_SECONDARY).child(r.summary.clone()))
+                            }),
                     ),
             )
             .child(
@@ -1084,10 +1101,9 @@ impl Workspace {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .children(
-                        rating
-                            .map(|r| self.rating_report(r, false, format!("Below the {bar}% bar"))),
-                    ),
+                    .children(rating.map(|r| {
+                        self.rating_report(r, false, format!("Below the {bar}% bar"), false)
+                    })),
             )
             .child(actions)
             .into_any_element()

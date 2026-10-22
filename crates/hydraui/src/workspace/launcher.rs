@@ -461,7 +461,16 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let shell = self.shell();
-        let mut request = crate::hydra::PaneRequest::new(env, self.env_cwd(env, cx), shell);
+        let cwd = super::orchestrator::orchestrator_folder(
+            &self.env_cwd(env, cx),
+            &self.hydra.user_home,
+            self.hydra.paths.root(),
+            pipeline,
+        );
+        if let Err(e) = std::fs::create_dir_all(&cwd) {
+            crate::action_log::write(format!("orchestrator folder {}: {e}", cwd.display()));
+        }
+        let mut request = crate::hydra::PaneRequest::new(env, cwd, shell);
         request.command = Some(crate::hydra::command_line(
             shell,
             &[

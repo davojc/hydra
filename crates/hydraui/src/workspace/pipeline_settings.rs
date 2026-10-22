@@ -507,13 +507,11 @@ impl Workspace {
                             )
                             .child(
                                 Button::new(SharedString::from(format!("skill-{key}")))
-                                    .label(format!(
-                                        "{} ▾",
-                                        s.skill.clone().unwrap_or_else(|| "No skill".into())
-                                    ))
+                                    .label(s.skill.clone().unwrap_or_else(|| "No skill".into()))
+                                    .dropdown_caret(true)
                                     .outline()
                                     .small()
-                                    .w(px(140.))
+                                    .w(px(120.))
                                     .flex_none()
                                     .on_click(cx.listener(move |ws, _, window, cx| {
                                         ws.pick_skill(orch, key, window, cx)
@@ -523,18 +521,19 @@ impl Workspace {
                                 Button::new(SharedString::from(format!("folder-{key}")))
                                     .label(match &s.folder {
                                         Some(f) => format!(
-                                            "in {} ▾",
+                                            "in {}",
                                             std::path::Path::new(f)
                                                 .file_name()
                                                 .map_or(f.clone(), |n| n
                                                     .to_string_lossy()
                                                     .into_owned())
                                         ),
-                                        None => "Orchestrator's folder ▾".into(),
+                                        None => "Orchestrator's folder".into(),
                                     })
+                                    .dropdown_caret(true)
                                     .outline()
                                     .small()
-                                    .w(px(190.))
+                                    .w(px(165.))
                                     .flex_none()
                                     .tooltip("The folder this stage's session starts in")
                                     .on_click(cx.listener(move |ws, _, window, cx| {

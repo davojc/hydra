@@ -31,6 +31,25 @@ pub fn orchestrator_prompt(pipeline: &str) -> String {
     )
 }
 
+/// Where an orchestrator's Claude starts: `cwd`, unless that is the home folder, whose trust
+/// Claude Code never remembers (it would ask at every start); then a folder of its own under
+/// `<HYDRA_HOME>/hydraui/orchestrators`, trusted once and remembered.
+pub fn orchestrator_folder(
+    cwd: &std::path::Path,
+    user_home: &std::path::Path,
+    hydra_root: &std::path::Path,
+    pipeline: &str,
+) -> std::path::PathBuf {
+    if cwd == user_home {
+        hydra_root
+            .join("hydraui")
+            .join("orchestrators")
+            .join(pipeline)
+    } else {
+        cwd.to_path_buf()
+    }
+}
+
 /// What hydraui types into the orchestrator's terminal after `changes` to `run` (§6): the run,
 /// the stage and the result, and what to do next; `None` when nothing calls for it (a pause).
 pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
@@ -933,6 +952,18 @@ mod tests {
         };
         assert!(wake_now(&ready, false));
         assert!(!wake_now(&ready, true));
+    }
+
+    #[test]
+    fn an_orchestrator_launched_from_home_gets_its_own_folder() {
+        let home = std::path::Path::new("/Users/me");
+        let root = std::path::Path::new("/Users/me/.hydra");
+        assert_eq!(
+            orchestrator_folder(home, home, root, "inth"),
+            root.join("hydraui").join("orchestrators").join("inth")
+        );
+        let project = std::path::Path::new("/Users/me/Projects/app");
+        assert_eq!(orchestrator_folder(project, home, root, "inth"), project);
     }
 
     #[test]

@@ -527,6 +527,8 @@ mod tests {
         );
     }
 
+    // Holding the exe open exclusively needs Windows' share modes.
+    #[cfg(windows)]
     #[test]
     fn uninstall_refuses_while_hydraui_runs() {
         use std::os::windows::fs::OpenOptionsExt;

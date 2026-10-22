@@ -1,11 +1,11 @@
-//! Per-pane init scripts: `state/<env>/shell/hydraui/<pane-id>.ps1|.bash`, so panes never
-//! overwrite each other or the CLI's `init.ps1` (spec §4.5).
+//! Per-pane init scripts: `state/<env>/shell/hydraui/<pane-id>.ps1|.bash|.zsh/`, so panes
+//! never overwrite each other or the CLI's `init.ps1` (spec §4.5).
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use hydra_core::name::EnvName;
 use hydra_core::paths::HydraPaths;
-use hydra_platform::shell::{PromptStyle, ShellKind, render_init};
+use hydra_platform::shell::{PromptStyle, ShellKind, render_init, write_init_text};
 
 /// A pane id unique across hydraui processes: `<pid>-<n>`.
 pub fn next_pane_id() -> String {
@@ -28,18 +28,16 @@ pub fn write_pane_init(
 ) -> std::io::Result<PathBuf> {
     let dir = paths.state_dir(env).join("shell").join("hydraui");
     std::fs::create_dir_all(&dir)?;
-    let ext = match kind {
-        ShellKind::Pwsh => "ps1",
-        ShellKind::Bash => "bash",
-    };
-    let path = dir.join(format!("{pane_id}.{ext}"));
     let style = PromptStyle {
         name: env.as_str(),
         rgb,
         integration: true,
     };
-    std::fs::write(&path, render_init(kind, &style, startup))?;
-    Ok(path)
+    write_init_text(
+        kind,
+        &dir.join(pane_id),
+        &render_init(kind, &style, startup),
+    )
 }
 
 /// Deletes every environment's pane init scripts; hydraui calls it at start. A script is
@@ -82,9 +80,11 @@ mod tests {
         )
         .unwrap();
         let b = write_pane_init(&paths, &work(), None, ShellKind::Bash, None, "1-2").unwrap();
+        let c = write_pane_init(&paths, &work(), None, ShellKind::Zsh, None, "1-3").unwrap();
         let dir = paths.state_dir(&work()).join("shell");
         assert_eq!(a, dir.join("hydraui").join("1-1.ps1"));
         assert_eq!(b, dir.join("hydraui").join("1-2.bash"));
+        assert_eq!(c, dir.join("hydraui").join("1-3.zsh").join(".zshrc"));
         let text = std::fs::read_to_string(&a).unwrap();
         assert!(text.contains("133;A"), "{text}");
         assert!(text.contains("\nnpm run dev\n"), "{text}");

@@ -226,7 +226,7 @@ impl Hydra {
             })
     }
 
-    /// hydraui's `default_shell`, else hydra's, else pwsh.
+    /// hydraui's `default_shell`, else hydra's, else the platform's (`ShellKind::platform_default`).
     pub fn shell(&self, ui_default: Option<&str>) -> ShellKind {
         ui_default
             .and_then(ShellKind::parse)
@@ -236,7 +236,7 @@ impl Hydra {
                     .as_deref()
                     .and_then(ShellKind::parse)
             })
-            .unwrap_or(ShellKind::Pwsh)
+            .unwrap_or(ShellKind::platform_default())
     }
 
     /// The environment's tab tint (spec §7.1).
@@ -593,7 +593,7 @@ pub fn command_line(shell: ShellKind, argv: &[String]) -> String {
             let words: Vec<String> = argv.iter().map(|a| pwsh_quote(a)).collect();
             format!("& {}", words.join(" "))
         }
-        ShellKind::Bash => argv
+        ShellKind::Bash | ShellKind::Zsh => argv
             .iter()
             .map(|a| sh_quote(a))
             .collect::<Vec<_>>()
@@ -1127,7 +1127,7 @@ email = \"p@example.com\"
     #[test]
     fn shell_choice_is_hydraui_then_hydra_then_pwsh() {
         assert_eq!(fx("").hydra.shell(Some("bash")), ShellKind::Bash);
-        assert_eq!(fx("").hydra.shell(None), ShellKind::Pwsh);
+        assert_eq!(fx("").hydra.shell(None), ShellKind::platform_default());
         let f = fx("default_shell = \"bash\"\n");
         assert_eq!(f.hydra.shell(None), ShellKind::Bash);
         assert_eq!(f.hydra.shell(Some("pwsh")), ShellKind::Pwsh);

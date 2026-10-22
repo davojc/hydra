@@ -14,9 +14,49 @@ pub mod release;
 
 use release::{Release, WindowsBuild};
 
-/// The release assets.
+/// The release assets: this platform's builds, named for their target.
+#[cfg(windows)]
 pub const HYDRA_ASSET: &str = "hydra-x86_64-pc-windows-msvc.exe";
+#[cfg(windows)]
 pub const HYDRAUI_ASSET: &str = "hydraui-x86_64-pc-windows-msvc.exe";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub const HYDRA_ASSET: &str = "hydra-aarch64-apple-darwin";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub const HYDRAUI_ASSET: &str = "hydraui-aarch64-apple-darwin";
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+pub const HYDRA_ASSET: &str = "hydra-x86_64-apple-darwin";
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+pub const HYDRAUI_ASSET: &str = "hydraui-x86_64-apple-darwin";
+/// No release has builds for other platforms, so an update says it can't find them.
+#[cfg(not(any(
+    windows,
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    )
+)))]
+pub const HYDRA_ASSET: &str = "hydra-unsupported-platform";
+#[cfg(not(any(
+    windows,
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    )
+)))]
+pub const HYDRAUI_ASSET: &str = "hydraui-unsupported-platform";
+
+/// Lets the downloaded build run: a new Unix file has no executable bit. Windows has none.
+fn make_runnable(path: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("can't make {} runnable", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
 
 /// GitHub's latest-release URL; `HYDRA_UPDATE_API` points it elsewhere (tests).
 pub fn latest_url() -> String {
@@ -118,7 +158,7 @@ pub fn download_verified_with(
     if actual != expected {
         anyhow::bail!("checksum mismatch - nothing changed");
     }
-    Ok(())
+    make_runnable(new)
 }
 
 /// The file's SHA-256, as lowercase hex.
@@ -156,7 +196,7 @@ pub fn copy_verified(src_dir: &Path, asset: &str, new: &Path) -> anyhow::Result<
         let _ = fs::remove_file(new);
         anyhow::bail!("checksum mismatch - nothing changed");
     }
-    Ok(())
+    make_runnable(new)
 }
 
 /// One exe to replace: `target` moves to `old`, `new` takes its place.
@@ -374,6 +414,46 @@ mod tests {
             seen.windows(2).all(|w| w[0].0 <= w[1].0),
             "never goes backwards"
         );
+    }
+
+    #[test]
+    fn the_assets_are_this_platforms_builds() {
+        let want = if cfg!(windows) {
+            (
+                "hydra-x86_64-pc-windows-msvc.exe",
+                "hydraui-x86_64-pc-windows-msvc.exe",
+            )
+        } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            ("hydra-aarch64-apple-darwin", "hydraui-aarch64-apple-darwin")
+        } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+            ("hydra-x86_64-apple-darwin", "hydraui-x86_64-apple-darwin")
+        } else {
+            return;
+        };
+        assert_eq!((HYDRA_ASSET, HYDRAUI_ASSET), want);
+    }
+
+    /// A downloaded or copied build must run: Unix files arrive without the executable bit.
+    #[cfg(unix)]
+    #[test]
+    fn downloaded_and_copied_builds_can_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let runs = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o111 == 0o111;
+        let gh = fake::FakeGitHub::serve("v1.0.0", &[("a", b"bytes")]);
+        let build = fetch_latest(&gh.latest_url(), "t")
+            .unwrap()
+            .windows_build("a")
+            .unwrap();
+        let d = tempfile::tempdir().unwrap();
+        let new = d.path().join("a.new");
+        download_verified(&build, &new, "t").unwrap();
+        assert!(runs(&new));
+        std::fs::write(d.path().join("b"), b"bytes").unwrap();
+        let sum = sha256_file(&d.path().join("b")).unwrap();
+        std::fs::write(d.path().join("b.sha256"), format!("{sum}  b\n")).unwrap();
+        let copied = d.path().join("b.new");
+        copy_verified(d.path(), "b", &copied).unwrap();
+        assert!(runs(&copied));
     }
 
     #[test]

@@ -145,15 +145,13 @@ mod tests {
 
     #[test]
     fn the_title_names_the_layout_not_the_tab() {
+        let l = Path::new(if cfg!(windows) { r"C:\l" } else { "/l" });
         assert_eq!(
-            window_title(Some(Path::new(r"C:\l\client-a.hydraui")), false),
+            window_title(Some(&l.join("client-a.hydraui")), false),
             "hydraui - client-a"
         );
         assert_eq!(window_title(None, false), "hydraui - untitled");
         assert_eq!(window_title(None, true), "hydraui");
-        assert_eq!(
-            window_title(Some(Path::new(r"C:\l\x.hydraui")), true),
-            "hydraui"
-        );
+        assert_eq!(window_title(Some(&l.join("x.hydraui")), true), "hydraui");
     }
 }

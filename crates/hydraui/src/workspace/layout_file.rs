@@ -485,16 +485,26 @@ impl Workspace {
             then(self, PathBuf::from(p), window, cx);
             return;
         }
-        let (tx, rx) = futures::channel::oneshot::channel();
-        let owner = crate::claim::hwnd_of(window);
-        std::thread::spawn(move || {
-            let _ = tx.send(crate::save_dialog::prompt(&dir, &name, owner));
-        });
+        #[cfg(windows)]
+        let rx = {
+            let (tx, rx) = futures::channel::oneshot::channel();
+            let owner = crate::claim::hwnd_of(window);
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::save_dialog::prompt(&dir, &name, owner));
+            });
+            rx
+        };
+        // gpui's own Save panel, which doesn't know the file type.
+        #[cfg(not(windows))]
+        let rx = cx.prompt_for_new_path(&dir, Some(&name));
         cx.spawn_in(window, async move |this, cx| match rx.await {
             Ok(Ok(Some(path))) => {
+                #[cfg(not(windows))]
+                let path = crate::save_dialog::with_extension(path);
                 let _ = this.update_in(cx, |ws, window, cx| then(ws, path, window, cx));
             }
             Ok(Err(e)) => {
+                let e = e.to_string();
                 let _ = this.update_in(cx, |_, window, cx| {
                     window.push_notification(Notification::error(e).title("Save"), cx)
                 });

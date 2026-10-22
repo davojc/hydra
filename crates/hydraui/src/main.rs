@@ -81,7 +81,7 @@ fn main() {
             })
             .detach();
             let style = TermStyle {
-                font: ui.font.clone().into(),
+                font: config::terminal_font(&ui.font, &cx.text_system().all_font_names()).into(),
                 font_size: px(ui.font_size),
                 palette,
             };
@@ -104,6 +104,7 @@ fn main() {
 }
 
 /// A GUI exe has no console: say why it can't start in a message box, then exit.
+#[cfg(windows)]
 fn fatal(message: &str) -> ! {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
     let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
@@ -117,5 +118,32 @@ fn fatal(message: &str) -> ! {
             MB_OK | MB_ICONERROR,
         )
     };
+    std::process::exit(1)
+}
+
+/// Says why hydraui can't start, on stderr (for a launch from a terminal) and in an alert
+/// (for one from Finder or the Dock), then exits.
+#[cfg(target_os = "macos")]
+fn fatal(message: &str) -> ! {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSAlert, NSAlertStyle, NSApplication};
+    use objc2_foundation::NSString;
+    eprintln!("hydraui: {message}");
+    // AppKit is main-thread only; off it, stderr has to do.
+    if let Some(mtm) = MainThreadMarker::new() {
+        let _ = NSApplication::sharedApplication(mtm);
+        let alert = NSAlert::new(mtm);
+        alert.setAlertStyle(NSAlertStyle::Critical);
+        alert.setMessageText(&NSString::from_str("hydraui can't start"));
+        alert.setInformativeText(&NSString::from_str(message));
+        alert.runModal();
+    }
+    std::process::exit(1)
+}
+
+/// Says why hydraui can't start, on stderr, then exits.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn fatal(message: &str) -> ! {
+    eprintln!("hydraui: {message}");
     std::process::exit(1)
 }

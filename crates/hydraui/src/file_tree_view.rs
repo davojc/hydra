@@ -97,7 +97,7 @@ pub fn row_menu(is_dir: bool, changed: bool, can_cd: bool) -> Vec<Option<MenuEnt
         out.push(entry("New terminal here", MenuAction::NewTerminal));
     }
     out.extend([
-        entry("Reveal in Explorer", MenuAction::Reveal),
+        entry(crate::file_ops::REVEAL_LABEL, MenuAction::Reveal),
         None,
         entry("Rename…", MenuAction::Rename),
         entry("Delete…", MenuAction::Delete),
@@ -126,7 +126,15 @@ pub fn menu_event(action: MenuAction, path: &Path, is_dir: bool, root: &Path) ->
         MenuAction::Reveal => TreeEvent::Reveal(path),
         MenuAction::Rename => TreeEvent::Rename(path),
         MenuAction::Delete => TreeEvent::Delete(path),
-        MenuAction::CopyPath => TreeEvent::Copy(path.to_string_lossy().replace('/', "\\")),
+        MenuAction::CopyPath => {
+            let text = path.to_string_lossy();
+            // Windows paths copy with backslashes; elsewhere `/` is the only separator.
+            TreeEvent::Copy(if cfg!(windows) {
+                text.replace('/', "\\")
+            } else {
+                text.into_owned()
+            })
+        }
         MenuAction::CopyRelativePath => {
             TreeEvent::Copy(crate::file_ops::relative_path(root, &path))
         }
@@ -370,7 +378,7 @@ impl FileTreeView {
             self.sync_watches();
             cx.notify();
         } else {
-            cx.emit(file_click(ev.modifiers().control, path));
+            cx.emit(file_click(ev.modifiers().secondary(), path));
         }
     }
 }
@@ -516,7 +524,7 @@ mod tests {
                 "-",
                 "cd here",
                 "New terminal here",
-                "Reveal in Explorer",
+                crate::file_ops::REVEAL_LABEL,
                 "-",
                 "Rename…",
                 "Delete…",
@@ -540,9 +548,9 @@ mod tests {
 
     #[test]
     fn menu_actions_act_on_the_folder_a_file_is_in() {
-        let root = Path::new(r"C:\repo");
-        let file = PathBuf::from(r"C:\repo\src\main.rs");
-        let dir = PathBuf::from(r"C:\repo\src");
+        let root = Path::new(if cfg!(windows) { r"C:\repo" } else { "/repo" });
+        let dir = root.join("src");
+        let file = dir.join("main.rs");
         let ev = |a| menu_event(a, &file, false, root);
         assert_eq!(ev(MenuAction::NewFile), TreeEvent::NewFile(dir.clone()));
         assert_eq!(ev(MenuAction::NewFolder), TreeEvent::NewFolder(dir.clone()));
@@ -550,11 +558,16 @@ mod tests {
         assert_eq!(ev(MenuAction::Rename), TreeEvent::Rename(file.clone()));
         assert_eq!(
             ev(MenuAction::CopyPath),
-            TreeEvent::Copy(r"C:\repo\src\main.rs".into())
+            TreeEvent::Copy(file.to_string_lossy().into_owned())
         );
+        let relative = if cfg!(windows) {
+            r"src\main.rs"
+        } else {
+            "src/main.rs"
+        };
         assert_eq!(
             ev(MenuAction::CopyRelativePath),
-            TreeEvent::Copy(r"src\main.rs".into())
+            TreeEvent::Copy(relative.into())
         );
         assert_eq!(
             menu_event(MenuAction::NewFile, &dir, true, root),
@@ -609,6 +622,19 @@ mod tests {
         assert_eq!(file_click(true, p.clone()), TreeEvent::Insert(p));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn paths_are_found_under_the_repository_on_unix() {
+        let rel = |root: &str, p: &str| rel_to(Path::new(root), Path::new(p));
+        assert_eq!(
+            rel("/w/repo", "/w/repo/src/A.rs"),
+            Some(PathBuf::from("src/A.rs"))
+        );
+        assert_eq!(rel("/w/repo", "/w/repo"), Some(PathBuf::new()));
+        assert_eq!(rel("/w/repo", "/w/repository/a"), None);
+    }
+
+    #[cfg(windows)]
     #[test]
     fn paths_are_found_under_the_repository_however_windows_spells_them() {
         let rel = |root: &str, p: &str| rel_to(Path::new(root), Path::new(p));

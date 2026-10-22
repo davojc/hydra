@@ -2,7 +2,7 @@
 
 # hydra
 
-**Terminals with their own identities.** hydra opens PowerShell or Git Bash terminals inside named *environments*. Each environment has its own sign-ins and identity for the tools you use, including Claude Code, the GitHub CLI, git, AWS, Azure, Google Cloud and more. A `work` terminal and a `personal` terminal can then sit side by side, each signed in to a different account, and neither can quietly use the other's.
+**Terminals with their own identities.** hydra opens PowerShell or Git Bash terminals (zsh on macOS) inside named *environments*. Each environment has its own sign-ins and identity for the tools you use, including Claude Code, the GitHub CLI, git, AWS, Azure, Google Cloud and more. A `work` terminal and a `personal` terminal can then sit side by side, each signed in to a different account, and neither can quietly use the other's.
 
 hydra comes in two parts that share the same `~/.hydra` folder:
 
@@ -25,7 +25,7 @@ Typical uses:
 - **Run Claude Code on several accounts at once.** Each environment has its own Claude sign-in, usage limits and history, and all of them share the skills, plugins, settings and MCP servers in your `~/.claude`. Things you add from inside an environment stay in that environment (see [Claude Code](#claude-code-separate-accounts-shared-setup)).
 - **Keep several Claude sessions busy.** Jot ideas on a project's task board while Claude works; move one into Pickup and hydraui hands it to a Claude session that is free.
 
-> **Status:** early (0.6). Windows 11 with PowerShell 7 and Git for Windows. See [What's not built yet](#whats-not-built-yet).
+> **Status:** early (0.6). Windows 11 with PowerShell 7 and Git for Windows, and macOS on Apple silicon with zsh (newer still: the builds aren't signed yet). See [What's not built yet](#whats-not-built-yet).
 
 ---
 
@@ -39,7 +39,15 @@ Typical uses:
 hydra init        # creates ~/.hydra
 ```
 
-**Updating:** `hydra update` installs the latest release after checking its SHA-256 checksum. `hydra update --check` only reports. It won't update while another hydra terminal is open. hydraui shows **Update hydra <version>** in its title bar when a release is out; it updates both `hydraui.exe` and `hydra.exe` the same way, then offers a restart.
+**macOS:** download `hydraui-aarch64-apple-darwin` and/or `hydra-aarch64-apple-darwin` from the [latest release](https://github.com/davojc/hydra/releases/latest) (each has a `.sha256`). Rename them to `hydraui` / `hydra`, put `hydra` in a folder on your `PATH`, and make both runnable. The builds aren't signed yet, so clear the quarantine your browser adds:
+
+```sh
+chmod +x hydra hydraui
+xattr -d com.apple.quarantine hydra hydraui
+hydra init        # creates ~/.hydra
+```
+
+**Updating:** `hydra update` installs the latest release after checking its SHA-256 checksum. `hydra update --check` only reports. It won't update while another hydra terminal is open. hydraui shows **Update hydra <version>** in its title bar when a release is out; it updates both `hydraui.exe` and `hydra.exe` the same way, then offers a restart. On macOS it updates `hydraui` and `hydra` the same way.
 
 **From source:** install Rust from <https://rustup.rs>, then `git clone https://github.com/davojc/hydra.git` and `cargo build --release`. Local builds report a `-dev` version (e.g. `0.5.0-dev`), so `hydra update` replaces them with the real release. `scripts\deploy.ps1` builds and installs to `E:\Tools`, or another folder with `-Target`.
 
@@ -58,7 +66,7 @@ hydraui runs the same environments as the CLI, in one window. Start it from the 
 - **Task board.** Right-click a terminal and choose **Tasks** for its project's board: Backlog, Pickup, InProgress, Verify and Done. Cards live in `.hydra/tasks.md` in the project, as plain Markdown. Claude sessions in hydraui terminals see the board through a local tool server hydra sets up for them: they take cards from Pickup, work on them, commit, and move them to Verify with the commit, for you to check and move to Done. **Take in new worktree** gives a card its own branch, worktree and Claude terminal.
 - **Auto-pickup.** Moving a card into Pickup types it into a free Claude session of that project. A session is free when it is new or has just moved a card to Verify; with a Jev API key (TypeSafe's decision model, set from the launcher), Jev also judges whether a session that finished other work is ready for a new task. That sends the session's last 60 terminal lines to TypeSafe's API. A Pickup card's right-click menu also has **Send to a free session** and **Send to ▸**. The launcher's **Open hydraui log** shows why a card went where it did.
 - **Layouts.** Save a window as a layout file: its environments, terminals, folders and open files come back when you open it, and Claude restarts where it was running.
-- **Launcher and keys.** `Ctrl+Shift+P` opens the launcher: environments, sign-ins, secrets, settings, layouts and more. The help icon in the title bar lists every key; change them under `[keys]` in `~/.hydra/hydraui/config.toml`.
+- **Launcher and keys.** `Ctrl+Shift+P` opens the launcher: environments, sign-ins, secrets, settings, layouts and more. The help icon in the title bar lists every key; change them under `[keys]` in `~/.hydra/hydraui/config.toml`. On macOS the keys use Cmd (`Cmd+Shift+P`, `Cmd+B`, `Cmd+click`, …), as Terminal does, and Ctrl stays with the shell.
 - **Updates.** The title bar shows **Update hydra <version>** when a release is out, and updates hydraui and `hydra.exe` together.
 
 hydraui terminals skip the CLI's folder guard; a terminal whose folder is bound to another environment shows a warning badge instead.
@@ -119,7 +127,7 @@ hydra starts each terminal with environment variables that point every tool at t
 
 - **Inherited variables are cleared.** Identity variables picked up from the terminal you launched from, such as `GH_TOKEN`, `AWS_PROFILE` or `ANTHROPIC_API_KEY`, are removed. This includes those of tools the environment doesn't use, so nothing leaks between environments, even when one hydra terminal is started from inside another.
 - **Launch fails closed.** If something could make a tool fall back to another identity, hydra refuses to open the terminal and says how to fix it. Examples are a configured SSH key that doesn't exist, or a secret you referenced but never stored. A tool that simply isn't signed in yet doesn't block anything.
-- **Secrets live in Windows Credential Manager.** Config files only reference them (`secret:work/linear`). Values never go to disk or into hydra's output. The one exception is a gws credentials file, which is written readable by your Windows account only.
+- **Secrets live in Windows Credential Manager** (the login Keychain on macOS). Config files only reference them (`secret:work/linear`). Values never go to disk or into hydra's output. The one exception is a gws credentials file, which is written readable by your Windows account only.
 
 ## Tools
 
@@ -324,6 +332,6 @@ A project's task board is `.hydra/tasks.md` in the project itself.
 - **`ssh` / `scp` / `sftp`** using the environment's key outside git.
 - **Windows Terminal profiles,** one coloured tab per environment.
 - **`hydra doctor`.**
-- **macOS and Linux.**
+- **Linux,** and on macOS a signed and notarised app (`.app` bundle, Homebrew).
 
 The CLI's design is in [`docs/superpowers/specs/2026-10-03-hydra-design.md`](docs/superpowers/specs/2026-10-03-hydra-design.md) and its roadmap in [`docs/superpowers/plans/2026-10-03-hydra-roadmap.md`](docs/superpowers/plans/2026-10-03-hydra-roadmap.md). hydraui's designs are in [`docs/superpowers/specs/`](docs/superpowers/specs/): the app, environment tabs, the task board, its MCP server and auto-pickup.

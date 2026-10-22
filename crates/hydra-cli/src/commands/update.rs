@@ -11,8 +11,16 @@ use crate::VERSION;
 use crate::style;
 
 /// The replaced exe. Windows can't delete a running exe, so the next hydra start removes it.
-pub const OLD_EXE: &str = "hydra.old.exe";
-const NEW_EXE: &str = "hydra.new.exe";
+pub const OLD_EXE: &str = if cfg!(windows) {
+    "hydra.old.exe"
+} else {
+    "hydra.old"
+};
+const NEW_EXE: &str = if cfg!(windows) {
+    "hydra.new.exe"
+} else {
+    "hydra.new"
+};
 
 fn user_agent() -> String {
     format!("hydra/{VERSION}")

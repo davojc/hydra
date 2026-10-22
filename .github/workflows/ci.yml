@@ -2,7 +2,11 @@ name: ci
 on: [push, pull_request]
 jobs:
   test:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -20,6 +24,9 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
+    outputs:
+      release: ${{ steps.decide.outputs.release }}
+      version: ${{ steps.decide.outputs.version }}
     concurrency:
       group: release
       cancel-in-progress: false
@@ -106,3 +113,43 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.decide.outputs.version }}
         run: gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" --title "hydra $VERSION" --generate-notes
+
+  # The macOS builds join the release the Windows job published. A separate job, so a
+  # shortage of macOS runners delays only these assets, never the release itself.
+  release-macos:
+    needs: release
+    if: needs.release.outputs.release == 'true'
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        env:
+          HYDRA_VERSION: ${{ needs.release.outputs.version }}
+        run: cargo build --release -p hydra-cli -p hydraui
+      - name: Package
+        run: |
+          mkdir -p dist
+          for bin in hydra hydraui; do
+            asset="$bin-aarch64-apple-darwin"
+            cp "target/release/$bin" "dist/$asset"
+            (cd dist && shasum -a 256 "$asset" > "$asset.sha256" && cat "$asset.sha256")
+          done
+      - name: Check the version
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          got="$(dist/hydra-aarch64-apple-darwin --version)"
+          echo "$got"
+          if [ "$got" != "hydra $VERSION" ]; then
+            echo "expected 'hydra $VERSION', got '$got'" >&2
+            exit 1
+          fi
+      - name: Add them to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: gh release upload "v$VERSION" dist/*

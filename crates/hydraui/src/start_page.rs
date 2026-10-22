@@ -30,7 +30,7 @@ pub fn folder_label(path: &Path, home: &Path) -> String {
     let dir = path.parent().unwrap_or(path);
     match dir.strip_prefix(home) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
-        Ok(rest) => format!("~\\{}", rest.display()),
+        Ok(rest) => format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display()),
         Err(_) => dir.display().to_string(),
     }
 }
@@ -81,40 +81,44 @@ mod tests {
         assert_eq!(ago(86400), "1 day ago");
     }
 
+    /// `windows` on Windows, `unix` elsewhere: the same place in each platform's spelling.
+    fn os(windows: &'static str, unix: &'static str) -> &'static str {
+        if cfg!(windows) { windows } else { unix }
+    }
+
     #[test]
     fn folders_under_home_use_a_tilde() {
-        let home = Path::new(r"C:\Users\d");
+        let home = Path::new(os(r"C:\Users\d", "/Users/d"));
         assert_eq!(
-            folder_label(Path::new(r"C:\Users\d\.hydra\x.hydraui"), home),
-            r"~\.hydra"
+            folder_label(&home.join(".hydra").join("x.hydraui"), home),
+            os(r"~\.hydra", "~/.hydra")
         );
-        assert_eq!(
-            folder_label(Path::new(r"E:\work\x.hydraui"), home),
-            r"E:\work"
-        );
+        let work = os(r"E:\work", "/work");
+        assert_eq!(folder_label(&Path::new(work).join("x.hydraui"), home), work);
     }
 
     #[test]
     fn rows_filter_by_name_or_folder_and_mark_open_ones() {
-        let home = Path::new(r"C:\Users\d");
-        let recent = [
-            entry(r"E:\work\client-a.hydraui", 1000),
-            entry(r"C:\Users\d\blog.hydraui", 900),
-        ];
+        let home = Path::new(os(r"C:\Users\d", "/Users/d"));
+        let (client, blog) = (
+            os(r"E:\work\client-a.hydraui", "/work/client-a.hydraui"),
+            os(r"C:\Users\d\blog.hydraui", "/Users/d/blog.hydraui"),
+        );
+        let recent = [entry(client, 1000), entry(blog, 900)];
         let open_elsewhere = |p: &Path| p.ends_with("blog.hydraui");
         let all = rows(&recent, "", home, 1000, &open_elsewhere);
         assert_eq!(
             all,
             [
                 Row {
-                    path: r"E:\work\client-a.hydraui".into(),
+                    path: client.into(),
                     name: "client-a".into(),
-                    folder: r"E:\work".into(),
+                    folder: os(r"E:\work", "/work").into(),
                     ago: "just now".into(),
                     elsewhere: false,
                 },
                 Row {
-                    path: r"C:\Users\d\blog.hydraui".into(),
+                    path: blog.into(),
                     name: "blog".into(),
                     folder: "~".into(),
                     ago: "1 min ago".into(),

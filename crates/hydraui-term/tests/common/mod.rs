@@ -52,8 +52,8 @@ impl Fx {
             .filter(|(k, _)| !k.eq_ignore_ascii_case("GH_TOKEN") && !k.eq_ignore_ascii_case("HOME"))
             .collect();
         inherited.push(("GH_TOKEN".into(), "leaked".into()));
-        if shell == ShellKind::Bash {
-            // Keeps the developer's ~/.bashrc out of the test.
+        if shell != ShellKind::Pwsh {
+            // Keeps the developer's ~/.bashrc and ~/.zshrc out of the test.
             inherited.push(("HOME".into(), self.dir.path().into()));
         }
         let spec = SpawnSpec {

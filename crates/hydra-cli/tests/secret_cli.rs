@@ -1,5 +1,5 @@
 mod common;
-use common::Home;
+use common::{Home, show};
 use predicates::prelude::*;
 
 #[test]
@@ -76,15 +76,8 @@ fn set_secret_stores_all_of_piped_stdin() {
         .success();
     let out = h
         .hydra()
-        .args([
-            "run",
-            "work",
-            "--",
-            "pwsh",
-            "-NoProfile",
-            "-Command",
-            "Write-Output \"[$env:CREDS]\"",
-        ])
+        .args(["run", "work", "--"])
+        .args(show("CREDS"))
         .output()
         .unwrap();
     assert!(out.status.success());

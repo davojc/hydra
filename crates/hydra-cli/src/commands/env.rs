@@ -151,11 +151,13 @@ fn rm(
     Ok(0)
 }
 
-/// Runs $VISUAL, $EDITOR or notepad on the file and waits for it to close.
+/// Runs $VISUAL, $EDITOR, or else notepad (Windows) or vi (as git does elsewhere) on the
+/// file and waits for it to close.
 fn open_editor(file: &Path) -> anyhow::Result<()> {
+    let fallback = if cfg!(windows) { "notepad" } else { "vi" };
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| "notepad".to_string());
+        .unwrap_or_else(|_| fallback.to_string());
     // A value that is itself an existing file (e.g. a path with spaces) is the program, no arguments.
     let whole = Path::new(editor.trim());
     if whole.is_file() {

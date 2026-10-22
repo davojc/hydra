@@ -177,7 +177,10 @@ pub fn language(path: &Path) -> &'static str {
     if matches!(name.as_deref(), Some("makefile" | "gnumakefile")) {
         return "make";
     }
-    match ext(path).as_deref() {
+    if matches!(name.as_deref(), Some("dockerfile" | "containerfile")) {
+        return "dockerfile";
+    }
+    let by_ext = match ext(path).as_deref() {
         Some("rs") => "rust",
         Some("toml") => "toml",
         Some("json" | "jsonc") => "json",
@@ -195,8 +198,15 @@ pub fn language(path: &Path) -> &'static str {
         Some("cpp" | "cc" | "cxx" | "hpp" | "hh") => "cpp",
         Some("cs") => "csharp",
         Some("tsp") => "typespec",
+        Some("dockerfile" | "containerfile") => "dockerfile",
         _ => "text",
+    };
+    // Variants like `Dockerfile.dev`, unless the suffix is a known type (`Dockerfile.md`).
+    let variant = |prefix| name.as_deref().is_some_and(|n| n.starts_with(prefix));
+    if by_ext == "text" && (variant("dockerfile.") || variant("containerfile.")) {
+        return "dockerfile";
     }
+    by_ext
 }
 
 /// Where the cursor goes after a reload: the same line and column (in UTF-16 units, as the
@@ -474,6 +484,12 @@ mod tests {
         assert_eq!(language(Path::new("Makefile")), "make");
         assert_eq!(language(Path::new("x.tsx")), "tsx");
         assert_eq!(language(Path::new("main.tsp")), "typespec");
+        assert_eq!(language(Path::new("Dockerfile")), "dockerfile");
+        assert_eq!(language(Path::new("Containerfile")), "dockerfile");
+        assert_eq!(language(Path::new("app.dockerfile")), "dockerfile");
+        assert_eq!(language(Path::new("Dockerfile.dev")), "dockerfile");
+        assert_eq!(language(Path::new("Dockerfile.md")), "markdown");
+        assert_eq!(language(Path::new("dockerfile-notes.txt")), "text");
     }
 
     fn doc(t: &str) -> FileDoc {

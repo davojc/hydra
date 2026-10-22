@@ -544,7 +544,8 @@ open switches to its file tab.
 
 - **Raw**: gpui-component's code editor, editable, with syntax highlighting
   chosen by extension, line numbers and find (`Ctrl+F`). `Ctrl+S` saves.
-  Grammars gpui-component doesn't ship (TypeSpec, `.tsp`) are vendored under
+  Grammars gpui-component doesn't ship (TypeSpec, `.tsp`; Dockerfiles, `Dockerfile`,
+  `Containerfile`, `*.dockerfile`, `Dockerfile.*`) are vendored under
   `crates/hydraui/grammars/`, compiled by the build script and registered at startup.
 - **Rendered**: Markdown, read-only, reflecting unsaved edits. Markdown files
   and OpenAPI specs open in Rendered, others in Raw. Links open in the browser

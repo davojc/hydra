@@ -5,6 +5,12 @@ fn main() {
         .file("grammars/typespec/src/parser.c")
         .warnings(false)
         .compile("tree-sitter-typespec");
+    cc::Build::new()
+        .include("grammars/dockerfile/src")
+        .file("grammars/dockerfile/src/parser.c")
+        .file("grammars/dockerfile/src/scanner.c")
+        .warnings(false)
+        .compile("tree-sitter-dockerfile");
     println!("cargo:rerun-if-changed=grammars");
     // hydraui's version info follows the release (HYDRA_VERSION) like hydra.exe's.
     println!("cargo:rerun-if-env-changed=HYDRA_VERSION");

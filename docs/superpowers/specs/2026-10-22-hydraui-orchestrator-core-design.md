@@ -252,8 +252,8 @@ wake-up; Claude Code's Channels were set aside for the reasons in auto-pickup §
   ticket and the current stage, e.g. `INTH-123 · 2/4 Develop`, amber when the run is stopped. The
   run's stage terminals are listed directly under it, indented, each with its stage title and the
   usual activity dot and state (working / needs you / idle). (Look: builder's call.)
-- **Clicking the badge** opens the run in the file pane area (as the Tasks tab opens), a tab named
-  after the run. It shows:
+- **Clicking the badge** opens a **Run** tab in the strip above the orchestrator's terminal, as the
+  Tasks tab opens (beside the terminal's own tab; ✕ closes it). It shows:
   - the ticket, summary, pipeline and bar, and the run's state (running, stopped with its reason,
     finished);
   - one row per stage, in order: title, status, attempts, the score drawn against that stage's bar,

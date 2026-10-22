@@ -13,6 +13,7 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::diff::{Diff, DiffFile, DiffMode, DiffState};
 use gpui_component::input::{Editor, EditorState, InputEvent, Position};
+use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -20,7 +21,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use crate::file_doc::{self, DiskChange, DiskFlags, FileDoc, ImageKind, ImageUse};
 use crate::file_ops;
 use crate::keys::SaveFile;
-use crate::open_files::{after_close, find};
+use crate::open_files::{after_close, find, to_close};
 use crate::openapi::SpecKind;
 use crate::openapi_view::{ApiView, ApiViewEvent};
 
@@ -555,6 +556,69 @@ impl FilePane {
         });
     }
 
+    /// Closes every file tab but `keep` (or all of them), asking once first when any of
+    /// them has unsaved edits.
+    fn close_tabs(&mut self, keep: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        let closing = to_close(self.tabs.len(), keep);
+        let dirty: Vec<usize> = closing
+            .iter()
+            .copied()
+            .filter(|&i| self.tabs[i].dirty)
+            .collect();
+        if dirty.is_empty() {
+            self.remove_tabs(&closing, cx);
+            return;
+        }
+        let title = match dirty.as_slice() {
+            [i] => format!("{} has unsaved edits", file_name(&self.tabs[*i].path)),
+            _ => format!("{} files have unsaved edits", dirty.len()),
+        };
+        let pane = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (save, discard) = (pane.clone(), pane.clone());
+            let (save_closing, discard_closing) = (closing.clone(), closing.clone());
+            let dirty = dirty.clone();
+            dialog.title(title.clone()).footer(
+                h_flex()
+                    .gap_2()
+                    .justify_end()
+                    .child(
+                        Button::new("cancel")
+                            .label("Cancel")
+                            .on_click(|_, w, cx| w.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("discard")
+                            .label("Discard")
+                            .on_click(move |_, w, cx| {
+                                w.close_dialog(cx);
+                                discard.update(cx, |p, cx| p.remove_tabs(&discard_closing, cx));
+                            }),
+                    )
+                    .child(Button::new("save").label("Save").primary().on_click(
+                        move |_, w, cx| {
+                            w.close_dialog(cx);
+                            save.update(cx, |p, cx| {
+                                // Nothing closes unless every edit is saved.
+                                if let Err(e) = dirty.iter().try_for_each(|&i| p.save_tab(i, cx)) {
+                                    w.push_notification(Notification::error(e).title("Save"), cx);
+                                    return;
+                                }
+                                p.remove_tabs(&save_closing, cx);
+                            });
+                        },
+                    )),
+            )
+        });
+    }
+
+    /// Removes file tabs given last first, as `to_close` gives them.
+    fn remove_tabs(&mut self, closing: &[usize], cx: &mut Context<Self>) {
+        for &i in closing {
+            self.remove_tab(i, cx);
+        }
+    }
+
     fn remove_tab(&mut self, i: usize, cx: &mut Context<Self>) {
         if i >= self.tabs.len() {
             return;
@@ -736,7 +800,26 @@ impl Render for FilePane {
                         p.focus_content(w, cx);
                         cx.emit(FilePaneEvent::Changed);
                         cx.notify();
-                    })),
+                    }))
+                    .context_menu({
+                        let pane = cx.entity();
+                        move |menu, _, _| {
+                            let (close, others, all) = (pane.clone(), pane.clone(), pane.clone());
+                            menu.item(PopupMenuItem::new("Close").on_click(move |_, w, cx| {
+                                close.update(cx, |p, cx| p.close_tab(i, w, cx));
+                            }))
+                            .item(
+                                PopupMenuItem::new("Close Others").on_click(move |_, w, cx| {
+                                    others.update(cx, |p, cx| p.close_tabs(Some(i), w, cx));
+                                }),
+                            )
+                            .item(
+                                PopupMenuItem::new("Close All").on_click(move |_, w, cx| {
+                                    all.update(cx, |p, cx| p.close_tabs(None, w, cx));
+                                }),
+                            )
+                        }
+                    }),
             );
         }
         let root = v_flex()

@@ -28,6 +28,12 @@ pub fn after_close(len: usize, active: usize, closed: usize) -> Option<usize> {
     })
 }
 
+/// The file tabs that closing all but `keep` (or all, for `None`) closes, last first so each
+/// index stays good as the ones after it go.
+pub fn to_close(len: usize, keep: Option<usize>) -> Vec<usize> {
+    (0..len).rev().filter(|&i| Some(i) != keep).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,5 +64,13 @@ mod tests {
         );
         assert_eq!(after_close(3, 0, 2), Some(0));
         assert_eq!(after_close(1, 0, 0), None);
+    }
+
+    #[test]
+    fn closing_others_or_all_goes_from_the_last_tab() {
+        assert_eq!(to_close(4, Some(1)), vec![3, 2, 0]);
+        assert_eq!(to_close(3, None), vec![2, 1, 0]);
+        assert_eq!(to_close(1, Some(0)), Vec::<usize>::new());
+        assert_eq!(to_close(0, None), Vec::<usize>::new());
     }
 }

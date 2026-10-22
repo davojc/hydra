@@ -67,6 +67,8 @@ fn main() {
     gpui_platform::application()
         .with_assets(hydraui::assets::AppAssets)
         .run(move |cx: &mut App| {
+            // The Dock shows hydraui's icon, not a bare executable's (macOS).
+            hydraui::app_icon::set();
             gpui_component::init(cx);
             hydraui::grammars::register();
             let mode = match ui.theme {

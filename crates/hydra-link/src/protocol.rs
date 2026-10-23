@@ -128,7 +128,9 @@ pub enum Outcome {
         projects: Vec<String>,
     },
     Board(BoardInfo),
-    Refused(String),
+    Refused {
+        reason: String,
+    },
     Missing,
     Paired {
         word: String,
@@ -144,6 +146,6 @@ pub enum ServerMsg {
     SessionGone { id: u64 },
     Board(BoardInfo),
     Alert { session: u64, kind: AlertKind },
-    Notice(String),
+    Notice { text: String },
     TooOld { need: u32 },
 }

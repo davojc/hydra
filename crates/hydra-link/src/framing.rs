@@ -68,22 +68,143 @@ mod tests {
         }
     }
 
+    fn board() -> BoardInfo {
+        BoardInfo {
+            project: "E:/p".into(),
+            name: "p".into(),
+            columns: vec![
+                vec![WireCard {
+                    text: "a".into(),
+                    taker: None,
+                    commit: None,
+                }],
+                vec![],
+                vec![WireCard {
+                    text: "b".into(),
+                    taker: Some("s".into()),
+                    commit: None,
+                }],
+                vec![WireCard {
+                    text: "c".into(),
+                    taker: None,
+                    commit: Some("abc".into()),
+                }],
+                vec![],
+            ],
+        }
+    }
+
+    fn client_msgs() -> Vec<ClientMsg> {
+        vec![
+            ClientMsg::Hello {
+                version: PROTOCOL_VERSION,
+            },
+            ClientMsg::Pair { secret: "s".into() },
+            ClientMsg::Snapshot,
+            ClientMsg::Board {
+                project: "E:/p".into(),
+            },
+            ClientMsg::AddCard {
+                project: "E:/p".into(),
+                text: "x".into(),
+                to: Column::Pickup,
+            },
+            ClientMsg::MoveCard {
+                project: "E:/p".into(),
+                card: CardRef {
+                    column: Column::Verify,
+                    text: "x".into(),
+                    nth: 1,
+                },
+                to: Column::Done,
+            },
+            ClientMsg::RemoteControl { session: 2 },
+            ClientMsg::Seen { session: 3 },
+        ]
+    }
+
+    fn outcomes() -> Vec<Outcome> {
+        vec![
+            Outcome::Ok,
+            Outcome::Snapshot {
+                sessions: vec![session()],
+                projects: vec!["E:/p".into()],
+            },
+            Outcome::Board(board()),
+            Outcome::Refused {
+                reason: "no".into(),
+            },
+            Outcome::Missing,
+            Outcome::Paired { word: "w".into() },
+        ]
+    }
+
+    fn server_msgs() -> Vec<ServerMsg> {
+        let mut v = vec![
+            ServerMsg::Welcome {
+                version: 1,
+                window: "w".into(),
+            },
+            ServerMsg::Session(session()),
+            ServerMsg::SessionGone { id: 4 },
+            ServerMsg::Board(board()),
+            ServerMsg::Alert {
+                session: 5,
+                kind: AlertKind::Finished,
+            },
+            ServerMsg::Notice { text: "n".into() },
+            ServerMsg::TooOld { need: 2 },
+        ];
+        v.extend(
+            outcomes()
+                .into_iter()
+                .enumerate()
+                .map(|(i, outcome)| ServerMsg::Reply {
+                    id: i as u64,
+                    outcome,
+                }),
+        );
+        v
+    }
+
+    async fn round_trip<T>(items: Vec<T>)
+    where
+        T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        let (mut a, mut b) = duplex(1 << 16);
+        for item in &items {
+            write_msg(&mut a, item).await.unwrap();
+        }
+        for item in items {
+            assert_eq!(read_msg::<_, T>(&mut b).await.unwrap(), Some(item));
+        }
+    }
+
     #[tokio::test]
     async fn round_trips_every_message() {
-        let (mut a, mut b) = duplex(4096);
-        let req = Request {
+        round_trip(client_msgs()).await;
+        round_trip(server_msgs()).await;
+        round_trip(vec![Request {
             id: 7,
             msg: ClientMsg::AddCard {
                 project: "E:/p".into(),
                 text: "x".into(),
                 to: Column::Pickup,
             },
-        };
-        let srv = ServerMsg::Session(session());
-        write_msg(&mut a, &req).await.unwrap();
-        write_msg(&mut a, &srv).await.unwrap();
-        assert_eq!(read_msg::<_, Request>(&mut b).await.unwrap(), Some(req));
-        assert_eq!(read_msg::<_, ServerMsg>(&mut b).await.unwrap(), Some(srv));
+        }])
+        .await;
+    }
+
+    #[test]
+    fn refusals_and_notices_have_a_stable_shape() {
+        assert_eq!(
+            serde_json::to_value(Outcome::Refused { reason: "x".into() }).unwrap(),
+            json!({"type":"refused","reason":"x"})
+        );
+        assert_eq!(
+            serde_json::to_value(ServerMsg::Notice { text: "x".into() }).unwrap(),
+            json!({"type":"notice","text":"x"})
+        );
     }
 
     #[tokio::test]

@@ -16,6 +16,10 @@ pub struct Pipeline {
     /// in, e.g. `https://fev2-solutions-{ticket_lower}.dev.iov42.net` (a branch deploy). Prompts
     /// use it as `{feature_env}`.
     pub feature_env: Option<String>,
+    /// The branch every repository's work for a ticket must be on, as a pattern (`{ticket}`,
+    /// `{ticket_lower}`), e.g. `{ticket}` → `INTH-166`; a stage's report is refused while a PR
+    /// in it is on another branch.
+    pub branch: Option<String>,
     /// The bar every stage must clear unless it sets its own, 0 to 100.
     pub bar: u8,
     pub stages: Vec<Stage>,
@@ -76,6 +80,14 @@ pub struct Stage {
 }
 
 impl Pipeline {
+    /// The branch for `ticket`; `None` when the pipeline names no branch rule.
+    pub fn branch_for(&self, ticket: &str) -> Option<String> {
+        self.branch.as_ref().map(|b| {
+            b.replace("{ticket}", ticket)
+                .replace("{ticket_lower}", &ticket.to_lowercase())
+        })
+    }
+
     /// `feature_env` for `ticket`; empty when the pipeline names none.
     pub fn feature_env_for(&self, ticket: &str) -> String {
         self.feature_env
@@ -105,6 +117,7 @@ struct File {
     name: String,
     bar: Option<u8>,
     feature_env: Option<String>,
+    branch: Option<String>,
     #[serde(default, rename = "stage")]
     stages: Vec<FileStage>,
     linear: Option<FileLinear>,
@@ -238,6 +251,10 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
             .feature_env
             .map(|f| f.trim().to_string())
             .filter(|f| !f.is_empty()),
+        branch: file
+            .branch
+            .map(|b| b.trim().to_string())
+            .filter(|b| !b.is_empty()),
         bar: file.bar.unwrap_or(DEFAULT_BAR),
         stages,
         linear: file.linear.map(linear_settings).transpose()?,
@@ -255,6 +272,7 @@ pub struct Edit {
     pub name: String,
     pub bar: u8,
     pub feature_env: Option<String>,
+    pub branch: Option<String>,
     pub stages: Vec<EditStage>,
     pub linear: Option<LinearSettings>,
 }
@@ -279,6 +297,7 @@ impl From<&Pipeline> for Edit {
             name: p.name.clone(),
             bar: p.bar,
             feature_env: p.feature_env.clone(),
+            branch: p.branch.clone(),
             stages: p
                 .stages
                 .iter()
@@ -375,6 +394,17 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
         Some(f) => doc["feature_env"] = value(f),
         None => {
             doc.remove("feature_env");
+        }
+    }
+    match edit
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+    {
+        Some(b) => doc["branch"] = value(b),
+        None => {
+            doc.remove("branch");
         }
     }
     match &edit.linear {
@@ -724,6 +754,36 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
     }
 
     const ONE_STAGE: &str = "name = \"t\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n";
+
+    #[test]
+    fn a_pipeline_names_the_branch_for_a_ticket() {
+        assert_eq!(parse(ONE_STAGE).unwrap().branch_for("INTH-166"), None);
+        let p = parse(&format!("branch = \"{{ticket}}\"\n{ONE_STAGE}")).unwrap();
+        assert_eq!(p.branch_for("INTH-166").as_deref(), Some("INTH-166"));
+        assert_eq!(p.branch_for("PRE-151").as_deref(), Some("PRE-151"));
+        let lower = parse(&format!("branch = \"fix/{{ticket_lower}}\"\n{ONE_STAGE}")).unwrap();
+        assert_eq!(lower.branch_for("INTH-7").as_deref(), Some("fix/inth-7"));
+        let blank = parse(&format!("branch = \" \"\n{ONE_STAGE}")).unwrap();
+        assert_eq!(blank.branch, None);
+    }
+
+    #[test]
+    fn saving_keeps_or_drops_the_branch() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(folder(d.path()).join("t.toml"), ONE_STAGE).unwrap();
+        let mut edit = edit_of(&load(d.path(), "t").unwrap());
+        assert_eq!(edit.branch, None);
+        edit.branch = Some("{ticket}".into());
+        save(d.path(), "t", &edit).unwrap();
+        assert_eq!(
+            load(d.path(), "t").unwrap().branch.as_deref(),
+            Some("{ticket}")
+        );
+        edit.branch = None;
+        save(d.path(), "t", &edit).unwrap();
+        assert_eq!(load(d.path(), "t").unwrap().branch, None);
+    }
 
     #[test]
     fn a_linear_table_takes_its_defaults_from_the_team_alone() {

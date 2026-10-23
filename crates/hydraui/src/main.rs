@@ -63,6 +63,10 @@ fn main() {
             &hydraui::updater::is_our_hydra,
         );
         hydraui::updater::clean_old(&exe, hydra.as_deref());
+        // A pipeline's branch rule asks GitHub through it.
+        if let Some(server) = hydraui::mcp::server::get() {
+            server.set_hydra_exe(hydra);
+        }
     }
     gpui_platform::application()
         .with_assets(hydraui::assets::AppAssets)

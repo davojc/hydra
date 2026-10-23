@@ -913,10 +913,19 @@ fn stage_note(run: &Run, i: usize) -> String {
     if !later.is_empty() {
         around.push_str(&format!("Later: {}. ", later.join(", ")));
     }
+    // The pipeline's branch rule, which the report is held to (hydraui refuses a PR on another
+    // branch).
+    let branch = run.pipeline.branch_for(&run.ticket).map_or(String::new(), |b| {
+        format!(
+            "\nName every branch you create or push exactly {b}, in each repository: no prefix, \
+             no suffix, no other name. Put each pull request's link in your report; one on \
+             another branch is refused."
+        )
+    });
     format!(
         "---\nhydraui pipeline \"{}\" · {} · stage {} of {}: {}{skill}.\n{around}Do only this \
          stage. When it's done, call stage_report (score, evidence, reasons for and against, \
-         handoff); stage_brief has what earlier stages handed over.",
+         handoff); stage_brief has what earlier stages handed over.{branch}",
         run.pipeline.name,
         run.ticket,
         i + 1,
@@ -1021,6 +1030,35 @@ mod tests {
         assert!(matches!(runs.role("tok-a"), Role::Stage(r, 0) if r.id == id));
         assert!(matches!(runs.role("orch"), Role::Orchestrator(r) if r.id == id));
         assert!(matches!(runs.role("other"), Role::Other));
+    }
+
+    #[test]
+    fn every_stage_is_told_the_branch_it_must_use() {
+        let mut runs = Runs::default();
+        let mut p = pipeline(&["develop"]);
+        p.branch = Some("{ticket}".into());
+        let id = runs
+            .start_run("orch", p, "PRE-151", "x")
+            .unwrap()
+            .id
+            .clone();
+        let s = runs.begin("orch", &id, "develop", "", 30).unwrap();
+        assert!(
+            s.prompt
+                .contains("Name every branch you create or push exactly PRE-151"),
+            "{}",
+            s.prompt
+        );
+        assert!(s.prompt.contains("pull request's link"), "{}", s.prompt);
+        // No rule, no line.
+        let mut plain = Runs::default();
+        let id = plain
+            .start_run("orch", pipeline(&["develop"]), "PRE-152", "x")
+            .unwrap()
+            .id
+            .clone();
+        let s = plain.begin("orch", &id, "develop", "", 30).unwrap();
+        assert!(!s.prompt.contains("Name every branch"), "{}", s.prompt);
     }
 
     #[test]

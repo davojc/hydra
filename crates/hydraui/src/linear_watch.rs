@@ -112,7 +112,7 @@ pub fn pr_links(run: &Run) -> Vec<String> {
             .chain(rating.evidence.iter().map(|e| e.detail.as_str()))
             .chain(std::iter::once(rating.handoff.as_str()));
         for text in texts {
-            for link in pull_requests(text) {
+            for link in crate::branch_rule::pull_requests(text) {
                 if !found.contains(&link) {
                     found.push(link);
                 }
@@ -120,30 +120,6 @@ pub fn pr_links(run: &Run) -> Vec<String> {
         }
     }
     found
-}
-
-/// GitHub pull request URLs in `text`: `https://github.com/<owner>/<repo>/pull/<n>`.
-fn pull_requests(text: &str) -> Vec<String> {
-    const START: &str = "https://github.com/";
-    let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(at) = rest.find(START) {
-        let tail = &rest[at + START.len()..];
-        let parts: Vec<&str> = tail.splitn(4, '/').collect();
-        if let [owner, repo, "pull", n] = parts.as_slice() {
-            let digits: String = n.chars().take_while(char::is_ascii_digit).collect();
-            let plain = |s: &str| {
-                !s.is_empty()
-                    && s.chars()
-                        .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
-            };
-            if !digits.is_empty() && plain(owner) && plain(repo) {
-                out.push(format!("{START}{owner}/{repo}/pull/{digits}"));
-            }
-        }
-        rest = tail;
-    }
-    out
 }
 
 /// The comment an ended run leaves (§4): how it ended, each stage's score and summary, and

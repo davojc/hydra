@@ -161,3 +161,20 @@ orchestrator) gets the same claim and end writes. A ticket from another team is 
 - **Not yet checked by hand** against a live Linear workspace. The queries follow Linear's
   documented schema (`IssueFilter` with `team.key`, `state.id`, `assignee.null`; `issue(id:)`
   accepts an identifier; personal keys go in `Authorization` without `Bearer`).
+
+## 10. The branch rule (added 2026-10-23)
+
+Jordan: INTH-166's Develop stage pushed `jordan/inth-166-…` instead of `INTH-166`, so its feature
+environment didn't come up under the expected name. The fix is a hard rule:
+
+- **Setting.** A pipeline's `branch = "{ticket}"` (`{ticket_lower}` works too), also **Branch
+  name** in Pipeline settings. For PRE-151 every repository's branch is `PRE-151`.
+- **Told.** Every stage's hydraui note says it: *Name every branch you create or push exactly
+  PRE-151, in each repository: no prefix, no suffix, no other name. Put each pull request's link
+  in your report.*
+- **Enforced.** `stage_report` is refused (nothing recorded) while a GitHub pull request named in
+  the report's summary, evidence or handoff is on another branch. hydraui asks GitHub as the
+  stage's environment (`hydra run <env> -- gh pr view <url> --json headRefName`), outside the
+  registry lock, with a 30 s limit. A branch it can't read refuses too (fail closed), saying why.
+- **Not covered.** Work pushed without a pull request in the report isn't checked. The orchestrator
+  and the person see the report, and Verify works against the feature environment anyway.

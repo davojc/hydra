@@ -24,6 +24,9 @@ pub struct Peer {
     pub state: SessionState,
 }
 
+/// Reads a pull request's branch: `(env, url)` → the branch, or why not.
+pub type BranchLookup = fn(&str, &str) -> Result<String, String>;
+
 pub struct Registry {
     terminals: HashMap<String, Terminal>,
     /// What each terminal's Claude session last said it is doing (its status hooks).
@@ -34,6 +37,11 @@ pub struct Registry {
     pub min_week_left: u8,
     /// `<HYDRA_HOME>`, where pipelines and run logs live; the run tools refuse without it.
     pub hydra_root: Option<PathBuf>,
+    /// The `hydra` next to hydraui, which asks GitHub for a pull request's branch as the
+    /// stage's environment (the pipeline's branch rule).
+    pub hydra_exe: Option<PathBuf>,
+    /// Stands in for that lookup in tests: `(env, url)` → the branch.
+    pub branch_lookup: Option<BranchLookup>,
     /// Claude session ids already written to a run's log, as (run, who, id) (§13).
     logged_claude: std::collections::HashSet<(String, String, String)>,
 }
@@ -47,6 +55,8 @@ impl Default for Registry {
             min_week_left: MIN_WEEK_LEFT,
             hydra_root: None,
             logged_claude: Default::default(),
+            hydra_exe: None,
+            branch_lookup: None,
         }
     }
 }

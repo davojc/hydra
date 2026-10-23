@@ -322,3 +322,147 @@ fn the_host_runs_without_a_tokio_runtime() {
     host.unpair();
     host.stop();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_paired_phone_can_pair_again() {
+    let (host, mut events, first) = paired_host().await;
+    let offer = host.offer_pairing();
+    let (again, word) = timed(Client::pair_at(PHONE, &offer, host.addr_for_tests()))
+        .await
+        .expect("the paired phone pairs again");
+    assert_eq!(
+        word,
+        hydra_link::pairing::word_pair(&offer.secret, &host.endpoint_id(), &again.endpoint_id())
+    );
+    match wait_for(&mut events, "Paired", |e| {
+        matches!(e, HostEvent::Paired { .. })
+    })
+    .await
+    {
+        HostEvent::Paired { phone, word: w } => {
+            assert_eq!(phone, again.endpoint_id());
+            assert_eq!(w, word);
+        }
+        _ => unreachable!(),
+    }
+    drop(first);
+}
+
+/// A raw connection from `key` that sends one request frame; returns how the host closed it.
+async fn raw_request(host: &Host, key: [u8; 32]) -> iroh::endpoint::ConnectionError {
+    let ep = Endpoint::builder(presets::Minimal)
+        .secret_key(SecretKey::from_bytes(&key))
+        .relay_mode(RelayMode::Disabled)
+        .bind()
+        .await
+        .expect("bind");
+    let conn = timed(ep.connect(host.addr_for_tests(), ALPN))
+        .await
+        .expect("connect");
+    if let Ok((mut send, _recv)) = conn.open_bi().await {
+        let _ = write_msg(
+            &mut send,
+            &Request {
+                id: 1,
+                msg: ClientMsg::Snapshot,
+            },
+        )
+        .await;
+    }
+    let why = timed(conn.closed()).await;
+    ep.close().await;
+    why
+}
+
+async fn assert_no_request(events: &mut UnboundedReceiver<HostEvent>) {
+    let quiet = tokio::time::timeout(Duration::from_millis(300), async {
+        while let Some(ev) = events.next().await {
+            assert!(
+                !matches!(ev, HostEvent::Request { .. }),
+                "a stranger's message reached hydraui"
+            );
+        }
+    })
+    .await;
+    assert!(quiet.is_err(), "the event stream ended");
+}
+
+fn is_refused(e: &iroh::endpoint::ConnectionError) -> bool {
+    matches!(e, iroh::endpoint::ConnectionError::ApplicationClosed(c) if c.error_code.into_inner() == 1)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_strangers_raw_request_is_closed_unread() {
+    let (host, mut events, _client) = paired_host().await;
+    let why = raw_request(&host, STRANGER).await;
+    assert!(is_refused(&why), "closed with {why:?}");
+    assert_no_request(&mut events).await;
+
+    host.offer_pairing();
+    let why = raw_request(&host, STRANGER).await;
+    assert!(is_refused(&why), "closed with {why:?}");
+    assert_no_request(&mut events).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn events_since_the_handshake_reach_the_first_receiver() {
+    let (host, mut events, client) = paired_host().await;
+    host.broadcast(ServerMsg::Notice {
+        text: "early".into(),
+    });
+    // The reply follows the notice on the same stream, so the notice has been read.
+    let (got, _) = tokio::join!(timed(client.request(ClientMsg::Snapshot)), async {
+        match wait_for(&mut events, "Request", |e| {
+            matches!(e, HostEvent::Request { .. })
+        })
+        .await
+        {
+            HostEvent::Request { reply, .. } => reply.send(Outcome::Ok),
+            _ => unreachable!(),
+        }
+    });
+    assert_eq!(got.expect("a reply"), Outcome::Ok);
+    let mut seen = client.events();
+    assert_eq!(
+        timed(seen.recv()).await.expect("an event"),
+        ServerMsg::Notice {
+            text: "early".into()
+        }
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_burst_of_broadcasts_ends_with_the_newest() {
+    let (host, _events, client) = paired_host().await;
+    let mut seen = client.events();
+    for i in 0..2000 {
+        host.broadcast(ServerMsg::Notice {
+            text: format!("n{i}"),
+        });
+    }
+    host.broadcast(ServerMsg::Notice {
+        text: "last".into(),
+    });
+    timed(async {
+        loop {
+            match seen.recv().await {
+                Ok(ServerMsg::Notice { text }) if text == "last" => break,
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(e) => panic!("events ended: {e}"),
+            }
+        }
+    })
+    .await;
+}
+
+/// The test thread is busy inside `stop`, so on this single-threaded runtime the client
+/// cannot answer the host's close; `stop` must not wait for it.
+#[tokio::test]
+async fn stop_does_not_wait_for_the_network() {
+    let (host, _events, client) = paired_host().await;
+    let began = std::time::Instant::now();
+    host.stop();
+    let took = began.elapsed();
+    assert!(took < Duration::from_millis(500), "stop took {took:?}");
+    drop(client);
+}

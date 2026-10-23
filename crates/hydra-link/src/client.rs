@@ -28,7 +28,6 @@ const EVENT_BACKLOG: usize = 256;
 pub enum LinkError {
     /// The desktop turned this phone away: not paired, or a wrong or expired secret.
     Refused,
-    NotPaired,
     /// The app is older than the desktop accepts; it needs this protocol version.
     TooOld(u32),
     /// The connection ended.
@@ -40,7 +39,6 @@ impl fmt::Display for LinkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LinkError::Refused => write!(f, "the desktop refused this phone"),
-            LinkError::NotPaired => write!(f, "this phone is not paired"),
             LinkError::TooOld(need) => write!(f, "the app is too old: protocol {need} needed"),
             LinkError::Closed => write!(f, "the connection closed"),
             LinkError::Io(e) => write!(f, "{e}"),
@@ -60,6 +58,9 @@ pub struct Client {
     pending: Pending,
     next_id: AtomicU64,
     events: broadcast::Sender<ServerMsg>,
+    /// Subscribed before the reader started; the first `events()` call gets it, so it
+    /// sees everything since the handshake.
+    first_events: Mutex<Option<broadcast::Receiver<ServerMsg>>>,
     reader: JoinHandle<()>,
 }
 
@@ -122,9 +123,12 @@ impl Client {
         rx.await.map_err(|_| LinkError::Closed)
     }
 
-    /// Everything the desktop sends that isn't a reply, from now on.
+    /// Everything the desktop sends that isn't a reply: since the handshake for the first
+    /// receiver, from now on for later ones.
     pub fn events(&self) -> broadcast::Receiver<ServerMsg> {
-        self.events.subscribe()
+        lock(&self.first_events)
+            .take()
+            .unwrap_or_else(|| self.events.subscribe())
     }
 
     pub fn endpoint_id(&self) -> String {
@@ -165,7 +169,7 @@ async fn open(
     match handshake(&endpoint, addr, secret).await {
         Ok((conn, send, recv, word)) => {
             let pending: Pending = Arc::new(Mutex::new(Some(HashMap::new())));
-            let (events, _) = broadcast::channel(EVENT_BACKLOG);
+            let (events, first_events) = broadcast::channel(EVENT_BACKLOG);
             let reader = tokio::spawn(read_loop(recv, Arc::clone(&pending), events.clone()));
             let client = Client {
                 endpoint,
@@ -174,6 +178,7 @@ async fn open(
                 pending,
                 next_id: AtomicU64::new(1),
                 events,
+                first_events: Mutex::new(Some(first_events)),
                 reader,
             };
             Ok((client, word))

@@ -6,18 +6,18 @@
 //! pairing phone's first frame is `Pair` (id 0); every connection then sends `Hello`
 //! (id 0) before any other request.
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use futures::channel::mpsc as events;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr, EndpointId};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, oneshot};
 
 use crate::close;
 use crate::framing::{read_msg, write_msg};
@@ -73,7 +73,7 @@ pub enum HostEvent {
 /// request; answering after that connection has gone does nothing.
 pub struct Replier {
     id: u64,
-    out: Option<mpsc::UnboundedSender<ServerMsg>>,
+    out: Option<Arc<Outbox>>,
 }
 
 impl Replier {
@@ -83,7 +83,7 @@ impl Replier {
 
     fn reply(&mut self, outcome: Outcome) {
         if let Some(out) = self.out.take() {
-            let _ = out.send(ServerMsg::Reply {
+            out.push(ServerMsg::Reply {
                 id: self.id,
                 outcome,
             });
@@ -105,12 +105,58 @@ impl fmt::Debug for Replier {
     }
 }
 
+/// Most messages waiting to go to one phone; past this the oldest broadcast is dropped.
+const OUTBOX_CAP: usize = 256;
+
+/// One connection's outgoing queue, bounded at `OUTBOX_CAP`. When full it drops the
+/// oldest message that is not a reply (a reply someone is waiting on is kept while
+/// any broadcast can go instead).
+#[derive(Default)]
+struct Outbox {
+    queue: Mutex<VecDeque<ServerMsg>>,
+    ready: Notify,
+}
+
+impl Outbox {
+    fn push(&self, msg: ServerMsg) {
+        {
+            let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+            if q.len() >= OUTBOX_CAP {
+                let victim = q
+                    .iter()
+                    .position(|m| !matches!(m, ServerMsg::Reply { .. }))
+                    .unwrap_or(0);
+                q.remove(victim);
+            }
+            q.push_back(msg);
+        }
+        self.ready.notify_one();
+    }
+
+    fn pop(&self) -> Option<ServerMsg> {
+        self.queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop_front()
+    }
+
+    /// The next message, waiting for one if the queue is empty.
+    async fn next(&self) -> ServerMsg {
+        loop {
+            if let Some(msg) = self.pop() {
+                return msg;
+            }
+            self.ready.notified().await;
+        }
+    }
+}
+
 /// The phone connection that has said Hello and been welcomed.
 struct Current {
     serial: u64,
     phone: EndpointId,
     conn: Connection,
-    out: mpsc::UnboundedSender<ServerMsg>,
+    out: Arc<Outbox>,
 }
 
 struct State {
@@ -142,7 +188,6 @@ pub struct Host {
     shared: Arc<Shared>,
     endpoint: Option<Endpoint>,
     stop: Option<oneshot::Sender<()>>,
-    thread: Option<JoinHandle<()>>,
 }
 
 impl Host {
@@ -170,7 +215,8 @@ impl Host {
         let (stop_tx, stop_rx) = oneshot::channel();
         let run = Arc::clone(&shared);
         let (key, relays) = (cfg.secret_key, cfg.relays);
-        let thread = std::thread::Builder::new()
+        // Detached: `stop` only signals it, and it finishes closing in the background.
+        std::thread::Builder::new()
             .name("hydra-link".into())
             .spawn(move || {
                 let rt = match tokio::runtime::Builder::new_multi_thread()
@@ -215,7 +261,6 @@ impl Host {
             shared,
             endpoint: Some(endpoint),
             stop: Some(stop_tx),
-            thread: Some(thread),
         };
         Ok((host, events_rx))
     }
@@ -266,12 +311,13 @@ impl Host {
     /// Sends `msg` to the connected phone; dropped when none is connected.
     pub fn broadcast(&self, msg: ServerMsg) {
         if let Some(c) = &self.shared.lock().current {
-            let _ = c.out.send(msg);
+            c.out.push(msg);
         }
     }
 
-    /// Closes the phone's connection and the endpoint, and ends the link thread. Dropping
-    /// the host does the same.
+    /// Tells the link thread to close the phone's connection and the endpoint and to end.
+    /// Returns at once: the closing happens in the background. Dropping the host does
+    /// the same.
     pub fn stop(self) {}
 
     fn endpoint(&self) -> &Endpoint {
@@ -287,9 +333,6 @@ impl Drop for Host {
         self.endpoint = None;
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
-        }
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
         }
     }
 }
@@ -326,43 +369,44 @@ async fn read_frame(recv: &mut RecvStream) -> Result<ClientMsg, Refusal> {
 async fn handshake(
     shared: &Shared,
     conn: &Connection,
-) -> Result<(u64, mpsc::UnboundedSender<ServerMsg>, RecvStream), Refusal> {
+) -> Result<(u64, Arc<Outbox>, RecvStream), Refusal> {
     // Who is calling is known from the TLS handshake: check it before reading anything.
     let phone = conn.remote_id();
-    let pairing = {
+    let (known, offered) = {
         let st = shared.lock();
-        if st.paired == Some(phone) {
-            false
-        } else if st
+        let offered = st
             .offer
             .as_ref()
-            .is_some_and(|(_, until)| Instant::now() < *until)
-        {
-            true
-        } else {
-            return Err(REFUSED);
-        }
+            .is_some_and(|(_, until)| Instant::now() < *until);
+        (st.paired == Some(phone), offered)
     };
+    if !known && !offered {
+        return Err(REFUSED);
+    }
     let (mut send, mut recv) = match tokio::time::timeout(HANDSHAKE, conn.accept_bi()).await {
         Ok(Ok(streams)) => streams,
         _ => return Err(REFUSED),
     };
-    if pairing {
-        let ClientMsg::Pair { secret } = read_frame(&mut recv).await? else {
-            return Err(REFUSED);
-        };
-        let word = pair(shared, phone, &secret).ok_or(REFUSED)?;
-        let reply = ServerMsg::Reply {
-            id: 0,
-            outcome: Outcome::Paired { word: word.clone() },
-        };
-        write_msg(&mut send, &reply).await.map_err(|_| REFUSED)?;
+    // A stranger may only Pair; the paired phone may Pair again (while an offer is
+    // live) or go straight to Hello.
+    let mut first = read_frame(&mut recv).await?;
+    if let ClientMsg::Pair { secret } = &first {
+        let word = pair(shared, phone, secret).ok_or(REFUSED)?;
+        // hydraui hears of it even if the reply below can't be written.
         shared.emit(HostEvent::Paired {
             phone: phone.to_string(),
-            word,
+            word: word.clone(),
         });
+        let reply = ServerMsg::Reply {
+            id: 0,
+            outcome: Outcome::Paired { word },
+        };
+        write_msg(&mut send, &reply).await.map_err(|_| REFUSED)?;
+        first = read_frame(&mut recv).await?;
+    } else if !known {
+        return Err(REFUSED);
     }
-    let ClientMsg::Hello { version } = read_frame(&mut recv).await? else {
+    let ClientMsg::Hello { version } = first else {
         return Err(REFUSED);
     };
     if version < PROTOCOL_VERSION {
@@ -382,13 +426,13 @@ async fn handshake(
         }
         st.serial += 1;
         let serial = st.serial;
-        let (out, out_rx) = mpsc::unbounded_channel();
+        let out = Arc::new(Outbox::default());
         // Queued under the lock, so no broadcast can overtake it.
-        let _ = out.send(ServerMsg::Welcome {
+        out.push(ServerMsg::Welcome {
             version: PROTOCOL_VERSION,
             window: shared.window.clone(),
         });
-        tokio::spawn(write_loop(conn.clone(), send, out_rx));
+        tokio::spawn(write_loop(conn.clone(), send, Arc::clone(&out)));
         let old = st.current.replace(Current {
             serial,
             phone,
@@ -429,13 +473,13 @@ async fn run(
     shared: &Shared,
     conn: &Connection,
     serial: u64,
-    out: mpsc::UnboundedSender<ServerMsg>,
+    out: Arc<Outbox>,
     mut recv: RecvStream,
 ) {
     while let Ok(Some(Request { id, msg })) = read_msg::<_, Request>(&mut recv).await {
         match msg {
             ClientMsg::Hello { .. } | ClientMsg::Pair { .. } => {
-                let _ = out.send(ServerMsg::Reply {
+                out.push(ServerMsg::Reply {
                     id,
                     outcome: Outcome::Refused {
                         reason: "already connected".into(),
@@ -447,7 +491,7 @@ async fn run(
                 msg,
                 reply: Replier {
                     id,
-                    out: Some(out.clone()),
+                    out: Some(Arc::clone(&out)),
                 },
             }),
         }
@@ -471,18 +515,59 @@ async fn run(
 }
 
 /// Writes queued messages to the phone until the connection ends.
-async fn write_loop(
-    conn: Connection,
-    mut send: SendStream,
-    mut queue: mpsc::UnboundedReceiver<ServerMsg>,
-) {
+async fn write_loop(conn: Connection, mut send: SendStream, out: Arc<Outbox>) {
     loop {
         tokio::select! {
-            msg = queue.recv() => match msg {
-                Some(msg) if write_msg(&mut send, &msg).await.is_ok() => {}
-                _ => break,
-            },
+            msg = out.next() => {
+                if write_msg(&mut send, &msg).await.is_err() {
+                    break;
+                }
+            }
             _ = conn.closed() => break,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn notice(i: usize) -> ServerMsg {
+        ServerMsg::Notice {
+            text: format!("n{i}"),
+        }
+    }
+
+    fn drain(out: &Outbox) -> Vec<ServerMsg> {
+        std::iter::from_fn(|| out.pop()).collect()
+    }
+
+    #[test]
+    fn a_full_outbox_drops_the_oldest() {
+        let out = Outbox::default();
+        for i in 0..OUTBOX_CAP + 50 {
+            out.push(notice(i));
+        }
+        let got = drain(&out);
+        assert_eq!(got.len(), OUTBOX_CAP);
+        assert_eq!(got[0], notice(50));
+        assert_eq!(got[OUTBOX_CAP - 1], notice(OUTBOX_CAP + 49));
+    }
+
+    #[test]
+    fn a_full_outbox_keeps_replies_over_broadcasts() {
+        let out = Outbox::default();
+        let reply = ServerMsg::Reply {
+            id: 7,
+            outcome: Outcome::Ok,
+        };
+        out.push(reply.clone());
+        for i in 0..OUTBOX_CAP + 10 {
+            out.push(notice(i));
+        }
+        let got = drain(&out);
+        assert_eq!(got.len(), OUTBOX_CAP);
+        assert_eq!(got[0], reply);
+        assert_eq!(got[OUTBOX_CAP - 1], notice(OUTBOX_CAP + 9));
     }
 }

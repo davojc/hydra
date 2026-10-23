@@ -132,3 +132,26 @@ orchestrator) gets the same claim and end writes. A ticket from another team is 
 - Phase 3: the Slack review loop, the review stage, and Slack DMs on escalation.
 - Several tickets at once (still one per orchestrator).
 - Writing anything to Linear beyond the claim, the end comment and the passed state.
+
+## 9. As built
+
+- **Modules.** `linear.rs` (the client; requests and replies are pure, `Http` sends them),
+  `linear_watch.rs` (the decisions, and `find_and_claim` / `claim_named` / `end_writes` over the
+  `LinearApi` trait, tested against a Linear in memory), and `workspace/linear.rs` (the switch,
+  the checks off the UI thread, the card row, the ticket link and SLA pill).
+- **The claim comment** names the pipeline and its stages. It doesn't name the run, since the
+  run starts only after the claim.
+- **Re-check before claiming.** `find_and_claim` reads the ticket again just before it claims
+  it. A ticket that has left the trigger state, or gained an assignee when only unassigned ones
+  count, is passed over.
+- **A run's ticket** comes from the watcher's pick, or is read from Linear when a run starts by
+  hand. Either way it's logged as `linear ticket` (link and SLA times), which is what a resumed
+  run reads back. An ended run logs `linear sla` (`inside`, from the time it ended), which
+  History shows as Inside / Missed.
+- **The watcher's switch isn't saved.** It's off after a restart, and so is a resumed run's
+  orchestrator.
+- **Times** are read by a small RFC 3339 parser (UTC only, as Linear sends them). The workspace
+  has no date crate.
+- **Not yet checked by hand** against a live Linear workspace. The queries follow Linear's
+  documented schema (`IssueFilter` with `team.key`, `state.id`, `assignee.null`; `issue(id:)`
+  accepts an identifier; personal keys go in `Authorization` without `Bearer`).

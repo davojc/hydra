@@ -190,6 +190,20 @@ pub fn focused_pane(
         .flatten()
 }
 
+/// `focused_pane`, unless the user is `away` (a card the phone put into Pickup): then no
+/// terminal counts as in front of them, whatever the window shows.
+pub fn focused_for(
+    away: bool,
+    window_active: bool,
+    shown: Option<PaneId>,
+    board_shown: impl Fn(PaneId) -> bool,
+) -> Option<PaneId> {
+    if away {
+        return None;
+    }
+    focused_pane(window_active, shown, board_shown)
+}
+
 /// Cards on their way to a session, by project and text, so one card never goes to two
 /// sessions (§2 anti-goals): an offer is running for it, or it was sent moments ago.
 #[derive(Debug, Default)]
@@ -504,6 +518,23 @@ mod tests {
         assert_eq!(focused_pane(true, Some(1), |p| p == 1), None);
         assert_eq!(focused_pane(false, Some(1), |_| false), None);
         assert_eq!(focused_pane(true, None, |_| false), None);
+    }
+
+    #[test]
+    fn away_means_no_session_is_focused() {
+        // The shown terminal is free and idle, the window active and the terminal on screen.
+        let session = |away: bool| Session {
+            focused: focused_for(away, true, Some(1), |_| false) == Some(1),
+            ..free(1)
+        };
+        assert_eq!(candidates(&[session(true)], &project()), vec![1]);
+        assert!(candidates(&[session(false)], &project()).is_empty());
+        // Away, nothing is asked about what's shown.
+        assert_eq!(
+            focused_for(true, true, Some(1), |_| panic!("not consulted")),
+            None
+        );
+        assert_eq!(focused_for(false, true, Some(1), |p| p == 1), None);
     }
 
     #[test]

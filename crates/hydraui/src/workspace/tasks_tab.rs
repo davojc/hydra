@@ -340,7 +340,10 @@ impl Workspace {
                 }
             },
         );
-        self.boards.insert(project, (board.clone(), sub));
+        // Reloaded or changed here: the phone gets it as it is now.
+        let seen = cx.observe(&board, |ws, board, cx| ws.phone_board_changed(&board, cx));
+        self.boards
+            .insert(project, (board.clone(), Subscription::join(sub, seen)));
         board
     }
 

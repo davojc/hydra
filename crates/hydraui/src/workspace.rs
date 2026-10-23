@@ -7,6 +7,7 @@ mod busy;
 mod finder;
 mod launcher;
 mod layout_file;
+mod phone;
 mod pickup;
 mod settings_tab;
 mod shortcuts;
@@ -217,6 +218,18 @@ pub struct Workspace {
     in_flight: crate::pickup::InFlight,
     /// Listens for board files the MCP server's sessions create.
     _mcp_pump: Option<gpui::Task<()>>,
+    /// The phone link, while this window holds it (phone spec §4).
+    phone: Option<phone::PhoneLink>,
+    /// This window is waiting to take the phone link (another window holds it).
+    phone_seeking: bool,
+    /// Counts `phone_stop`s, so a wait for the link started before one ends.
+    phone_seek: u64,
+    /// Terminals the phone shows as Finished: a turn ended and the phone hasn't seen it.
+    phone_finished: HashSet<PaneId>,
+    /// Cards the phone put into Pickup, by project and text, while they are offered.
+    phone_cards: HashSet<(PathBuf, String)>,
+    /// The word pair both screens showed at the last pairing, for the Phone page.
+    phone_word: Option<String>,
     /// Coming back to the window clears the alert of the terminal it shows.
     _activation: Subscription,
 }
@@ -394,6 +407,12 @@ impl Workspace {
             reserved: HashMap::new(),
             in_flight: Default::default(),
             _mcp_pump: mcp_pump,
+            phone: None,
+            phone_seeking: false,
+            phone_seek: 0,
+            phone_finished: HashSet::new(),
+            phone_cards: HashSet::new(),
+            phone_word: None,
             _activation: activation,
         }
     }
@@ -417,6 +436,7 @@ impl Workspace {
         if let StartWith::File(path) = start {
             self.open_layout_path(path, window, cx);
         }
+        self.phone_start(window, cx);
         // Each pane's folder as it is when the window closes.
         let ws = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
@@ -678,6 +698,7 @@ impl Workspace {
         );
         self.subs.insert(id, sub);
         self.panes.insert(id, view);
+        self.phone_broadcast_session(id, cx);
     }
 
     /// The selected environment and its shown terminal: what the layout saves as selected.
@@ -946,6 +967,7 @@ impl Workspace {
         self.file_subs.remove(&id);
         self.commands.remove(&id);
         self.attention.remove(&id);
+        self.phone_pane_gone(id);
     }
 
     /// Ctrl+W: the file pane when it has the focus, else the shown terminal's Tasks tab when

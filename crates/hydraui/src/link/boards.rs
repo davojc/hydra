@@ -37,10 +37,9 @@ fn failed(e: CommitError) -> Outcome {
     }
 }
 
-/// Applies `change` to the board of `project`, which must be (once normalised with
-/// `project_root`) one of `known`; nothing is created for any other. Returns the board as
-/// written.
-pub fn apply(known: &[PathBuf], project: &str, change: PhoneChange) -> Result<BoardInfo, Outcome> {
+/// The project `project` names, once normalised with `project_root`, when it is one of
+/// `known`'s; refused otherwise.
+pub fn known_root(known: &[PathBuf], project: &str) -> Result<PathBuf, Outcome> {
     // `project_root` walks ancestors lexically, so `<known>/../x` would resolve to `<known>`
     // though it names a folder beside it: a path with `..` never names a known project.
     let path = Path::new(project);
@@ -54,6 +53,22 @@ pub fn apply(known: &[PathBuf], project: &str, change: PhoneChange) -> Result<Bo
     if !known.iter().any(|k| tasks_project::project_root(k) == root) {
         return Err(refused("hydraui doesn't know that project"));
     }
+    Ok(root)
+}
+
+/// `project`'s board as the file has it now, when it is one of `known`'s.
+pub fn board(known: &[PathBuf], project: &str) -> Result<BoardInfo, Outcome> {
+    let root = known_root(known, project)?;
+    let (board, _) =
+        tasks_project::load(&root).map_err(|e| refused(format!("Couldn't read the board: {e}")))?;
+    Ok(wire::board_info(&root, &board))
+}
+
+/// Applies `change` to the board of `project`, which must be (once normalised with
+/// `project_root`) one of `known`; nothing is created for any other. Returns the board as
+/// written.
+pub fn apply(known: &[PathBuf], project: &str, change: PhoneChange) -> Result<BoardInfo, Outcome> {
+    let root = known_root(known, project)?;
     let committed = match change {
         PhoneChange::Add { text, to } => {
             if text.trim().is_empty() {
@@ -96,12 +111,15 @@ pub fn apply(known: &[PathBuf], project: &str, change: PhoneChange) -> Result<Bo
     Ok(wire::board_info(&root, &committed.board))
 }
 
-/// The card's text when `change` put a card into Pickup.
+/// The card's text, as the board stores it, when `change` put a card into Pickup from
+/// elsewhere (a move within Pickup is no arrival), as `task_board::arrived` says for the
+/// desktop board.
 pub fn arrived_in_pickup(change: &PhoneChange) -> Option<String> {
+    let pickup = hydra_link::Column::Pickup;
     match change {
-        PhoneChange::Add { text, to } if *to == hydra_link::Column::Pickup => Some(text.clone()),
-        PhoneChange::Move { card, to } if *to == hydra_link::Column::Pickup => {
-            Some(card.text.clone())
+        PhoneChange::Add { text, to } if *to == pickup => Some(tasks::normalise(text)),
+        PhoneChange::Move { card, to } if *to == pickup && card.column != pickup => {
+            Some(tasks::normalise(&card.text))
         }
         _ => None,
     }
@@ -233,5 +251,46 @@ mod tests {
         assert_eq!(arrived_in_pickup(&mv(W::Pickup)), Some("m".into()));
         assert_eq!(arrived_in_pickup(&add("a", W::Backlog)), None);
         assert_eq!(arrived_in_pickup(&mv(W::Verify)), None);
+    }
+
+    #[test]
+    fn an_arrival_is_named_as_the_board_stores_it() {
+        assert_eq!(
+            arrived_in_pickup(&add("  fix\n  the   paste ", W::Pickup)),
+            Some("fix the paste".into())
+        );
+        // What the board then holds is that same text.
+        let d = repo();
+        let known = vec![d.path().to_path_buf()];
+        let info = apply(&known, &proj(&d), add("  fix\n  the   paste ", W::Pickup)).unwrap();
+        assert_eq!(texts(&info, 1), ["fix the paste"]);
+    }
+
+    #[test]
+    fn a_board_is_read_only_for_a_known_project() {
+        let d = repo();
+        let other = repo();
+        let known = vec![d.path().to_path_buf()];
+        apply(&known, &proj(&d), add("a", W::Backlog)).unwrap();
+        assert_eq!(texts(&board(&known, &proj(&d)).unwrap(), 0), ["a"]);
+        assert_eq!(
+            board(&known, &proj(&other)),
+            Err(Outcome::Refused {
+                reason: "hydraui doesn't know that project".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_move_within_pickup_is_no_arrival() {
+        let within = PhoneChange::Move {
+            card: hydra_link::CardRef {
+                column: W::Pickup,
+                text: "m".into(),
+                nth: 0,
+            },
+            to: W::Pickup,
+        };
+        assert_eq!(arrived_in_pickup(&within), None);
     }
 }

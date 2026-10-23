@@ -110,7 +110,11 @@ impl Workspace {
         self.reserved.remove(&id);
         view.update(cx, |v, cx| v.set_claude(state, resumed, cx));
         self.tick_activity(cx);
-        if let Some(alert) = alert_for(before, state) {
+        let alert = alert_for(before, state);
+        // The phone hears of it whether or not the terminal is in sight.
+        let changed = view.read(cx).claude() != before;
+        self.phone_session_changed(id, alert, changed, cx);
+        if let Some(alert) = alert {
             self.alert(id, alert, window, cx);
         }
     }

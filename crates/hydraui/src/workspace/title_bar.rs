@@ -192,6 +192,25 @@ impl Workspace {
                     .on_click(cx.listener(|ws, _, window, cx| ws.restart(window, cx))),
             ),
         };
+        // Pause/Resume the shown environment's orchestrator (orchestrator spec §5.4).
+        let pause = self
+            .shown_run(cx)
+            .filter(|(_, run)| run.state.open())
+            .map(|(_, run)| {
+                let (id, paused) = (run.id.clone(), run.paused);
+                Button::new("pause-orchestrator")
+                    .label(if paused {
+                        "Resume orchestrator"
+                    } else {
+                        "Pause orchestrator"
+                    })
+                    .outline()
+                    .xsmall()
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        ws.set_paused(&id, !paused);
+                        cx.notify();
+                    }))
+            });
         TitleBar::new().child(
             h_flex()
                 .w_full()
@@ -206,6 +225,7 @@ impl Workspace {
                 .child(
                     h_flex()
                         .gap_2()
+                        .children(pause.map(|b| div().occlude().child(b)))
                         // Occluded, as the Update button below, so a click isn't a drag.
                         .child(
                             div().occlude().child(

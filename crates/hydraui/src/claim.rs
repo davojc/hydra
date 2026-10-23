@@ -185,8 +185,9 @@ pub fn is_claimed(layout: &Path) -> bool {
     true
 }
 
+/// Whether process `pid` is running.
 #[cfg(windows)]
-fn alive(pid: u32) -> bool {
+pub(crate) fn alive(pid: u32) -> bool {
     // SAFETY: query-only access; the handle is closed before returning.
     unsafe {
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
@@ -200,8 +201,9 @@ fn alive(pid: u32) -> bool {
     }
 }
 
+/// Whether process `pid` is running.
 #[cfg(unix)]
-fn alive(pid: u32) -> bool {
+pub(crate) fn alive(pid: u32) -> bool {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
     };

@@ -53,7 +53,11 @@ impl Workspace {
     }
 
     /// The sessions, each draft that may have been cleared settled from its screen first.
-    fn fresh_sessions(&mut self, window: &Window, cx: &mut Context<Self>) -> Vec<Session> {
+    pub(super) fn fresh_sessions(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<Session> {
         let now = Instant::now();
         let live = &self.panes;
         self.reserved
@@ -67,7 +71,7 @@ impl Workspace {
                 .active()
                 .and_then(|t| t.shown)
                 .filter(|_| !self.all_tasks_shown()),
-            |id| self.tasks_tabs.get(&id) == Some(&true),
+            |id| self.tasks_tabs.get(&id) == Some(&true) || self.pipeline_shown(id),
         );
         self.sessions(focused, cx)
     }

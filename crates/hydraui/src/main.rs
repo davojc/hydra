@@ -49,7 +49,10 @@ fn main() {
         None => hydraui::workspace::StartWith::Page,
     };
     // Terminals get this server's address and a token (spec §2).
-    hydraui::mcp::server::init();
+    if let Some(server) = hydraui::mcp::server::init() {
+        // Pipelines and run logs live in the hydra home (orchestrator spec §2, §8).
+        server.set_hydra_root(hydra.paths.root().to_path_buf());
+    }
     // Init scripts left by earlier runs (spec §4.5).
     hydraui_term::clear_pane_inits(&hydra.paths);
     // Exes a previous update replaced (spec §7.11).
@@ -64,6 +67,8 @@ fn main() {
     gpui_platform::application()
         .with_assets(hydraui::assets::AppAssets)
         .run(move |cx: &mut App| {
+            // The Dock shows hydraui's icon, not a bare executable's (macOS).
+            hydraui::app_icon::set();
             gpui_component::init(cx);
             hydraui::grammars::register();
             let mode = match ui.theme {

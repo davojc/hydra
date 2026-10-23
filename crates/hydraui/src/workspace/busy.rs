@@ -106,10 +106,17 @@ impl Workspace {
             self.pane_name(id, cx),
             if resumed { " (resumed session)" } else { "" }
         ));
+        if state == SessionState::Ended {
+            // Claude ended without reporting: its stage fails (orchestrator spec §3.4).
+            self.stage_session_gone(token);
+        }
         // A card sent here has reached the session, or it moved on: no longer reserved.
         self.reserved.remove(&id);
         view.update(cx, |v, cx| v.set_claude(state, resumed, cx));
         self.tick_activity(cx);
+        if self.pending_wakes.contains_key(&id) {
+            self.send_wakes(window, cx);
+        }
         if let Some(alert) = alert_for(before, state) {
             self.alert(id, alert, window, cx);
         }
@@ -139,6 +146,7 @@ impl Workspace {
             && !self.all_tasks_shown()
             && self.envs.active().and_then(|t| t.shown) == Some(id)
             && self.tasks_tabs.get(&id) != Some(&true)
+            && !self.pipeline_shown(id)
     }
 
     /// Tells you a terminal out of sight needs you: its environment tab gets a badge until it

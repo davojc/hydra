@@ -60,6 +60,9 @@ impl Workspace {
             return;
         }
         self.tasks_tabs.insert(id, shown);
+        if let Some(pipeline) = self.pipeline_tabs.get_mut(&id) {
+            pipeline.shown = false;
+        }
         if shown {
             self.leave_files(id);
             self.follow_project(id, window, cx);
@@ -111,12 +114,12 @@ impl Workspace {
             return None;
         }
         let id = self.envs.active()?.shown?;
-        (self.tasks_tabs.get(&id) == Some(&true)).then_some(id)
+        (self.tasks_tabs.get(&id) == Some(&true) && !self.pipeline_shown(id)).then_some(id)
     }
 
     /// The board view on screen when terminal `id`'s Tasks tab is selected.
     pub(super) fn shown_board(&self, id: PaneId) -> Option<&Entity<TaskBoardView>> {
-        if self.tasks_tabs.get(&id) != Some(&true) {
+        if self.tasks_tabs.get(&id) != Some(&true) || self.pipeline_shown(id) {
             return None;
         }
         self.board_views.get(&id)
@@ -432,8 +435,9 @@ impl Workspace {
         }
     }
 
-    /// The strip above a terminal with a Tasks tab (§4): the terminal by its name, then
-    /// **Tasks ✕**; the selected one in the environment's colour, as environment tabs are.
+    /// The strip above a terminal with a Tasks or Pipeline tab (§4; orchestrator spec §7.1):
+    /// the terminal by its name, then **Tasks ✕** and **Pipeline ✕** when open; the selected one
+    /// in the environment's colour, as environment tabs are.
     pub(super) fn render_tasks_strip(
         &self,
         id: PaneId,
@@ -443,7 +447,10 @@ impl Workspace {
         border: Hsla,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let shown = self.tasks_tabs.get(&id) == Some(&true);
+        let pipeline = self.pipeline_tabs.get(&id).map(|t| t.shown);
+        let tasks = self.tasks_tabs.get(&id).copied();
+        let pipeline_shown = pipeline == Some(true);
+        let tasks_shown = tasks == Some(true) && !pipeline_shown;
         let tab = |key: &str, selected: bool| {
             h_flex()
                 .id(SharedString::from(format!("{key}-{id}")))
@@ -455,6 +462,14 @@ impl Workspace {
                 .when(selected, |d| d.bg(tint.opacity(0.25)))
                 .hover(|d| d.bg(tint.opacity(0.15)))
         };
+        let close = |key: &str| {
+            div()
+                .id(SharedString::from(format!("{key}-{id}")))
+                .px_1()
+                .text_color(muted)
+                .hover(|d| d.text_color(tint))
+                .child("✕")
+        };
         h_flex()
             .h(px(28.))
             .flex_none()
@@ -464,31 +479,45 @@ impl Workspace {
             .border_b_1()
             .border_color(border)
             .child(
-                tab("tasks-terminal-tab", !shown)
-                    .on_click(
-                        cx.listener(move |ws, _, window, cx| ws.show_tasks(id, false, window, cx)),
-                    )
+                tab("tasks-terminal-tab", !tasks_shown && !pipeline_shown)
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.show_pipeline(id, false, window, cx);
+                        ws.show_tasks(id, false, window, cx);
+                    }))
                     .child(label),
             )
-            .child(
-                tab("tasks-tab", shown)
-                    .on_click(
-                        cx.listener(move |ws, _, window, cx| ws.show_tasks(id, true, window, cx)),
-                    )
-                    .child("Tasks")
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("tasks-close-{id}")))
-                            .px_1()
-                            .text_color(muted)
-                            .hover(|d| d.text_color(tint))
-                            .child("✕")
-                            .on_click(cx.listener(move |ws, _, window, cx| {
+            .when(tasks.is_some(), |strip| {
+                strip.child(
+                    tab("tasks-tab", tasks_shown)
+                        .on_click(
+                            cx.listener(move |ws, _, window, cx| {
+                                ws.show_tasks(id, true, window, cx)
+                            }),
+                        )
+                        .child("Tasks")
+                        .child(close("tasks-close").on_click(cx.listener(
+                            move |ws, _, window, cx| {
                                 cx.stop_propagation();
                                 ws.close_tasks(id, window, cx);
-                            })),
-                    ),
-            )
+                            },
+                        ))),
+                )
+            })
+            .when(pipeline.is_some(), |strip| {
+                strip.child(
+                    tab("pipeline-tab", pipeline_shown)
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.show_pipeline(id, true, window, cx)
+                        }))
+                        .child("Pipeline")
+                        .child(close("pipeline-close").on_click(cx.listener(
+                            move |ws, _, window, cx| {
+                                cx.stop_propagation();
+                                ws.close_pipeline(id, window, cx);
+                            },
+                        ))),
+                )
+            })
     }
 }
 

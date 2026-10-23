@@ -144,6 +144,29 @@ pub fn forget(file: &Path, wt: &Worktree) -> std::io::Result<()> {
 /// deletes the branch. Refused, with nothing changed, when the worktree or the main work tree
 /// has uncommitted changes or the main work tree isn't on the base branch; a merge that
 /// conflicts is aborted. On success, what was done.
+/// Removes the worktree at `path` (a run's, orchestrator spec §8) when it holds no work that
+/// isn't committed, untracked files included; its branch stays. `Ok(false)`: kept, because it
+/// had some. A folder that is gone already counts as removed.
+pub fn remove_if_clean(path: &Path) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(true);
+    }
+    if !git(path, &["status", "--porcelain"])?.is_empty() {
+        return Ok(false);
+    }
+    let common = git(
+        path,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    let repo = Path::new(&common)
+        .parent()
+        .ok_or("the worktree's repository has no folder")?
+        .to_path_buf();
+    let target = path.to_string_lossy().into_owned();
+    git(&repo, &["worktree", "remove", &target])?;
+    Ok(true)
+}
+
 pub fn merge_and_remove(wt: &Worktree) -> Result<String, String> {
     let dirty = |dir: &Path| {
         git(dir, &["status", "--porcelain", "--untracked-files=no"]).map(|s| !s.is_empty())
@@ -228,6 +251,41 @@ mod tests {
         git(&repo, &["add", "a.txt"]).unwrap();
         git(&repo, &["commit", "-q", "-m", "first"]).unwrap();
         Some((d, repo))
+    }
+
+    #[test]
+    fn a_run_gets_a_worktree_named_after_it() {
+        let Some((d, repo)) = repo() else {
+            return;
+        };
+        let wt = create(&repo, "INTH-1-1").unwrap();
+        assert_eq!(wt.branch, "task/inth-1-1");
+        assert_eq!(wt.path, d.path().join("repo-worktrees").join("inth-1-1"));
+    }
+
+    #[test]
+    fn a_dirty_worktree_is_kept_and_a_clean_one_removed_keeping_its_branch() {
+        let Some((_d, repo)) = repo() else {
+            return;
+        };
+        let wt = create(&repo, "INTH-1-1").unwrap();
+        std::fs::write(wt.path.join("a.txt"), "changed\n").unwrap();
+        assert_eq!(remove_if_clean(&wt.path), Ok(false));
+        assert!(wt.path.exists());
+        git(&wt.path, &["commit", "-q", "-am", "work"]).unwrap();
+        std::fs::write(wt.path.join("new.txt"), "untracked\n").unwrap();
+        assert_eq!(
+            remove_if_clean(&wt.path),
+            Ok(false),
+            "untracked work is work too"
+        );
+        std::fs::remove_file(wt.path.join("new.txt")).unwrap();
+        assert_eq!(remove_if_clean(&wt.path), Ok(true));
+        assert!(!wt.path.exists());
+        let branches = git(&repo, &["branch", "--list", &wt.branch]).unwrap();
+        assert!(branches.contains("task/inth-1-1"), "{branches}");
+        // Already gone: nothing to do.
+        assert_eq!(remove_if_clean(&wt.path), Ok(true));
     }
 
     #[test]

@@ -44,6 +44,34 @@ pub fn interrupted(hydra_root: &Path, alive: impl Fn(u32) -> bool) -> Vec<Interr
         .collect()
 }
 
+/// The folder attempt `label` of run `run` opened in and its Claude session, as its log has
+/// them; what reopening that attempt's conversation needs.
+pub fn logged_session(
+    hydra_root: &Path,
+    run: &str,
+    label: &str,
+) -> (Option<PathBuf>, Option<String>) {
+    let Ok(log) = std::fs::read_to_string(crate::run_log::file_for(hydra_root, run)) else {
+        return (None, None);
+    };
+    let (mut folder, mut claude) = (None, None);
+    for e in log
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+    {
+        match event(&e) {
+            "stage folder" if text(&e, "label") == label => {
+                folder = Some(PathBuf::from(text(&e, "folder")));
+            }
+            "claude session" if text(&e, "who") == label => {
+                claude = Some(text(&e, "id").to_string()).filter(|c| !c.is_empty());
+            }
+            _ => {}
+        }
+    }
+    (folder, claude)
+}
+
 fn event(e: &Value) -> &str {
     e.get("event").and_then(Value::as_str).unwrap_or_default()
 }
@@ -148,6 +176,16 @@ fn replay(id: &str, pipeline: Pipeline, events: &[Value]) -> Option<Run> {
                 let s = runs.begin(REPLAYED, id, text(e, "stage"), "", 0).ok()?;
                 runs.link(id, s.stage, text(e, "label"), &s.name);
             }
+            // A person sent the run back here and its session reopened (Go back).
+            "stage reopened" => {
+                let r = runs.run(id)?;
+                let i = r
+                    .pipeline
+                    .stages
+                    .iter()
+                    .position(|s| s.id == text(e, "stage"))?;
+                runs.link(id, i, text(e, "label"), text(e, "label"));
+            }
             "skill used" => {
                 if let Some(token) = latest(&runs, text(e, "stage")) {
                     runs.skill_used(&token, text(e, "skill"));
@@ -168,6 +206,10 @@ fn replay(id: &str, pipeline: Pipeline, events: &[Value]) -> Option<Run> {
                         note: text(e, "note").to_string(),
                     },
                     "stop" => Choice::Stop,
+                    "back" => Choice::Back {
+                        stage: text(e, "stage").to_string(),
+                        note: text(e, "note").to_string(),
+                    },
                     _ => continue,
                 };
                 runs.person(id, choice).ok()?;
@@ -319,5 +361,44 @@ mod tests {
                 .ticket
                 .is_none()
         );
+    }
+
+    #[test]
+    fn an_attempts_folder_and_session_are_read_back_for_reopening() {
+        let home = home_with(&mid_run());
+        assert_eq!(
+            logged_session(home.path(), "INTH-7-2", "s-01"),
+            (Some(PathBuf::from("/w/qa")), Some("a-c".to_string()))
+        );
+        assert_eq!(
+            logged_session(home.path(), "INTH-7-2", "s-09"),
+            (None, None)
+        );
+        assert_eq!(logged_session(home.path(), "NOPE-1", "s-01"), (None, None));
+    }
+
+    #[test]
+    fn a_run_sent_back_to_an_earlier_stage_replays() {
+        let mut log = mid_run();
+        let low = RATING.replace("88", "30");
+        log.push(line(
+            "report",
+            &format!(r#","stage":"b","label":"s-02","rating":{low}"#),
+        ));
+        log.push(line(
+            "person",
+            r#","choice":"back","note":"rename the branch","stage":"a""#,
+        ));
+        log.push(line("stage reopened", r#","stage":"a","label":"s-03""#));
+        let found = interrupted(home_with(&log).path(), |_| false);
+        let r = &found[0].run;
+        assert_eq!(r.stages[0].status, StageStatus::Running);
+        assert_eq!(r.stages[0].attempts.len(), 2);
+        assert_eq!(
+            r.stages[0].latest().unwrap().session.as_deref(),
+            Some("s-03")
+        );
+        assert_eq!(r.stages[1].status, StageStatus::Waiting);
+        assert_eq!(r.stages[1].tries(), 0);
     }
 }

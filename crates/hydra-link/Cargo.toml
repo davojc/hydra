@@ -7,9 +7,14 @@ rust-version.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["signal"] }
 getrandom.workspace = true
 sha2.workspace = true
 base64.workspace = true
 iroh.workspace = true
 futures.workspace = true
+clap.workspace = true
+
+[[bin]]
+name = "link-probe"
+path = "src/bin/link-probe.rs"

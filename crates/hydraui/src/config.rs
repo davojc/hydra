@@ -63,6 +63,10 @@ pub struct UiConfig {
     pub colors: ColorsConfig,
     /// Command name → keys, e.g. `new_terminal = "ctrl-alt-d"`; `""` unbinds.
     pub keys: BTreeMap<String, String>,
+    /// The phone link is on.
+    pub phone_access: bool,
+    /// The paired phone's endpoint id.
+    pub phone: Option<String>,
 }
 
 impl Default for UiConfig {
@@ -76,6 +80,8 @@ impl Default for UiConfig {
             editor: None,
             colors: ColorsConfig::default(),
             keys: BTreeMap::new(),
+            phone_access: false,
+            phone: None,
         }
     }
 }
@@ -126,6 +132,8 @@ pub fn parse(text: &str) -> (UiConfig, Vec<String>) {
             }),
             "editor" => get(value).map(|e| cfg.editor = Some(e)),
             "keys" => get(value).map(|k| cfg.keys = k),
+            "phone_access" => get(value).map(|b| cfg.phone_access = b),
+            "phone" => get(value).map(|p| cfg.phone = Some(p)),
             "colors" => match value {
                 toml::Value::Table(colors) => {
                     parse_colors(colors, &mut cfg.colors, &mut problems);
@@ -253,6 +261,21 @@ mod tests {
         let (cfg, problems) = parse(text);
         assert!(problems.is_empty(), "{problems:?}");
         cfg
+    }
+
+    #[test]
+    fn config_reads_phone_settings() {
+        let cfg = clean(
+            "phone_access = true
+phone = \"abc\"",
+        );
+        assert!(cfg.phone_access);
+        assert_eq!(cfg.phone.as_deref(), Some("abc"));
+        let cfg = clean("");
+        assert!(!cfg.phone_access);
+        assert_eq!(cfg.phone, None);
+        let (_, problems) = parse("phone_access = \"yes\"");
+        assert!(problems.iter().any(|p| p.starts_with("phone_access:")));
     }
 
     #[test]

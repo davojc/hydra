@@ -2,4 +2,6 @@
 //! `hydra_link` wire types, and the board changes the phone may make.
 
 pub mod boards;
+pub mod owner;
+pub mod store;
 pub mod wire;

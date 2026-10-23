@@ -121,6 +121,12 @@ struct FileLinear {
     every_minutes: Option<u32>,
 }
 
+/// The `[linear]` defaults (phase 2 spec §2).
+pub const DEFAULT_PICK: &str = "Ready for Investigation";
+pub const DEFAULT_CLAIM: &str = "In Investigation";
+pub const DEFAULT_PASSED: &str = "Ready for Peer Review";
+pub const DEFAULT_EVERY_MINUTES: u32 = 5;
+
 /// The `[linear]` table, its defaults filled in (phase 2 spec §2).
 fn linear_settings(f: FileLinear) -> Result<LinearSettings, String> {
     let text = |v: Option<String>, default: &str| {
@@ -141,16 +147,16 @@ fn linear_settings(f: FileLinear) -> Result<LinearSettings, String> {
             ));
         }
     };
-    let every_minutes = f.every_minutes.unwrap_or(5);
+    let every_minutes = f.every_minutes.unwrap_or(DEFAULT_EVERY_MINUTES);
     if every_minutes == 0 {
         return Err("[linear] every_minutes must be at least 1".into());
     }
     Ok(LinearSettings {
         team,
-        pick: text(f.pick, "Ready for Investigation"),
+        pick: text(f.pick, DEFAULT_PICK),
         assignee,
-        claim: text(f.claim, "In Investigation"),
-        passed: text(f.passed, "Ready for Peer Review"),
+        claim: text(f.claim, DEFAULT_CLAIM),
+        passed: text(f.passed, DEFAULT_PASSED),
         every_minutes,
     })
 }
@@ -300,6 +306,20 @@ pub fn validate(edit: &Edit) -> Result<(), &'static str> {
     }
     if edit.stages.iter().any(|s| s.title.trim().is_empty()) {
         return Err("Every stage needs a name");
+    }
+    if let Some(l) = &edit.linear {
+        if l.team.trim().is_empty() {
+            return Err("Name the Linear team, e.g. INTH");
+        }
+        if [&l.pick, &l.claim, &l.passed]
+            .iter()
+            .any(|s| s.trim().is_empty())
+        {
+            return Err("Name the Linear states");
+        }
+        if l.every_minutes == 0 {
+            return Err("Check Linear every minute or more");
+        }
     }
     Ok(())
 }
@@ -930,6 +950,24 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
         edit.name = "x".into();
         edit.stages.clear();
         assert_eq!(validate(&edit), Err("Add at least one stage"));
+    }
+
+    #[test]
+    fn linear_settings_are_checked_before_saving() {
+        let mut edit = edit_of(&parse(&format!("{ONE_STAGE}[linear]\nteam = \"INTH\"\n")).unwrap());
+        assert_eq!(validate(&edit), Ok(()));
+        let mut l = edit.linear.clone().unwrap();
+        l.team = " ".into();
+        edit.linear = Some(l.clone());
+        assert_eq!(validate(&edit), Err("Name the Linear team, e.g. INTH"));
+        l.team = "INTH".into();
+        l.pick = "".into();
+        edit.linear = Some(l.clone());
+        assert_eq!(validate(&edit), Err("Name the Linear states"));
+        l.pick = "Ready for Review".into();
+        l.every_minutes = 0;
+        edit.linear = Some(l);
+        assert_eq!(validate(&edit), Err("Check Linear every minute or more"));
     }
 
     #[test]

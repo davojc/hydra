@@ -202,7 +202,7 @@ pub(super) fn tell(changes: Vec<Change>) {
 
 /// Writes `event` to run `run`'s log (§8), noting a failure in hydraui's log: what only the app
 /// knows, which a restart needs to pick the run back up (§13).
-fn note_run(run: &str, event: &str, fields: serde_json::Value) {
+pub(super) fn note_run(run: &str, event: &str, fields: serde_json::Value) {
     let Some(root) = server::get().and_then(|sv| server::lock(sv.registry()).hydra_root.clone())
     else {
         return;
@@ -589,6 +589,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Linear hears of runs that started or ended (phase 2 §4).
+        self.linear_runs_changed(&changes, cx);
         // Where a new run's orchestrator is, and which hydraui drives it (§13).
         let started: Vec<(String, String)> = server::get()
             .map(|sv| {

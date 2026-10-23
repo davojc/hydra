@@ -144,7 +144,7 @@ impl Workspace {
     }
 
     /// The pipeline file, environment and folder of `orch`'s current run.
-    fn settings_target(
+    pub(super) fn settings_target(
         &self,
         orch: PaneId,
         cx: &App,

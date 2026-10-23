@@ -76,6 +76,8 @@ pub struct Started {
     pub pane: Pane,
     pub events: Receiver<TermEvent>,
     pub warnings: Vec<String>,
+    /// The environment's `[claude] remote_control`, as the launch loaded it.
+    pub remote_control: bool,
 }
 
 pub struct Hydra {
@@ -331,6 +333,11 @@ impl Hydra {
     pub fn start(&self, req: &PaneRequest, size: GridSize) -> Result<Started, String> {
         let launch = self.prepare(req)?;
         let warnings = launch.warnings.clone();
+        let remote_control = launch
+            .config
+            .claude
+            .as_ref()
+            .is_some_and(|c| c.remote_control);
         let spec = SpawnSpec {
             paths: self.paths.clone(),
             launch,
@@ -346,6 +353,7 @@ impl Hydra {
             pane,
             events,
             warnings,
+            remote_control,
         })
     }
 

@@ -129,7 +129,8 @@ fn session_info(f: &PaneFacts, project: &Path, board: Option<&Board>) -> Session
             .taker
             .as_deref()
             .and_then(|t| board.and_then(|b| card_of(b, t))),
-        remote_control: f.remote_control,
+        // Only a Claude session has Remote Control; a plain shell never reports it.
+        remote_control: f.remote_control && kind == hydra_link::Kind::Claude,
         changed_at: f.changed_at,
     }
 }
@@ -613,6 +614,14 @@ mod tests {
         assert_eq!(s.project.as_deref(), Some("/w/api"));
         assert_eq!(s.changed_at, 1_700_000_000);
         assert!(s.remote_control);
+        // A plain shell never reports Remote Control, whatever its environment says.
+        let shell = PaneFacts {
+            claude: None,
+            ..facts()
+        };
+        let s = session_info(&shell, Path::new("/w/api"), None);
+        assert_eq!(s.kind, Kind::Shell);
+        assert!(!s.remote_control);
         // No board read, or no name to take cards under: no card.
         assert_eq!(session_info(&facts(), Path::new("/w/api"), None).card, None);
         let nameless = PaneFacts {

@@ -19,6 +19,42 @@ pub struct Pipeline {
     /// The bar every stage must clear unless it sets its own, 0 to 100.
     pub bar: u8,
     pub stages: Vec<Stage>,
+    /// Where its tickets come from in Linear (phase 2 spec §2); `None`: named by hand.
+    pub linear: Option<LinearSettings>,
+}
+
+/// A pipeline's `[linear]` table (phase 2 spec §2): which tickets it takes, and the states it
+/// moves them through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinearSettings {
+    /// The team's key, e.g. `INTH`.
+    pub team: String,
+    /// The state that triggers a pickup.
+    pub pick: String,
+    pub assignee: Assignee,
+    /// The state a picked ticket moves to.
+    pub claim: String,
+    /// The state a ticket moves to when every stage passed.
+    pub passed: String,
+    pub every_minutes: u32,
+}
+
+/// Which tickets in the `pick` state a pipeline takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Assignee {
+    /// Only tickets nobody is assigned (the default).
+    Unassigned,
+    /// Whoever they're assigned to.
+    Any,
+}
+
+impl Assignee {
+    pub fn word(self) -> &'static str {
+        match self {
+            Assignee::Unassigned => "unassigned",
+            Assignee::Any => "any",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +107,52 @@ struct File {
     feature_env: Option<String>,
     #[serde(default, rename = "stage")]
     stages: Vec<FileStage>,
+    linear: Option<FileLinear>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileLinear {
+    team: Option<String>,
+    pick: Option<String>,
+    assignee: Option<String>,
+    claim: Option<String>,
+    passed: Option<String>,
+    every_minutes: Option<u32>,
+}
+
+/// The `[linear]` table, its defaults filled in (phase 2 spec §2).
+fn linear_settings(f: FileLinear) -> Result<LinearSettings, String> {
+    let text = |v: Option<String>, default: &str| {
+        v.map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| default.to_string())
+    };
+    let team = text(f.team, "");
+    if team.is_empty() {
+        return Err("[linear] needs the team's key, e.g. team = \"INTH\"".into());
+    }
+    let assignee = match f.assignee.as_deref().map(str::trim) {
+        None | Some("unassigned") => Assignee::Unassigned,
+        Some("any") => Assignee::Any,
+        Some(other) => {
+            return Err(format!(
+                "[linear] assignee {other:?} must be \"unassigned\" or \"any\""
+            ));
+        }
+    };
+    let every_minutes = f.every_minutes.unwrap_or(5);
+    if every_minutes == 0 {
+        return Err("[linear] every_minutes must be at least 1".into());
+    }
+    Ok(LinearSettings {
+        team,
+        pick: text(f.pick, "Ready for Investigation"),
+        assignee,
+        claim: text(f.claim, "In Investigation"),
+        passed: text(f.passed, "Ready for Peer Review"),
+        every_minutes,
+    })
 }
 
 #[derive(Deserialize)]
@@ -152,6 +234,7 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
             .filter(|f| !f.is_empty()),
         bar: file.bar.unwrap_or(DEFAULT_BAR),
         stages,
+        linear: file.linear.map(linear_settings).transpose()?,
     })
 }
 
@@ -167,6 +250,7 @@ pub struct Edit {
     pub bar: u8,
     pub feature_env: Option<String>,
     pub stages: Vec<EditStage>,
+    pub linear: Option<LinearSettings>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,6 +285,7 @@ impl From<&Pipeline> for Edit {
                     prompt: s.prompt.clone(),
                 })
                 .collect(),
+            linear: p.linear.clone(),
         }
     }
 }
@@ -270,6 +355,24 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
         Some(f) => doc["feature_env"] = value(f),
         None => {
             doc.remove("feature_env");
+        }
+    }
+    match &edit.linear {
+        Some(l) => {
+            // Into the table that's there, so its comments stay.
+            if !doc.get("linear").is_some_and(Item::is_table) {
+                doc["linear"] = Item::Table(Table::new());
+            }
+            let t = &mut doc["linear"];
+            t["team"] = value(l.team.trim());
+            t["pick"] = value(l.pick.trim());
+            t["assignee"] = value(l.assignee.word());
+            t["claim"] = value(l.claim.trim());
+            t["passed"] = value(l.passed.trim());
+            t["every_minutes"] = value(i64::from(l.every_minutes));
+        }
+        None => {
+            doc.remove("linear");
         }
     }
     let old: Vec<Table> = doc
@@ -598,6 +701,84 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
 
     fn edit_of(p: &Pipeline) -> Edit {
         Edit::from(p)
+    }
+
+    const ONE_STAGE: &str = "name = \"t\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n";
+
+    #[test]
+    fn a_linear_table_takes_its_defaults_from_the_team_alone() {
+        assert_eq!(parse(ONE_STAGE).unwrap().linear, None);
+        let p = parse(&format!("{ONE_STAGE}[linear]\nteam = \"INTH\"\n")).unwrap();
+        assert_eq!(
+            p.linear,
+            Some(LinearSettings {
+                team: "INTH".into(),
+                pick: "Ready for Investigation".into(),
+                assignee: Assignee::Unassigned,
+                claim: "In Investigation".into(),
+                passed: "Ready for Peer Review".into(),
+                every_minutes: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn a_pipeline_can_trigger_off_another_state_and_any_assignee() {
+        let p = parse(&format!(
+            "{ONE_STAGE}[linear]\nteam = \"INTH\"\npick = \"Ready for Review\"\nassignee = \"any\"\n\
+             claim = \"In Review\"\npassed = \"Done\"\nevery_minutes = 15\n"
+        ))
+        .unwrap();
+        let l = p.linear.unwrap();
+        assert_eq!(l.pick, "Ready for Review");
+        assert_eq!(l.assignee, Assignee::Any);
+        assert_eq!((l.claim.as_str(), l.passed.as_str()), ("In Review", "Done"));
+        assert_eq!(l.every_minutes, 15);
+    }
+
+    #[test]
+    fn linear_mistakes_are_named() {
+        for (table, says) in [
+            ("[linear]\npick = \"X\"\n", "team"),
+            ("[linear]\nteam = \" \"\n", "team"),
+            ("[linear]\nteam = \"INTH\"\nassignee = \"me\"\n", "assignee"),
+            (
+                "[linear]\nteam = \"INTH\"\nevery_minutes = 0\n",
+                "every_minutes",
+            ),
+            ("[linear]\nteam = \"INTH\"\nlabel = \"x\"\n", "label"),
+        ] {
+            let e = parse(&format!("{ONE_STAGE}{table}")).unwrap_err();
+            assert!(e.contains(says), "{says}: {e}");
+        }
+    }
+
+    #[test]
+    fn saving_keeps_or_drops_the_linear_table() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        let file = folder(d.path()).join("t.toml");
+        std::fs::write(
+            &file,
+            format!("{ONE_STAGE}[linear]\n# The INTH queue.\nteam = \"INTH\"\n"),
+        )
+        .unwrap();
+        let mut edit = edit_of(&load(d.path(), "t").unwrap());
+        let mut l = edit.linear.clone().unwrap();
+        l.pick = "Ready for Review".into();
+        l.assignee = Assignee::Any;
+        edit.linear = Some(l);
+        save(d.path(), "t", &edit).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("# The INTH queue."), "{text}");
+        let l = load(d.path(), "t").unwrap().linear.unwrap();
+        assert_eq!(
+            (l.pick.as_str(), l.assignee),
+            ("Ready for Review", Assignee::Any)
+        );
+        edit.linear = None;
+        save(d.path(), "t", &edit).unwrap();
+        assert_eq!(load(d.path(), "t").unwrap().linear, None);
     }
 
     #[test]

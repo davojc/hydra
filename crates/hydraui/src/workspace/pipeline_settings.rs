@@ -77,6 +77,8 @@ impl SettingsDraft {
             name: self.name.read(cx).value().to_string(),
             // Not edited here: the pattern is the same for every ticket, so it stays as the file has it.
             feature_env: self.saved.feature_env.clone(),
+            // Its own section comes with the views (phase 2 plan task 6).
+            linear: self.saved.linear.clone(),
             bar: slider_value(&self.bar, cx),
             stages: self
                 .stages

@@ -499,9 +499,13 @@ impl Workspace {
                 // Unsaved edits: ask first, and close from the dialog (spec §7.8).
                 let all: Vec<PaneId> = ws.files.keys().copied().collect();
                 if ws.unsaved_in(&all, cx).is_empty() {
+                    orchestrator::closing();
                     return true;
                 }
-                ws.confirm_unsaved(all, window, cx, |_, w, _| w.remove_window());
+                ws.confirm_unsaved(all, window, cx, |_, w, _| {
+                    orchestrator::closing();
+                    w.remove_window()
+                });
                 false
             })
             .unwrap_or(true)

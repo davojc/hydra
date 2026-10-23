@@ -1025,7 +1025,10 @@ impl Workspace {
                                     w.close_dialog(cx);
                                     ws.update(cx, |ws, cx| {
                                         let all: Vec<PaneId> = ws.files.keys().copied().collect();
-                                        ws.confirm_unsaved(all, w, cx, |_, w, _| w.remove_window());
+                                        ws.confirm_unsaved(all, w, cx, |_, w, _| {
+                                            closing();
+                                            w.remove_window()
+                                        });
                                     });
                                 }),
                         ),
@@ -1238,11 +1241,20 @@ impl Workspace {
         let changes = server::get().map_or_else(Vec::new, |sv| {
             let mut reg = server::lock(sv.registry());
             match reg.runs.role(token) {
-                Role::Stage(..) => reg.runs.session_gone(token),
+                // A shell that dies as hydraui closes isn't a stage failing (§13).
+                Role::Stage(..) if !reg.closing => reg.runs.session_gone(token),
                 _ => Vec::new(),
             }
         });
         tell(changes);
+    }
+}
+
+/// The window is about to close: from now on its terminals going is hydraui quitting, not
+/// their work ending, so open runs stay open for a restart to pick up (§13).
+pub(super) fn closing() {
+    if let Some(sv) = server::get() {
+        server::lock(sv.registry()).closing = true;
     }
 }
 

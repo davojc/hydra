@@ -32,7 +32,7 @@ pub fn rows(reports: &[IdentityReport]) -> Vec<Row> {
 pub const SIGN_IN_TOOLS: &[&str] = &["claude", "github", "azure", "gcloud", "codex", "gws"];
 
 /// The tools added with a few values first (a form), then a sign-in if they have one.
-pub const SETUP_TOOLS: &[&str] = &["git", "aws", "gemini", "jev", "kube"];
+pub const SETUP_TOOLS: &[&str] = &["git", "aws", "gemini", "jev", "linear", "kube"];
 
 /// One field of a tool's set-up form.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,7 +79,7 @@ pub fn form_fields(tool: &str) -> Vec<Field> {
             "the AWS profile to sign in with",
             true,
         )],
-        "gemini" | "jev" => vec![Field {
+        "gemini" | "jev" | "linear" => vec![Field {
             masked: true,
             ..field("api_key", "API key", "stored as a hydra secret", true)
         }],
@@ -97,7 +97,7 @@ pub fn form_fields(tool: &str) -> Vec<Field> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FormResult {
     Values(Box<ToolValues>),
-    /// An API key (gemini, jev), to store as a secret first.
+    /// An API key (gemini, jev, linear), to store as a secret first.
     ApiKey(String),
 }
 
@@ -117,7 +117,7 @@ pub fn form_values(tool: &str, typed: &[(&str, String)]) -> Result<FormResult, S
         }
     }
     Ok(match tool {
-        "gemini" | "jev" => FormResult::ApiKey(get("api_key").unwrap_or_default()),
+        "gemini" | "jev" | "linear" => FormResult::ApiKey(get("api_key").unwrap_or_default()),
         _ => FormResult::Values(Box::new(ToolValues {
             name: get("name"),
             email: get("email"),
@@ -205,6 +205,8 @@ mod tests {
         assert_eq!(keys("aws"), vec!["profile"]);
         assert_eq!(keys("gemini"), vec!["api_key"]);
         assert_eq!(keys("jev"), vec!["api_key"]);
+        assert_eq!(keys("linear"), vec!["api_key"]);
+        assert!(form_fields("linear")[0].masked);
         assert_eq!(keys("kube"), vec!["kubeconfig"]);
         assert!(form_fields("gemini")[0].masked);
         assert!(form_fields("jev")[0].masked);
@@ -245,6 +247,10 @@ mod tests {
             FormResult::ApiKey("ts-key".into())
         );
         assert!(form_values("jev", &typed(&[("api_key", "")])).is_err());
+        assert_eq!(
+            form_values("linear", &typed(&[("api_key", " lin_api_x ")])).unwrap(),
+            FormResult::ApiKey("lin_api_x".into())
+        );
     }
 
     #[test]
@@ -261,6 +267,7 @@ mod tests {
                 AddChoice::SetUp("aws".into()),
                 AddChoice::SetUp("gemini".into()),
                 AddChoice::SetUp("jev".into()),
+                AddChoice::SetUp("linear".into()),
                 AddChoice::SetUp("kube".into()),
             ]
         );

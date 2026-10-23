@@ -198,10 +198,17 @@ impl Workspace {
                             .children(chips)
                             .children(link),
                     )
-                    .children(e.note.clone().map(|n| {
+                    // Every note a person gave, with its stage, so a later try's purpose stays
+                    // readable (Re-run, Go back).
+                    .children(e.notes.iter().map(|(stage, n)| {
+                        let at = if stage.is_empty() {
+                            String::new()
+                        } else {
+                            format!("{stage}: ")
+                        };
                         text(12., theme::TEXT_SECONDARY)
                             .pl(px(92.))
-                            .child(format!("Note: {n}"))
+                            .child(format!("↩ {at}{n}"))
                     }));
             }
             rows = rows.child(row);

@@ -43,13 +43,16 @@ Linear: without it, **Watch Linear** says what to set up and stays off.
 ```toml
 [linear]
 team = "INTH"                          # the team's key
-pick = "Ready for Investigation"       # the state tickets are taken from
+pick = "Ready for Investigation"       # the state that triggers a pickup
+assignee = "unassigned"                # "unassigned", or "any" to take assigned tickets too
 claim = "In Investigation"             # the state a picked ticket moves to
 passed = "Ready for Peer Review"       # where a ticket goes when every stage passed
 every_minutes = 5
 ```
 
-All but `team` have these defaults. A pipeline without the table works as in phase 1: tickets
+All but `team` have these defaults. Another pipeline can trigger off another state (say `pick =
+"Ready for Review"`) and take tickets whoever they're assigned to (`assignee = "any"`), as
+Jordan asked on 2026-10-23. A pipeline without the table works as in phase 1: tickets
 are named to the orchestrator by hand. State names are looked up in the team's workflow once
 per check; a name the team doesn't have stops watching and says which.
 
@@ -60,11 +63,11 @@ Pipeline settings gets a **Linear** section with these fields.
 - **The switch.** Each orchestrator's card has **Watch Linear** (off when it starts). It is the
   orchestrator's, not the pipeline's: two orchestrators on one pipeline would race for tickets,
   so only one at a time may watch a team. A second one says which orchestrator already watches.
-- **A check.** The team's issues in the `pick` state, unassigned, with `slaBreachesAt` set,
-  ordered by `slaBreachesAt`. It runs every `every_minutes` while watching and the orchestrator
+- **A check.** The team's issues in the `pick` state (unassigned only, unless `assignee =
+  "any"`), with `slaBreachesAt` set, ordered by `slaBreachesAt`. It runs every `every_minutes` while watching and the orchestrator
   has no open run, and at once on **Check Linear now** or when a run ends.
-- **Picking.** The first ticket is claimed (§4). If the claim fails because someone else took it
-  meanwhile (it's no longer unassigned), hydraui takes the next one. Then hydraui types into the
+- **Picking.** The first ticket is claimed (§4). If someone else took it meanwhile (it has left
+  the `pick` state, or, with `unassigned`, gained an assignee), hydraui takes the next one. Then hydraui types into the
   orchestrator: `Linear has INTH-170 "<title>" (SLA breaches <date>). Start it: call run_start
   with pipeline "inth", ticket INTH-170 and that title.` The run is the ticket's from then on,
   as in phase 1.
@@ -79,8 +82,8 @@ Pipeline settings gets a **Linear** section with these fields.
 
 hydraui makes three writes, all as the environment's Linear user:
 
-1. **Claim**, before the orchestrator is told: assign to the key's user (`viewer`), move to
-   `claim`, and comment *"hydraui's orchestrator (pipeline "INTH SLA tickets") is working on this:
+1. **Claim**, before the orchestrator is told: assign to the key's user (`viewer`) when the
+   ticket has no assignee (an assigned ticket keeps its assignee), move to `claim`, and comment *"hydraui's orchestrator (pipeline "INTH SLA tickets") is working on this:
    replicate → develop → verify. Run INTH-170-1."*
 2. **Passed**, when the run finishes with every stage passed: move to `passed` and comment the
    outcome. The comment lists each stage with its score and summary, and any PR links found in

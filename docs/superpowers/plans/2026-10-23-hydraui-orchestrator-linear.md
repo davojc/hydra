@@ -21,16 +21,16 @@ Follow `db55ff0` (jev) exactly.
 
 ## Task 2: the pipeline's `[linear]` table (spec §2)
 
-- `pipeline.rs`: `Pipeline.linear: Option<LinearSettings{team, pick, claim, passed,
-  every_minutes}>`, with defaults for all but `team`. A `[linear]` without `team` is an error.
+- `pipeline.rs`: `Pipeline.linear: Option<LinearSettings{team, pick, assignee (Unassigned | Any), claim,
+  passed, every_minutes}>`, with defaults for all but `team`. A `[linear]` without `team` is an error.
   `Edit` and `save` carry it, and an absent table stays absent. Tests: parse with defaults, parse
   overrides, the missing-team error, the save round trip.
 
 ## Task 3: the GraphQL client (spec §6)
 
 - `hydraui/linear.rs`:
-  - `trait LinearApi` with `viewer()`, `states(team)`, `pickable(team, state_id)` (unassigned,
-    `slaBreachesAt` set, ordered), `claim(issue_id, user_id, state_id)`, `comment(issue_id,
+  - `trait LinearApi` with `viewer()`, `states(team)`, `pickable(team, state_id, unassigned_only)`
+    (`slaBreachesAt` set, ordered), `claim(issue_id, user_id, state_id)`, `comment(issue_id,
     body)`, `set_state(issue_id, state_id)`.
   - `Ticket{id, identifier, title, url, sla_breaches_at, sla_high_risk_at, assignee}`.
   - `Http` implements it on `ureq` (POST `https://api.linear.app/graphql`, `Authorization: <key>`).
@@ -40,7 +40,8 @@ Follow `db55ff0` (jev) exactly.
 ## Task 4: the watcher's decisions (spec §3, §4)
 
 - `hydraui/linear_watch.rs`, pure:
-  - `pick(tickets) -> Option<&Ticket>`: soonest breach first, unassigned only.
+  - `pick(tickets) -> Option<&Ticket>`: soonest breach first, unassigned only unless
+    `assignee = "any"`. The claim assigns only an unassigned ticket.
   - `due(last_check, now, every, has_open_run, watching) -> bool`.
   - `Failures`: three in a row stops watching; a rejected key stops at once.
   - `claim_comment(pipeline, run)`, and `end_comment(run)` with stage scores, summaries, and PR

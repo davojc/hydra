@@ -21,6 +21,7 @@ use crate::settings::{ENV_COLOURS, SHELLS};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Section {
     General,
+    Phone,
     Env(String),
     Credentials,
 }
@@ -207,6 +208,7 @@ impl Workspace {
         let (border, muted) = (theme.border, theme.muted_foreground);
         let page = match &tab.section {
             Section::General => self.general_page(cx),
+            Section::Phone => self.phone_page(cx),
             Section::Env(env) => self.env_page(env, cx),
             Section::Credentials => self.credentials_page(cx),
         };
@@ -315,6 +317,12 @@ impl Workspace {
                 "General".into(),
                 None,
                 Section::General,
+            ))
+            .child(item(
+                "settings-phone".into(),
+                "Phone".into(),
+                None,
+                Section::Phone,
             ))
             .child(heading("ENVIRONMENTS"))
             .children(envs)
@@ -1048,7 +1056,12 @@ fn action_button(
 }
 
 /// A page's heading: its title and a line under it, with buttons on the right.
-fn page_title(title: &str, sub: String, buttons: impl IntoElement, cx: &App) -> AnyElement {
+pub(super) fn page_title(
+    title: &str,
+    sub: String,
+    buttons: impl IntoElement,
+    cx: &App,
+) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     h_flex()
         .justify_between()
@@ -1071,7 +1084,12 @@ fn page_title(title: &str, sub: String, buttons: impl IntoElement, cx: &App) -> 
 }
 
 /// A bordered group of rows under a heading, with something on the heading's right.
-fn group(title: &str, right: Option<AnyElement>, rows: Vec<AnyElement>, cx: &App) -> AnyElement {
+pub(super) fn group(
+    title: &str,
+    right: Option<AnyElement>,
+    rows: Vec<AnyElement>,
+    cx: &App,
+) -> AnyElement {
     group_inner(div().child(title.to_string()), right, rows, cx)
 }
 

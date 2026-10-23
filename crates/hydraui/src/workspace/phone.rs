@@ -15,6 +15,7 @@ use gpui_component::WindowExt;
 use gpui_component::notification::Notification;
 use hydra_core::paths::HydraPaths;
 use hydra_link::host::{Host, HostConfig, HostEvent, Replier};
+use hydra_link::pairing::PairingOffer;
 use hydra_link::{AlertKind, ClientMsg, Outcome, ServerMsg, SessionInfo};
 
 use super::Workspace;
@@ -32,17 +33,32 @@ use crate::tasks_project;
 const RETRY: Duration = Duration::from_secs(10);
 
 /// What this window runs while it holds the phone link. Dropping it stops the host (closing
-/// the phone's connection) and then lets the link go for another window.
+/// the phone's connection) and only then lets the link go for another window: the worker owns
+/// both, and ends by stopping the host and dropping the lock, in that order.
 pub(super) struct PhoneLink {
-    /// Owns the host: dropping it (cancelling the worker) stops the host.
-    _worker: Task<()>,
+    worker: Option<Task<()>>,
     jobs: UnboundedSender<Job>,
     _events: Task<()>,
-    _lock: owner::OwnerLock,
 }
 
-/// One thing for the worker to send, in order.
+impl Drop for PhoneLink {
+    fn drop(&mut self) {
+        // The worker finishes on its own (not cancelled), so it can stop the host first.
+        let _ = self.jobs.unbounded_send(Job::Stop);
+        if let Some(worker) = self.worker.take() {
+            worker.detach();
+        }
+    }
+}
+
+/// One thing for the worker to do, in order.
 enum Job {
+    /// Stop the host, then let the link go; the last job.
+    Stop,
+    /// A fresh pairing offer, sent back.
+    Offer(futures::channel::oneshot::Sender<PairingOffer>),
+    /// Forget the paired phone and hang up on it.
+    Unpair,
     Send(ServerMsg),
     /// A terminal as it is now; its project and card are read off the UI thread.
     Session(PaneFacts),
@@ -184,9 +200,14 @@ fn open(paths: &HydraPaths, paired: Option<String>, window: String) -> Opened {
 }
 
 /// Sends the jobs to the phone in order until the link stops.
-async fn work(host: Host, mut jobs: UnboundedReceiver<Job>) {
+async fn work(host: Host, lock: owner::OwnerLock, mut jobs: UnboundedReceiver<Job>) {
     while let Some(job) = jobs.next().await {
         match job {
+            Job::Stop => break,
+            Job::Offer(tx) => {
+                let _ = tx.send(host.offer_pairing());
+            }
+            Job::Unpair => host.unpair(),
             Job::Send(msg) => host.broadcast(msg),
             Job::Session(f) => {
                 for s in resolve(std::slice::from_ref(&f)) {
@@ -208,6 +229,9 @@ async fn work(host: Host, mut jobs: UnboundedReceiver<Job>) {
             } => reply.send(boards::board(&known, &project).map_or_else(|o| o, Outcome::Board)),
         }
     }
+    // The host first, so the phone is hung up on before another window can take the link.
+    host.stop();
+    drop(lock);
 }
 
 impl Workspace {
@@ -250,10 +274,12 @@ impl Workspace {
     }
 
     /// Stops the phone link here (or the wait for it), letting another window take it.
-    #[expect(dead_code, reason = "the Phone page's switch (Task 9) calls it")]
     pub(super) fn phone_stop(&mut self) {
         self.phone_seek += 1;
         self.phone_seeking = false;
+        self.phone_connected = false;
+        self.phone_offer = None;
+        self.phone_word = None;
         if self.phone.take().is_some() {
             action_log::write("phone: this window let the phone link go");
         }
@@ -278,6 +304,8 @@ impl Workspace {
             Opened::Link(lock, host, mut events) => {
                 // Stopped meanwhile: dropping them lets the link go.
                 if !self.phone_wanted(seek) {
+                    host.stop();
+                    drop(lock);
                     return;
                 }
                 action_log::write(format!(
@@ -285,7 +313,7 @@ impl Workspace {
                     host.endpoint_id()
                 ));
                 let (jobs, rx) = unbounded();
-                let worker = cx.background_spawn(work(host, rx));
+                let worker = cx.background_spawn(work(host, lock, rx));
                 let pump = cx.spawn_in(window, async move |this, cx| {
                     while let Some(event) = events.next().await {
                         if this
@@ -297,10 +325,9 @@ impl Workspace {
                     }
                 });
                 self.phone = Some(PhoneLink {
-                    _worker: worker,
+                    worker: Some(worker),
                     jobs,
                     _events: pump,
-                    _lock: lock,
                 });
                 cx.notify();
             }
@@ -320,6 +347,16 @@ impl Workspace {
         }
     }
 
+    /// Asks the host for a fresh pairing offer, sent back on `tx`.
+    pub(super) fn phone_offer_job(&self, tx: futures::channel::oneshot::Sender<PairingOffer>) {
+        self.phone_job(Job::Offer(tx));
+    }
+
+    /// Has the host forget the paired phone and hang up on it.
+    pub(super) fn phone_unpair_job(&self) {
+        self.phone_job(Job::Unpair);
+    }
+
     /// Sends `msg` to the phone, in order with everything else it is sent.
     pub(super) fn phone_send(&self, msg: ServerMsg) {
         self.phone_job(Job::Send(msg));
@@ -329,8 +366,16 @@ impl Workspace {
         match event {
             HostEvent::Request { msg, reply, .. } => self.phone_request(msg, reply, window, cx),
             HostEvent::Paired { phone, word } => self.phone_paired(phone, word, window, cx),
-            HostEvent::Connected => action_log::write("phone: connected"),
-            HostEvent::Disconnected => action_log::write("phone: disconnected"),
+            HostEvent::Connected => {
+                action_log::write("phone: connected");
+                self.phone_connected = true;
+                cx.notify();
+            }
+            HostEvent::Disconnected => {
+                action_log::write("phone: disconnected");
+                self.phone_connected = false;
+                cx.notify();
+            }
         }
     }
 
@@ -346,6 +391,7 @@ impl Workspace {
         action_log::write(format!("phone: paired ({word})"));
         self.ui.phone = Some(phone.clone());
         self.phone_word = Some(word);
+        self.phone_offer = None;
         let paths = self.hydra.paths.clone();
         let saved = cx.background_spawn(async move { store::set_paired(&paths, Some(&phone)) });
         cx.spawn_in(window, async move |_, cx| {

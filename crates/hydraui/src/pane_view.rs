@@ -178,7 +178,6 @@ fn hit_cell(dx: f32, dy: f32, cell: (f32, f32), size: GridSize) -> Option<(usize
     inside.then(|| grid_cell(dx, dy, cell, size))
 }
 
-/// A terminal's name: the user's, else its folder's name (spec §2.2 of the env-tabs design).
 /// Remote Control for a terminal once its Claude session state is `claude`: with no session
 /// it is the environment's setting; during one it stays as it is (the env's, or what the
 /// phone turned on).
@@ -186,6 +185,7 @@ fn remote_control_after(claude: Option<SessionState>, now: bool, env: bool) -> b
     if claude.is_none() { env } else { now }
 }
 
+/// A terminal's name: the user's, else its folder's name (spec §2.2 of the env-tabs design).
 pub fn label_for(name: Option<&str>, cwd: &Path) -> String {
     match name.map(str::trim).filter(|n| !n.is_empty()) {
         Some(n) => n.to_string(),

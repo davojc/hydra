@@ -8,6 +8,7 @@ mod finder;
 mod launcher;
 mod layout_file;
 mod phone;
+mod phone_page;
 mod pickup;
 mod settings_tab;
 mod shortcuts;
@@ -230,6 +231,10 @@ pub struct Workspace {
     phone_cards: HashSet<(PathBuf, String)>,
     /// The word pair both screens showed at the last pairing, for the Phone page.
     phone_word: Option<String>,
+    /// The pairing code the Phone page shows, until it expires or a phone pairs.
+    phone_offer: Option<phone_page::ShownOffer>,
+    /// The paired phone is connected now.
+    phone_connected: bool,
     /// Coming back to the window clears the alert of the terminal it shows.
     _activation: Subscription,
 }
@@ -413,6 +418,8 @@ impl Workspace {
             phone_finished: HashSet::new(),
             phone_cards: HashSet::new(),
             phone_word: None,
+            phone_offer: None,
+            phone_connected: false,
             _activation: activation,
         }
     }

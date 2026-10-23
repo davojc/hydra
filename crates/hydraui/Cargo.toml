@@ -13,6 +13,7 @@ hydra-core.workspace = true
 hydra-platform.workspace = true
 hydra-providers.workspace = true
 hydra-update.workspace = true
+hydra-link.workspace = true
 dirs.workspace = true
 hydraui-term.workspace = true
 hydraui-sets.workspace = true

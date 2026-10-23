@@ -22,6 +22,7 @@ pub mod input;
 pub mod jev;
 pub mod keys;
 pub mod launcher;
+pub mod link;
 pub mod mcp;
 pub mod open_files;
 pub mod openapi;

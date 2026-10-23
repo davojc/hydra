@@ -3371,6 +3371,7 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
  "hydra-core",
+ "hydra-link",
  "hydra-platform",
  "hydra-providers",
  "hydra-update",

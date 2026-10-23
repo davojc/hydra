@@ -15,8 +15,8 @@ jobs:
       # Dependencies come from the cache; only the workspace's crates rebuild.
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
 
   release:
     needs: test

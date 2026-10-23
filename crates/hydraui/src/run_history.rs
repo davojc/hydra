@@ -40,6 +40,10 @@ pub struct Entry {
     pub stages: Vec<(String, Option<u8>)>,
     /// A person's note on it, when they gave one.
     pub note: Option<String>,
+    /// Whether it ended inside its ticket's SLA, for a run from Linear (phase 2 §5).
+    pub sla: Option<bool>,
+    /// The ticket in Linear.
+    pub link: Option<String>,
     /// When it started, as the log writes times (sortable).
     started: String,
 }
@@ -75,6 +79,7 @@ fn entry(run: &str, text: &str, live: bool) -> Option<Entry> {
     let (mut ticket, mut title, mut started) = (String::new(), String::new(), None);
     let (mut ended, mut end_outcome, mut end_reason) = (None, None, None);
     let (mut last_summary, mut needs_you, mut note) = (None, None, None);
+    let (mut sla, mut link) = (None, None);
     let mut stages: Vec<(String, Option<u8>)> = Vec::new();
     let mut end_scores: Option<Vec<(String, Option<u8>)>> = None;
     let stage_entry = |stages: &mut Vec<(String, Option<u8>)>, id: &str| -> usize {
@@ -118,6 +123,8 @@ fn entry(run: &str, text: &str, live: bool) -> Option<Entry> {
                 }
             }
             Some("needs you") => needs_you = s("reason"),
+            Some("linear ticket") => link = s("url").filter(|u| !u.is_empty()),
+            Some("linear sla") => sla = v.get("inside").and_then(Value::as_bool),
             Some("person") => {
                 if let Some(n) = s("note").filter(|n| !n.trim().is_empty()) {
                     note = Some(n);
@@ -178,6 +185,8 @@ fn entry(run: &str, text: &str, live: bool) -> Option<Entry> {
         took,
         stages: end_scores.unwrap_or(stages),
         note,
+        sla,
+        link,
         started,
     })
 }
@@ -371,5 +380,55 @@ mod tests {
         assert_eq!(h[0].took, None);
         // A missing folder is an empty history.
         assert!(read(&d.path().join("nowhere"), &[]).is_empty());
+    }
+
+    #[test]
+    fn a_linear_run_shows_its_sla_and_link() {
+        let d = tempfile::tempdir().unwrap();
+        log(
+            d.path(),
+            "INTH-170-1",
+            &[
+                (
+                    "2026-10-23 09:00:00.000",
+                    "run started",
+                    serde_json::json!({"ticket": "INTH-170", "summary": "Dutch", "pipeline": "inth"}),
+                ),
+                (
+                    "2026-10-23 09:00:01.000",
+                    "linear ticket",
+                    serde_json::json!({"url": "https://linear.app/iov42/issue/INTH-170",
+                           "sla_breaches_at": "2026-11-04T14:00:00.000Z", "sla_high_risk_at": null}),
+                ),
+                (
+                    "2026-10-23 11:00:00.000",
+                    "linear sla",
+                    serde_json::json!({"inside": false, "breaches_at": "2026-11-04T14:00:00.000Z"}),
+                ),
+                (
+                    "2026-10-23 11:00:00.000",
+                    "run ended",
+                    serde_json::json!({"outcome": "done", "scores": []}),
+                ),
+            ],
+        );
+        log(
+            d.path(),
+            "INTH-9-1",
+            &[(
+                "2026-10-23 08:00:00.000",
+                "run started",
+                serde_json::json!({"ticket": "INTH-9", "summary": "By hand", "pipeline": "inth"}),
+            )],
+        );
+        let all = read(d.path(), &[]);
+        let linear = all.iter().find(|e| e.run == "INTH-170-1").unwrap();
+        assert_eq!(linear.sla, Some(false));
+        assert_eq!(
+            linear.link.as_deref(),
+            Some("https://linear.app/iov42/issue/INTH-170")
+        );
+        let plain = all.iter().find(|e| e.run == "INTH-9-1").unwrap();
+        assert_eq!((plain.sla, plain.link.as_deref()), (None, None));
     }
 }

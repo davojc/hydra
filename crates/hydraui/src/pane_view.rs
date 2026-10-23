@@ -91,6 +91,9 @@ pub struct PaneView {
     claude: Option<SessionState>,
     /// Whether that session has a draft in its input and has clearly finished its turn.
     readiness: Readiness,
+    /// Whether Remote Control is on for the Claude session here: its environment starts
+    /// sessions with it, or the phone turned it on.
+    remote_control: bool,
     /// The user's name for this terminal (Rename, a layout's `title`); none: the folder's.
     name: Option<String>,
     /// The title the program set, kept for a tooltip; it never names the terminal.
@@ -221,6 +224,7 @@ impl PaneView {
         let on_focus = cx.on_focus(&focus, window, |_, _, cx| cx.emit(PaneEvent::Focused));
         let warnings: Vec<String> = request.note.iter().cloned().collect();
         let mcp = McpTerminal::register(request.cwd.clone(), &request.env);
+        let remote_control = hydra.env_remote_control(&request.env);
         let mut view = Self {
             id,
             cwd: request.cwd.clone(),
@@ -233,6 +237,7 @@ impl PaneView {
             prompt: None,
             claude: None,
             readiness: Readiness::default(),
+            remote_control,
             name: None,
             title: None,
             focus,
@@ -309,6 +314,15 @@ impl PaneView {
         }
         self.claude = (state != SessionState::Ended).then_some(state);
         cx.notify();
+    }
+
+    /// Whether Remote Control is on for the Claude session here.
+    pub fn remote_control(&self) -> bool {
+        self.remote_control
+    }
+
+    pub fn set_remote_control(&mut self, on: bool) {
+        self.remote_control = on;
     }
 
     /// Whether the Claude session here has a draft and has clearly finished its turn.

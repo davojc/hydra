@@ -410,6 +410,21 @@ impl Hydra {
         self.write_env(env, envedit::set_top(&text, key, value)?)
     }
 
+    /// Whether `env`'s Claude sessions start with Remote Control (`[claude] remote_control`).
+    pub fn env_remote_control(&self, env: &str) -> bool {
+        self.env_text(env)
+            .ok()
+            .and_then(|t| toml::from_str::<toml::Table>(&t).ok())
+            .and_then(|t| t.get("claude")?.get("remote_control")?.as_bool())
+            .unwrap_or(false)
+    }
+
+    /// Sets `env`'s `[claude] remote_control`.
+    pub fn set_env_remote_control(&self, env: &str, on: bool) -> Result<(), String> {
+        let text = self.env_text(env)?;
+        self.write_env(env, envedit::set_claude_remote_control(&text, on)?)
+    }
+
     /// `env`'s `[env]` variables, secrets as their `secret:` reference.
     pub fn env_variables(&self, env: &str) -> Vec<(String, String)> {
         self.env_text(env)

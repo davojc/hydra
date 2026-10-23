@@ -22,7 +22,7 @@ use crate::action_log;
 use crate::activity::Activity;
 use crate::envs::PaneId;
 use crate::link::boards::{self, PhoneChange};
-use crate::link::{owner, store, wire};
+use crate::link::{RcAction, owner, store, wire};
 use crate::mcp::{Alert, SessionState};
 use crate::task_board::TaskBoard;
 use crate::tasks::{Board, Column};
@@ -70,6 +70,7 @@ struct PaneFacts {
     claude: Option<SessionState>,
     activity: Activity,
     finished: bool,
+    remote_control: bool,
     /// The name its Claude session takes cards under.
     taker: Option<String>,
     /// Unix seconds.
@@ -128,8 +129,7 @@ fn session_info(f: &PaneFacts, project: &Path, board: Option<&Board>) -> Session
             .taker
             .as_deref()
             .and_then(|t| board.and_then(|b| card_of(b, t))),
-        // Task 8 says whether Remote Control is on.
-        remote_control: false,
+        remote_control: f.remote_control,
         changed_at: f.changed_at,
     }
 }
@@ -405,13 +405,40 @@ impl Workspace {
                 self.phone_broadcast_session(session, cx);
                 reply.send(Outcome::Ok);
             }
-            ClientMsg::RemoteControl { .. } => reply.send(Outcome::Refused {
-                reason: "Remote Control isn't available yet".into(),
-            }),
+            ClientMsg::RemoteControl { session } => self.phone_remote_control(session, reply, cx),
             // The host answers these itself.
             ClientMsg::Hello { .. } | ClientMsg::Pair { .. } => reply.send(Outcome::Refused {
                 reason: "Not expected now".into(),
             }),
+        }
+    }
+
+    /// The phone asks for Remote Control in terminal `session`: typed as `/remote-control` only
+    /// into an idle Claude with nothing in its input.
+    fn phone_remote_control(&mut self, session: PaneId, reply: Replier, cx: &mut Context<Self>) {
+        let Some(view) = self.panes.get(&session).cloned() else {
+            reply.send(Outcome::Missing);
+            return;
+        };
+        let typed = view.update(cx, |v, cx| {
+            let action =
+                crate::link::remote_control_reply(v.claude(), v.check_draft(), v.remote_control());
+            match action {
+                RcAction::AlreadyOn => Ok(()),
+                RcAction::Type if v.type_prompt("/remote-control", cx) => {
+                    v.set_remote_control(true);
+                    Ok(())
+                }
+                RcAction::Type => Err("This terminal isn't running.".to_string()),
+                RcAction::Refuse(reason) => Err(reason.to_string()),
+            }
+        });
+        match typed {
+            Ok(()) => {
+                self.phone_broadcast_session(session, cx);
+                reply.send(Outcome::Ok);
+            }
+            Err(reason) => reply.send(Outcome::Refused { reason }),
         }
     }
 
@@ -481,6 +508,7 @@ impl Workspace {
             claude: view.claude(),
             activity,
             finished: self.phone_finished.contains(&id),
+            remote_control: view.remote_control(),
             taker: view.taker_name(),
             changed_at: unix_secs(SystemTime::now(), since.elapsed()),
         })
@@ -557,6 +585,7 @@ mod tests {
             claude: Some(SessionState::Idle),
             activity: Activity::Idle,
             finished: true,
+            remote_control: true,
             taker: Some("api-1".into()),
             changed_at: 1_700_000_000,
         }
@@ -583,7 +612,7 @@ mod tests {
         assert_eq!((s.kind, s.status), (Kind::Claude, Status::Finished));
         assert_eq!(s.project.as_deref(), Some("/w/api"));
         assert_eq!(s.changed_at, 1_700_000_000);
-        assert!(!s.remote_control);
+        assert!(s.remote_control);
         // No board read, or no name to take cards under: no card.
         assert_eq!(session_info(&facts(), Path::new("/w/api"), None).card, None);
         let nameless = PaneFacts {

@@ -699,6 +699,17 @@ impl Workspace {
                 let e = e.clone();
                 move |ws, w, cx| ws.set_env_home(e.clone(), w, cx)
             }));
+        let remote_row = {
+            let e = e.clone();
+            Switch::new(SharedString::from(format!("env-remote-control-{env}")))
+                .checked(self.hydra.env_remote_control(env))
+                .small()
+                .label("Claude sessions start with Remote Control")
+                .on_click(cx.listener(move |ws, on: &bool, window, cx| {
+                    let r = ws.hydra.set_env_remote_control(&e, *on);
+                    ws.env_edited(&e, r, window, cx)
+                }))
+        };
         let vars = self.hydra.env_variables(env);
         let var_rows: Vec<AnyElement> = if vars.is_empty() {
             vec![
@@ -775,6 +786,7 @@ impl Workspace {
                     setting("Label", label_row.into_any_element(), cx),
                     setting("Colour", swatches.into_any_element(), cx),
                     setting("Home", home_row.into_any_element(), cx),
+                    setting("Remote Control", remote_row.into_any_element(), cx),
                 ],
                 cx,
             ))

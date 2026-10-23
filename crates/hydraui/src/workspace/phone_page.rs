@@ -77,13 +77,27 @@ fn clock(secs: u32) -> String {
 impl Workspace {
     /// Turns the phone link on or off: saved to config.toml off the UI thread, and the link
     /// started or stopped here. Stopping first also ends a wait for a link another window holds.
+    /// The link reads the setting back from config.toml when it starts, so it starts only once
+    /// the setting is saved.
     fn phone_toggle(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.ui.phone_access = on;
         self.phone_stop();
+        let seek = self.phone_seek;
         let paths = self.hydra.paths.clone();
         let saved = cx.background_spawn(async move { store::set_enabled(&paths, on) });
-        self.phone_saved(saved, "phone access", window, cx);
-        self.phone_start(window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let saved = saved.await;
+            let _ = this.update_in(cx, |ws, window, cx| {
+                if let Err(e) = saved {
+                    phone_unsaved("phone access", &e, window, cx);
+                }
+                // Not when the switch was flipped again meanwhile: that flip starts it.
+                if ws.phone_seek == seek {
+                    ws.phone_start(window, cx);
+                }
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -97,13 +111,7 @@ impl Workspace {
     ) {
         cx.spawn_in(window, async move |_, cx| {
             if let Err(e) = saved.await {
-                action_log::write(format!("phone: couldn't save {what}: {e}"));
-                let _ = cx.update(|window, cx| {
-                    window.push_notification(
-                        Notification::warning(format!("Couldn't save {what}: {e}")).title("Phone"),
-                        cx,
-                    )
-                });
+                let _ = cx.update(|window, cx| phone_unsaved(what, &e, window, cx));
             }
         })
         .detach();
@@ -318,6 +326,15 @@ impl Workspace {
         }
         col.into_any_element()
     }
+}
+
+/// Logs and shows that saving `what` failed with `e`.
+fn phone_unsaved(what: &str, e: &str, window: &mut Window, cx: &mut gpui::App) {
+    action_log::write(format!("phone: couldn't save {what}: {e}"));
+    window.push_notification(
+        Notification::warning(format!("Couldn't save {what}: {e}")).title("Phone"),
+        cx,
+    );
 }
 
 fn setting_row(label: &'static str, control: AnyElement) -> AnyElement {

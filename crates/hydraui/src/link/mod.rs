@@ -23,11 +23,10 @@ pub fn remote_control_reply(
     on: bool,
 ) -> RcAction {
     use crate::mcp::SessionState;
-    if on {
-        return RcAction::AlreadyOn;
-    }
+    // Not Claude first: a plain shell has no Remote Control, whatever its environment says.
     match claude {
         None => RcAction::Refuse("This terminal isn't running Claude."),
+        Some(_) if on => RcAction::AlreadyOn,
         Some(SessionState::Idle) if !draft => RcAction::Type,
         Some(_) => {
             RcAction::Refuse("Remote Control is off for this session. Answer it at your PC.")
@@ -59,6 +58,11 @@ mod tests {
         );
         assert_eq!(
             remote_control_reply(None, false, false),
+            RcAction::Refuse("This terminal isn't running Claude.")
+        );
+        // A plain shell has no Remote Control, even in an environment that turns it on.
+        assert_eq!(
+            remote_control_reply(None, false, true),
             RcAction::Refuse("This terminal isn't running Claude.")
         );
     }

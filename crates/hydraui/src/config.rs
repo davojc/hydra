@@ -235,7 +235,15 @@ pub fn set(paths: &HydraPaths, key: &str, value: Option<toml_edit::Value>) -> Re
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    std::fs::write(&path, out).map_err(|e| format!("can't write {}: {e}", path.display()))
+    // Written beside it, then moved over it: another window reading the settings (the phone
+    // link reads them each time it tries to start) never sees a half-written file.
+    let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
+    let written = std::fs::write(&tmp, &out).and_then(|()| std::fs::rename(&tmp, &path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        std::fs::write(&path, out).map_err(|e| format!("can't write {}: {e}", path.display()))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

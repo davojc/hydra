@@ -21,6 +21,7 @@ use hydra_link::{AlertKind, ClientMsg, Outcome, ServerMsg, SessionInfo};
 use super::Workspace;
 use crate::action_log;
 use crate::activity::Activity;
+use crate::config::{self, UiConfig};
 use crate::envs::PaneId;
 use crate::link::boards::{self, PhoneChange};
 use crate::link::{RcAction, owner, store, wire};
@@ -33,8 +34,9 @@ use crate::tasks_project;
 const RETRY: Duration = Duration::from_secs(10);
 
 /// What this window runs while it holds the phone link. Dropping it stops the host (closing
-/// the phone's connection) and only then lets the link go for another window: the worker owns
-/// both, and ends by stopping the host and dropping the lock, in that order.
+/// the phone's connection) and lets the link go for another window only once the host's
+/// endpoint has closed: the worker owns both, and ends by stopping the host, waiting off the
+/// UI thread for its endpoint to close, then dropping the lock.
 pub(super) struct PhoneLink {
     worker: Option<Task<()>>,
     jobs: UnboundedSender<Job>,
@@ -96,9 +98,53 @@ struct PaneFacts {
 /// What came of trying to take the link.
 enum Opened {
     Link(owner::OwnerLock, Host, UnboundedReceiver<HostEvent>),
+    /// Phone access is off in config.toml: nothing was started.
+    Off,
     /// Another window holds it.
     Elsewhere,
     Failed(String),
+}
+
+/// The phone settings as config.toml has them. hydraui windows don't watch the file, so
+/// another window may have changed them since this one read them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Saved {
+    access: bool,
+    phone: Option<String>,
+}
+
+impl Saved {
+    fn of(cfg: UiConfig) -> Self {
+        Saved {
+            access: cfg.phone_access,
+            phone: cfg.phone,
+        }
+    }
+
+    /// Takes these settings into `ui`, over what this window remembered.
+    fn adopt(self, ui: &mut UiConfig) {
+        ui.phone_access = self.access;
+        ui.phone = self.phone;
+    }
+}
+
+/// What taking the link does, decided by the settings on disk alone.
+#[derive(Debug, PartialEq, Eq)]
+enum Plan {
+    /// Phone access is off: start nothing.
+    Off,
+    /// Start the host, letting in only `paired`.
+    Start { paired: Option<String> },
+}
+
+fn plan(saved: &Saved) -> Plan {
+    if saved.access {
+        Plan::Start {
+            paired: saved.phone.clone(),
+        }
+    } else {
+        Plan::Off
+    }
 }
 
 /// "#rrggbb" for an 0xRRGGBB tint.
@@ -184,8 +230,20 @@ fn projects(panes: &[PaneFacts], boards: &[PathBuf]) -> Vec<String> {
         .collect()
 }
 
+/// Reads the phone settings from config.toml and, when phone access is on there, takes the
+/// link for this window and starts the host for the phone paired there, unless another
+/// window has it. Reads files: never on the UI thread.
+fn open(paths: &HydraPaths, window: String) -> (Saved, Opened) {
+    let saved = Saved::of(config::load(paths).0);
+    let opened = match plan(&saved) {
+        Plan::Off => Opened::Off,
+        Plan::Start { paired } => start(paths, paired, window),
+    };
+    (saved, opened)
+}
+
 /// Takes the link for this window and starts the host, unless another window has it.
-fn open(paths: &HydraPaths, paired: Option<String>, window: String) -> Opened {
+fn start(paths: &HydraPaths, paired: Option<String>, window: String) -> Opened {
     let Some(lock) = owner::try_own(paths) else {
         return Opened::Elsewhere;
     };
@@ -229,8 +287,13 @@ async fn work(host: Host, lock: owner::OwnerLock, mut jobs: UnboundedReceiver<Jo
             } => reply.send(boards::board(&known, &project).map_or_else(|o| o, Outcome::Board)),
         }
     }
-    // The host first, so the phone is hung up on before another window can take the link.
-    host.stop();
+    release(host, lock).await;
+}
+
+/// Stops `host`, then lets the link go once its endpoint has closed, so the next owner (another
+/// window, or this one after an off-and-on) never binds the same key while it still runs.
+async fn release(host: Host, lock: owner::OwnerLock) {
+    host.stop_and_wait_closed().await;
     drop(lock);
 }
 
@@ -246,25 +309,25 @@ impl Workspace {
         let seek = self.phone_seek;
         cx.spawn_in(window, async move |this, cx| {
             loop {
-                // Still wanted, with the window's name as it is now.
-                let Ok(Some((paths, paired, name))) = this.update(cx, |ws, _| {
+                // Still wanted, with the window's name as it is now. Whether phone access is on
+                // and which phone is paired are read from disk by `open`: another window may
+                // have changed them since this one started.
+                let Ok(Some((paths, name))) = this.update(cx, |ws, _| {
                     ws.phone_wanted(seek).then(|| {
                         let name = ws
                             .layout
                             .as_deref()
                             .map_or_else(|| "untitled".into(), hydraui_sets::layout_name);
-                        (ws.hydra.paths.clone(), ws.ui.phone.clone(), name)
+                        (ws.hydra.paths.clone(), name)
                     })
                 }) else {
                     return;
                 };
-                let opened = cx
-                    .background_spawn(async move { open(&paths, paired, name) })
-                    .await;
-                if !matches!(opened, Opened::Elsewhere) {
-                    let _ = this.update_in(cx, |ws, window, cx| {
-                        ws.phone_opened(seek, opened, window, cx)
-                    });
+                let (saved, opened) = cx.background_spawn(async move { open(&paths, name) }).await;
+                let again = this.update_in(cx, |ws, window, cx| {
+                    ws.phone_opened(seek, saved, opened, window, cx)
+                });
+                if !matches!(again, Ok(true)) {
                     return;
                 }
                 cx.background_executor().timer(RETRY).await;
@@ -290,23 +353,32 @@ impl Workspace {
         self.phone_seek == seek && self.ui.phone_access && self.phone.is_none()
     }
 
+    /// Takes in what `open` found; true while another window holds the link and this one
+    /// should try again.
     fn phone_opened(
         &mut self,
         seek: u64,
+        saved: Saved,
         opened: Opened,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if self.phone_seek == seek {
+            // The settings on disk win over what this window remembered; the Phone page
+            // shows them.
+            saved.adopt(&mut self.ui);
+            cx.notify();
+        }
+        let again = matches!(opened, Opened::Elsewhere) && self.phone_wanted(seek);
+        if self.phone_seek == seek && !again {
             self.phone_seeking = false;
         }
         match opened {
             Opened::Link(lock, host, mut events) => {
-                // Stopped meanwhile: dropping them lets the link go.
+                // Stopped meanwhile: let the link go, once its endpoint has closed.
                 if !self.phone_wanted(seek) {
-                    host.stop();
-                    drop(lock);
-                    return;
+                    cx.background_spawn(release(host, lock)).detach();
+                    return false;
                 }
                 action_log::write(format!(
                     "phone: this window holds the phone link ({})",
@@ -335,8 +407,9 @@ impl Workspace {
                 action_log::write(format!("phone: {why}"));
                 window.push_notification(Notification::warning(why).title("Phone"), cx);
             }
-            Opened::Elsewhere => {}
+            Opened::Elsewhere | Opened::Off => {}
         }
+        again
     }
 
     /// Queues `job` for the phone; nothing when the link isn't running here (a reply in it
@@ -677,6 +750,62 @@ mod tests {
         assert_eq!(
             session_info(&nameless, Path::new("/w/api"), Some(&board)).card,
             None
+        );
+    }
+
+    fn saved(access: bool, phone: Option<&str>) -> Saved {
+        Saved {
+            access,
+            phone: phone.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn with_phone_access_off_on_disk_nothing_starts() {
+        assert_eq!(plan(&saved(false, None)), Plan::Off);
+        assert_eq!(plan(&saved(false, Some("phone-a"))), Plan::Off);
+        assert_eq!(
+            plan(&saved(true, Some("phone-a"))),
+            Plan::Start {
+                paired: Some("phone-a".into())
+            }
+        );
+        assert_eq!(plan(&saved(true, None)), Plan::Start { paired: None });
+    }
+
+    #[test]
+    fn the_settings_on_disk_win_over_what_the_window_remembered() {
+        // This window started with phone-a paired and access on; another window has since
+        // unpaired it and paired phone-b, or turned access off.
+        let remembered = UiConfig {
+            phone_access: true,
+            phone: Some("phone-a".into()),
+            ..UiConfig::default()
+        };
+        let mut ui = remembered.clone();
+        saved(true, Some("phone-b")).adopt(&mut ui);
+        assert_eq!(ui.phone.as_deref(), Some("phone-b"));
+        assert!(ui.phone_access);
+        let mut ui = remembered.clone();
+        saved(true, None).adopt(&mut ui);
+        assert_eq!(ui.phone, None, "an unpaired phone is forgotten");
+        let mut ui = remembered;
+        saved(false, Some("phone-a")).adopt(&mut ui);
+        assert!(!ui.phone_access);
+    }
+
+    #[test]
+    fn open_reads_the_settings_from_disk_and_starts_nothing_while_off() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = HydraPaths::new(d.path());
+        store::set_paired(&paths, Some("phone-b")).unwrap();
+        store::set_enabled(&paths, false).unwrap();
+        let (got, opened) = open(&paths, "main".into());
+        assert_eq!(got, saved(false, Some("phone-b")));
+        assert!(matches!(opened, Opened::Off));
+        assert!(
+            !owner::held_elsewhere(&paths),
+            "the link wasn't taken while access is off"
         );
     }
 

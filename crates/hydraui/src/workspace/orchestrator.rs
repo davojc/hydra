@@ -1038,6 +1038,10 @@ impl Workspace {
                     ),
             )
             .child(h_flex().gap(px(3.)).children(segments))
+            .children(
+                self.current_ticket(orchestrator, cx)
+                    .and_then(|t| self.render_ticket_link(&t)),
+            )
             .into_any_element()
     }
 

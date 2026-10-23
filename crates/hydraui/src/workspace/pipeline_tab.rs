@@ -599,6 +599,7 @@ impl Workspace {
                     .border_b_1()
                     .border_color(color(theme::BORDER_SUBTLE))
                     .child(text(12.5, theme::TEXT_SECONDARY).child(run.ticket.clone()))
+                    .children(self.render_ticket_link(&run.ticket))
                     .child(
                         text(16., theme::TEXT)
                             .font_weight(FontWeight::MEDIUM)

@@ -232,6 +232,8 @@ pub struct Workspace {
     pending_wakes: HashMap<PaneId, (String, String)>,
     /// Each orchestrator's Linear watcher (orchestrator phase 2 §3).
     linear_watch: HashMap<PaneId, linear::Watch>,
+    /// Runs' tickets as Linear last said, by identifier: the card's SLA and link (phase 2 §5).
+    linear_tickets: HashMap<String, crate::linear::Ticket>,
     /// Cards being offered or just sent, so one card never goes to two sessions.
     in_flight: crate::pickup::InFlight,
     /// Listens for board files the MCP server's sessions create.
@@ -441,6 +443,7 @@ impl Workspace {
             reserved: HashMap::new(),
             pending_wakes: HashMap::new(),
             linear_watch: HashMap::new(),
+            linear_tickets: HashMap::new(),
             in_flight: Default::default(),
             _mcp_pump: mcp_pump,
             _activation: activation,

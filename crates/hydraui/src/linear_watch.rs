@@ -280,6 +280,75 @@ pub fn end_writes(
     Ok(wrote)
 }
 
+/// A UTC time as Linear sends it (`2026-11-04T14:04:05.535Z`).
+pub fn parse_time(s: &str) -> Option<SystemTime> {
+    let s = s.trim().strip_suffix('Z')?;
+    let (date, time) = s.split_once('T')?;
+    let num = |t: &str| t.parse::<i64>().ok();
+    let d: Vec<i64> = date.split('-').map(num).collect::<Option<_>>()?;
+    let time = time.split('.').next()?;
+    let t: Vec<i64> = time.split(':').map(num).collect::<Option<_>>()?;
+    let ([y, m, day], [hh, mm, ss]) = (d.as_slice(), t.as_slice()) else {
+        return None;
+    };
+    if !(1..=12).contains(m) || !(1..=31).contains(day) || *hh > 23 || *mm > 59 || *ss > 60 {
+        return None;
+    }
+    // Days since 1970-01-01 (Howard Hinnant's days_from_civil).
+    let y = if *m <= 2 { y - 1 } else { *y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + hh * 3_600 + mm * 60 + ss;
+    u64::try_from(secs)
+        .ok()
+        .map(|s| SystemTime::UNIX_EPOCH + Duration::from_secs(s))
+}
+
+/// How close a ticket is to breaching its SLA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlaLevel {
+    Ok,
+    /// Inside the SLA's high-risk window.
+    Risk,
+    Breached,
+}
+
+/// The card's SLA pill (§5): the time left, or that it's breached, and how worried to look.
+pub fn sla_pill(
+    breaches_at: &str,
+    high_risk_at: Option<&str>,
+    now: SystemTime,
+) -> Option<(String, SlaLevel)> {
+    let breach = parse_time(breaches_at)?;
+    let span = |d: Duration| {
+        let s = d.as_secs();
+        match s {
+            s if s >= 86_400 => format!("{}d", s / 86_400),
+            s if s >= 3_600 => format!("{}h", s / 3_600),
+            s => format!("{}m", (s / 60).max(1)),
+        }
+    };
+    if let Ok(left) = breach.duration_since(now) {
+        let risky = high_risk_at.and_then(parse_time).is_some_and(|r| now >= r);
+        let level = if risky { SlaLevel::Risk } else { SlaLevel::Ok };
+        return Some((format!("SLA {}", span(left)), level));
+    }
+    let over = now.duration_since(breach).unwrap_or_default();
+    Some((
+        format!("SLA breached {} ago", span(over)),
+        SlaLevel::Breached,
+    ))
+}
+
+/// Whether `at` is before the SLA breaches; `None` when the time can't be read.
+pub fn inside_sla(breaches_at: &str, at: SystemTime) -> Option<bool> {
+    parse_time(breaches_at).map(|b| at < b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -667,5 +736,58 @@ mod tests {
         passed.state = RunState::Stopped("a person stopped it".into());
         assert_eq!(end_writes(&api, &settings(), &passed).unwrap(), ["comment"]);
         assert_eq!(api.writes.borrow().len(), 1);
+    }
+
+    #[test]
+    fn linears_times_are_read() {
+        let t = parse_time("2026-11-04T14:04:05.535Z").unwrap();
+        let secs = t.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+        assert_eq!(secs, 1_793_801_045);
+        assert_eq!(
+            parse_time("1970-01-01T00:00:00Z"),
+            Some(SystemTime::UNIX_EPOCH)
+        );
+        for bad in [
+            "",
+            "2026-11-04",
+            "2026-13-04T00:00:00Z",
+            "2026-11-04T25:00:00Z",
+            "soon",
+        ] {
+            assert_eq!(parse_time(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_sla_pill_says_the_time_left_and_how_worried_to_look() {
+        let breach = "2026-11-04T14:00:00.000Z";
+        let risk = Some("2026-11-03T14:00:00.000Z");
+        let at = |s: &str| parse_time(s).unwrap();
+        assert_eq!(
+            sla_pill(breach, risk, at("2026-10-23T10:00:00Z")),
+            Some(("SLA 12d".into(), SlaLevel::Ok))
+        );
+        assert_eq!(
+            sla_pill(breach, risk, at("2026-11-04T09:00:00Z")),
+            Some(("SLA 5h".into(), SlaLevel::Risk))
+        );
+        assert_eq!(
+            sla_pill(breach, risk, at("2026-11-04T13:20:00Z")),
+            Some(("SLA 40m".into(), SlaLevel::Risk))
+        );
+        assert_eq!(
+            sla_pill(breach, None, at("2026-11-06T14:00:00Z")),
+            Some(("SLA breached 2d ago".into(), SlaLevel::Breached))
+        );
+        assert_eq!(sla_pill("whenever", risk, at("2026-10-23T10:00:00Z")), None);
+    }
+
+    #[test]
+    fn a_run_ended_inside_its_sla_or_not() {
+        let breach = "2026-11-04T14:00:00.000Z";
+        let at = |s: &str| parse_time(s).unwrap();
+        assert_eq!(inside_sla(breach, at("2026-11-04T13:59:59Z")), Some(true));
+        assert_eq!(inside_sla(breach, at("2026-11-04T14:00:01Z")), Some(false));
+        assert_eq!(inside_sla("?", at("2026-11-04T14:00:01Z")), None);
     }
 }

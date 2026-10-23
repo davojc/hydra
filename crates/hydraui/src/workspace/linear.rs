@@ -14,7 +14,7 @@ use gpui_component::{Sizable, h_flex};
 use super::Workspace;
 use crate::envs::PaneId;
 use crate::linear::{Http, LinearError};
-use crate::linear_watch::{self, Failures};
+use crate::linear_watch::{self, Failures, SlaLevel};
 use crate::mcp::server;
 use crate::orchestrator_theme::{self as theme, color};
 use crate::pipeline::{LinearSettings, Pipeline};
@@ -31,6 +31,28 @@ pub(super) struct Watch {
     pub checking: bool,
     /// What the last check found, for the card.
     pub status: Option<String>,
+}
+
+/// The Linear side of a run that started (`start`) or ended, off the UI thread: what was
+/// written, and the ticket as Linear has it now when the run started.
+fn linear_job(
+    hydra: &crate::hydra::Hydra,
+    env: &str,
+    settings: &LinearSettings,
+    run: &crate::runs::Run,
+    start: bool,
+) -> Result<(Vec<&'static str>, Option<crate::linear::Ticket>), LinearError> {
+    use crate::linear::LinearApi;
+    let api = Http {
+        key: hydra.linear_key(env).map_err(LinearError::Rejected)?,
+    };
+    if start {
+        let ticket = api.ticket(&run.ticket)?;
+        let claimed = linear_watch::claim_named(&api, settings, &run.pipeline, &run.ticket)?;
+        Ok((if claimed { vec!["claim"] } else { Vec::new() }, ticket))
+    } else {
+        Ok((linear_watch::end_writes(&api, settings, run)?, None))
+    }
 }
 
 impl Workspace {
@@ -201,6 +223,8 @@ impl Workspace {
             Ok(Some(ticket)) => {
                 w.failures.clear();
                 w.status = Some(format!("Picked {}", ticket.identifier));
+                self.linear_tickets
+                    .insert(ticket.identifier.to_ascii_uppercase(), ticket.clone());
                 crate::action_log::write(format!(
                     "linear: claimed {} for the {} orchestrator",
                     ticket.identifier, pipeline.file
@@ -274,20 +298,48 @@ impl Workspace {
             let (Some(env), Some(settings)) = (env, run.pipeline.linear.clone()) else {
                 continue;
             };
+            // Whether it ended inside its SLA, from the ticket as it was when the run started.
+            if !start
+                && let Some(breaches) = self
+                    .linear_tickets
+                    .get(&run.ticket.to_ascii_uppercase())
+                    .and_then(|t| t.sla_breaches_at.clone())
+                && let Some(inside) = linear_watch::inside_sla(&breaches, SystemTime::now())
+            {
+                super::orchestrator::note_run(
+                    &run.id,
+                    "linear sla",
+                    serde_json::json!({"inside": inside, "breaches_at": breaches}),
+                );
+            }
             let hydra = self.hydra.clone();
-            cx.background_spawn(async move {
-                let wrote = hydra
-                    .linear_key(&env)
-                    .map_err(LinearError::Rejected)
-                    .and_then(|key| {
-                        let api = Http { key };
-                        if start {
-                            linear_watch::claim_named(&api, &settings, &run.pipeline, &run.ticket)
-                                .map(|claimed| if claimed { vec!["claim"] } else { Vec::new() })
-                        } else {
-                            linear_watch::end_writes(&api, &settings, &run)
+            cx.spawn(async move |this, cx| {
+                let (run, done) = cx
+                    .background_spawn(async move {
+                        let done = linear_job(&hydra, &env, &settings, &run, start);
+                        (run, done)
+                    })
+                    .await;
+                let wrote = match done {
+                    Ok((wrote, ticket)) => {
+                        if let Some(t) = ticket {
+                            super::orchestrator::note_run(
+                                &run.id,
+                                "linear ticket",
+                                serde_json::json!({"url": t.url,
+                                    "sla_breaches_at": t.sla_breaches_at,
+                                    "sla_high_risk_at": t.sla_high_risk_at}),
+                            );
+                            let _ = this.update(cx, |ws, cx| {
+                                ws.linear_tickets
+                                    .insert(t.identifier.to_ascii_uppercase(), t);
+                                cx.notify();
+                            });
                         }
-                    });
+                        Ok(wrote)
+                    }
+                    Err(e) => Err(e),
+                };
                 match wrote {
                     Ok(wrote) => {
                         for what in wrote {
@@ -310,6 +362,56 @@ impl Workspace {
             })
             .detach();
         }
+    }
+
+    /// The ticket's SLA pill and its link to Linear (§5); `None` before Linear has said
+    /// anything about `ticket`.
+    pub(super) fn render_ticket_link(&self, ticket: &str) -> Option<AnyElement> {
+        let t = self.linear_tickets.get(&ticket.to_ascii_uppercase())?;
+        let pill = t.sla_breaches_at.as_deref().and_then(|b| {
+            linear_watch::sla_pill(b, t.sla_high_risk_at.as_deref(), SystemTime::now())
+        });
+        let url = t.url.clone();
+        Some(
+            h_flex()
+                .gap_2()
+                .children(pill.map(|(text, level)| {
+                    let (fg, bg) = match level {
+                        SlaLevel::Ok => (theme::TEXT_SECONDARY, theme::RAISED),
+                        SlaLevel::Risk => (theme::AMBER, theme::AMBER_TINT),
+                        SlaLevel::Breached => (theme::RED, theme::RED_TINT),
+                    };
+                    div()
+                        .px(px(6.))
+                        .py(px(1.))
+                        .rounded(px(4.))
+                        .text_xs()
+                        .bg(color(bg))
+                        .text_color(color(fg))
+                        .child(text)
+                }))
+                .when(!url.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .id(SharedString::from(format!("linear-link-{ticket}")))
+                            .text_xs()
+                            .text_color(color(theme::TEAL))
+                            .cursor_pointer()
+                            .hover(|d| d.underline())
+                            .child("Open in Linear ↗")
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// The ticket of `orch`'s current run.
+    pub(super) fn current_ticket(&self, orch: PaneId, cx: &gpui::App) -> Option<String> {
+        let token = self.panes.get(&orch)?.read(cx).mcp_token()?.to_string();
+        let sv = server::get()?;
+        let reg = server::lock(sv.registry());
+        reg.runs.current(&token).map(|r| r.ticket.clone())
     }
 
     /// The Linear line under an orchestrator's card: **Watch Linear** and **Check now**, and

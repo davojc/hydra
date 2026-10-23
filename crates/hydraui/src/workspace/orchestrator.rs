@@ -350,6 +350,11 @@ impl Workspace {
             reg.runs.restore(i.run.clone());
             reg.runs.adopt(&run_id, &token);
         }
+        // Its Linear ticket's link and SLA, as logged (phase 2 §5).
+        if let Some(t) = i.ticket.clone() {
+            self.linear_tickets
+                .insert(t.identifier.to_ascii_uppercase(), t);
+        }
         note_run(
             &run_id,
             "orchestrator",

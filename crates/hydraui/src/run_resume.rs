@@ -23,6 +23,8 @@ pub struct Interrupted {
     pub claude: String,
     /// Per attempt label: the folder its terminal opened in and its Claude session, as logged.
     pub stages: HashMap<String, (Option<PathBuf>, Option<String>)>,
+    /// Its Linear ticket as logged when it started (phase 2 §5): the card's link and SLA.
+    pub ticket: Option<crate::linear::Ticket>,
 }
 
 /// Every run under `<hydra_root>/hydraui/runs` that never ended, whose hydraui is no longer
@@ -90,7 +92,22 @@ fn read(hydra_root: &Path, file: &Path, alive: &impl Fn(u32) -> bool) -> Option<
             _ => {}
         }
     }
+    let ticket = events
+        .iter()
+        .rev()
+        .find(|e| event(e) == "linear ticket")
+        .map(|e| crate::linear::Ticket {
+            id: String::new(),
+            identifier: run.ticket.clone(),
+            title: run.summary.clone(),
+            url: text(e, "url").to_string(),
+            sla_breaches_at: e["sla_breaches_at"].as_str().map(str::to_string),
+            sla_high_risk_at: e["sla_high_risk_at"].as_str().map(str::to_string),
+            assignee: None,
+            state: String::new(),
+        });
     Some(Interrupted {
+        ticket,
         run,
         env: text(orch, "env").to_string(),
         folder: PathBuf::from(text(orch, "folder")),
@@ -277,5 +294,30 @@ mod tests {
         assert_eq!(r.stages[0].attempts.len(), 2);
         assert_eq!(r.stages[0].status, StageStatus::Running);
         assert!(r.paused);
+    }
+
+    #[test]
+    fn a_linear_runs_ticket_comes_back_from_its_log() {
+        let mut log = mid_run();
+        log.insert(
+            3,
+            line(
+                "linear ticket",
+                r#","url":"https://linear.app/iov42/issue/INTH-7","sla_breaches_at":"2026-11-04T14:00:00.000Z","sla_high_risk_at":null"#,
+            ),
+        );
+        let found = interrupted(home_with(&log).path(), |_| false);
+        let t = found[0].ticket.as_ref().unwrap();
+        assert_eq!(t.identifier, "INTH-7");
+        assert_eq!(t.url, "https://linear.app/iov42/issue/INTH-7");
+        assert_eq!(
+            t.sla_breaches_at.as_deref(),
+            Some("2026-11-04T14:00:00.000Z")
+        );
+        assert!(
+            interrupted(home_with(&mid_run()).path(), |_| false)[0]
+                .ticket
+                .is_none()
+        );
     }
 }

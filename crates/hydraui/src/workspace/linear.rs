@@ -196,7 +196,12 @@ impl Workspace {
             let found = cx
                 .background_spawn(async move {
                     let key = hydra.linear_key(&env).map_err(LinearError::Rejected)?;
-                    linear_watch::find_and_claim(&Http { key }, &s, &p)
+                    // Every ticket a run log names: hydraui ran it before (§3).
+                    let ran: Vec<String> = crate::run_history::read(hydra.paths.root(), &[])
+                        .into_iter()
+                        .map(|e| e.ticket)
+                        .collect();
+                    linear_watch::find_and_claim(&Http { key }, &s, &p, &ran)
                 })
                 .await;
             let _ = this.update_in(cx, |ws, window, cx| {
@@ -211,7 +216,7 @@ impl Workspace {
         &mut self,
         orch: PaneId,
         pipeline: &Pipeline,
-        found: Result<Option<crate::linear::Ticket>, LinearError>,
+        found: Result<linear_watch::Check, LinearError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -219,10 +224,19 @@ impl Workspace {
             return;
         };
         w.checking = false;
+        let skipped = |check: &linear_watch::Check| {
+            if check.skipped.is_empty() {
+                String::new()
+            } else {
+                format!(" · skipped {} (run here before)", check.skipped.join(", "))
+            }
+        };
         match found {
-            Ok(Some(ticket)) => {
+            Ok(check) if check.claimed.is_some() => {
+                let also = skipped(&check);
+                let ticket = check.claimed.expect("matched Some");
                 w.failures.clear();
-                w.status = Some(format!("Picked {}", ticket.identifier));
+                w.status = Some(format!("Picked {}{also}", ticket.identifier));
                 self.linear_tickets
                     .insert(ticket.identifier.to_ascii_uppercase(), ticket.clone());
                 crate::action_log::write(format!(
@@ -234,9 +248,9 @@ impl Workspace {
                     .insert(orch, (ticket.identifier.clone(), prompt));
                 self.send_wakes(window, cx);
             }
-            Ok(None) => {
+            Ok(check) => {
                 w.failures.clear();
-                w.status = Some("Nothing to pick".into());
+                w.status = Some(format!("Nothing to pick{}", skipped(&check)));
             }
             Err(e) => {
                 crate::action_log::write(format!("linear: {e}"));

@@ -206,11 +206,22 @@ fn claim(
 
 /// One check (§3, §4): picks the next ticket for `pipeline` and claims it, or `None` when there
 /// is nothing to pick. A ticket someone took meanwhile is passed over for the next.
+/// What a check did: the ticket it claimed, and the ones it passed over because hydraui already
+/// has a run for them.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Check {
+    pub claimed: Option<Ticket>,
+    pub skipped: Vec<String>,
+}
+
 pub fn find_and_claim(
     api: &dyn LinearApi,
     settings: &LinearSettings,
     pipeline: &Pipeline,
-) -> Result<Option<Ticket>, LinearError> {
+    already_ran: &[String],
+) -> Result<Check, LinearError> {
+    let ran = |id: &str| already_ran.iter().any(|r| r.eq_ignore_ascii_case(id));
+    let mut skipped: Vec<String> = Vec::new();
     let team = settings.team.as_str();
     let pick_state = state_id(api, team, &settings.pick)?;
     let claim_state = state_id(api, team, &settings.claim)?;
@@ -218,13 +229,26 @@ pub fn find_and_claim(
     let mut passed_over: Vec<String> = Vec::new();
     // A few tickets taken meanwhile in a row is plenty for one check.
     for _ in 0..5 {
-        let tickets: Vec<Ticket> = api
+        let mut tickets: Vec<Ticket> = api
             .pickable(team, &pick_state, unassigned_only)?
             .into_iter()
             .filter(|t| !passed_over.contains(&t.identifier))
             .collect();
+        // A ticket hydraui ran before (finished, stopped or interrupted) waits for a person,
+        // who can start it again by hand (§3).
+        let mut by_breach = tickets.clone();
+        by_breach.sort_by(|a, b| a.sla_breaches_at.cmp(&b.sla_breaches_at));
+        for t in by_breach.iter().filter(|t| ran(&t.identifier)) {
+            if !skipped.contains(&t.identifier) {
+                skipped.push(t.identifier.clone());
+            }
+        }
+        tickets.retain(|t| !ran(&t.identifier));
         let Some(next) = pick(&tickets, unassigned_only) else {
-            return Ok(None);
+            return Ok(Check {
+                claimed: None,
+                skipped,
+            });
         };
         // As it is now: someone may have moved or taken it since the list.
         let still = api.ticket(&next.identifier)?.filter(|t| {
@@ -236,9 +260,15 @@ pub fn find_and_claim(
             continue;
         };
         claim(api, &ticket, &claim_state, pipeline)?;
-        return Ok(Some(ticket));
+        return Ok(Check {
+            claimed: Some(ticket),
+            skipped,
+        });
     }
-    Ok(None)
+    Ok(Check {
+        claimed: None,
+        skipped,
+    })
 }
 
 /// Claims ticket `identifier` for a run started by hand (§4); `false` when Linear has no such
@@ -642,8 +672,9 @@ mod tests {
             t("INTH-1", "2026-11-04T00:00:00.000Z", None),
             t("INTH-2", "2026-11-02T00:00:00.000Z", None),
         ]);
-        let got = find_and_claim(&api, &settings(), &pipeline())
+        let got = find_and_claim(&api, &settings(), &pipeline(), &[])
             .unwrap()
+            .claimed
             .unwrap();
         assert_eq!(got.identifier, "INTH-2");
         assert_eq!(
@@ -663,8 +694,9 @@ mod tests {
             t("INTH-2", "2026-11-02T00:00:00.000Z", None),
         ]);
         api.taken_meanwhile = vec!["INTH-2".into()];
-        let got = find_and_claim(&api, &settings(), &pipeline())
+        let got = find_and_claim(&api, &settings(), &pipeline(), &[])
             .unwrap()
+            .claimed
             .unwrap();
         assert_eq!(got.identifier, "INTH-1");
         assert!(api.writes.borrow().iter().all(|w| !w.contains("INTH-2")));
@@ -674,7 +706,9 @@ mod tests {
     fn nothing_to_pick_writes_nothing() {
         let api = fake_with(vec![t("INTH-1", "2026-11-04T00:00:00.000Z", Some("u-9"))]);
         assert_eq!(
-            find_and_claim(&api, &settings(), &pipeline()).unwrap(),
+            find_and_claim(&api, &settings(), &pipeline(), &[])
+                .unwrap()
+                .claimed,
             None
         );
         assert!(api.writes.borrow().is_empty());
@@ -688,7 +722,10 @@ mod tests {
         let mut s = settings();
         s.pick = "ready for review".into();
         s.assignee = Assignee::Any;
-        let got = find_and_claim(&api, &s, &pipeline()).unwrap().unwrap();
+        let got = find_and_claim(&api, &s, &pipeline(), &[])
+            .unwrap()
+            .claimed
+            .unwrap();
         assert_eq!(got.identifier, "INTH-5");
         assert_eq!(api.writes.borrow()[0], "update uuid-INTH-5 s-claim -");
     }
@@ -699,7 +736,7 @@ mod tests {
         let mut s = settings();
         s.claim = "Doing".into();
         assert_eq!(
-            find_and_claim(&api, &s, &pipeline()).unwrap_err(),
+            find_and_claim(&api, &s, &pipeline(), &[]).unwrap_err(),
             LinearError::Failed("INTH has no state \"Doing\"".into())
         );
     }
@@ -789,5 +826,27 @@ mod tests {
         assert_eq!(inside_sla(breach, at("2026-11-04T13:59:59Z")), Some(true));
         assert_eq!(inside_sla(breach, at("2026-11-04T14:00:01Z")), Some(false));
         assert_eq!(inside_sla("?", at("2026-11-04T14:00:01Z")), None);
+    }
+
+    #[test]
+    fn tickets_hydraui_already_ran_are_skipped_and_named() {
+        let api = fake_with(vec![
+            t("INTH-166", "2026-11-04T00:00:00.000Z", None),
+            t("INTH-169", "2026-11-05T00:00:00.000Z", None),
+            t("INTH-165", "2026-11-18T00:00:00.000Z", None),
+        ]);
+        let ran = ["INTH-166".to_string(), "inth-165".to_string()];
+        let check = find_and_claim(&api, &settings(), &pipeline(), &ran).unwrap();
+        assert_eq!(check.claimed.unwrap().identifier, "INTH-169");
+        assert_eq!(check.skipped, ["INTH-166", "INTH-165"]);
+        assert!(api.writes.borrow().iter().all(|w| w.contains("INTH-169")));
+        // Only already-run ones left: nothing claimed, both named.
+        let api = fake_with(vec![t("INTH-166", "2026-11-04T00:00:00.000Z", None)]);
+        let check = find_and_claim(&api, &settings(), &pipeline(), &ran).unwrap();
+        assert_eq!(
+            (check.claimed, check.skipped),
+            (None, vec!["INTH-166".to_string()])
+        );
+        assert!(api.writes.borrow().is_empty());
     }
 }

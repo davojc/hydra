@@ -148,6 +148,12 @@ orchestrator) gets the same claim and end writes. A ticket from another team is 
   hand. Either way it's logged as `linear ticket` (link and SLA times), which is what a resumed
   run reads back. An ended run logs `linear sla` (`inside`, from the time it ended), which
   History shows as Inside / Missed.
+- **Tickets hydraui already ran are skipped.** That covers any ticket a run log names, whether
+  its run finished, stopped or was interrupted. Such a ticket is waiting on a person (a PR to
+  review, a stop to look at, an Interrupted card to resume), and the status line names it. Found
+  on 2026-10-23: INTH-165 (done, PR open) and INTH-166 (interrupted) were still unassigned in
+  Ready for Investigation, because they ran before phase 2 claimed anything. To run one again,
+  start it by hand.
 - **The watcher's switch isn't saved.** It's off after a restart, and so is a resumed run's
   orchestrator.
 - **Times** are read by a small RFC 3339 parser (UTC only, as Linear sends them). The workspace

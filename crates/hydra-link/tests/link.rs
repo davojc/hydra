@@ -466,3 +466,31 @@ async fn stop_does_not_wait_for_the_network() {
     assert!(took < Duration::from_millis(500), "stop took {took:?}");
     drop(client);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unpair_withdraws_a_live_offer() {
+    let (host, _events) = start(config());
+    let offer = host.offer_pairing();
+    host.unpair();
+    let got = timed(Client::pair_at(PHONE, &offer, host.addr_for_tests())).await;
+    assert!(
+        matches!(got, Err(LinkError::Refused)),
+        "got {:?}",
+        got.err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_and_wait_closed_resolves_once_the_endpoint_is_closed() {
+    let (host, _events, client) = paired_host().await;
+    let began = std::time::Instant::now();
+    let closed = host.stop_and_wait_closed();
+    assert!(
+        began.elapsed() < Duration::from_millis(500),
+        "stop_and_wait_closed blocked"
+    );
+    timed(closed).await;
+    // The phone has been hung up on by then.
+    let got = timed(client.request(ClientMsg::Snapshot)).await;
+    assert!(matches!(got, Err(LinkError::Closed)), "got {got:?}");
+}

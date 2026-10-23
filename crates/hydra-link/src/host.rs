@@ -188,6 +188,8 @@ pub struct Host {
     shared: Arc<Shared>,
     endpoint: Option<Endpoint>,
     stop: Option<oneshot::Sender<()>>,
+    /// Resolves once the link thread has closed the endpoint (or ended without one).
+    closed: Option<futures::channel::oneshot::Receiver<()>>,
 }
 
 impl Host {
@@ -213,6 +215,7 @@ impl Host {
         });
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<io::Result<Endpoint>>();
         let (stop_tx, stop_rx) = oneshot::channel();
+        let (closed_tx, closed_rx) = futures::channel::oneshot::channel::<()>();
         let run = Arc::clone(&shared);
         let (key, relays) = (cfg.secret_key, cfg.relays);
         // Detached: `stop` only signals it, and it finishes closing in the background.
@@ -252,6 +255,8 @@ impl Host {
                         c.conn.close(close::BYE.into(), b"hydraui stopped");
                     }
                     let _ = tokio::time::timeout(CLOSE_GRACE, ep.close()).await;
+                    // Only now may another endpoint bind this key.
+                    let _ = closed_tx.send(());
                 });
             })?;
         let endpoint = ready_rx
@@ -261,6 +266,7 @@ impl Host {
             shared,
             endpoint: Some(endpoint),
             stop: Some(stop_tx),
+            closed: Some(closed_rx),
         };
         Ok((host, events_rx))
     }
@@ -299,10 +305,12 @@ impl Host {
         offer
     }
 
-    /// Forgets the paired phone and closes its connection.
+    /// Forgets the paired phone, withdraws any live pairing offer and closes the phone's
+    /// connection.
     pub fn unpair(&self) {
         let mut st = self.shared.lock();
         st.paired = None;
+        st.offer = None;
         if let Some(c) = st.current.take() {
             c.conn.close(close::UNPAIRED.into(), b"unpaired");
         }
@@ -319,6 +327,20 @@ impl Host {
     /// Returns at once: the closing happens in the background. Dropping the host does
     /// the same.
     pub fn stop(self) {}
+
+    /// Stops the host as `stop` does, returning at once with a future that resolves when
+    /// the link thread has closed the phone's connection and the endpoint (after at most
+    /// the close grace), so the same key can then be bound again without a clash.
+    pub fn stop_and_wait_closed(mut self) -> impl Future<Output = ()> + Send + 'static {
+        let closed = self.closed.take();
+        drop(self);
+        async move {
+            if let Some(closed) = closed {
+                // Cancelled means the link thread ended: the endpoint is gone either way.
+                let _ = closed.await;
+            }
+        }
+    }
 
     fn endpoint(&self) -> &Endpoint {
         self.endpoint
@@ -520,6 +542,9 @@ async fn write_loop(conn: Connection, mut send: SendStream, out: Arc<Outbox>) {
         tokio::select! {
             msg = out.next() => {
                 if write_msg(&mut send, &msg).await.is_err() {
+                    // A phone that can't be written to would stay connected but deaf: hang
+                    // up, so it reconnects.
+                    conn.close(close::BYE.into(), b"write failed");
                     break;
                 }
             }

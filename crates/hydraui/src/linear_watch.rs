@@ -3,8 +3,8 @@
 
 use std::time::{Duration, SystemTime};
 
-use crate::linear::{LinearError, Ticket};
-use crate::pipeline::Pipeline;
+use crate::linear::{LinearApi, LinearError, Ticket};
+use crate::pipeline::{Assignee, LinearSettings, Pipeline};
 use crate::runs::{Run, RunState, StageStatus};
 
 /// How many failed checks in a row stop watching (the user's three-retries rule).
@@ -95,10 +95,10 @@ pub fn start_prompt(pipeline: &Pipeline, ticket: &Ticket) -> String {
 }
 
 /// The comment a claim leaves (§4).
-pub fn claim_comment(pipeline: &Pipeline, run_id: &str) -> String {
+pub fn claim_comment(pipeline: &Pipeline) -> String {
     let stages: Vec<&str> = pipeline.stages.iter().map(|s| s.title.as_str()).collect();
     format!(
-        "hydraui's orchestrator (pipeline \"{}\") is working on this: {}. Run {run_id}.",
+        "hydraui's orchestrator (pipeline \"{}\") is working on this: {}.",
         pipeline.name,
         stages.join(" → ")
     )
@@ -177,6 +177,107 @@ pub fn end_comment(run: &Run) -> String {
 /// Whether `run` ended with every stage passed, so the ticket moves on (§4).
 pub fn all_passed(run: &Run) -> bool {
     run.state == RunState::Finished && run.stages.iter().all(|s| s.status == StageStatus::Passed)
+}
+
+/// The id of `team`'s state named `name` (names ignore case).
+fn state_id(api: &dyn LinearApi, team: &str, name: &str) -> Result<String, LinearError> {
+    api.states(team)?
+        .into_iter()
+        .find(|s| s.name.eq_ignore_ascii_case(name.trim()))
+        .map(|s| s.id)
+        .ok_or_else(|| LinearError::Failed(format!("{team} has no state \"{}\"", name.trim())))
+}
+
+/// Claims `ticket` (§4): into the claim state, assigned to the key's user when nobody is, and
+/// the claim comment.
+fn claim(
+    api: &dyn LinearApi,
+    ticket: &Ticket,
+    claim_state: &str,
+    pipeline: &Pipeline,
+) -> Result<(), LinearError> {
+    let me = match ticket.assignee {
+        None => Some(api.viewer()?),
+        Some(_) => None,
+    };
+    api.update(&ticket.id, claim_state, me.as_deref())?;
+    api.comment(&ticket.id, &claim_comment(pipeline))
+}
+
+/// One check (§3, §4): picks the next ticket for `pipeline` and claims it, or `None` when there
+/// is nothing to pick. A ticket someone took meanwhile is passed over for the next.
+pub fn find_and_claim(
+    api: &dyn LinearApi,
+    settings: &LinearSettings,
+    pipeline: &Pipeline,
+) -> Result<Option<Ticket>, LinearError> {
+    let team = settings.team.as_str();
+    let pick_state = state_id(api, team, &settings.pick)?;
+    let claim_state = state_id(api, team, &settings.claim)?;
+    let unassigned_only = settings.assignee == Assignee::Unassigned;
+    let mut passed_over: Vec<String> = Vec::new();
+    // A few tickets taken meanwhile in a row is plenty for one check.
+    for _ in 0..5 {
+        let tickets: Vec<Ticket> = api
+            .pickable(team, &pick_state, unassigned_only)?
+            .into_iter()
+            .filter(|t| !passed_over.contains(&t.identifier))
+            .collect();
+        let Some(next) = pick(&tickets, unassigned_only) else {
+            return Ok(None);
+        };
+        // As it is now: someone may have moved or taken it since the list.
+        let still = api.ticket(&next.identifier)?.filter(|t| {
+            t.state.eq_ignore_ascii_case(settings.pick.trim())
+                && (!unassigned_only || t.assignee.is_none())
+        });
+        let Some(ticket) = still else {
+            passed_over.push(next.identifier.clone());
+            continue;
+        };
+        claim(api, &ticket, &claim_state, pipeline)?;
+        return Ok(Some(ticket));
+    }
+    Ok(None)
+}
+
+/// Claims ticket `identifier` for a run started by hand (§4); `false` when Linear has no such
+/// ticket or it is already in the claim state (the watcher claimed it).
+pub fn claim_named(
+    api: &dyn LinearApi,
+    settings: &LinearSettings,
+    pipeline: &Pipeline,
+    identifier: &str,
+) -> Result<bool, LinearError> {
+    let Some(ticket) = api.ticket(identifier)? else {
+        return Ok(false);
+    };
+    if ticket.state.eq_ignore_ascii_case(settings.claim.trim()) {
+        return Ok(false);
+    }
+    let claim_state = state_id(api, &settings.team, &settings.claim)?;
+    claim(api, &ticket, &claim_state, pipeline)?;
+    Ok(true)
+}
+
+/// The writes when `run` ended (§4): the end comment, and the passed state when every stage
+/// passed. Says what it wrote, for the run's log.
+pub fn end_writes(
+    api: &dyn LinearApi,
+    settings: &LinearSettings,
+    run: &Run,
+) -> Result<Vec<&'static str>, LinearError> {
+    let Some(ticket) = api.ticket(&run.ticket)? else {
+        return Ok(Vec::new());
+    };
+    api.comment(&ticket.id, &end_comment(run))?;
+    let mut wrote = vec!["comment"];
+    if all_passed(run) {
+        let passed = state_id(api, &settings.team, &settings.passed)?;
+        api.update(&ticket.id, &passed, None)?;
+        wrote.push("state");
+    }
+    Ok(wrote)
 }
 
 #[cfg(test)]
@@ -322,8 +423,8 @@ mod tests {
         ] {
             assert!(p.contains(says), "{says}: {p}");
         }
-        let c = claim_comment(&pipeline(), "INTH-170-1");
-        for says in ["INTH SLA tickets", "Replicate → Develop", "INTH-170-1"] {
+        let c = claim_comment(&pipeline());
+        for says in ["INTH SLA tickets", "Replicate → Develop"] {
             assert!(c.contains(says), "{says}: {c}");
         }
     }
@@ -371,5 +472,200 @@ mod tests {
             assert!(c.contains(says), "{says}: {c}");
         }
         assert!(!all_passed(&run));
+    }
+
+    /// Linear in memory: the team's states, its tickets, and every write.
+    #[derive(Default)]
+    struct Fake {
+        tickets: std::cell::RefCell<Vec<Ticket>>,
+        /// Tickets someone else changes between the pick and the re-check.
+        taken_meanwhile: Vec<String>,
+        writes: std::cell::RefCell<Vec<String>>,
+    }
+
+    const STATES: [(&str, &str); 4] = [
+        ("s-pick", "Ready for Investigation"),
+        ("s-claim", "In Investigation"),
+        ("s-passed", "Ready for Peer Review"),
+        ("s-review", "Ready for Review"),
+    ];
+
+    impl LinearApi for Fake {
+        fn viewer(&self) -> Result<String, LinearError> {
+            Ok("u-me".into())
+        }
+        fn states(&self, team: &str) -> Result<Vec<crate::linear::State>, LinearError> {
+            assert_eq!(team, "INTH");
+            Ok(STATES
+                .iter()
+                .map(|(id, name)| crate::linear::State {
+                    id: (*id).into(),
+                    name: (*name).into(),
+                })
+                .collect())
+        }
+        fn pickable(
+            &self,
+            _team: &str,
+            state_id: &str,
+            unassigned_only: bool,
+        ) -> Result<Vec<Ticket>, LinearError> {
+            let name = STATES.iter().find(|(id, _)| *id == state_id).unwrap().1;
+            Ok(self
+                .tickets
+                .borrow()
+                .iter()
+                .filter(|t| t.state == name && (!unassigned_only || t.assignee.is_none()))
+                .cloned()
+                .collect())
+        }
+        fn ticket(&self, identifier: &str) -> Result<Option<Ticket>, LinearError> {
+            let mut t = self
+                .tickets
+                .borrow()
+                .iter()
+                .find(|t| t.identifier == identifier)
+                .cloned();
+            if let Some(t) = t
+                .as_mut()
+                .filter(|t| self.taken_meanwhile.contains(&t.identifier))
+            {
+                t.assignee = Some("u-someone".into());
+                t.state = "In Development".into();
+            }
+            Ok(t)
+        }
+        fn update(
+            &self,
+            id: &str,
+            state_id: &str,
+            assignee: Option<&str>,
+        ) -> Result<(), LinearError> {
+            self.writes.borrow_mut().push(format!(
+                "update {id} {state_id} {}",
+                assignee.unwrap_or("-")
+            ));
+            Ok(())
+        }
+        fn comment(&self, id: &str, body: &str) -> Result<(), LinearError> {
+            let first = body.lines().next().unwrap_or_default();
+            self.writes
+                .borrow_mut()
+                .push(format!("comment {id} {first}"));
+            Ok(())
+        }
+    }
+
+    fn settings() -> LinearSettings {
+        pipeline().linear.unwrap()
+    }
+
+    fn fake_with(tickets: Vec<Ticket>) -> Fake {
+        Fake {
+            tickets: std::cell::RefCell::new(tickets),
+            ..Fake::default()
+        }
+    }
+
+    #[test]
+    fn a_check_claims_the_soonest_ticket() {
+        let api = fake_with(vec![
+            t("INTH-1", "2026-11-04T00:00:00.000Z", None),
+            t("INTH-2", "2026-11-02T00:00:00.000Z", None),
+        ]);
+        let got = find_and_claim(&api, &settings(), &pipeline())
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.identifier, "INTH-2");
+        assert_eq!(
+            *api.writes.borrow(),
+            [
+                "update uuid-INTH-2 s-claim u-me",
+                "comment uuid-INTH-2 hydraui's orchestrator (pipeline \"INTH SLA tickets\") is \
+                 working on this: Replicate → Develop.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_ticket_taken_meanwhile_is_passed_over() {
+        let mut api = fake_with(vec![
+            t("INTH-1", "2026-11-04T00:00:00.000Z", None),
+            t("INTH-2", "2026-11-02T00:00:00.000Z", None),
+        ]);
+        api.taken_meanwhile = vec!["INTH-2".into()];
+        let got = find_and_claim(&api, &settings(), &pipeline())
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.identifier, "INTH-1");
+        assert!(api.writes.borrow().iter().all(|w| !w.contains("INTH-2")));
+    }
+
+    #[test]
+    fn nothing_to_pick_writes_nothing() {
+        let api = fake_with(vec![t("INTH-1", "2026-11-04T00:00:00.000Z", Some("u-9"))]);
+        assert_eq!(
+            find_and_claim(&api, &settings(), &pipeline()).unwrap(),
+            None
+        );
+        assert!(api.writes.borrow().is_empty());
+    }
+
+    #[test]
+    fn another_trigger_state_and_assigned_tickets_keep_their_assignee() {
+        let mut ready = t("INTH-5", "2026-11-04T00:00:00.000Z", Some("u-9"));
+        ready.state = "Ready for Review".into();
+        let api = fake_with(vec![ready]);
+        let mut s = settings();
+        s.pick = "ready for review".into();
+        s.assignee = Assignee::Any;
+        let got = find_and_claim(&api, &s, &pipeline()).unwrap().unwrap();
+        assert_eq!(got.identifier, "INTH-5");
+        assert_eq!(api.writes.borrow()[0], "update uuid-INTH-5 s-claim -");
+    }
+
+    #[test]
+    fn a_state_the_team_lacks_is_named() {
+        let api = fake_with(vec![]);
+        let mut s = settings();
+        s.claim = "Doing".into();
+        assert_eq!(
+            find_and_claim(&api, &s, &pipeline()).unwrap_err(),
+            LinearError::Failed("INTH has no state \"Doing\"".into())
+        );
+    }
+
+    #[test]
+    fn a_run_started_by_hand_is_claimed_unless_it_already_was() {
+        let mut claimed = t("INTH-8", "2026-11-04T00:00:00.000Z", Some("u-me"));
+        claimed.state = "In Investigation".into();
+        let api = fake_with(vec![t("INTH-7", "2026-11-04T00:00:00.000Z", None), claimed]);
+        assert!(claim_named(&api, &settings(), &pipeline(), "INTH-7").unwrap());
+        assert!(!claim_named(&api, &settings(), &pipeline(), "INTH-8").unwrap());
+        assert!(!claim_named(&api, &settings(), &pipeline(), "INTH-404").unwrap());
+        assert_eq!(
+            api.writes.borrow().len(),
+            2,
+            "INTH-7's update and comment only"
+        );
+    }
+
+    #[test]
+    fn a_passed_run_comments_and_moves_on_a_stopped_one_only_comments() {
+        let mut ticket = t("INTH-170", "2026-11-04T00:00:00.000Z", Some("u-me"));
+        ticket.state = "In Investigation".into();
+        let api = fake_with(vec![ticket]);
+        let mut passed = run_with(90);
+        // The run's last stage is develop; it finished.
+        assert!(all_passed(&passed));
+        assert_eq!(
+            end_writes(&api, &settings(), &passed).unwrap(),
+            ["comment", "state"]
+        );
+        assert!(api.writes.borrow()[1].starts_with("update uuid-INTH-170 s-passed -"));
+        api.writes.borrow_mut().clear();
+        passed.state = RunState::Stopped("a person stopped it".into());
+        assert_eq!(end_writes(&api, &settings(), &passed).unwrap(), ["comment"]);
+        assert_eq!(api.writes.borrow().len(), 1);
     }
 }

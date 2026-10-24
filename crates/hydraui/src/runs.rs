@@ -75,9 +75,17 @@ pub struct StageRun {
     pub attempts: Vec<Attempt>,
     /// A person's note for the next attempt.
     pub note: Option<String>,
+    /// Attempts before this one don't count toward its tries: the run went back to an earlier
+    /// stage since (a person's choice).
+    pub counted_from: usize,
 }
 
 impl StageRun {
+    /// Its attempts that count toward `MAX_ATTEMPTS`.
+    pub fn tries(&self) -> usize {
+        self.attempts.len().saturating_sub(self.counted_from)
+    }
+
     pub fn latest(&self) -> Option<&Attempt> {
         self.attempts.last()
     }
@@ -165,6 +173,8 @@ pub enum Decided {
     Failed(String),
     /// A person re-runs it.
     Retrying,
+    /// A person sent the run back to this earlier stage: its own session goes on.
+    Reopened,
     Paused,
     Resumed,
     RunResumed,
@@ -193,6 +203,9 @@ pub enum Choice {
     Retry { note: String },
     /// Stop the ticket.
     Stop,
+    /// Go back to `stage`, an earlier stage that passed: its own session is reopened with the
+    /// note, and the stages after it wait for it again with fresh tries.
+    Back { stage: String, note: String },
 }
 
 /// Whether `used`, a skill a session invoked, is `wanted`: the same name, ignoring case, or a
@@ -377,7 +390,7 @@ impl Runs {
         let s = &r.stages[i];
         match s.status {
             StageStatus::Waiting => {}
-            StageStatus::Failed if s.attempts.len() < MAX_ATTEMPTS => {}
+            StageStatus::Failed if s.tries() < MAX_ATTEMPTS => {}
             StageStatus::Failed => {
                 return no(format!(
                     "stage {stage} failed {MAX_ATTEMPTS} times: a person decides"
@@ -585,7 +598,7 @@ impl Runs {
         let r = &mut self.runs[ri];
         let s = &mut r.stages[si];
         s.status = StageStatus::Failed;
-        let attempts = s.attempts.len();
+        let attempts = s.tries();
         let id = r.pipeline.stages[si].id.clone();
         let mut changes = vec![Change {
             run: r.id.clone(),
@@ -781,6 +794,7 @@ impl Runs {
                 return Ok(self.end(ri, format!("stopped by you at {at}")));
             }
             Choice::Retry { note } => note.trim().to_string(),
+            Choice::Back { stage, note } => return self.go_back(ri, &stage, note.trim()),
         };
         if !matches!(r.state, RunState::NeedsYou(_)) {
             return Err(format!("run {run} isn't waiting for you"));
@@ -811,6 +825,69 @@ impl Runs {
             what: Decided::RunResumed,
         });
         Ok(changes)
+    }
+
+    /// A person's **Go back** (§5.3): the run returns to `stage`, an earlier stage that passed,
+    /// whose own session goes on as a new attempt (`Starting` until its terminal links); the
+    /// stages after it wait again, their earlier tries no longer counted.
+    fn go_back(&mut self, ri: usize, stage: &str, note: &str) -> Result<Vec<Change>, String> {
+        let r = &self.runs[ri];
+        if !matches!(r.state, RunState::NeedsYou(_)) {
+            return Err(format!("run {} isn't waiting for you", r.id));
+        }
+        if note.is_empty() {
+            return Err("going back needs a note for that stage's session".into());
+        }
+        let Some(t) = r.pipeline.stages.iter().position(|s| s.id == stage) else {
+            return Err(format!("no stage {stage} in pipeline {}", r.pipeline.name));
+        };
+        let waiting = r
+            .stages
+            .iter()
+            .position(|s| s.status != StageStatus::Passed)
+            .unwrap_or(r.stages.len());
+        if t >= waiting {
+            return Err(format!(
+                "stage {stage} isn't an earlier stage that passed: re-run the waiting one instead"
+            ));
+        }
+        let r = &mut self.runs[ri];
+        r.sessions += 1;
+        let label = format!("s-{:02}", r.sessions);
+        let skills = r.stages[t]
+            .latest()
+            .map(|a| a.skills.clone())
+            .unwrap_or_default();
+        let s = &mut r.stages[t];
+        s.status = StageStatus::Starting;
+        s.attempts.push(Attempt {
+            label,
+            session: None,
+            session_name: None,
+            started: SystemTime::now(),
+            note: Some(note.to_string()),
+            rating: None,
+            skills,
+        });
+        for later in &mut r.stages[t + 1..] {
+            later.status = StageStatus::Waiting;
+            later.note = None;
+            later.counted_from = later.attempts.len();
+        }
+        r.state = RunState::Running;
+        let id = r.id.clone();
+        Ok(vec![
+            Change {
+                run: id.clone(),
+                stage: Some(t),
+                what: Decided::Reopened,
+            },
+            Change {
+                run: id,
+                stage: None,
+                what: Decided::RunResumed,
+            },
+        ])
     }
 
     /// What `run_status` returns: the run's state, each stage's status and attempts (session,
@@ -913,10 +990,19 @@ fn stage_note(run: &Run, i: usize) -> String {
     if !later.is_empty() {
         around.push_str(&format!("Later: {}. ", later.join(", ")));
     }
+    // The pipeline's branch rule, which the report is held to (hydraui refuses a PR on another
+    // branch).
+    let branch = run.pipeline.branch_for(&run.ticket).map_or(String::new(), |b| {
+        format!(
+            "\nName every branch you create or push exactly {b}, in each repository: no prefix, \
+             no suffix, no other name. Put each pull request's link in your report; one on \
+             another branch is refused."
+        )
+    });
     format!(
         "---\nhydraui pipeline \"{}\" · {} · stage {} of {}: {}{skill}.\n{around}Do only this \
          stage. When it's done, call stage_report (score, evidence, reasons for and against, \
-         handoff); stage_brief has what earlier stages handed over.",
+         handoff); stage_brief has what earlier stages handed over.{branch}",
         run.pipeline.name,
         run.ticket,
         i + 1,
@@ -1021,6 +1107,143 @@ mod tests {
         assert!(matches!(runs.role("tok-a"), Role::Stage(r, 0) if r.id == id));
         assert!(matches!(runs.role("orch"), Role::Orchestrator(r) if r.id == id));
         assert!(matches!(runs.role("other"), Role::Other));
+    }
+
+    /// A run of a, b where a passed (session `t1`) and b scored below its bar (session `t2`).
+    fn b_stopped(runs: &mut Runs) -> String {
+        let id = run(runs, &["a", "b"]);
+        started(runs, &id, "a", "t1");
+        runs.skill_used("t1", "qa");
+        runs.report("t1", rated(90)).unwrap();
+        started(runs, &id, "b", "t2");
+        runs.report("t2", rated(40)).unwrap();
+        assert!(matches!(
+            runs.run(&id).unwrap().state,
+            RunState::NeedsYou(_)
+        ));
+        id
+    }
+
+    fn back(stage: &str, note: &str) -> Choice {
+        Choice::Back {
+            stage: stage.to_string(),
+            note: note.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_person_sends_the_run_back_to_an_earlier_stage() {
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        let changes = runs
+            .person(&id, back("a", "rename the branch to INTH-1"))
+            .unwrap();
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.what == Decided::Reopened && c.stage == Some(0))
+        );
+        let r = runs.run(&id).unwrap();
+        assert_eq!(r.state, RunState::Running);
+        // The earlier stage goes on in its own conversation: a new attempt, starting.
+        assert_eq!(status(&runs, &id, 0), StageStatus::Starting);
+        let a = runs.run(&id).unwrap().stages[0].latest().unwrap().clone();
+        assert_eq!(runs.run(&id).unwrap().stages[0].attempts.len(), 2);
+        assert_eq!(a.note.as_deref(), Some("rename the branch to INTH-1"));
+        assert_eq!(a.label, "s-03");
+        assert_eq!(a.skills, ["qa"], "its conversation already used its skill");
+        // The later stage waits for it, its earlier tries no longer counted.
+        assert_eq!(status(&runs, &id, 1), StageStatus::Waiting);
+        assert_eq!(runs.run(&id).unwrap().stages[1].tries(), 0);
+        // Reopened, it reports and passes; the later stage may start again.
+        runs.link(&id, 0, "t3", "1. a");
+        runs.report("t3", rated(92)).unwrap();
+        assert_eq!(status(&runs, &id, 0), StageStatus::Passed);
+        assert!(runs.begin("orch", &id, "b", "", 30).is_ok());
+    }
+
+    #[test]
+    fn going_back_is_only_to_an_earlier_passed_stage_with_a_note() {
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        assert!(
+            runs.person(&id, back("a", "  "))
+                .unwrap_err()
+                .contains("note")
+        );
+        assert!(
+            runs.person(&id, back("b", "x"))
+                .unwrap_err()
+                .contains("earlier")
+        );
+        assert!(
+            runs.person(&id, back("zz", "x"))
+                .unwrap_err()
+                .contains("zz")
+        );
+        runs.person(&id, back("a", "fix")).unwrap();
+        // Running again: nothing to go back from.
+        assert!(
+            runs.person(&id, back("a", "again"))
+                .unwrap_err()
+                .contains("waiting")
+        );
+    }
+
+    #[test]
+    fn a_later_stage_gets_its_three_tries_again_after_going_back() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b"]);
+        started(&mut runs, &id, "a", "t1");
+        runs.report("t1", rated(90)).unwrap();
+        for tok in ["b1", "b2", "b3"] {
+            started(&mut runs, &id, "b", tok);
+            runs.session_gone(tok);
+        }
+        assert!(matches!(
+            runs.run(&id).unwrap().state,
+            RunState::NeedsYou(_)
+        ));
+        runs.person(&id, back("a", "fix the env")).unwrap();
+        runs.link(&id, 0, "t2", "1. a");
+        runs.report("t2", rated(90)).unwrap();
+        started(&mut runs, &id, "b", "b4");
+        runs.session_gone("b4");
+        assert_eq!(status(&runs, &id, 1), StageStatus::Failed);
+        assert_eq!(
+            runs.run(&id).unwrap().state,
+            RunState::Running,
+            "1 try of 3, not 4"
+        );
+    }
+
+    #[test]
+    fn every_stage_is_told_the_branch_it_must_use() {
+        let mut runs = Runs::default();
+        let mut p = pipeline(&["develop"]);
+        p.branch = Some("{ticket}".into());
+        let id = runs
+            .start_run("orch", p, "PRE-151", "x")
+            .unwrap()
+            .id
+            .clone();
+        let s = runs.begin("orch", &id, "develop", "", 30).unwrap();
+        assert!(
+            s.prompt
+                .contains("Name every branch you create or push exactly PRE-151"),
+            "{}",
+            s.prompt
+        );
+        assert!(s.prompt.contains("pull request's link"), "{}", s.prompt);
+        // No rule, no line.
+        let mut plain = Runs::default();
+        let id = plain
+            .start_run("orch", pipeline(&["develop"]), "PRE-152", "x")
+            .unwrap()
+            .id
+            .clone();
+        let s = plain.begin("orch", &id, "develop", "", 30).unwrap();
+        assert!(!s.prompt.contains("Name every branch"), "{}", s.prompt);
     }
 
     #[test]

@@ -43,7 +43,7 @@ pub enum Cmd {
     Auth { provider: String, env: String },
     /// Turn a tool on for an environment (writes env.toml only; sign in afterwards inside the environment)
     Add {
-        /// claude, github (gh), git, aws, azure, gcloud, gws, kube, codex, gemini, jev. Omit to list tools.
+        /// claude, github (gh), git, aws, azure, gcloud, gws, kube, codex, gemini, jev, linear. Omit to list tools.
         tool: Option<String>,
         /// Environment (default: the current hydra terminal's)
         env: Option<String>,
@@ -70,7 +70,7 @@ pub enum Cmd {
         credentials_secret: Option<String>,
         #[arg(long = "kubeconfig")]
         kube_config: Option<String>,
-        /// gemini, jev: secret name holding the API key, e.g. work/gemini or work/jev
+        /// gemini, jev, linear: secret name holding the API key, e.g. work/gemini or work/linear
         #[arg(long = "api-key-secret")]
         api_key_secret: Option<String>,
         /// Borrow the tool's login and settings from another environment, e.g. --from personal

@@ -20,7 +20,7 @@ use super::Workspace;
 use crate::envs::PaneId;
 use crate::mcp::server;
 use crate::orchestrator_theme::{self as theme, color};
-use crate::pipeline::{self, Edit, EditStage, validate};
+use crate::pipeline::{self, Assignee, Edit, EditStage, LinearSettings, validate};
 use crate::runs::MAX_ATTEMPTS;
 
 /// The width of a stage row's up/down arrows, so the prompt can line up under the title.
@@ -46,11 +46,47 @@ pub(super) struct SettingsDraft {
     file: String,
     saved: Edit,
     name: Entity<InputState>,
+    /// The branch rule, e.g. `{ticket}`; empty: none.
+    branch: Entity<InputState>,
     bar: Entity<SliderState>,
     stages: Vec<DraftStage>,
     skills: Vec<String>,
     next_key: u64,
+    linear: LinearDraft,
     _subs: Vec<Subscription>,
+}
+
+/// The Linear section (phase 2 spec §2, §5): off saves the pipeline without a `[linear]` table.
+struct LinearDraft {
+    on: bool,
+    /// Kept as the file has it (`watch`).
+    watch: bool,
+    any: bool,
+    team: Entity<InputState>,
+    pick: Entity<InputState>,
+    claim: Entity<InputState>,
+    passed: Entity<InputState>,
+    every: Entity<InputState>,
+}
+
+impl LinearDraft {
+    fn edit(&self, cx: &App) -> Option<LinearSettings> {
+        let text = |i: &Entity<InputState>| i.read(cx).value().trim().to_string();
+        self.on.then(|| LinearSettings {
+            team: text(&self.team),
+            pick: text(&self.pick),
+            assignee: if self.any {
+                Assignee::Any
+            } else {
+                Assignee::Unassigned
+            },
+            claim: text(&self.claim),
+            passed: text(&self.passed),
+            // Not a number: 0, which validation names.
+            every_minutes: text(&self.every).parse().unwrap_or(0),
+            watch: self.watch,
+        })
+    }
 }
 
 fn slider(value: u8, cx: &mut App) -> Entity<SliderState> {
@@ -77,6 +113,9 @@ impl SettingsDraft {
             name: self.name.read(cx).value().to_string(),
             // Not edited here: the pattern is the same for every ticket, so it stays as the file has it.
             feature_env: self.saved.feature_env.clone(),
+            branch: Some(self.branch.read(cx).value().trim().to_string()).filter(|b| !b.is_empty()),
+            linear: self.linear.edit(cx),
+            autostart: self.saved.autostart.clone(),
             bar: slider_value(&self.bar, cx),
             stages: self
                 .stages
@@ -142,7 +181,7 @@ impl Workspace {
     }
 
     /// The pipeline file, environment and folder of `orch`'s current run.
-    fn settings_target(
+    pub(super) fn settings_target(
         &self,
         orch: PaneId,
         cx: &App,
@@ -169,21 +208,67 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> SettingsDraft {
         let name = cx.new(|cx| InputState::new(window, cx).default_value(saved.name.clone()));
+        let branch = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("{ticket}")
+                .default_value(saved.branch.clone().unwrap_or_default())
+        });
         let bar = slider(saved.bar, cx);
         let mut subs = vec![
             cx.subscribe_in(&name, window, |_, _, _: &InputEvent, _, cx| cx.notify()),
+            cx.subscribe_in(&branch, window, |_, _, _: &InputEvent, _, cx| cx.notify()),
             cx.subscribe_in(&bar, window, move |ws, _, _: &SliderEvent, window, cx| {
                 ws.default_bar_moved(orch, window, cx)
             }),
         ];
+        let l = saved.linear.clone();
+        let mut input = |value: String, placeholder: &'static str| {
+            let i = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(placeholder)
+                    .default_value(value)
+            });
+            subs.push(cx.subscribe_in(&i, window, |_, _, _: &InputEvent, _, cx| cx.notify()));
+            i
+        };
+        let field = |f: fn(&LinearSettings) -> String, default: &str| {
+            l.as_ref().map_or(default.to_string(), f)
+        };
+        let linear = LinearDraft {
+            on: l.is_some(),
+            watch: l.as_ref().is_some_and(|l| l.watch),
+            any: l.as_ref().is_some_and(|l| l.assignee == Assignee::Any),
+            team: input(field(|l| l.team.clone(), ""), "INTH"),
+            pick: input(
+                field(|l| l.pick.clone(), pipeline::DEFAULT_PICK),
+                pipeline::DEFAULT_PICK,
+            ),
+            claim: input(
+                field(|l| l.claim.clone(), pipeline::DEFAULT_CLAIM),
+                pipeline::DEFAULT_CLAIM,
+            ),
+            passed: input(
+                field(|l| l.passed.clone(), pipeline::DEFAULT_PASSED),
+                pipeline::DEFAULT_PASSED,
+            ),
+            every: input(
+                field(
+                    |l| l.every_minutes.to_string(),
+                    &pipeline::DEFAULT_EVERY_MINUTES.to_string(),
+                ),
+                "5",
+            ),
+        };
         let mut draft = SettingsDraft {
             file,
             saved: saved.clone(),
             name,
+            branch,
             bar,
             stages: Vec::new(),
             skills,
             next_key: 0,
+            linear,
             _subs: Vec::new(),
         };
         for s in &saved.stages {
@@ -260,6 +345,83 @@ impl Workspace {
             s.update(cx, |s, cx| s.set_value(value, window, cx));
         }
         cx.notify();
+    }
+
+    /// The Linear section (phase 2 spec §2): where the pipeline's tickets come from.
+    fn render_linear_settings(
+        &self,
+        orch: PaneId,
+        draft: &SettingsDraft,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let l = &draft.linear;
+        let row = |label: &str, input: &Entity<InputState>| {
+            h_flex()
+                .gap_3()
+                .child(
+                    text(12.5, theme::TEXT_SECONDARY)
+                        .w(px(170.))
+                        .flex_none()
+                        .child(label.to_string()),
+                )
+                .child(div().w(px(300.)).child(Input::new(input).small()))
+        };
+        let toggle = Button::new(SharedString::from(format!("linear-on-{orch}")))
+            .label(if l.on {
+                "Pulling tickets from Linear"
+            } else {
+                "Pull tickets from Linear"
+            })
+            .when(l.on, |b| b.primary())
+            .when(!l.on, |b| b.outline())
+            .small()
+            .on_click(cx.listener(move |ws, _, _, cx| {
+                ws.with_draft(orch, cx, |d| d.linear.on = !d.linear.on)
+            }));
+        let mut body = v_flex()
+            .gap_2()
+            .child(text(11., theme::TEXT_MUTED).child("LINEAR"))
+            .child(h_flex().child(toggle));
+        if l.on {
+            let who = |any: bool, label: &'static str| {
+                Button::new(SharedString::from(format!("linear-any-{any}-{orch}")))
+                    .label(label)
+                    .when(l.any == any, |b| b.primary())
+                    .when(l.any != any, |b| b.ghost())
+                    .xsmall()
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        ws.with_draft(orch, cx, |d| d.linear.any = any)
+                    }))
+            };
+            body = body
+                .child(row("Team", &l.team))
+                .child(row("Trigger state", &l.pick))
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .child(
+                            text(12.5, theme::TEXT_SECONDARY)
+                                .w(px(170.))
+                                .flex_none()
+                                .child("Assignee"),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(who(false, "Unassigned only"))
+                                .child(who(true, "Anyone")),
+                        ),
+                )
+                .child(row("Claimed ticket moves to", &l.claim))
+                .child(row("When every stage passed", &l.passed))
+                .child(row("Check every (minutes)", &l.every))
+                .child(text(12., theme::TEXT_MUTED).child(
+                    "Watch Linear on the card picks the ticket in the trigger state whose SLA \
+                     breaches soonest, claims it and starts it. The environment needs Linear set \
+                     up (Set up linear…).",
+                ));
+        }
+        body
     }
 
     fn with_draft(
@@ -720,6 +882,18 @@ impl Workspace {
                             .child(
                                 v_flex()
                                     .gap_2()
+                                    .child(section("Branch name"))
+                                    .child(div().max_w(px(480.)).child(Input::new(&draft.branch)))
+                                    .child(text(12., theme::TEXT_MUTED).child(
+                                        "Every repository's branch for a ticket, e.g. {ticket} \
+                                         for INTH-166. Stages are told it, and a report whose \
+                                         pull request is on another branch is refused. Empty: \
+                                         no rule.",
+                                    )),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_2()
                                     .child(section("Default confidence bar"))
                                     .child(
                                         h_flex()
@@ -737,6 +911,7 @@ impl Workspace {
                                             ),
                                     ),
                             )
+                            .child(self.render_linear_settings(orch, draft, cx))
                             .child(
                                 v_flex()
                                     .gap_2()

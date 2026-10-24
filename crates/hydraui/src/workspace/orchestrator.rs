@@ -61,6 +61,24 @@ pub fn resume_prompt(run: &str, ticket: &str) -> String {
     )
 }
 
+/// What a stage's own session is told when a person sends the run back to it: their note, that
+/// a later stage found a problem, the branch rule, and to report again.
+pub fn reopen_prompt(run: &Run, stage: usize, note: &str) -> String {
+    let title = &run.pipeline.stages[stage].title;
+    let branch = run
+        .pipeline
+        .branch_for(&run.ticket)
+        .map_or(String::new(), |b| {
+            format!(" Every branch must be named exactly {b}, in each repository.")
+        });
+    format!(
+        "{note}\n\n---\nhydraui: a person sent run {} ({}) back to this stage, {title}, after a \
+         later stage found a problem. Fix it as the note says, then call stage_report again: a \
+         new report replaces your last.{branch}",
+        run.id, run.ticket
+    )
+}
+
 /// What a reopened stage session is told (§13).
 pub const STAGE_RESUME_PROMPT: &str = "hydraui restarted and reopened this session. Please \
      carry on with your stage where you left off, and call stage_report when it's done.";
@@ -73,6 +91,7 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
     let (mut finished, mut needs, mut ended, mut failed, mut passed) =
         (false, None, None, None, None);
     let (mut retrying, mut run_resumed, mut resumed) = (None, false, false);
+    let mut reopened = None;
     for c in changes.iter().filter(|c| &c.run == id) {
         match (&c.what, c.stage) {
             (Decided::RunFinished, _) => finished = true,
@@ -81,6 +100,7 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
             (Decided::Failed(why), Some(i)) => failed = Some((i, why)),
             (Decided::Passed, Some(i)) => passed = Some(i),
             (Decided::Retrying, Some(i)) => retrying = Some(i),
+            (Decided::Reopened, Some(i)) => reopened = Some(i),
             (Decided::RunResumed, _) => run_resumed = true,
             (Decided::Resumed, _) => resumed = true,
             _ => {}
@@ -106,7 +126,7 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
             "Run {id}: stage {} failed ({why}), attempt {} of {MAX_ATTEMPTS}. Call run_status, \
              then start it again with stage_start.",
             stage(i),
-            run.stages[i].attempts.len()
+            run.stages[i].tries()
         )
     } else if let Some(i) = passed {
         let score = run.stages[i].rating().map_or(0, |r| r.score);
@@ -115,6 +135,12 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
              stage.",
             stage(i),
             run.pipeline.bar_for(i)
+        )
+    } else if let Some(i) = reopened {
+        format!(
+            "Run {id}: a person sent it back to stage {}; its own session is reopened beside them \
+             with their note. Wait: hydraui tells you when it reports, then start the next stage.",
+            stage(i)
         )
     } else if let Some(i) = retrying {
         format!(
@@ -202,7 +228,7 @@ pub(super) fn tell(changes: Vec<Change>) {
 
 /// Writes `event` to run `run`'s log (§8), noting a failure in hydraui's log: what only the app
 /// knows, which a restart needs to pick the run back up (§13).
-fn note_run(run: &str, event: &str, fields: serde_json::Value) {
+pub(super) fn note_run(run: &str, event: &str, fields: serde_json::Value) {
     let Some(root) = server::get().and_then(|sv| server::lock(sv.registry()).hydra_root.clone())
     else {
         return;
@@ -350,6 +376,11 @@ impl Workspace {
             reg.runs.restore(i.run.clone());
             reg.runs.adopt(&run_id, &token);
         }
+        // Its Linear ticket's link and SLA, as logged (phase 2 §5).
+        if let Some(t) = i.ticket.clone() {
+            self.linear_tickets
+                .insert(t.identifier.to_ascii_uppercase(), t);
+        }
         note_run(
             &run_id,
             "orchestrator",
@@ -410,6 +441,92 @@ impl Workspace {
                 }
             }
         }
+        cx.notify();
+    }
+
+    /// Reopens stage `stage` of `run`'s own conversation after a person sent the run back to it
+    /// (Go back): `claude --resume` of its last attempt's session in its folder, with their
+    /// note, linked as the new attempt. Without a logged session it fails, and the orchestrator
+    /// starts it afresh.
+    fn reopen_stage(
+        &mut self,
+        run: &str,
+        stage: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sv) = server::get() else {
+            return;
+        };
+        let (r, root) = {
+            let reg = server::lock(sv.registry());
+            (reg.runs.run(run).cloned(), reg.hydra_root.clone())
+        };
+        let (Some(r), Some(root)) = (r, root) else {
+            return;
+        };
+        let s = &r.stages[stage];
+        let (Some(now), Some(before)) = (s.latest(), s.attempts.iter().rev().nth(1)) else {
+            return;
+        };
+        let note = now.note.clone().unwrap_or_default();
+        let (folder, claude) = crate::run_resume::logged_session(&root, run, &before.label);
+        let env = self.panes.values().find_map(|v| {
+            let v = v.read(cx);
+            (v.mcp_token() == Some(r.orchestrator.as_str())).then(|| v.request.env.clone())
+        });
+        let fail = |why: &str| {
+            let mut reg = server::lock(sv.registry());
+            let changes = reg.runs.start_failed(run, stage, why);
+            crate::run_log::record(&root, &reg.runs, &changes);
+            changes
+        };
+        let (Some(env), Some(dir), Some(claude)) = (env, folder.filter(|d| d.is_dir()), claude)
+        else {
+            let changes = fail("its earlier session can't be reopened (not in the run's log)");
+            return self.runs_changed(changes, window, cx);
+        };
+        let shell = self.shell();
+        let mut request = PaneRequest::new(&env, dir.clone(), shell);
+        request.command = Some(command_line(
+            shell,
+            &[
+                "claude".into(),
+                "--resume".into(),
+                claude,
+                reopen_prompt(&r, stage, &note),
+            ],
+        ));
+        let name =
+            crate::runs::session_name(stage, &r.pipeline.stages[stage].title, s.attempts.len() - 1);
+        let opened = self
+            .open_terminal_beside(&env, request, window, cx)
+            .and_then(|id| self.panes.get(&id).cloned());
+        let Some(view) = opened else {
+            let changes = fail("its terminal didn't open");
+            return self.runs_changed(changes, window, cx);
+        };
+        view.update(cx, |v, cx| v.set_name(Some(name.clone()), cx));
+        let token = view.read(cx).mcp_token().map(str::to_string);
+        let taker = view.read(cx).taker_name().unwrap_or(name);
+        let Some(token) = token else {
+            let changes = fail("its terminal has no MCP token");
+            return self.runs_changed(changes, window, cx);
+        };
+        server::lock(sv.registry())
+            .runs
+            .link(run, stage, &token, &taker);
+        note_run(
+            run,
+            "stage reopened",
+            serde_json::json!({"stage": r.pipeline.stages[stage].id, "label": now.label}),
+        );
+        note_run(
+            run,
+            "stage folder",
+            serde_json::json!({"label": now.label, "folder": dir.display().to_string()}),
+        );
+        crate::action_log::write(format!("run {run}: reopened {taker} for a person"));
         cx.notify();
     }
 
@@ -589,6 +706,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Linear hears of runs that started or ended (phase 2 §4).
+        self.linear_runs_changed(&changes, cx);
+        // A person sent a run back to an earlier stage: its own session reopens.
+        for c in changes.iter().filter(|c| c.what == Decided::Reopened) {
+            if let Some(stage) = c.stage {
+                self.reopen_stage(&c.run, stage, window, cx);
+            }
+        }
         // Where a new run's orchestrator is, and which hydraui drives it (§13).
         let started: Vec<(String, String)> = server::get()
             .map(|sv| {
@@ -900,7 +1025,10 @@ impl Workspace {
                                     w.close_dialog(cx);
                                     ws.update(cx, |ws, cx| {
                                         let all: Vec<PaneId> = ws.files.keys().copied().collect();
-                                        ws.confirm_unsaved(all, w, cx, |_, w, _| w.remove_window());
+                                        ws.confirm_unsaved(all, w, cx, |_, w, _| {
+                                            closing();
+                                            w.remove_window()
+                                        });
                                     });
                                 }),
                         ),
@@ -1036,6 +1164,10 @@ impl Workspace {
                     ),
             )
             .child(h_flex().gap(px(3.)).children(segments))
+            .children(
+                self.current_ticket(orchestrator, cx)
+                    .and_then(|t| self.render_ticket_link(&t)),
+            )
             .into_any_element()
     }
 
@@ -1109,11 +1241,20 @@ impl Workspace {
         let changes = server::get().map_or_else(Vec::new, |sv| {
             let mut reg = server::lock(sv.registry());
             match reg.runs.role(token) {
-                Role::Stage(..) => reg.runs.session_gone(token),
+                // A shell that dies as hydraui closes isn't a stage failing (§13).
+                Role::Stage(..) if !reg.closing => reg.runs.session_gone(token),
                 _ => Vec::new(),
             }
         });
         tell(changes);
+    }
+}
+
+/// The window is about to close: from now on its terminals going is hydraui quitting, not
+/// their work ending, so open runs stay open for a restart to pick up (§13).
+pub(super) fn closing() {
+    if let Some(sv) = server::get() {
+        server::lock(sv.registry()).closing = true;
     }
 }
 
@@ -1317,6 +1458,41 @@ mod tests {
         }
         for says in ["restarted", "carry on", "stage_report"] {
             assert!(STAGE_RESUME_PROMPT.contains(says), "{says}");
+        }
+    }
+
+    #[test]
+    fn going_back_tells_the_orchestrator_and_the_reopened_session() {
+        let mut runs = crate::runs::Runs::default();
+        let mut p = crate::pipeline::parse(
+            "name = \"t\"\nbranch = \"{ticket}\"\n[[stage]]\nid = \"develop\"\ntitle = \"Develop\"\n\
+             [[stage]]\nid = \"verify\"\ntitle = \"Verify\"\n",
+        )
+        .unwrap();
+        p.file = "t".into();
+        let id = runs
+            .start_run("orch", p, "INTH-166", "x")
+            .unwrap()
+            .id
+            .clone();
+        let changes = vec![Change {
+            run: id.clone(),
+            stage: Some(0),
+            what: Decided::Reopened,
+        }];
+        let run = runs.run(&id).unwrap();
+        let wake = wake_message(run, &changes).unwrap();
+        assert!(
+            wake.contains("sent it back to stage develop") && wake.contains("Wait"),
+            "{wake}"
+        );
+        let prompt = reopen_prompt(run, 0, "Rename the branch to INTH-166.");
+        assert!(
+            prompt.starts_with("Rename the branch to INTH-166."),
+            "{prompt}"
+        );
+        for says in ["Develop", "stage_report again", "named exactly INTH-166"] {
+            assert!(prompt.contains(says), "{says}: {prompt}");
         }
     }
 

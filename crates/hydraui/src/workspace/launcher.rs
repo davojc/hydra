@@ -484,7 +484,81 @@ impl Workspace {
         }
         // Its card shows at once, so its settings can be set before the first ticket.
         self.orchestrators.insert(id, pipeline.to_string());
-        crate::action_log::write(format!("started an orchestrator for {pipeline} in {env}"));
+        // A pipeline that asks for it watches Linear from the start (`[linear] watch`).
+        let watch = crate::pipeline::load(self.hydra.paths.root(), pipeline)
+            .ok()
+            .and_then(|p| p.linear)
+            .is_some_and(|l| l.watch);
+        if watch {
+            let w = self.linear_watch.entry(id).or_default();
+            w.on = true;
+            w.status = Some("Looking…".into());
+        }
+        crate::action_log::write(format!(
+            "started an orchestrator for {pipeline} in {env}{}",
+            if watch { ", watching Linear" } else { "" }
+        ));
+    }
+
+    /// At launch: each pipeline with `[autostart] env` gets its orchestrator in that
+    /// environment, once (the first piece of roadmap phase 3, "start what you need at
+    /// launch"). `HYDRAUI_NO_AUTOSTART` turns it off, for test windows.
+    pub(super) fn autostart_pipelines(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if std::env::var_os("HYDRAUI_NO_AUTOSTART").is_some() {
+            return;
+        }
+        let root = self.hydra.paths.root().to_path_buf();
+        let envs = self.hydra.env_names();
+        for name in crate::pipeline::names(&root) {
+            let Some(env) = crate::pipeline::load(&root, &name)
+                .ok()
+                .and_then(|p| p.autostart)
+            else {
+                continue;
+            };
+            if !envs.contains(&env) {
+                crate::action_log::write(format!(
+                    "autostart: pipeline {name} names environment {env}, which doesn't exist"
+                ));
+                continue;
+            }
+            if self.orchestrators.values().any(|f| f == &name) {
+                continue;
+            }
+            // Its window shows the pipelines, not the start page.
+            if self.is_start_page() {
+                self.leave_start_page(window, cx);
+            }
+            // A run of it that hydraui closed on carries on, rather than a second orchestrator
+            // starting beside its Interrupted card (orchestrator §13).
+            let left = self
+                .interrupted
+                .iter()
+                .position(|i| i.run.pipeline.file == name && i.env == env);
+            let Some(idx) = left else {
+                self.open_orchestrator(&env, &name, window, cx);
+                continue;
+            };
+            self.resume_run(idx, window, cx);
+            let watch = crate::pipeline::load(&root, &name)
+                .ok()
+                .and_then(|p| p.linear)
+                .is_some_and(|l| l.watch);
+            let orch = self
+                .orchestrators
+                .iter()
+                .find(|(_, f)| **f == name)
+                .map(|(id, _)| *id);
+            if let (true, Some(orch)) = (watch, orch) {
+                let w = self.linear_watch.entry(orch).or_default();
+                w.on = true;
+                w.status = Some("Watching (after the run in progress)".into());
+            }
+            crate::action_log::write(format!(
+                "autostart: {name} resumed the run hydraui closed on{}",
+                if watch { ", watching Linear" } else { "" }
+            ));
+        }
     }
 
     /// Deletes `env` after a confirmation, as `hydra env rm` does (spec §7.4); its saved

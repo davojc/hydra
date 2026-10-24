@@ -4,6 +4,7 @@
 //! in `crate::pipeline_view`; this is the drawing and the wiring.
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::SystemTime;
 
 use gpui::prelude::*;
@@ -73,6 +74,27 @@ fn stage_where(skill: Option<&str>, folder: Option<&str>) -> Option<String> {
 
 fn text(size: f32, hex: u32) -> Div {
     div().text_size(px(size)).text_color(color(hex))
+}
+
+/// The note a person started an attempt with (Re-run or Go back), under its panel's header.
+fn note_strip(note: Option<&str>) -> Option<AnyElement> {
+    let note = note.map(str::trim).filter(|n| !n.is_empty())?;
+    Some(
+        v_flex()
+            .px(px(16.))
+            .py(px(8.))
+            .gap_0p5()
+            .bg(color(theme::RAISED))
+            .border_b_1()
+            .border_color(color(theme::BORDER_SUBTLE))
+            .child(text(11., theme::TEXT_MUTED).child("STARTED WITH YOUR NOTE"))
+            .child(
+                text(12.5, theme::TEXT)
+                    .line_height(relative(1.4))
+                    .child(note.to_string()),
+            )
+            .into_any_element(),
+    )
 }
 
 impl Workspace {
@@ -222,9 +244,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (word, note) = match &choice {
-            Choice::Retry { note } => ("re-run", Some(note.trim().to_string())),
-            Choice::Stop => ("stop", None),
+        let (word, note, stage) = match &choice {
+            Choice::Retry { note } => ("re-run", Some(note.trim().to_string()), None),
+            Choice::Stop => ("stop", None, None),
+            Choice::Back { stage, note } => {
+                ("back", Some(note.trim().to_string()), Some(stage.clone()))
+            }
         };
         let Some(sv) = server::get() else {
             return;
@@ -234,9 +259,11 @@ impl Workspace {
             let done = reg.runs.person(run, choice);
             if let (Ok(_), Some(root)) = (&done, &reg.hydra_root) {
                 let file = crate::run_log::file_for(root, run);
-                if let Err(e) =
-                    crate::run_log::append(&file, "person", json!({"choice": word, "note": note}))
-                {
+                if let Err(e) = crate::run_log::append(
+                    &file,
+                    "person",
+                    json!({"choice": word, "note": note, "stage": stage}),
+                ) {
                     crate::action_log::write(format!("run log {run}: {e}"));
                 }
             }
@@ -320,6 +347,133 @@ impl Workspace {
                         .child(
                             Button::new("rerun-go")
                                 .label(format!("Re-run {title}"))
+                                .primary()
+                                .on_click(move |_, window, cx| submit(window, cx)),
+                        ),
+                )
+        });
+    }
+
+    /// **Go back…** (Go back): pick an earlier stage that passed and write a note; its own
+    /// session reopens with it, and the stages after it run again with fresh tries.
+    fn back_dialog(
+        &mut self,
+        orch: PaneId,
+        run: String,
+        preselect: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let stages: Vec<(String, String)> = server::get()
+            .and_then(|sv| {
+                let reg = server::lock(sv.registry());
+                let r = reg.runs.run(&run)?;
+                Some(
+                    r.pipeline
+                        .stages
+                        .iter()
+                        .zip(&r.stages)
+                        .take_while(|(_, s)| s.status == StageStatus::Passed)
+                        .map(|(spec, _)| (spec.id.clone(), spec.title.clone()))
+                        .collect(),
+                )
+            })
+            .unwrap_or_default();
+        if stages.is_empty() {
+            window.push_notification(
+                Notification::info("No earlier stage has passed yet: re-run the waiting one.")
+                    .title("Go back"),
+                cx,
+            );
+            return;
+        }
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(
+                "What should it fix? e.g. Rename the branch to INTH-166 and reopen the PR",
+            )
+        });
+        // The stage just before the waiting one, unless another is picked.
+        let picked = Rc::new(Cell::new(
+            preselect
+                .filter(|p| *p < stages.len())
+                .unwrap_or(stages.len() - 1),
+        ));
+        let ws = cx.entity();
+        let first = Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first.replace(false) {
+                input.update(cx, |s, cx| s.focus(window, cx));
+            }
+            let submit = {
+                let (ws, input, run, stages, picked) = (
+                    ws.clone(),
+                    input.clone(),
+                    run.clone(),
+                    stages.clone(),
+                    picked.clone(),
+                );
+                move |window: &mut Window, cx: &mut App| {
+                    let note = input.read(cx).value().trim().to_string();
+                    if note.is_empty() {
+                        window.push_notification(
+                            Notification::warning(
+                                "Going back needs a note for that stage's session.",
+                            )
+                            .title("Go back"),
+                            cx,
+                        );
+                        return;
+                    }
+                    window.close_dialog(cx);
+                    let stage = stages[picked.get()].0.clone();
+                    let run = run.clone();
+                    ws.update(cx, |ws, cx| {
+                        ws.person_choice(orch, &run, Choice::Back { stage, note }, window, cx)
+                    });
+                }
+            };
+            let on_ok = submit.clone();
+            let choices = stages.iter().enumerate().map(|(i, (_, title))| {
+                let picked = picked.clone();
+                Button::new(SharedString::from(format!("back-to-{i}")))
+                    .label(format!("{}. {title}", i + 1))
+                    .when(picked.get() == i, |b| b.primary())
+                    .when(picked.get() != i, |b| b.outline())
+                    .small()
+                    .on_click(move |_, window, _| {
+                        picked.set(i);
+                        window.refresh();
+                    })
+            });
+            dialog
+                .title("Go back to an earlier stage")
+                .on_ok(move |_, window, cx| {
+                    on_ok(window, cx);
+                    false
+                })
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(h_flex().gap_1().flex_wrap().children(choices))
+                        .child(Input::new(&input))
+                        .child(text(12.5, theme::TEXT_SECONDARY).child(
+                            "That stage's own session reopens with your note and reports again; \
+                             it still has to clear its bar. The stages after it run again, with \
+                             fresh tries.",
+                        )),
+                )
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("back-cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("back-go")
+                                .label("Go back")
                                 .primary()
                                 .on_click(move |_, window, cx| submit(window, cx)),
                         ),
@@ -472,14 +626,20 @@ impl Workspace {
                 };
                 let is_selected = selected == Some((i, ai));
                 let label = a.label.clone();
+                // The note a person started this try with (Re-run or Go back), kept in view.
+                let note = a
+                    .note
+                    .clone()
+                    .map(|n| n.trim().to_string())
+                    .filter(|n| !n.is_empty());
                 sessions = sessions.child(
-                    h_flex()
+                    v_flex()
                         .id(SharedString::from(format!(
                             "pipeline-session-{orch}-{label}"
                         )))
                         .px(px(10.))
                         .py(px(7.))
-                        .gap_2()
+                        .gap_1()
                         .rounded(px(6.))
                         .border_1()
                         .border_color(if is_selected {
@@ -498,15 +658,45 @@ impl Workspace {
                                 t.confirm_stop = false;
                             });
                         }))
-                        .child(div().size(px(6.)).flex_none().rounded_full().bg(color(dot)))
                         .child(
-                            text(12., theme::TEXT)
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .child(format!("Try {} · {skill}", ai + 1)),
+                            h_flex()
+                                .gap_2()
+                                .child(div().size(px(6.)).flex_none().rounded_full().bg(color(dot)))
+                                .child(
+                                    text(12., theme::TEXT)
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .child(format!("Try {} · {skill}", ai + 1)),
+                                )
+                                .child(text(11.5, theme::TEXT_MUTED).flex_none().child(line)),
                         )
-                        .child(text(11.5, theme::TEXT_MUTED).flex_none().child(line)),
+                        .children(note.map(|n| {
+                            text(11.5, theme::TEXT_SECONDARY)
+                                .pl(px(14.))
+                                .line_height(relative(1.35))
+                                .child(format!("↩ Your note: {n}"))
+                        })),
+                );
+            }
+            // While the run waits for a person, a stage that passed can be gone back to.
+            let can_go_back = matches!(run.state, RunState::NeedsYou(_))
+                && s.status == StageStatus::Passed
+                && stopped_at.is_none_or(|at| i < at);
+            if can_go_back {
+                let back_run = run.id.clone();
+                sessions = sessions.child(
+                    div()
+                        .id(SharedString::from(format!("pipeline-back-here-{orch}-{i}")))
+                        .pl(px(10.))
+                        .text_size(px(11.5))
+                        .text_color(color(theme::TEAL))
+                        .cursor_pointer()
+                        .hover(|d| d.underline())
+                        .child("↩ Go back here")
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.back_dialog(orch, back_run.clone(), Some(i), window, cx)
+                        })),
                 );
             }
             let dim = stopped_at.is_some_and(|at| i > at);
@@ -599,6 +789,7 @@ impl Workspace {
                     .border_b_1()
                     .border_color(color(theme::BORDER_SUBTLE))
                     .child(text(12.5, theme::TEXT_SECONDARY).child(run.ticket.clone()))
+                    .children(self.render_ticket_link(&run.ticket))
                     .child(
                         text(16., theme::TEXT)
                             .font_weight(FontWeight::MEDIUM)
@@ -676,6 +867,7 @@ impl Workspace {
                             session_line(run, si, ai, live, now)
                         ),
                     ))
+                    .children(note_strip(a.note.as_deref()))
                     .child(terminal(si, ai))
                     .child(
                         v_flex()
@@ -748,6 +940,7 @@ impl Workspace {
                         session_name(si, &spec.title, ai),
                         session_line(run, si, ai, None, now),
                     ))
+                    .children(note_strip(a.note.as_deref()))
                     .child(body)
                     .child(terminal(si, ai))
                     .into_any_element()
@@ -1074,6 +1267,15 @@ impl Workspace {
                             ws.rerun_dialog(orch, rr_run.clone(), rr_title.clone(), bar, window, cx)
                         })),
                 )
+                .child({
+                    let back_run = run_id.clone();
+                    Button::new("pipeline-back")
+                        .label("Go back…")
+                        .tooltip("Reopen an earlier stage's own session to fix its work")
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.back_dialog(orch, back_run.clone(), None, window, cx)
+                        }))
+                })
                 .child(
                     Button::new("pipeline-stop")
                         .label("Stop this ticket")

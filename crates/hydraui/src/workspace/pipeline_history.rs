@@ -155,7 +155,12 @@ impl Workspace {
                         .truncate()
                         .child(e.detail.clone()),
                     text(12., theme::TEXT_SECONDARY).child(took_text(e.took)),
-                    text(12., theme::TEXT_MUTED).child("–"),
+                    // Inside its ticket's SLA or not, for a run from Linear (phase 2 §5).
+                    match e.sla {
+                        Some(true) => text(12., theme::GREEN).child("Inside"),
+                        Some(false) => text(12., theme::RED).child("Missed"),
+                        None => text(12., theme::TEXT_MUTED).child("–"),
+                    },
                 ));
             if open {
                 let chips = e.stages.iter().map(|(stage, score)| {
@@ -171,12 +176,39 @@ impl Workspace {
                                 .child(score.map_or("–".to_string(), |s| format!("{s}%"))),
                         )
                 });
+                let link = e.link.clone().map(|url| {
+                    div()
+                        .id(SharedString::from(format!("history-linear-{}", e.run)))
+                        .text_size(px(11.5))
+                        .text_color(color(theme::TEAL))
+                        .cursor_pointer()
+                        .hover(|d| d.underline())
+                        .child("Open in Linear ↗")
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            cx.open_url(&url);
+                        })
+                });
                 row = row
-                    .child(h_flex().pl(px(92.)).gap_2().flex_wrap().children(chips))
-                    .children(e.note.clone().map(|n| {
+                    .child(
+                        h_flex()
+                            .pl(px(92.))
+                            .gap_2()
+                            .flex_wrap()
+                            .children(chips)
+                            .children(link),
+                    )
+                    // Every note a person gave, with its stage, so a later try's purpose stays
+                    // readable (Re-run, Go back).
+                    .children(e.notes.iter().map(|(stage, n)| {
+                        let at = if stage.is_empty() {
+                            String::new()
+                        } else {
+                            format!("{stage}: ")
+                        };
                         text(12., theme::TEXT_SECONDARY)
                             .pl(px(92.))
-                            .child(format!("Note: {n}"))
+                            .child(format!("↩ {at}{n}"))
                     }));
             }
             rows = rows.child(row);

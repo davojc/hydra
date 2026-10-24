@@ -4,6 +4,7 @@ use toml_edit::{Array, DocumentMut, Item, Table, TableLike, Value, value};
 /// Tools `hydra add` knows, in display order.
 pub const TOOLS: &[&str] = &[
     "claude", "github", "git", "aws", "azure", "gcloud", "gws", "kube", "codex", "gemini", "jev",
+    "linear",
 ];
 
 /// Normalises a user-typed tool name: "gh" -> "github". Err(message listing TOOLS) if unknown.
@@ -31,7 +32,7 @@ pub struct ToolValues {
     pub isolate: Option<bool>,       // aws: isolate
     pub credentials: Option<String>, // gws: credentials ("secret:..." value)
     pub kube_config: Option<String>, // kube: config
-    pub api_key: Option<String>,     // gemini, jev: api_key ("secret:..." value)
+    pub api_key: Option<String>,     // gemini, jev, linear: api_key ("secret:..." value)
     pub from: Option<String>,        // any borrowable tool: from (owner env)
 }
 
@@ -84,10 +85,14 @@ fn check_applies(tool: &str, v: &ToolValues) -> Result<(), String> {
         (v.isolate.is_some(), "--isolate", "aws"),
         (v.credentials.is_some(), "--credentials-secret", "gws"),
         (v.kube_config.is_some(), "--kubeconfig", "kube"),
-        (v.api_key.is_some(), "--api-key-secret", "gemini and jev"),
+        (
+            v.api_key.is_some(),
+            "--api-key-secret",
+            "gemini, jev and linear",
+        ),
     ];
     for (present, flag, owner) in given {
-        if present && !owner.split(" and ").any(|o| o == tool) {
+        if present && !owner.split([',', ' ']).any(|o| o == tool) {
             return Err(format!("{flag} only applies to {owner}"));
         }
     }
@@ -134,7 +139,7 @@ fn fill(t: &mut dyn TableLike, tool: &str, v: &ToolValues) -> Result<(), String>
         "aws" => &[("profile", &v.profile)],
         "gws" => &[("credentials", &v.credentials)],
         "kube" => &[("config", &v.kube_config)],
-        "gemini" | "jev" => &[("api_key", &v.api_key)],
+        "gemini" | "jev" | "linear" => &[("api_key", &v.api_key)],
         _ => &[],
     };
     for (key, val) in strings {
@@ -170,7 +175,7 @@ fn fill(t: &mut dyn TableLike, tool: &str, v: &ToolValues) -> Result<(), String>
                 return Err("aws needs --profile".to_string());
             }
         }
-        "gemini" | "jev" if !has_key(t, "api_key") => {
+        "gemini" | "jev" | "linear" if !has_key(t, "api_key") => {
             return Err(format!("{tool} needs --api-key-secret"));
         }
         _ => {}
@@ -594,7 +599,23 @@ JEV_API_KEY = \"Jev: judgement calls\"
         );
         assert_eq!(
             add_tool(&tpl(), "aws", &v).unwrap_err(),
-            "--api-key-secret only applies to gemini and jev"
+            "--api-key-secret only applies to gemini, jev and linear"
+        );
+    }
+
+    #[test]
+    fn linear_api_key_validates() {
+        let v = ToolValues {
+            api_key: Some("secret:work/linear".into()),
+            ..vals()
+        };
+        let (out, _) = add_tool(&tpl(), "linear", &v).unwrap();
+        let cfg: EnvConfig = toml::from_str(&out).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.linear.unwrap().api_key, "secret:work/linear");
+        assert_eq!(
+            add_tool(&tpl(), "linear", &vals()).unwrap_err(),
+            "linear needs --api-key-secret"
         );
     }
 

@@ -584,6 +584,24 @@ impl Hydra {
         }
     }
 
+    /// `env`'s Linear API key, read from the secret its `[linear]` table names (orchestrator
+    /// phase 2 §1). Says what to set up when there is none. Reads the store, so call it off the
+    /// UI thread.
+    pub fn linear_key(&self, env: &str) -> Result<String, String> {
+        let name = EnvName::parse(env).map_err(|e| e.to_string())?;
+        let cfg = load_env(&self.paths, &name).map_err(|e| e.to_string())?;
+        let missing = || format!("{env} has no Linear API key: Set up linear… or hydra add linear");
+        let raw = cfg.linear.map(|l| l.api_key).ok_or_else(missing)?;
+        let r = SecretRef::parse_value(&raw)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(missing)?;
+        self.store
+            .get(&r)
+            .map_err(|e| e.to_string())?
+            .filter(|k| !k.trim().is_empty())
+            .ok_or_else(missing)
+    }
+
     /// Stores a secret through hydra's store, which also keeps secrets.toml's index. The
     /// value is kept exactly as typed; an empty or blank one is refused.
     pub fn set_secret(&self, path: &str, value: &str) -> Result<(), String> {
@@ -1006,6 +1024,18 @@ mod tests {
         );
         let req = PaneRequest::new("work", f.free.clone(), ShellKind::Pwsh);
         assert!(f.hydra.prepare(&req).is_ok());
+    }
+
+    #[test]
+    fn an_environments_linear_key_is_read_from_its_secret() {
+        let f = fx("");
+        let none = f.hydra.linear_key("work").unwrap_err();
+        assert!(none.contains("Set up linear"), "{none}");
+        f.hydra
+            .add_api_key("work", "linear", "lin_api_test")
+            .unwrap();
+        assert_eq!(f.hydra.linear_key("work").unwrap(), "lin_api_test");
+        assert!(f.hydra.linear_key("nowhere").is_err());
     }
 
     #[test]

@@ -7,6 +7,7 @@ mod busy;
 mod finder;
 mod launcher;
 mod layout_file;
+mod linear;
 mod orchestrator;
 mod pickup;
 mod pipeline_history;
@@ -229,6 +230,10 @@ pub struct Workspace {
     /// Each orchestrator's wake-up waiting to be typed, with its run (orchestrator spec §6): the
     /// newest only.
     pending_wakes: HashMap<PaneId, (String, String)>,
+    /// Each orchestrator's Linear watcher (orchestrator phase 2 §3).
+    linear_watch: HashMap<PaneId, linear::Watch>,
+    /// Runs' tickets as Linear last said, by identifier: the card's SLA and link (phase 2 §5).
+    linear_tickets: HashMap<String, crate::linear::Ticket>,
     /// Cards being offered or just sent, so one card never goes to two sessions.
     in_flight: crate::pickup::InFlight,
     /// Listens for board files the MCP server's sessions create.
@@ -292,6 +297,8 @@ impl Workspace {
                         ws.sync_shown_lanes(window, cx);
                         // A draft cleared without a hook: a waiting wake-up may go now.
                         ws.send_wakes(window, cx);
+                        // A Linear watcher whose check is due looks (phase 2 §3).
+                        ws.linear_tick(window, cx);
                         // The Pipeline tab's session times tick.
                         if ws
                             .envs
@@ -435,6 +442,8 @@ impl Workspace {
             board_events: HashMap::new(),
             reserved: HashMap::new(),
             pending_wakes: HashMap::new(),
+            linear_watch: HashMap::new(),
+            linear_tickets: HashMap::new(),
             in_flight: Default::default(),
             _mcp_pump: mcp_pump,
             _activation: activation,
@@ -471,6 +480,8 @@ impl Workspace {
         if let StartWith::File(path) = start {
             self.open_layout_path(path, window, cx);
         }
+        // Pipelines that start themselves (`[autostart]`), watching Linear when they ask to.
+        self.autostart_pipelines(window, cx);
         // Each pane's folder as it is when the window closes.
         let ws = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
@@ -490,9 +501,13 @@ impl Workspace {
                 // Unsaved edits: ask first, and close from the dialog (spec §7.8).
                 let all: Vec<PaneId> = ws.files.keys().copied().collect();
                 if ws.unsaved_in(&all, cx).is_empty() {
+                    orchestrator::closing();
                     return true;
                 }
-                ws.confirm_unsaved(all, window, cx, |_, w, _| w.remove_window());
+                ws.confirm_unsaved(all, window, cx, |_, w, _| {
+                    orchestrator::closing();
+                    w.remove_window()
+                });
                 false
             })
             .unwrap_or(true)

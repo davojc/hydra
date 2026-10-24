@@ -189,7 +189,7 @@ impl Workspace {
         self.recheck_accounts(env, cx);
     }
 
-    /// The form for a tool that needs values first (git, aws, gemini, jev, kube). It stays open,
+    /// The form for a tool that needs values first (git, aws, gemini, jev, linear, kube). It stays open,
     /// showing what's wrong, until the values check out.
     fn set_up_form(
         &mut self,

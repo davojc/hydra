@@ -153,7 +153,8 @@ impl Workspace {
                 .rounded(px(10.))
                 .border_1()
                 .border_color(tint.opacity(if active { 0.45 } else { 0.2 }))
-                .child(self.render_pipeline_card(*orch, card, active, cx));
+                .child(self.render_pipeline_card(*orch, card, active, cx))
+                .children(self.render_linear_row(*orch, cx));
             let orch = *orch;
             let history_shown = self.pipeline_shown(orch)
                 && self.pipeline_tabs.get(&orch).map(|t| t.view)

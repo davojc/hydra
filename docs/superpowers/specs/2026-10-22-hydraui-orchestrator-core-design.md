@@ -537,3 +537,25 @@ starts over and the stage doesn't use up an attempt.
   new terminal's token. A stage that was running reopens the same way in its logged folder,
   told to carry on and call `stage_report`, and its latest attempt moves to the new token. A
   stage whose Claude session wasn't logged ends as if its session had gone (§5.2).
+
+## 14. Going back to an earlier stage
+
+Jordan (2026-10-24): INTH-166's Verify failed twice because Develop had pushed the wrong branch,
+and once a stage passed there was no way back to its session to correct it. A person whose run
+waits for them can now choose **Go back…** in the Pipeline tab's banner:
+
+- **The choice.** Pick an earlier stage that passed, and write a note (required).
+  `Choice::Back { stage, note }`.
+- **Same conversation.** That stage's own session reopens with the note: `claude --resume` of its
+  last attempt's Claude session, in that attempt's folder, both read from the run's log. It's
+  kept as a new attempt so its earlier report stays in the timeline. It keeps the skills its
+  conversation already used, so the skill rule doesn't make it start over. It reports again and
+  must clear its bar again, and the branch rule too.
+- **Later stages.** They wait for it again, and their earlier attempts no longer count toward
+  their three tries (`StageRun::counted_from`). Their history stays visible.
+- **The orchestrator** is told the run went back and to wait for the report. Then it starts the
+  next stage as usual.
+- **No session in the log.** Without a logged session (runs from before session ids were logged)
+  the stage fails as if its session had gone, so the orchestrator starts it afresh.
+- **Logged** as `person {choice: "back", stage, note}`, `went back`, and `stage reopened {stage,
+  label}`. A restart replays it.

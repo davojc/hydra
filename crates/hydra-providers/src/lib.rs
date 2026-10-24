@@ -12,6 +12,7 @@ pub mod github;
 pub mod gws;
 pub mod jev;
 pub mod kube;
+pub mod linear;
 pub mod report;
 #[cfg(test)]
 pub(crate) mod testutil;
@@ -30,6 +31,7 @@ pub fn all() -> Vec<Box<dyn Provider>> {
         Box::new(dir::CODEX),
         Box::new(gemini::Gemini),
         Box::new(jev::Jev),
+        Box::new(linear::Linear),
         Box::new(envvars::EnvVars),
     ]
 }

@@ -24,6 +24,9 @@ pub struct Peer {
     pub state: SessionState,
 }
 
+/// Reads a pull request's branch: `(env, url)` → the branch, or why not.
+pub type BranchLookup = fn(&str, &str) -> Result<String, String>;
+
 pub struct Registry {
     terminals: HashMap<String, Terminal>,
     /// What each terminal's Claude session last said it is doing (its status hooks).
@@ -34,6 +37,14 @@ pub struct Registry {
     pub min_week_left: u8,
     /// `<HYDRA_HOME>`, where pipelines and run logs live; the run tools refuse without it.
     pub hydra_root: Option<PathBuf>,
+    /// The `hydra` next to hydraui, which asks GitHub for a pull request's branch as the
+    /// stage's environment (the pipeline's branch rule).
+    pub hydra_exe: Option<PathBuf>,
+    /// Stands in for that lookup in tests: `(env, url)` → the branch.
+    pub branch_lookup: Option<BranchLookup>,
+    /// hydraui's window is closing: terminals going now is hydraui quitting, so their runs stay
+    /// open, to be picked back up after a restart (orchestrator spec §13).
+    pub closing: bool,
     /// Claude session ids already written to a run's log, as (run, who, id) (§13).
     logged_claude: std::collections::HashSet<(String, String, String)>,
 }
@@ -47,6 +58,9 @@ impl Default for Registry {
             min_week_left: MIN_WEEK_LEFT,
             hydra_root: None,
             logged_claude: Default::default(),
+            hydra_exe: None,
+            branch_lookup: None,
+            closing: false,
         }
     }
 }
@@ -118,6 +132,9 @@ impl Registry {
     pub fn revoke(&mut self, token: &str) -> Vec<Change> {
         self.terminals.remove(token);
         self.sessions.remove(token);
+        if self.closing {
+            return Vec::new();
+        }
         self.runs.session_gone(token)
     }
 
@@ -193,6 +210,32 @@ mod tests {
         assert_eq!(r.get(&b).unwrap().name, "api");
         assert_eq!(a.len(), 32);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn terminals_closing_with_hydraui_leave_their_runs_open() {
+        let mut r = Registry::default();
+        let orch = r.register("orchestrator", "C:/w".into());
+        let stage = r.register("1. A", "C:/w".into());
+        let p =
+            crate::pipeline::parse("name = \"t\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n").unwrap();
+        let id = r
+            .runs
+            .start_run(&orch, p, "INTH-1", "x")
+            .unwrap()
+            .id
+            .clone();
+        let s = r.runs.begin(&orch, &id, "a", "", 0).unwrap();
+        r.runs.link(&id, s.stage, &stage, "1. A");
+        // The window is closing: its terminals going is hydraui quitting, not the work ending.
+        r.closing = true;
+        assert!(r.revoke(&stage).is_empty());
+        assert!(r.revoke(&orch).is_empty());
+        assert!(
+            r.runs.run(&id).unwrap().state.open(),
+            "it comes back after a restart"
+        );
+        assert!(r.get(&orch).is_none(), "the terminal is still gone");
     }
 
     #[test]

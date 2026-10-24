@@ -480,6 +480,8 @@ impl Workspace {
         if let StartWith::File(path) = start {
             self.open_layout_path(path, window, cx);
         }
+        // Pipelines that start themselves (`[autostart]`), watching Linear when they ask to.
+        self.autostart_pipelines(window, cx);
         // Each pane's folder as it is when the window closes.
         let ws = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {

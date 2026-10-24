@@ -484,7 +484,49 @@ impl Workspace {
         }
         // Its card shows at once, so its settings can be set before the first ticket.
         self.orchestrators.insert(id, pipeline.to_string());
-        crate::action_log::write(format!("started an orchestrator for {pipeline} in {env}"));
+        // A pipeline that asks for it watches Linear from the start (`[linear] watch`).
+        let watch = crate::pipeline::load(self.hydra.paths.root(), pipeline)
+            .ok()
+            .and_then(|p| p.linear)
+            .is_some_and(|l| l.watch);
+        if watch {
+            let w = self.linear_watch.entry(id).or_default();
+            w.on = true;
+            w.status = Some("Looking…".into());
+        }
+        crate::action_log::write(format!(
+            "started an orchestrator for {pipeline} in {env}{}",
+            if watch { ", watching Linear" } else { "" }
+        ));
+    }
+
+    /// At launch: each pipeline with `[autostart] env` gets its orchestrator in that
+    /// environment, once (the first piece of roadmap phase 3, "start what you need at
+    /// launch"). `HYDRAUI_NO_AUTOSTART` turns it off, for test windows.
+    pub(super) fn autostart_pipelines(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if std::env::var_os("HYDRAUI_NO_AUTOSTART").is_some() {
+            return;
+        }
+        let root = self.hydra.paths.root().to_path_buf();
+        let envs = self.hydra.env_names();
+        for name in crate::pipeline::names(&root) {
+            let Some(env) = crate::pipeline::load(&root, &name)
+                .ok()
+                .and_then(|p| p.autostart)
+            else {
+                continue;
+            };
+            if !envs.contains(&env) {
+                crate::action_log::write(format!(
+                    "autostart: pipeline {name} names environment {env}, which doesn't exist"
+                ));
+                continue;
+            }
+            if self.orchestrators.values().any(|f| f == &name) {
+                continue;
+            }
+            self.open_orchestrator(&env, &name, window, cx);
+        }
     }
 
     /// Deletes `env` after a confirmation, as `hydra env rm` does (spec §7.4); its saved

@@ -59,6 +59,8 @@ pub(super) struct SettingsDraft {
 /// The Linear section (phase 2 spec §2, §5): off saves the pipeline without a `[linear]` table.
 struct LinearDraft {
     on: bool,
+    /// Kept as the file has it (`watch`).
+    watch: bool,
     any: bool,
     team: Entity<InputState>,
     pick: Entity<InputState>,
@@ -82,6 +84,7 @@ impl LinearDraft {
             passed: text(&self.passed),
             // Not a number: 0, which validation names.
             every_minutes: text(&self.every).parse().unwrap_or(0),
+            watch: self.watch,
         })
     }
 }
@@ -112,6 +115,7 @@ impl SettingsDraft {
             feature_env: self.saved.feature_env.clone(),
             branch: Some(self.branch.read(cx).value().trim().to_string()).filter(|b| !b.is_empty()),
             linear: self.linear.edit(cx),
+            autostart: self.saved.autostart.clone(),
             bar: slider_value(&self.bar, cx),
             stages: self
                 .stages
@@ -232,6 +236,7 @@ impl Workspace {
         };
         let linear = LinearDraft {
             on: l.is_some(),
+            watch: l.as_ref().is_some_and(|l| l.watch),
             any: l.as_ref().is_some_and(|l| l.assignee == Assignee::Any),
             team: input(field(|l| l.team.clone(), ""), "INTH"),
             pick: input(

@@ -25,6 +25,9 @@ pub struct Pipeline {
     pub stages: Vec<Stage>,
     /// Where its tickets come from in Linear (phase 2 spec §2); `None`: named by hand.
     pub linear: Option<LinearSettings>,
+    /// The environment its orchestrator starts in when hydraui launches (`[autostart] env`);
+    /// `None`: started from the launcher.
+    pub autostart: Option<String>,
 }
 
 /// A pipeline's `[linear]` table (phase 2 spec §2): which tickets it takes, and the states it
@@ -41,6 +44,8 @@ pub struct LinearSettings {
     /// The state a ticket moves to when every stage passed.
     pub passed: String,
     pub every_minutes: u32,
+    /// Its orchestrator starts with Watch Linear on.
+    pub watch: bool,
 }
 
 /// Which tickets in the `pick` state a pipeline takes.
@@ -121,6 +126,13 @@ struct File {
     #[serde(default, rename = "stage")]
     stages: Vec<FileStage>,
     linear: Option<FileLinear>,
+    autostart: Option<FileAutostart>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileAutostart {
+    env: String,
 }
 
 #[derive(Deserialize)]
@@ -132,6 +144,7 @@ struct FileLinear {
     claim: Option<String>,
     passed: Option<String>,
     every_minutes: Option<u32>,
+    watch: Option<bool>,
 }
 
 /// The `[linear]` defaults (phase 2 spec §2).
@@ -171,6 +184,7 @@ fn linear_settings(f: FileLinear) -> Result<LinearSettings, String> {
         claim: text(f.claim, DEFAULT_CLAIM),
         passed: text(f.passed, DEFAULT_PASSED),
         every_minutes,
+        watch: f.watch.unwrap_or(false),
     })
 }
 
@@ -258,6 +272,13 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
         bar: file.bar.unwrap_or(DEFAULT_BAR),
         stages,
         linear: file.linear.map(linear_settings).transpose()?,
+        autostart: match file.autostart {
+            Some(a) if a.env.trim().is_empty() => {
+                return Err("[autostart] needs the environment, e.g. env = \"work\"".into());
+            }
+            Some(a) => Some(a.env.trim().to_string()),
+            None => None,
+        },
     })
 }
 
@@ -275,6 +296,7 @@ pub struct Edit {
     pub branch: Option<String>,
     pub stages: Vec<EditStage>,
     pub linear: Option<LinearSettings>,
+    pub autostart: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,6 +333,7 @@ impl From<&Pipeline> for Edit {
                 })
                 .collect(),
             linear: p.linear.clone(),
+            autostart: p.autostart.clone(),
         }
     }
 }
@@ -420,9 +443,30 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
             t["claim"] = value(l.claim.trim());
             t["passed"] = value(l.passed.trim());
             t["every_minutes"] = value(i64::from(l.every_minutes));
+            if l.watch {
+                t["watch"] = value(true);
+            } else if let Some(t) = t.as_table_mut() {
+                t.remove("watch");
+            }
         }
         None => {
             doc.remove("linear");
+        }
+    }
+    match edit
+        .autostart
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+    {
+        Some(env) => {
+            if !doc.get("autostart").is_some_and(Item::is_table) {
+                doc["autostart"] = Item::Table(Table::new());
+            }
+            doc["autostart"]["env"] = value(env);
+        }
+        None => {
+            doc.remove("autostart");
         }
     }
     let old: Vec<Table> = doc
@@ -786,6 +830,21 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
     }
 
     #[test]
+    fn a_pipeline_can_start_itself_and_watch_linear() {
+        let p = parse(ONE_STAGE).unwrap();
+        assert_eq!(p.autostart, None);
+        let p = parse(&format!(
+            "{ONE_STAGE}[autostart]\nenv = \"iov42\"\n[linear]\nteam = \"INTH\"\nwatch = true\n"
+        ))
+        .unwrap();
+        assert_eq!(p.autostart.as_deref(), Some("iov42"));
+        assert!(p.linear.unwrap().watch);
+        let quiet = parse(&format!("{ONE_STAGE}[linear]\nteam = \"INTH\"\n")).unwrap();
+        assert!(!quiet.linear.unwrap().watch, "off unless asked");
+        assert!(parse(&format!("{ONE_STAGE}[autostart]\nenv = \" \"\n")).is_err());
+    }
+
+    #[test]
     fn a_linear_table_takes_its_defaults_from_the_team_alone() {
         assert_eq!(parse(ONE_STAGE).unwrap().linear, None);
         let p = parse(&format!("{ONE_STAGE}[linear]\nteam = \"INTH\"\n")).unwrap();
@@ -798,6 +857,7 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
                 claim: "In Investigation".into(),
                 passed: "Ready for Peer Review".into(),
                 every_minutes: 5,
+                watch: false,
             })
         );
     }

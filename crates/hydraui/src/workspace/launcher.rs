@@ -525,6 +525,10 @@ impl Workspace {
             if self.orchestrators.values().any(|f| f == &name) {
                 continue;
             }
+            // Its window shows the pipelines, not the start page.
+            if self.is_start_page() {
+                self.leave_start_page(window, cx);
+            }
             self.open_orchestrator(&env, &name, window, cx);
         }
     }

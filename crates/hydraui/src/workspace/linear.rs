@@ -190,6 +190,10 @@ impl Workspace {
         let w = self.linear_watch.entry(orch).or_default();
         w.checking = true;
         w.last = Some(SystemTime::now());
+        crate::action_log::write(format!(
+            "linear: {}: checking {}",
+            pipeline.file, settings.team
+        ));
         let hydra = self.hydra.clone();
         let (p, s) = (pipeline.clone(), settings.clone());
         cx.spawn_in(window, async move |this, cx| {
@@ -251,6 +255,11 @@ impl Workspace {
             Ok(check) => {
                 w.failures.clear();
                 w.status = Some(format!("Nothing to pick{}", skipped(&check)));
+                crate::action_log::write(format!(
+                    "linear: {}: nothing to pick{}",
+                    pipeline.file,
+                    skipped(&check)
+                ));
             }
             Err(e) => {
                 crate::action_log::write(format!("linear: {e}"));

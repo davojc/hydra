@@ -706,8 +706,12 @@ A pipeline may work on several tickets together: `runs_at_once = N` (1 to 6; Pip
 of them (Jordan chose "one card per run"):
 
 - **Starting** a pipeline opens an orchestrator for each run not open yet, in its environment;
-  autostart does the same, after resuming a run hydraui closed on. Cards read `Review PR's · 1`,
-  `· 2`, …
+  autostart does the same, after resuming a run hydraui closed on.
+- **In the sidebar** (Jordan, revised the same day: not separate cards): one block per pipeline,
+  with one card (its name, "1 of 2 running", the most urgent state), its trigger row, then
+  `orchestrator 1`, `orchestrator 2`, … each with its ticket line (ticket · stage · state, its SLA
+  and PR links; click it for that run's Pipeline tab), any product question, and its sessions
+  nested under it (`pipeline_card::group_card`).
 - **One trigger.** The first orchestrator (its *lead*) holds the Linear or Slack switch; the
   others say "Run 2 of 3: takes work from the first card's Slack". A look happens while any run
   is free, and what it finds goes to a free one (`free_slot`: no run open, nothing on its way to

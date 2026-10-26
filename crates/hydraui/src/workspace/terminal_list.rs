@@ -170,9 +170,17 @@ impl Workspace {
         for idx in interrupted {
             list = list.child(self.render_interrupted_card(idx, cx));
         }
-        // Each orchestrator is one framed block: its card, links, its own row, then the sessions
-        // it started nested under it, so several pipelines' sessions never mix.
+        // Each pipeline is one framed block: its card, links, then each orchestrator's row with
+        // the sessions it started nested under it, so pipelines' sessions never mix. A pipeline
+        // running several tickets at once has several orchestrators in its one block.
         for (orch, card, panes) in &cards {
+            let slots = self.slots(*orch, cx);
+            if slots.len() > 1 {
+                if slots[0] == *orch {
+                    list = list.child(self.render_pipeline_group(&slots, &cards, shown, tint, cx));
+                }
+                continue;
+            }
             let active = panes.iter().any(|p| Some(*p) == shown);
             let mut block = v_flex()
                 .id(SharedString::from(format!("pipeline-block-{orch}")))
@@ -184,7 +192,7 @@ impl Workspace {
                 .border_1()
                 // The pipeline's own colour, so pipelines are told apart at a glance.
                 .border_color(color(card.accent).opacity(if active { 0.55 } else { 0.3 }))
-                .child(self.render_pipeline_card(*orch, card, active, cx))
+                .child(self.render_pipeline_card(*orch, card, active, true, cx))
                 .children(self.render_question(*orch, cx))
                 .children(self.render_linear_row(*orch, cx));
             let orch = *orch;
@@ -236,6 +244,73 @@ impl Workspace {
         panel
             .child(list)
             .children(meter.map(|m| div().flex_none().p_1().pb_3().child(m)))
+    }
+
+    /// The block of a pipeline running several tickets at once: one card for the pipeline, its
+    /// trigger, then each orchestrator (`orchestrator 1`, `2`, …) with its ticket and the
+    /// sessions it started nested under it.
+    fn render_pipeline_group(
+        &self,
+        slots: &[PaneId],
+        cards: &[(PaneId, crate::pipeline_card::Card, Vec<PaneId>)],
+        shown: Option<PaneId>,
+        tint: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let members: Vec<&(PaneId, crate::pipeline_card::Card, Vec<PaneId>)> = slots
+            .iter()
+            .filter_map(|s| cards.iter().find(|(o, _, _)| o == s))
+            .collect();
+        let lead = slots[0];
+        let group = crate::pipeline_card::group_card(
+            &members.iter().map(|(_, c, _)| c).collect::<Vec<_>>(),
+        );
+        let active = members
+            .iter()
+            .any(|(_, _, panes)| panes.iter().any(|p| Some(*p) == shown));
+        let accent = color(group.accent);
+        let mut block = v_flex()
+            .id(SharedString::from(format!("pipeline-group-{lead}")))
+            .mx_1()
+            .my_1()
+            .pb_1()
+            .gap_0p5()
+            .rounded(px(10.))
+            .border_1()
+            .border_color(accent.opacity(if active { 0.55 } else { 0.3 }))
+            .child(self.render_pipeline_card(lead, &group, active, false, cx))
+            .children(self.render_linear_row(lead, cx));
+        for (orch, card, panes) in members {
+            let orch = *orch;
+            if let Some(row) =
+                self.terminal_row(orch, shown == Some(orch), tint, Nest::Orchestrator, cx)
+            {
+                block = block.child(row);
+            }
+            // Its ticket, when it has one.
+            if card.state != crate::pipeline_card::CardState::Ready {
+                block = block.child(self.render_run_line(orch, card, cx));
+            }
+            block = block.children(self.render_question(orch, cx));
+            let stage_rows: Vec<_> = panes
+                .iter()
+                .filter(|id| **id != orch)
+                .filter_map(|id| self.terminal_row(*id, shown == Some(*id), tint, Nest::Stage, cx))
+                .collect();
+            if !stage_rows.is_empty() {
+                block = block.child(
+                    v_flex()
+                        .ml(px(18.))
+                        .mr_1()
+                        .pl(px(6.))
+                        .gap_0p5()
+                        .border_l_2()
+                        .border_color(accent.opacity(0.45))
+                        .children(stage_rows),
+                );
+            }
+        }
+        block.into_any_element()
     }
 
     /// Terminal `id`'s row: its activity dot, name, Claude's state and × on hover;

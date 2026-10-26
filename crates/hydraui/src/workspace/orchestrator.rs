@@ -978,20 +978,11 @@ impl Workspace {
         tokens
             .iter()
             .filter_map(|(id, token)| {
-                // With several runs at once, each card says which it is: `Review PR's · 2`.
-                let numbered = |mut c: Card| {
-                    let slots = self.slots(*id, cx);
-                    if slots.len() > 1 {
-                        let n = slots.iter().position(|s| s == id).map_or(1, |i| i + 1);
-                        c.name = format!("{} · {n}", c.name);
-                    }
-                    c
-                };
                 let Some(run) = reg.runs.current(token) else {
                     // Started from the launcher, no ticket yet: the card of its pipeline.
                     let file = self.orchestrators.get(id)?;
                     let pipeline = crate::pipeline::load(root, file).ok()?;
-                    return Some((*id, numbered(ready_card(&pipeline)), vec![*id]));
+                    return Some((*id, ready_card(&pipeline), vec![*id]));
                 };
                 let panes = card_tokens(run)
                     .iter()
@@ -1002,7 +993,7 @@ impl Workspace {
                 if let Ok(p) = crate::pipeline::load(root, &run.pipeline.file) {
                     c.accent = crate::pipeline_card::accent(&p);
                 }
-                Some((*id, numbered(c), panes))
+                Some((*id, c, panes))
             })
             .collect()
     }
@@ -1108,22 +1099,17 @@ impl Workspace {
     /// The design's pipeline card: the diamond and the pipeline's name, the ticket and stage
     /// with the state pill, and one segment per stage. Clicking it shows the orchestrator (the
     /// Pipeline view takes its place in plan Task 10).
+    /// `ticket`: show the run's ticket link (one run per card); a pipeline's card over several
+    /// orchestrators leaves it to each orchestrator's line.
     pub(super) fn render_pipeline_card(
         &self,
         orchestrator: PaneId,
         c: &Card,
         active: bool,
+        ticket: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (pill_fg, pill_bg) = match c.state {
-            CardState::Ready => (theme::TEXT_SECONDARY, theme::RAISED),
-            CardState::Working => (theme::TEAL, theme::TEAL_TINT),
-            CardState::NeedsYou => (theme::RED, theme::RED_TINT),
-            CardState::Asking => (theme::AMBER, theme::AMBER_TINT),
-            CardState::Paused => (theme::AMBER, theme::AMBER_TINT),
-            CardState::Done => (theme::GREEN, theme::GREEN_TINT),
-            CardState::Stopped => (theme::TEXT_SECONDARY, theme::RAISED),
-        };
+        let (pill_fg, pill_bg) = pill_colors(c.state);
         let segments = c.segments.iter().map(|s| {
             let fill = match s {
                 Segment::Passed => color(c.accent),
@@ -1194,7 +1180,60 @@ impl Workspace {
                             .child(c.state.word()),
                     ),
             )
-            .child(h_flex().gap(px(3.)).children(segments))
+            .when(!c.segments.is_empty(), |d| {
+                d.child(h_flex().gap(px(3.)).children(segments))
+            })
+            .when(ticket, |d| {
+                d.children(
+                    self.current_ticket(orchestrator, cx)
+                        .and_then(|(t, prs)| self.render_ticket_link(&t, &prs)),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// Under a numbered orchestrator of a pipeline with several runs: its ticket and stage, its
+    /// state, and its ticket link; clicking it opens that orchestrator's Pipeline tab.
+    pub(super) fn render_run_line(
+        &self,
+        orchestrator: PaneId,
+        c: &Card,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (fg, bg) = pill_colors(c.state);
+        v_flex()
+            .id(SharedString::from(format!("run-line-{orchestrator}")))
+            .ml(px(26.))
+            .mr_1()
+            .gap_0p5()
+            .cursor_pointer()
+            .on_click(
+                cx.listener(move |ws, _, window, cx| ws.open_pipeline(orchestrator, window, cx)),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .justify_between()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(color(theme::TEXT_SECONDARY))
+                            .child(c.line.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .px(px(6.))
+                            .py(px(1.))
+                            .rounded(px(4.))
+                            .text_xs()
+                            .bg(color(bg))
+                            .text_color(color(fg))
+                            .child(c.state.word()),
+                    ),
+            )
             .children(
                 self.current_ticket(orchestrator, cx)
                     .and_then(|(t, prs)| self.render_ticket_link(&t, &prs)),
@@ -1301,6 +1340,19 @@ fn stage_failed(s: &StartStage, why: String) {
             .start_failed(&s.run, s.stage, &why)
     });
     tell(changes);
+}
+
+/// A card state's pill: text and background colour.
+fn pill_colors(state: CardState) -> (u32, u32) {
+    match state {
+        CardState::Ready => (theme::TEXT_SECONDARY, theme::RAISED),
+        CardState::Working => (theme::TEAL, theme::TEAL_TINT),
+        CardState::NeedsYou => (theme::RED, theme::RED_TINT),
+        CardState::Asking => (theme::AMBER, theme::AMBER_TINT),
+        CardState::Paused => (theme::AMBER, theme::AMBER_TINT),
+        CardState::Done => (theme::GREEN, theme::GREEN_TINT),
+        CardState::Stopped => (theme::TEXT_SECONDARY, theme::RAISED),
+    }
 }
 
 #[cfg(test)]

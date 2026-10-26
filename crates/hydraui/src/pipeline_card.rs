@@ -121,6 +121,49 @@ pub fn ready_card(pipeline: &crate::pipeline::Pipeline) -> Card {
     }
 }
 
+/// The one card of a pipeline running several tickets at once (`runs_at_once`): its name, how
+/// many are running, and the most urgent state among them; no progress bar (each orchestrator
+/// under it shows its own ticket).
+pub fn group_card(runs: &[&Card]) -> Card {
+    let rank = |s: CardState| match s {
+        CardState::NeedsYou => 0,
+        CardState::Asking => 1,
+        CardState::Working => 2,
+        CardState::Paused => 3,
+        CardState::Stopped => 4,
+        CardState::Done => 5,
+        CardState::Ready => 6,
+    };
+    let busy = |s: CardState| {
+        matches!(
+            s,
+            CardState::Working | CardState::NeedsYou | CardState::Asking | CardState::Paused
+        )
+    };
+    let running = runs.iter().filter(|c| busy(c.state)).count();
+    let state = runs
+        .iter()
+        .map(|c| c.state)
+        .min_by_key(|s| rank(*s))
+        .unwrap_or(CardState::Ready);
+    Card {
+        name: runs.first().map(|c| c.name.clone()).unwrap_or_default(),
+        line: match running {
+            0 => "No ticket yet".into(),
+            n => format!("{n} of {} running", runs.len()),
+        },
+        state: if running == 0 {
+            CardState::Ready
+        } else {
+            state
+        },
+        segments: Vec::new(),
+        accent: runs
+            .first()
+            .map_or(crate::orchestrator_theme::TEAL, |c| c.accent),
+    }
+}
+
 /// The terminals grouped under the card, by token: the orchestrator's, then every attempt's
 /// session that opened, in stage and attempt order.
 pub fn card_tokens(run: &Run) -> Vec<String> {
@@ -208,6 +251,39 @@ pub fn meter(week_used: Option<f64>, floor: u8) -> Option<Meter> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_pipelines_runs_share_one_card_with_the_most_urgent_state() {
+        let c = |state| Card {
+            name: "Review PR's".into(),
+            line: String::new(),
+            state,
+            segments: vec![Segment::Pending],
+            accent: 0x123456,
+        };
+        let (ready, working, needs) = (
+            c(CardState::Ready),
+            c(CardState::Working),
+            c(CardState::NeedsYou),
+        );
+        let g = group_card(&[&ready, &ready]);
+        assert_eq!(
+            (g.line.as_str(), g.state),
+            ("No ticket yet", CardState::Ready)
+        );
+        let g = group_card(&[&working, &ready]);
+        assert_eq!(
+            (g.line.as_str(), g.state),
+            ("1 of 2 running", CardState::Working)
+        );
+        let g = group_card(&[&working, &needs]);
+        assert_eq!(
+            (g.line.as_str(), g.state),
+            ("2 of 2 running", CardState::NeedsYou)
+        );
+        assert!(g.segments.is_empty());
+        assert_eq!((g.name.as_str(), g.accent), ("Review PR's", 0x123456));
+    }
+
     use serde_json::json;
 
     use super::*;

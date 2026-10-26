@@ -1189,7 +1189,7 @@ impl Workspace {
         ticket: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (pill_fg, pill_bg) = pill_colors(c.state);
+        let (pill_fg, pill_bg) = pill_colors(c.state, c.accent);
         let segments = c.segments.iter().map(|s| {
             let fill = match s {
                 Segment::Passed => color(c.accent),
@@ -1255,8 +1255,8 @@ impl Workspace {
                             .py(px(2.))
                             .rounded(px(4.))
                             .text_xs()
-                            .bg(color(pill_bg))
-                            .text_color(color(pill_fg))
+                            .bg(pill_bg)
+                            .text_color(pill_fg)
                             .child(c.state.word()),
                     ),
             )
@@ -1266,7 +1266,7 @@ impl Workspace {
             .when(ticket, |d| {
                 d.children(
                     self.current_ticket(orchestrator, cx)
-                        .and_then(|(t, prs)| self.render_ticket_link(&t, &prs)),
+                        .and_then(|(t, prs)| self.render_ticket_link(&t, &prs, c.accent)),
                 )
             })
             .into_any_element()
@@ -1280,7 +1280,7 @@ impl Workspace {
         c: &Card,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (fg, bg) = pill_colors(c.state);
+        let (fg, bg) = pill_colors(c.state, c.accent);
         v_flex()
             .id(SharedString::from(format!("run-line-{orchestrator}")))
             .ml(px(26.))
@@ -1309,14 +1309,14 @@ impl Workspace {
                             .py(px(1.))
                             .rounded(px(4.))
                             .text_xs()
-                            .bg(color(bg))
-                            .text_color(color(fg))
+                            .bg(bg)
+                            .text_color(fg)
                             .child(c.state.word()),
                     ),
             )
             .children(
                 self.current_ticket(orchestrator, cx)
-                    .and_then(|(t, prs)| self.render_ticket_link(&t, &prs)),
+                    .and_then(|(t, prs)| self.render_ticket_link(&t, &prs, c.accent)),
             )
             .into_any_element()
     }
@@ -1423,15 +1423,15 @@ fn stage_failed(s: &StartStage, why: String) {
 }
 
 /// A card state's pill: text and background colour.
-fn pill_colors(state: CardState) -> (u32, u32) {
+/// A card's state pill: in the pipeline's own colour while it works or when it's done; red,
+/// amber and grey keep their meaning whatever the colour.
+fn pill_colors(state: CardState, accent: u32) -> (gpui::Hsla, gpui::Hsla) {
+    let pair = |fg: u32, bg: u32| (color(fg), color(bg));
     match state {
-        CardState::Ready => (theme::TEXT_SECONDARY, theme::RAISED),
-        CardState::Working => (theme::TEAL, theme::TEAL_TINT),
-        CardState::NeedsYou => (theme::RED, theme::RED_TINT),
-        CardState::Asking => (theme::AMBER, theme::AMBER_TINT),
-        CardState::Paused => (theme::AMBER, theme::AMBER_TINT),
-        CardState::Done => (theme::GREEN, theme::GREEN_TINT),
-        CardState::Stopped => (theme::TEXT_SECONDARY, theme::RAISED),
+        CardState::Working | CardState::Done => (color(accent), color(accent).opacity(0.16)),
+        CardState::Ready | CardState::Stopped => pair(theme::TEXT_SECONDARY, theme::RAISED),
+        CardState::NeedsYou => pair(theme::RED, theme::RED_TINT),
+        CardState::Asking | CardState::Paused => pair(theme::AMBER, theme::AMBER_TINT),
     }
 }
 

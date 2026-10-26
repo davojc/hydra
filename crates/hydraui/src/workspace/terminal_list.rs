@@ -102,42 +102,44 @@ impl Workspace {
         // Pipelines start where Claude is set up: their orchestrator is a Claude session.
         let claude = self.hydra.sign_ins(&env).iter().any(|t| t == "claude");
         let (start_env, new_env) = (env.clone(), env.clone());
-        list = list.child(
-            Button::new("list-new-terminal")
-                .label("+ New")
-                .ghost()
-                .small()
-                .tooltip("New terminal (Ctrl+T)")
-                .on_click(cx.listener(move |ws, _, window, cx| {
-                    ws.new_terminal(&env, None, window, cx);
-                })),
-        );
-        list = list.when(claude, |l| {
-            l.child(
-                h_flex()
-                    .gap_1()
-                    .child(
-                        Button::new("list-start-pipeline")
-                            .label("▶ Start pipeline")
-                            .ghost()
-                            .small()
-                            .tooltip("Start an orchestrator on one of your pipelines")
-                            .on_click(cx.listener(move |ws, _, window, cx| {
-                                ws.choose_pipeline(start_env.clone(), window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("list-new-pipeline")
-                            .label("+ New pipeline")
-                            .ghost()
-                            .small()
-                            .tooltip("Make a pipeline, blank or from a copy, and edit its settings")
-                            .on_click(cx.listener(move |ws, _, window, cx| {
-                                ws.new_pipeline(Some(new_env.clone()), window, cx);
-                            })),
-                    ),
+        // Open session and Create pipeline side by side, then Start pipeline below them, filled:
+        // it's what most people come here for.
+        let open = Button::new("list-new-terminal")
+            .label("Open session")
+            .outline()
+            .small()
+            .flex_1()
+            .tooltip("A new terminal in this environment (Ctrl+T)")
+            .on_click(cx.listener(move |ws, _, window, cx| {
+                ws.new_terminal(&env, None, window, cx);
+            }));
+        let mut actions = v_flex().px_2().pt_1().pb_1p5().gap_1p5();
+        actions = actions.child(h_flex().gap_1p5().child(open).when(claude, |row| {
+            row.child(
+                Button::new("list-new-pipeline")
+                    .label("Create pipeline")
+                    .outline()
+                    .small()
+                    .flex_1()
+                    .tooltip("Make a pipeline, blank or from a copy, and edit its settings")
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.new_pipeline(Some(new_env.clone()), window, cx);
+                    })),
             )
-        });
+        }));
+        if claude {
+            actions = actions.child(
+                Button::new("list-start-pipeline")
+                    .label("▶  Start pipeline")
+                    .primary()
+                    .w_full()
+                    .tooltip("Start an orchestrator on one of your pipelines")
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.choose_pipeline(start_env.clone(), window, cx);
+                    })),
+            );
+        }
+        list = list.child(actions);
         // Terminals in the same project sit together, a line between one project's and the
         // next's.
         let all_tasks = self.all_tasks_shown();
@@ -194,7 +196,7 @@ impl Workspace {
                 .border_color(color(card.accent).opacity(if active { 0.55 } else { 0.3 }))
                 .child(self.render_pipeline_card(*orch, card, active, true, cx))
                 .children(self.render_question(*orch, cx))
-                .children(self.render_linear_row(*orch, cx));
+                .children(self.render_linear_row(*orch, card.accent, cx));
             let orch = *orch;
             if let Some(row) =
                 self.terminal_row(orch, shown == Some(orch), tint, Nest::Orchestrator, cx)
@@ -279,7 +281,7 @@ impl Workspace {
             .border_1()
             .border_color(accent.opacity(if active { 0.55 } else { 0.3 }))
             .child(self.render_pipeline_card(lead, &group, active, false, cx))
-            .children(self.render_linear_row(lead, cx));
+            .children(self.render_linear_row(lead, group.accent, cx));
         for (orch, card, panes) in members {
             let orch = *orch;
             if let Some(row) =

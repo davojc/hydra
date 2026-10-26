@@ -28,6 +28,8 @@ impl Outcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub run: String,
+    /// The pipeline it ran, by file name (`inth` for `inth.toml`).
+    pub pipeline: String,
     pub ticket: String,
     /// The summary the orchestrator gave: the ticket's title.
     pub title: String,
@@ -86,6 +88,7 @@ pub fn took_text(took: Option<u64>) -> String {
 
 fn entry(run: &str, text: &str, live: bool) -> Option<Entry> {
     let (mut ticket, mut title, mut started) = (String::new(), String::new(), None);
+    let mut pipeline = String::new();
     let (mut ended, mut end_outcome, mut end_reason) = (None, None, None);
     let (mut last_summary, mut needs_you, mut note) = (None, None, None);
     let (mut sla, mut link) = (None, None);
@@ -111,6 +114,7 @@ fn entry(run: &str, text: &str, live: bool) -> Option<Entry> {
             Some("run started") => {
                 ticket = s("ticket").unwrap_or_default();
                 title = s("summary").unwrap_or_default();
+                pipeline = s("pipeline").unwrap_or_default();
                 started = at;
             }
             Some("stage started") => {
@@ -197,6 +201,7 @@ fn entry(run: &str, text: &str, live: bool) -> Option<Entry> {
         .map(|(e, s)| (e - s).max(0) as u64);
     Some(Entry {
         run: run.to_string(),
+        pipeline,
         ticket,
         title,
         outcome,
@@ -347,6 +352,7 @@ mod tests {
         let h = read(d.path(), &[]);
         let runs: Vec<&str> = h.iter().map(|e| e.run.as_str()).collect();
         assert_eq!(runs, ["INTH-471-1", "INTH-477-1"], "newest first");
+        assert_eq!(h[1].pipeline, "ticket");
         let stopped = &h[0];
         assert_eq!(
             (

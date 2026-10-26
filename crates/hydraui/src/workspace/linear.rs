@@ -591,7 +591,12 @@ impl Workspace {
 
     /// A run's ticket under its card and on its Pipeline tab: the SLA pill and **Open in
     /// Linear**, then each PR its stages reported, one per line, labelled with the ticket.
-    pub(super) fn render_ticket_link(&self, ticket: &str, prs: &[String]) -> Option<AnyElement> {
+    pub(super) fn render_ticket_link(
+        &self,
+        ticket: &str,
+        prs: &[String],
+        accent: u32,
+    ) -> Option<AnyElement> {
         let t = self.linear_tickets.get(&ticket.to_ascii_uppercase());
         let pr_rows: Vec<AnyElement> = prs
             .iter()
@@ -602,7 +607,7 @@ impl Workspace {
                     div()
                         .id(SharedString::from(format!("pr-link-{ticket}-{url}")))
                         .text_xs()
-                        .text_color(color(theme::TEAL))
+                        .text_color(color(accent))
                         .cursor_pointer()
                         .hover(|d| d.underline())
                         .truncate()
@@ -642,7 +647,7 @@ impl Workspace {
                         div()
                             .id(SharedString::from(format!("linear-link-{ticket}")))
                             .text_xs()
-                            .text_color(color(theme::TEAL))
+                            .text_color(color(accent))
                             .cursor_pointer()
                             .hover(|d| d.underline())
                             .child("Open in Linear ↗")
@@ -680,6 +685,7 @@ impl Workspace {
     pub(super) fn render_linear_row(
         &self,
         orch: PaneId,
+        accent: u32,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         // What the card says about where work comes from: Linear or a Slack channel.
@@ -772,9 +778,9 @@ impl Workspace {
             waiting: source.waiting,
         });
         let (fg, bg, dot) = match mode {
-            linear_watch::Mode::Automatic => (theme::GREEN, theme::GREEN_TINT, "●"),
-            linear_watch::Mode::Manual => (theme::TEXT_SECONDARY, theme::RAISED, "○"),
-            linear_watch::Mode::Stopped => (theme::RED, theme::RED_TINT, "■"),
+            linear_watch::Mode::Automatic => (color(accent), color(accent).opacity(0.16), "●"),
+            linear_watch::Mode::Manual => (color(theme::TEXT_SECONDARY), color(theme::RAISED), "○"),
+            linear_watch::Mode::Stopped => (color(theme::RED), color(theme::RED_TINT), "■"),
         };
         let on = mode == linear_watch::Mode::Automatic;
         let checking = w.is_some_and(|w| w.checking);
@@ -815,8 +821,8 @@ impl Workspace {
                                 .py(px(1.))
                                 .rounded(px(4.))
                                 .text_xs()
-                                .bg(color(bg))
-                                .text_color(color(fg))
+                                .bg(bg)
+                                .text_color(fg)
                                 .child(format!("{dot} {}", mode.label())),
                         ),
                 )
@@ -842,7 +848,7 @@ impl Workspace {
                                     .h_full()
                                     .rounded_full()
                                     .w(relative(p))
-                                    .bg(color(theme::GREEN).opacity(0.7)),
+                                    .bg(color(accent).opacity(0.8)),
                             ),
                     )
                 })

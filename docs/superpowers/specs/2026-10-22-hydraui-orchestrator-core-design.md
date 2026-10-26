@@ -788,3 +788,17 @@ tickets at once, the row has each orchestrator of that pipeline in turn, its ter
 **Pipeline N** tab, and clicking one shows it. Opening one orchestrator's Pipeline tab (the card,
 a run line) gives the others theirs too, behind it.
 
+## 26. Sidebar actions, colour everywhere, one pipeline's history (added 2026-10-26)
+
+- **Sidebar actions** (Jordan, 2026-10-26: "more organised"). **Open session** and **Create
+  pipeline** side by side, outlined; under them **▶ Start pipeline**, filled and full width, as
+  it's what most people come for.
+- **A pipeline's colour reaches everything it tints**, not only the frame and ◆: the state pill
+  while working or done, the trigger's **Automatic** pill and its next-look bar, the ticket and PR
+  links, and in the Pipeline tab the selected view, the running stage's ring, row and panel
+  header, the passed connectors, **Go back here**, and History's chips and in-progress pill.
+  Red, amber and grey keep their meaning; green stays for a pass or a reason for.
+  `orchestrator_theme::blend` lays the colour over the dark surface for tints and edges.
+- **History shows one pipeline.** The run log's `run started` names its pipeline
+  (`run_history::Entry.pipeline`); an orchestrator's History lists only its own pipeline's runs.
+

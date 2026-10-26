@@ -41,8 +41,12 @@ impl Workspace {
             })
             .unwrap_or_default();
         let entries = read(self.hydra.paths.root(), &live);
+        // Only this orchestrator's pipeline: INTH's history isn't the PR reviews'.
+        let pipeline = self.orchestrators.get(&orch).cloned();
+        let accent = self.accent_of(orch, cx);
         let shown: Vec<_> = entries
             .iter()
+            .filter(|e| pipeline.as_ref().is_none_or(|p| &e.pipeline == p))
             .filter(|e| match tab.history_filter {
                 HistoryFilter::All => true,
                 HistoryFilter::Done => e.outcome == Outcome::Done,
@@ -58,23 +62,13 @@ impl Workspace {
                 .rounded(px(6.))
                 .border_1()
                 .border_color(color(if on {
-                    theme::TEAL_BORDER
+                    theme::edge_of(accent)
                 } else {
                     theme::BORDER
                 }))
-                .when(on, |d| d.bg(color(theme::TEAL_TINT)))
+                .when(on, |d| d.bg(color(theme::tint_of(accent))))
                 .cursor_pointer()
-                .child(
-                    text(
-                        12.5,
-                        if on {
-                            theme::TEAL
-                        } else {
-                            theme::TEXT_SECONDARY
-                        },
-                    )
-                    .child(label),
-                )
+                .child(text(12.5, if on { accent } else { theme::TEXT_SECONDARY }).child(label))
                 .on_click(cx.listener(move |ws, _, _, cx| {
                     if let Some(t) = ws.pipeline_tabs.get_mut(&orch) {
                         t.history_filter = filter;
@@ -115,7 +109,7 @@ impl Workspace {
             let (fg, bg) = match e.outcome {
                 Outcome::Done => (theme::GREEN, theme::GREEN_TINT),
                 Outcome::Stopped => (theme::RED, theme::RED_TINT),
-                Outcome::InProgress => (theme::TEAL, theme::TEAL_TINT),
+                Outcome::InProgress => (accent, theme::tint_of(accent)),
             };
             let open = tab.open_row.as_deref() == Some(e.run.as_str());
             let (run, live_row) = (e.run.clone(), e.outcome == Outcome::InProgress);
@@ -180,7 +174,7 @@ impl Workspace {
                     div()
                         .id(SharedString::from(format!("history-linear-{}", e.run)))
                         .text_size(px(11.5))
-                        .text_color(color(theme::TEAL))
+                        .text_color(color(accent))
                         .cursor_pointer()
                         .hover(|d| d.underline())
                         .child("Open in Linear ↗")

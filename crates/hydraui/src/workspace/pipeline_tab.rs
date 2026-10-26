@@ -623,7 +623,7 @@ impl Workspace {
         v_flex()
             .size_full()
             .bg(color(theme::PANEL))
-            .child(self.render_view_bar(orch, view, cx))
+            .child(self.render_view_bar(orch, view, self.accent_of(orch, cx), cx))
             .child(
                 div()
                     .flex_1()
@@ -635,7 +635,34 @@ impl Workspace {
 
     /// **Ticket · History · Settings**: the pipeline's views, kept here rather than as links
     /// under its card.
-    fn render_view_bar(&self, orch: PaneId, current: TabView, cx: &mut Context<Self>) -> Div {
+    /// Orchestrator `orch`'s pipeline colour: its run's pipeline, or the one it was started on.
+    pub(super) fn accent_of(&self, orch: PaneId, cx: &App) -> u32 {
+        let token = self
+            .panes
+            .get(&orch)
+            .and_then(|v| v.read(cx).mcp_token().map(str::to_string));
+        let from_run = token.zip(server::get()).and_then(|(token, sv)| {
+            let reg = server::lock(sv.registry());
+            reg.runs
+                .current(&token)
+                .map(|r| crate::pipeline_card::accent(&r.pipeline))
+        });
+        from_run
+            .or_else(|| {
+                let file = self.orchestrators.get(&orch)?;
+                let p = crate::pipeline::load(self.hydra.paths.root(), file).ok()?;
+                Some(crate::pipeline_card::accent(&p))
+            })
+            .unwrap_or(theme::TEAL)
+    }
+
+    fn render_view_bar(
+        &self,
+        orch: PaneId,
+        current: TabView,
+        accent: u32,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let item = |id: &str, label: &'static str, view: TabView| {
             let on = view == current;
             div()
@@ -646,7 +673,8 @@ impl Workspace {
                 .text_size(px(12.5))
                 .cursor_pointer()
                 .when(on, |d| {
-                    d.bg(color(theme::TEAL_TINT)).text_color(color(theme::TEXT))
+                    d.bg(color(theme::tint_of(accent)))
+                        .text_color(color(theme::TEXT))
                 })
                 .when(!on, |d| {
                     d.text_color(color(theme::TEXT_SECONDARY))
@@ -743,12 +771,13 @@ impl Workspace {
         });
         let mut rows = v_flex().px(px(22.)).py(px(18.));
         let count = run.stages.len();
+        let accent = crate::pipeline_card::accent(&run.pipeline);
         for (i, s) in run.stages.iter().enumerate() {
             let spec = &run.pipeline.stages[i];
             let bar = run.pipeline.bar_for(i);
             let (badge, tone) = gate_badge(s.rating(), bar, s.status);
             let (title_hex, badge_hex) = match (s.status, tone) {
-                (st, _) if st.busy() => (theme::TEAL, theme::TEXT_MUTED),
+                (st, _) if st.busy() => (accent, theme::TEXT_MUTED),
                 (StageStatus::Stopped | StageStatus::Failed, _) => (theme::RED, theme::RED),
                 (StageStatus::Passed, _) => (theme::TEXT, theme::GREEN),
                 (_, Tone::Muted) => (theme::TEXT_SECONDARY, theme::TEXT_MUTED),
@@ -769,8 +798,8 @@ impl Workspace {
                         .child("✓"),
                     st if st.busy() => d
                         .border_2()
-                        .border_color(color(theme::TEAL))
-                        .child(div().size(px(7.)).rounded_full().bg(color(theme::TEAL))),
+                        .border_color(color(accent))
+                        .child(div().size(px(7.)).rounded_full().bg(color(accent))),
                     StageStatus::Stopped | StageStatus::Failed => d
                         .bg(color(theme::RED_TINT))
                         .text_color(color(theme::RED))
@@ -783,7 +812,7 @@ impl Workspace {
                 });
             let connector = div().w(px(1.)).flex_1().min_h(px(14.)).bg(color(
                 if s.status == StageStatus::Passed {
-                    theme::TEAL
+                    accent
                 } else {
                     theme::BORDER
                 },
@@ -795,7 +824,7 @@ impl Workspace {
                 let line = session_line(run, i, ai, live, now);
                 let latest = ai + 1 == s.attempts.len();
                 let (dot, tint, edge) = if latest && s.status.busy() {
-                    (theme::TEAL, theme::TEAL_TINT, theme::TEAL_BORDER)
+                    (accent, theme::tint_of(accent), theme::edge_of(accent))
                 } else if latest && s.status == StageStatus::Stopped {
                     (theme::RED, theme::WAITING_TINT, theme::RED_BORDER)
                 } else {
@@ -867,7 +896,7 @@ impl Workspace {
                         .id(SharedString::from(format!("pipeline-back-here-{orch}-{i}")))
                         .pl(px(10.))
                         .text_size(px(11.5))
-                        .text_color(color(theme::TEAL))
+                        .text_color(color(accent))
                         .cursor_pointer()
                         .hover(|d| d.underline())
                         .child("↩ Go back here")
@@ -966,9 +995,11 @@ impl Workspace {
                     .border_b_1()
                     .border_color(color(theme::BORDER_SUBTLE))
                     .child(text(12.5, theme::TEXT_SECONDARY).child(run.ticket.clone()))
-                    .children(
-                        self.render_ticket_link(&run.ticket, &crate::linear_watch::pr_links(run)),
-                    )
+                    .children(self.render_ticket_link(
+                        &run.ticket,
+                        &crate::linear_watch::pr_links(run),
+                        crate::pipeline_card::accent(&run.pipeline),
+                    ))
                     .child(
                         text(16., theme::TEXT)
                             .font_weight(FontWeight::MEDIUM)
@@ -1038,7 +1069,7 @@ impl Workspace {
                 v_flex()
                     .size_full()
                     .child(self.panel_header(
-                        theme::TEAL,
+                        crate::pipeline_card::accent(&run.pipeline),
                         session_name(si, &spec.title, ai),
                         format!(
                             "{} · {}",

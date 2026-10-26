@@ -100,7 +100,7 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
     let (mut finished, mut needs, mut ended, mut failed, mut passed) =
         (false, None, None, None, None);
     let (mut retrying, mut run_resumed, mut resumed) = (None, false, false);
-    let mut reopened = None;
+    let (mut reopened, mut rescoring) = (None, None);
     let (mut asked, mut answered) = (None, None);
     for c in changes.iter().filter(|c| &c.run == id) {
         match (&c.what, c.stage) {
@@ -111,6 +111,7 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
             (Decided::Passed, Some(i)) => passed = Some(i),
             (Decided::Retrying, Some(i)) => retrying = Some(i),
             (Decided::Reopened, Some(i)) => reopened = Some(i),
+            (Decided::Rescoring, Some(i)) => rescoring = Some(i),
             (Decided::RunResumed, _) => run_resumed = true,
             (Decided::Resumed, _) => resumed = true,
             (Decided::Asked(q), Some(i)) => asked = Some((i, q)),
@@ -149,6 +150,12 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
         format!(
             "Run {id}: a person sent it back to stage {}; its own session is reopened beside them \
              with their note. Wait: hydraui tells you when it reports, then start the next stage.",
+            stage(i)
+        )
+    } else if let Some(i) = rescoring {
+        format!(
+            "Run {id}: a person worked on stage {} in its own session and asked it to score \
+             again. Wait: hydraui tells you when it reports.",
             stage(i)
         )
     } else if let Some((i, why)) = failed {

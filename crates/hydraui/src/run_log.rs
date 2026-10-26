@@ -69,6 +69,7 @@ pub fn record(hydra_root: &Path, runs: &Runs, changes: &[Change]) {
             Decided::Failed(why) => ("stage failed", json!({"stage": stage, "reason": why})),
             Decided::Retrying => ("re-run", json!({"stage": stage})),
             Decided::Reopened => ("went back", json!({"stage": stage})),
+            Decided::Rescoring => ("scoring again", json!({"stage": stage})),
             Decided::Paused => ("paused", json!({})),
             Decided::Resumed => ("resumed", json!({})),
             Decided::Asked(question) => (

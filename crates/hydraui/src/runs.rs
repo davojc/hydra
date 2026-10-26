@@ -205,6 +205,8 @@ pub enum Decided {
     Retrying,
     /// A person sent the run back to this earlier stage: its own session goes on.
     Reopened,
+    /// A person worked on this stopped stage in its own session and asked it to score again.
+    Rescoring,
     Paused,
     Resumed,
     /// A stage asked a person a question; the ticket waits.
@@ -1134,6 +1136,46 @@ impl Runs {
         Ok(changes)
     }
 
+    /// A person's **Score again**: the stopped stage's own session, which they worked in since
+    /// its report, looks again and reports anew. The same attempt goes back to `Running`, so it
+    /// isn't counted as another try.
+    pub fn rescore(&mut self, run: &str, stage: usize) -> Result<Vec<Change>, String> {
+        let Some(ri) = self.index(run) else {
+            return Err(format!("no run {run}"));
+        };
+        let r = &mut self.runs[ri];
+        if !matches!(r.state, RunState::NeedsYou(_)) {
+            return Err(format!("run {run} isn't waiting for you"));
+        }
+        if r.fix_after.is_some() {
+            return Err(format!("run {run} is being sent back"));
+        }
+        let Some(s) = r.stages.get_mut(stage) else {
+            return Err("no such stage".into());
+        };
+        if s.status != StageStatus::Stopped {
+            return Err("only a stage stopped at its gate can score again".into());
+        }
+        if s.latest().and_then(|a| a.session.as_deref()).is_none() {
+            return Err("that stage's session isn't known".into());
+        }
+        s.status = StageStatus::Running;
+        r.state = RunState::Running;
+        let id = r.id.clone();
+        Ok(vec![
+            Change {
+                run: id.clone(),
+                stage: Some(stage),
+                what: Decided::Rescoring,
+            },
+            Change {
+                run: id,
+                stage: None,
+                what: Decided::RunResumed,
+            },
+        ])
+    }
+
     /// Sets what run `run` is about, as a link (`{pr}` in its prompts).
     pub fn set_link(&mut self, run: &str, link: &str) {
         let link = link.trim();
@@ -1568,6 +1610,28 @@ mod tests {
         );
         let s = runs.begin("orch", &id, "b", "", 30).unwrap();
         assert!(s.prompt.contains("- q"), "{}", s.prompt);
+    }
+
+    #[test]
+    fn a_stopped_stage_scores_again_in_its_own_session_without_using_a_try() {
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        assert!(runs.rescore(&id, 0).is_err(), "a passed stage");
+        let changes = runs.rescore(&id, 1).unwrap();
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.what == Decided::Rescoring && c.stage == Some(1))
+        );
+        assert_eq!(runs.run(&id).unwrap().state, RunState::Running);
+        assert_eq!(status(&runs, &id, 1), StageStatus::Running);
+        assert!(runs.rescore(&id, 1).is_err(), "already scoring");
+        // The same session reports again, on the same attempt.
+        runs.report("t2", rated(92)).unwrap();
+        let r = runs.run(&id).unwrap();
+        assert_eq!(r.stages[1].attempts.len(), 1);
+        assert_eq!(r.stages[1].rating().unwrap().score, 92);
+        assert_eq!(r.state, RunState::Finished);
     }
 
     #[test]

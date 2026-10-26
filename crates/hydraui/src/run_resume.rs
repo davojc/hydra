@@ -234,6 +234,11 @@ fn replay(id: &str, pipeline: Pipeline, events: &[Value]) -> Option<Run> {
                 let on = e.get("on").and_then(Value::as_bool).unwrap_or(true);
                 runs.mark(id, i, reason, on).ok()?;
             }
+            // A person worked in the stopped stage's session and asked it to score again.
+            "scoring again" => {
+                let i = stage_index(&runs, id, text(e, "stage"))?;
+                runs.rescore(id, i).ok()?;
+            }
             "sent back" => {
                 let i = stage_index(&runs, id, text(e, "stage"))?;
                 runs.send_back(id, i).ok()?;
@@ -482,5 +487,21 @@ mod tests {
         );
         assert_eq!(r.stages[1].status, StageStatus::Waiting);
         assert_eq!(r.stages[1].tries(), 0);
+    }
+
+    #[test]
+    fn a_stage_scoring_again_replays_as_running_on_the_same_try() {
+        let mut log = mid_run();
+        let low = RATING.replace("88", "30");
+        log.push(line(
+            "report",
+            &format!(r#","stage":"b","label":"s-02","rating":{low}"#),
+        ));
+        log.push(line("scoring again", r#","stage":"b""#));
+        let found = interrupted(home_with(&log).path(), |_| false);
+        let r = &found[0].run;
+        assert_eq!(r.state, crate::runs::RunState::Running);
+        assert_eq!(r.stages[1].status, StageStatus::Running);
+        assert_eq!(r.stages[1].attempts.len(), 1);
     }
 }

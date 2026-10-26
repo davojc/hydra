@@ -76,6 +76,11 @@ fn text(size: f32, hex: u32) -> Div {
     div().text_size(px(size)).text_color(color(hex))
 }
 
+/// What **Score again** types into the stopped stage's session.
+const SCORE_AGAIN: &str = "A person has worked on this stage in this session since you reported. \
+     Look at the stage's work as it is now, check it again the way the stage asks, then call \
+     stage_report again: a fresh score, evidence, and reasons for and against.";
+
 /// The note a person started an attempt with (Re-run or Go back), under its panel's header.
 fn note_strip(note: Option<&str>) -> Option<AnyElement> {
     let note = note.map(str::trim).filter(|n| !n.is_empty())?;
@@ -281,6 +286,37 @@ impl Workspace {
                 tell(changes);
             }
             Err(e) => window.push_notification(Notification::error(e).title("Pipeline"), cx),
+        }
+    }
+
+    /// **Score again**: the stopped stage's own session, which the person has worked in since
+    /// its report, is asked to look again and report a new score.
+    fn score_again(
+        &mut self,
+        orch: PaneId,
+        run: &str,
+        stage: usize,
+        pane: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sv) = server::get() else {
+            return;
+        };
+        let done = server::lock(sv.registry()).runs.rescore(run, stage);
+        match done {
+            Ok(changes) => {
+                crate::action_log::write(format!("run {run}: the user asked for a new score"));
+                self.pending_wakes
+                    .insert(pane, (run.to_string(), SCORE_AGAIN.to_string()));
+                self.send_wakes(window, cx);
+                self.pipeline_tab_update(orch, cx, |t| {
+                    t.selected = None;
+                    t.stepped_in = false;
+                });
+                tell(changes);
+            }
+            Err(e) => window.push_notification(Notification::error(e).title("Score again"), cx),
         }
     }
 
@@ -1410,6 +1446,21 @@ impl Workspace {
                         .on_click(cx.listener(move |ws, _, window, cx| {
                             ws.pipeline_tab_update(orch, cx, |t| t.stepped_in = true);
                             ws.focus_active(window, cx);
+                        })),
+                );
+            }
+            let pane = ai.and_then(|ai| self.pane_of_session(run, si, ai, cx));
+            if let (Some(_), Some(pane)) = (rating, pane) {
+                let again_run = run_id.clone();
+                actions = actions.child(
+                    Button::new("pipeline-score-again")
+                        .label("Score again")
+                        .tooltip(
+                            "Fixed it in the session? It checks its work again and reports a \
+                             new score",
+                        )
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.score_again(orch, &again_run, si, pane, window, cx)
                         })),
                 );
             }

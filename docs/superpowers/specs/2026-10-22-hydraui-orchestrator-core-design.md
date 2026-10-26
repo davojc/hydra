@@ -753,3 +753,18 @@ and finished on 24 Oct, was moved back to Ready for Investigation, and the watch
 trigger state (it claims out of it, and moves a passed one on), so a ticket that's there again
 was put back by a person. The watcher now skips only tickets with a run still open here (running,
 or interrupted and waiting to be resumed); the card and notification say "still running here".
+
+## 23. Score again (added 2026-10-26)
+
+A stage stopped below its bar; the person stepped into its session and fixed the problem there,
+but nothing could ask that session to score its work again (Jordan, 2026-10-26). Re-run started
+a new session, losing the fix's context and spending a try.
+
+- **Where.** The stopped banner shows **Score again** beside **Step into**, while the stage's
+  session is still open.
+- **What it does.** The same attempt goes back to `Running` (not counted as another try), the run
+  goes on, and the session is told a person worked on it, to check the stage's work as it is now
+  and call `stage_report` again (`runs::rescore`). Its new report passes or stops the stage as any
+  report does. The orchestrator is told to wait for it.
+- **Logged and resumed** as `scoring again {stage}`; a restart replays it.
+

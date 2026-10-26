@@ -188,6 +188,8 @@ pub struct StartStage {
     pub folder: Option<String>,
     pub title: String,
     pub prompt: String,
+    /// How its Claude starts, before the prompt (`Pipeline::stage_claude`).
+    pub claude: Vec<String>,
 }
 
 /// What happened to a run or one of its stages, for the app to show and tell the orchestrator.
@@ -533,6 +535,7 @@ impl Runs {
             skill: spec.skill.clone(),
             folder: spec.folder.clone(),
             title: spec.title.clone(),
+            claude: r.pipeline.stage_claude(),
             prompt: format!(
                 "{}\n\n{}",
                 render(&spec.prompt, &vars, &brief),
@@ -1260,7 +1263,10 @@ fn stage_note(run: &Run, i: usize) -> String {
     let product = format!(
         "\nNot your call: a change beyond the ticket that alters what users see or do (removing \
          or changing a feature, copy or a flow) is a product decision. Ask before making it: \
-         {ask}, and wait."
+         {ask}, and wait. Don't ask the user whether to ask: just ask. A product question \
+         already open (in the ticket, a thread, or an earlier run's handoff) counts too: call \
+         stage_ask with it and its link rather than carrying it on as pending or marking its \
+         test @fixme, so the run shows what holds it up."
     );
     format!(
         "---\nhydraui pipeline \"{}\" · {} · stage {} of {}: {}{skill}.\n{around}Do only this \
@@ -1791,10 +1797,18 @@ mod tests {
     fn every_stage_is_told_to_ask_before_a_product_decision() {
         let mut runs = Runs::default();
         let id = run(&mut runs, &["develop"]);
-        let p = runs.begin("orch", &id, "develop", "", 30).unwrap().prompt;
+        let s = runs.begin("orch", &id, "develop", "", 30).unwrap();
+        let p = s.prompt;
         assert!(p.contains("is a product decision"), "{p}");
         assert!(p.contains("call stage_ask with the question"), "{p}");
+        assert!(p.contains("Don't ask the user whether to ask"), "{p}");
+        assert!(p.contains("already open"), "{p}");
         assert!(!p.contains("Slack"), "{p}");
+        assert_eq!(
+            s.claude,
+            ["claude"],
+            "nothing to pre-approve without a channel"
+        );
 
         let mut runs = Runs::default();
         let mut pipe = pipeline(&["develop"]);
@@ -1804,7 +1818,16 @@ mod tests {
             .unwrap()
             .id
             .clone();
-        let p = runs.begin("orch", &id, "develop", "", 30).unwrap().prompt;
+        let s = runs.begin("orch", &id, "develop", "", 30).unwrap();
+        assert_eq!(
+            s.claude,
+            [
+                "claude".to_string(),
+                format!("--allowedTools={}", crate::pipeline::PRODUCT_TOOLS)
+            ],
+            "posting the question and reading replies never wait for the user"
+        );
+        let p = s.prompt;
         assert!(p.contains("post it in Slack #product-"), "{p}");
         assert!(p.contains("the message's link"), "{p}");
     }

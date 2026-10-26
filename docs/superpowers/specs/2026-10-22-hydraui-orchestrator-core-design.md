@@ -584,6 +584,15 @@ for a stage. Every stage is now told so, and has a way to ask.
   it and types it to the session. A stage that reports or fails while asking drops the question.
 - **Logged and resumed**: `asked` (stage, question, link) and `answered` (answer) in the run's
   log; a restart brings a waiting question back.
+- **No go-ahead needed** (Jordan, 2026-10-26): a stage asks rather than asking the user whether
+  to ask. With a channel, its Claude starts with `--allowedTools=` posting a Slack message and
+  reading a thread (`pipeline::PRODUCT_TOOLS`), so neither waits on a permission prompt.
+- **Questions already open count.** INTH-165's stages carried a product-owner question from the
+  ticket along as "pending PO" (and marked its test `@fixme`), so nothing on the run showed it.
+  The rule now says to register an open question with `stage_ask` and its link as well.
+- **A stray "needs you".** Claude can send a permission-prompt notification just after its turn
+  ends; an orchestrator waiting for its stage then read "needs you" for nothing. A `waiting`
+  within 10 s of the session going idle is ignored (`busy.rs`, `STRAY_WAIT`).
 
 ## 16. Must address (added 2026-10-26)
 

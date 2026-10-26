@@ -87,7 +87,24 @@ pub struct Stage {
     pub prompt: String,
 }
 
+/// What a stage may do without asking when its pipeline has a product channel (core spec §15):
+/// post its product question in Slack and read the replies, so asking product never waits on
+/// the user's approval.
+pub const PRODUCT_TOOLS: &str =
+    "mcp__claude_ai_Slack__slack_send_message,mcp__claude_ai_Slack__slack_read_thread";
+
 impl Pipeline {
+    /// How a stage's Claude starts, before its own arguments: with [`PRODUCT_TOOLS`] allowed
+    /// when the pipeline asks product in a channel.
+    pub fn stage_claude(&self) -> Vec<String> {
+        let mut argv = vec!["claude".to_string()];
+        if self.product_channel.is_some() {
+            // One word: the flag takes a list, and would take the prompt after it too.
+            argv.push(format!("--allowedTools={PRODUCT_TOOLS}"));
+        }
+        argv
+    }
+
     /// The branch for `ticket`; `None` when the pipeline names no branch rule.
     pub fn branch_for(&self, ticket: &str) -> Option<String> {
         self.branch.as_ref().map(|b| {

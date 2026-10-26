@@ -423,15 +423,13 @@ impl Workspace {
             match i.stages.get(&label) {
                 Some((Some(dir), Some(claude))) if dir.is_dir() => {
                     let mut request = PaneRequest::new(&i.env, dir.clone(), shell);
-                    request.command = Some(command_line(
-                        shell,
-                        &[
-                            "claude".into(),
-                            "--resume".into(),
-                            claude.clone(),
-                            STAGE_RESUME_PROMPT.into(),
-                        ],
-                    ));
+                    let mut argv = i.run.pipeline.stage_claude();
+                    argv.extend([
+                        "--resume".into(),
+                        claude.clone(),
+                        STAGE_RESUME_PROMPT.into(),
+                    ]);
+                    request.command = Some(command_line(shell, &argv));
                     let name = crate::runs::session_name(
                         si,
                         &i.run.pipeline.stages[si].title,
@@ -511,15 +509,9 @@ impl Workspace {
         };
         let shell = self.shell();
         let mut request = PaneRequest::new(&env, dir.clone(), shell);
-        request.command = Some(command_line(
-            shell,
-            &[
-                "claude".into(),
-                "--resume".into(),
-                claude,
-                reopen_prompt(&r, stage, &note),
-            ],
-        ));
+        let mut argv = r.pipeline.stage_claude();
+        argv.extend(["--resume".into(), claude, reopen_prompt(&r, stage, &note)]);
+        request.command = Some(command_line(shell, &argv));
         let name =
             crate::runs::session_name(stage, &r.pipeline.stages[stage].title, s.attempts.len() - 1);
         let opened = self
@@ -684,10 +676,9 @@ impl Workspace {
             serde_json::json!({"label": s.label, "folder": cwd.display().to_string()}),
         );
         let mut request = PaneRequest::new(env, cwd, shell);
-        request.command = Some(command_line(
-            shell,
-            &["claude".to_string(), s.prompt.clone()],
-        ));
+        let mut argv = s.claude.clone();
+        argv.push(s.prompt.clone());
+        request.command = Some(command_line(shell, &argv));
         let Some(id) = self.open_terminal_beside(env, request, window, cx) else {
             return stage_failed(&s, format!("environment {env} isn't open"));
         };

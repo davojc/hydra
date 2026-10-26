@@ -12,6 +12,9 @@ use crate::activity::{Activity, busiest};
 use crate::envs::PaneId;
 use crate::mcp::{Alert, SessionState, alert_for};
 
+/// How soon after a turn ends a "waiting" is taken as stray rather than a real prompt.
+const STRAY_WAIT: Duration = Duration::from_secs(10);
+
 /// Keys the Claude alerts' toasts, one per terminal, so a newer one replaces the last.
 struct ClaudeAlert;
 
@@ -101,6 +104,21 @@ impl Workspace {
             return;
         };
         let before = view.read(cx).claude();
+        // A permission prompt or a question comes during a turn. Claude sometimes sends one
+        // just after its turn ended (an orchestrator waiting for its stage showed "needs you"
+        // for nothing): it isn't one.
+        let idle_for = self
+            .activity
+            .get(&id)
+            .filter(|_| before == Some(SessionState::Idle))
+            .map(|a| a.since.elapsed());
+        if state == SessionState::Waiting && idle_for.is_some_and(|d| d < STRAY_WAIT) {
+            crate::action_log::write(format!(
+                "hook: {}: ignored waiting just after its turn ended",
+                self.pane_name(id, cx)
+            ));
+            return;
+        }
         crate::action_log::write(format!(
             "hook: {}: {before:?} -> {state:?}{}",
             self.pane_name(id, cx),

@@ -124,6 +124,10 @@ impl Workspace {
             self.pane_name(id, cx),
             if resumed { " (resumed session)" } else { "" }
         ));
+        // Its first turn is over: it can be handed work.
+        if before == Some(SessionState::Working) && state == SessionState::Idle {
+            self.starting_up.remove(&id);
+        }
         if state == SessionState::Ended {
             // Claude ended without reporting: its stage fails (orchestrator spec §3.4).
             self.stage_session_gone(token);

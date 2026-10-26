@@ -711,6 +711,12 @@ of them (Jordan chose "one card per run"):
   (Pipeline settings → Advanced) reads **One at a time** or **Up to 2…6**. Extra orchestrators stay
   open once started and take later work. Names are `orchestrator 1`, `2`, … when the pipeline
   allows more than one.
+- **A new orchestrator gets its ticket after its first turn** (bug, 2026-10-26: orchestrator 2 was
+  handed pw-dashboard #58 the instant its session started; Claude submitted its startup prompt
+  0.3 s later and the typed hand-over was lost). Wake-ups wait until a just-opened orchestrator's
+  first turn ends (`starting_up`, Working → Idle), or 90 s. A pull request an orchestrator was
+  handed but didn't start within 5 minutes goes back to the front of the queue once
+  (`Queued::tries`), then is skipped with a notification.
 - **In the sidebar** (Jordan, revised the same day: not separate cards): one block per pipeline,
   with one card (its name, "1 of 2 running", the most urgent state), its trigger row, then
   `orchestrator 1`, `orchestrator 2`, … each with its ticket line (ticket · stage · state, its SLA

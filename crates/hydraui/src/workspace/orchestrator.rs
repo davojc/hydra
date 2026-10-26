@@ -381,6 +381,7 @@ impl Workspace {
             ],
         ));
         let id = self.open_terminal(&i.env, request, window, cx);
+        self.starting_up.insert(id, std::time::Instant::now());
         let Some(view) = self.panes.get(&id).cloned() else {
             return;
         };
@@ -935,6 +936,14 @@ impl Workspace {
                 self.pending_wakes.remove(&pane);
                 continue;
             };
+            // Still on its first turn: what's typed now never reaches it.
+            if self
+                .starting_up
+                .get(&pane)
+                .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(90))
+            {
+                continue;
+            }
             let paused = server::get().is_some_and(|sv| {
                 server::lock(sv.registry())
                     .runs

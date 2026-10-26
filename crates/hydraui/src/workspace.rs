@@ -241,6 +241,12 @@ pub struct Workspace {
     /// Pull requests a Slack watcher passed over because their author is the person watching,
     /// so GitHub isn't asked about them again.
     slack_mine: std::collections::HashSet<String>,
+    /// The pull request each orchestrator was handed and hasn't started yet, to retry once.
+    slack_inflight: HashMap<PaneId, crate::slack_watch::Queued>,
+    /// Orchestrators whose Claude hasn't finished its first turn: a prompt typed then is lost,
+    /// so nothing is handed to them until it has.
+    /// (When it opened: after 90 seconds it counts as ready anyway.)
+    starting_up: HashMap<PaneId, std::time::Instant>,
     /// Runs' tickets as Linear last said, by identifier: the card's SLA and link (phase 2 §5).
     linear_tickets: HashMap<String, crate::linear::Ticket>,
     /// Cards being offered or just sent, so one card never goes to two sessions.
@@ -457,6 +463,8 @@ impl Workspace {
             linear_watch: HashMap::new(),
             slack_queues: HashMap::new(),
             slack_mine: std::collections::HashSet::new(),
+            slack_inflight: HashMap::new(),
+            starting_up: HashMap::new(),
             linear_tickets: HashMap::new(),
             in_flight: Default::default(),
             _mcp_pump: mcp_pump,

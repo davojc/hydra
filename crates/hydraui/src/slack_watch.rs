@@ -21,6 +21,9 @@ pub struct Queued {
     pub title: String,
     /// Who posted it (a Slack user id).
     pub by: String,
+    /// Times it was handed to an orchestrator that didn't start it.
+    #[serde(default)]
+    pub tries: u8,
 }
 
 impl Queued {
@@ -30,6 +33,7 @@ impl Queued {
             ticket: pr.ticket(),
             title: pr.title(),
             by: by.to_string(),
+            tries: 0,
         }
     }
 }

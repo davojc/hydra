@@ -673,6 +673,8 @@ impl Workspace {
             ],
         ));
         let id = self.open_terminal(env, request, window, cx);
+        // Nothing is handed to it until Claude has finished its first turn.
+        self.starting_up.insert(id, std::time::Instant::now());
         if let Some(view) = self.panes.get(&id).cloned() {
             view.update(cx, |v, cx| v.set_name(Some(name), cx));
         }

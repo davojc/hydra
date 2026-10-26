@@ -309,6 +309,7 @@ impl Workspace {
             if let Some(w) = self.linear_watch.get_mut(&id) {
                 w.starting = None;
             }
+            self.slack_inflight.remove(&id);
         }
         // A Slack watcher starts what it took before it looks again.
         let slack: Vec<PaneId> = self

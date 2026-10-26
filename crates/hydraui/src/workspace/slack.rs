@@ -76,6 +76,19 @@ impl Workspace {
             if let Some(w) = self.linear_watch.get_mut(&slot) {
                 w.starting = None;
             }
+            // Handed over once without starting: it goes back to the front for another try.
+            if let Some(mut pr) = self.slack_inflight.remove(&slot)
+                && pr.tries == 0
+            {
+                pr.tries = 1;
+                crate::action_log::write(format!(
+                    "slack: {}: the orchestrator didn't start {ticket}; trying again",
+                    pipeline.file
+                ));
+                self.slack_queue(&pipeline.file).push_front(pr);
+                self.save_slack_queue(&pipeline.file);
+                continue;
+            }
             crate::action_log::write(format!(
                 "slack: {}: the orchestrator didn't start {ticket}; skipped",
                 pipeline.file
@@ -116,6 +129,7 @@ impl Workspace {
         self.save_slack_queue(&pipeline.file);
         self.linear_watch.entry(slot).or_default().starting =
             Some((pr.ticket.clone(), SystemTime::now()));
+        self.slack_inflight.insert(slot, pr.clone());
         self.linear_watch.entry(orch).or_default().status = Some(format!("Started {}", pr.ticket));
         crate::action_log::write(format!(
             "slack: {}: starting {} ({})",

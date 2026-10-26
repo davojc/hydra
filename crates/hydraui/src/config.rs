@@ -66,6 +66,9 @@ pub struct UiConfig {
     /// The share of the seven-day Claude limit, in percent, a pipeline stage needs left
     /// (orchestrator spec §5.1).
     pub min_week_left: u8,
+    /// The team's Canopy, which finishes **Connect Slack**'s sign-in (it holds the Slack app's
+    /// secret) and hands each person's own token back, e.g. `https://canopy.dev.iov42.net`.
+    pub slack_connect_url: Option<String>,
 }
 
 impl Default for UiConfig {
@@ -80,6 +83,7 @@ impl Default for UiConfig {
             colors: ColorsConfig::default(),
             keys: BTreeMap::new(),
             min_week_left: crate::runs::MIN_WEEK_LEFT,
+            slack_connect_url: None,
         }
     }
 }
@@ -136,6 +140,14 @@ pub fn parse(text: &str) -> (UiConfig, Vec<String>) {
                     .filter(|n| *n <= 100)
                     .ok_or(format!("{n} must be between 0 and 100"))?;
                 cfg.min_week_left = n;
+                Ok(())
+            }),
+            "slack_connect_url" => get::<String>(value).and_then(|u| {
+                let u = u.trim().trim_end_matches('/').to_string();
+                if !u.starts_with("https://") {
+                    return Err(format!("{u:?} must be an https:// address"));
+                }
+                cfg.slack_connect_url = Some(u);
                 Ok(())
             }),
             "colors" => match value {
@@ -315,6 +327,7 @@ default_env = "work"
 default_shell = "bash"
 editor = "code"
 min_week_left = 25
+slack_connect_url = "https://canopy.dev.iov42.net/"
 
 [colors]
 background = "#101010"
@@ -331,9 +344,20 @@ new_terminal = "ctrl-alt-d"
         assert_eq!(cfg.default_shell.as_deref(), Some("bash"));
         assert_eq!(cfg.editor.as_deref(), Some("code"));
         assert_eq!(cfg.min_week_left, 25);
+        assert_eq!(
+            cfg.slack_connect_url.as_deref(),
+            Some("https://canopy.dev.iov42.net")
+        );
         assert_eq!(cfg.colors.background.as_deref(), Some("#101010"));
         assert_eq!(cfg.colors.palette.as_ref().map(Vec::len), Some(2));
         assert_eq!(cfg.keys["new_terminal"], "ctrl-alt-d");
+    }
+
+    #[test]
+    fn slack_connect_needs_https() {
+        let (cfg, problems) = parse("slack_connect_url = \"http://canopy\"\n");
+        assert_eq!(cfg.slack_connect_url, None);
+        assert!(problems[0].contains("https"), "{problems:?}");
     }
 
     #[test]

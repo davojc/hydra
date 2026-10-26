@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, SharedString, Window, div, px};
 use gpui_component::WindowExt;
-use gpui_component::button::Button;
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::notification::Notification;
 use gpui_component::switch::Switch;
 use gpui_component::{Sizable, h_flex, v_flex};
@@ -583,6 +583,8 @@ impl Workspace {
             tooltip: String,
             pick: &'static str,
             pick_tooltip: String,
+            /// A Slack trigger offers Connect Slack while it's stopped (a missing or bad token).
+            env: Option<String>,
         }
         let source = match (self.linear_of(orch, cx), self.slack_of(orch, cx)) {
             (Some((_, s, _)), _) => Source {
@@ -591,6 +593,7 @@ impl Workspace {
                 noun: "ticket",
                 waiting: 0,
                 tooltip: linear_watch::trigger_tooltip(&s),
+                env: None,
                 pick: "Pick next ticket",
                 pick_tooltip: format!(
                     "Start the {} ticket in {} whose SLA breaches first, now. Once: it doesn't \
@@ -598,7 +601,8 @@ impl Workspace {
                     s.team, s.pick
                 ),
             },
-            (None, Some((p, s, _))) => Source {
+            (None, Some((p, s, env))) => Source {
+                env: Some(env),
                 looking: crate::slack_watch::looking(&s),
                 every_minutes: s.every_minutes,
                 noun: "PR",
@@ -677,6 +681,29 @@ impl Workspace {
                             theme::TEXT_SECONDARY
                         }))
                         .child(line),
+                )
+                .when_some(
+                    source
+                        .env
+                        .clone()
+                        .filter(|_| mode == linear_watch::Mode::Stopped),
+                    |d, env| {
+                        d.child(
+                            h_flex().child(
+                                Button::new(SharedString::from(format!("slack-connect-{orch}")))
+                                    .label("Connect Slack")
+                                    .primary()
+                                    .xsmall()
+                                    .tooltip(
+                                        "Sign in to Slack in your browser; the token is kept in \
+                                         your keychain and Automatic comes back on.",
+                                    )
+                                    .on_click(cx.listener(move |ws, _, window, cx| {
+                                        ws.connect_slack(env.clone(), window, cx)
+                                    })),
+                            ),
+                        )
+                    },
                 )
                 // Automatic picks by itself; a pick by hand is for Manual (or Stopped).
                 .when(!on && open_run.is_none(), |d| {

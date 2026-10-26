@@ -54,6 +54,9 @@ pub enum Action {
     StartOrchestrator,
     /// A pipeline of its own, blank or copied from another, then its orchestrator and settings.
     NewPipeline,
+    /// The selected environment's Slack, for pipelines that watch a channel: signed in through
+    /// the team's Canopy.
+    ConnectSlack,
     /// The pipelines folder, opened by the system (the example written first if it is empty).
     EditPipelines,
 }
@@ -110,6 +113,7 @@ pub fn entries(
     add("Tasks: all projects".into(), Action::AllBoards);
     add("Start orchestrator…".into(), Action::StartOrchestrator);
     add("New pipeline…".into(), Action::NewPipeline);
+    add("Connect Slack…".into(), Action::ConnectSlack);
     add("Edit pipelines".into(), Action::EditPipelines);
     add("Keyboard shortcuts".into(), Action::Shortcuts);
     add("Settings".into(), Action::Settings);
@@ -157,6 +161,7 @@ mod tests {
                 "Tasks: all projects",
                 "Start orchestrator…",
                 "New pipeline…",
+                "Connect Slack…",
                 "Edit pipelines",
                 "Keyboard shortcuts",
                 "Settings",
@@ -217,6 +222,7 @@ mod tests {
                 "Tasks: all projects",
                 "Start orchestrator…",
                 "New pipeline…",
+                "Connect Slack…",
                 "Edit pipelines",
                 "Keyboard shortcuts",
                 "Settings",
@@ -229,8 +235,9 @@ mod tests {
         assert_eq!(got[13].action, Action::AllBoards);
         assert_eq!(got[14].action, Action::StartOrchestrator);
         assert_eq!(got[15].action, Action::NewPipeline);
-        assert_eq!(got[16].action, Action::EditPipelines);
-        assert_eq!(got[17].action, Action::Shortcuts);
+        assert_eq!(got[16].action, Action::ConnectSlack);
+        assert_eq!(got[17].action, Action::EditPipelines);
+        assert_eq!(got[18].action, Action::Shortcuts);
         assert_eq!(got[0].action, Action::OpenFile);
         assert_eq!(got[1].action, Action::SearchFiles);
         assert_eq!(got[4].action, Action::StartPage);

@@ -266,4 +266,114 @@ impl Workspace {
         }
         cx.notify();
     }
+
+    /// **Connect Slack** for environment `env`: the browser signs in to Slack through the
+    /// team's Canopy, which hands the token back here; it's stored as `<env>/slack`, and a
+    /// Slack watcher in `env` that had stopped goes back to Automatic.
+    pub(super) fn connect_slack(
+        &mut self,
+        env: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = "Connect Slack";
+        let (ui, _) = crate::config::load(&self.hydra.paths);
+        let Some(canopy) = ui.slack_connect_url else {
+            window.push_notification(
+                Notification::warning(
+                    "Set slack_connect_url in hydraui's config.toml to your team's Canopy (e.g. \
+                     https://canopy.dev.iov42.net): it finishes the Slack sign-in.",
+                )
+                .title(title),
+                cx,
+            );
+            return;
+        };
+        let started = (|| {
+            let server = tiny_http::Server::http("127.0.0.1:0").map_err(|e| e.to_string())?;
+            let port = server
+                .server_addr()
+                .to_ip()
+                .map(|a| a.port())
+                .ok_or("no local port")?;
+            let state = crate::slack_connect::nonce()?;
+            Ok::<_, String>((server, port, state))
+        })();
+        let (server, port, state) = match started {
+            Ok(s) => s,
+            Err(e) => {
+                window.push_notification(Notification::error(e).title(title), cx);
+                return;
+            }
+        };
+        crate::action_log::write(format!("slack: connecting {env} through {canopy}"));
+        cx.open_url(&crate::slack_connect::start_url(&canopy, port, &state));
+        window.push_notification(
+            Notification::info(
+                "Finish in your browser: sign in to Canopy if asked, then Allow on Slack's page.",
+            )
+            .title(title),
+            cx,
+        );
+        let hydra = self.hydra.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let done = cx
+                .background_spawn(async move {
+                    let c =
+                        crate::slack_connect::receive(&server, &state, crate::slack_connect::WAIT)?;
+                    hydra.set_secret(&format!("{env}/slack"), &c.token)?;
+                    Ok::<_, String>((env, c))
+                })
+                .await;
+            let _ = this.update_in(cx, |ws, window, cx| {
+                match done {
+                    Ok((env, c)) => {
+                        crate::action_log::write(format!(
+                            "slack: {env} connected as {} in {}",
+                            c.user, c.team
+                        ));
+                        // Watchers that stopped for want of a token go again.
+                        let stopped: Vec<PaneId> = ws
+                            .linear_watch
+                            .iter()
+                            .filter(|(_, w)| w.stopped.is_some())
+                            .map(|(id, _)| *id)
+                            .filter(|id| ws.slack_of(*id, cx).is_some_and(|(_, _, e)| e == env))
+                            .collect();
+                        for id in &stopped {
+                            if let Some(w) = ws.linear_watch.get_mut(id) {
+                                w.on = true;
+                                w.stopped = None;
+                                w.last = None;
+                                w.failures.clear();
+                            }
+                        }
+                        window.push_notification(
+                            Notification::success(format!(
+                                "Slack is connected for {env}{}.{}",
+                                if c.team.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" ({})", c.team)
+                                },
+                                if stopped.is_empty() {
+                                    ""
+                                } else {
+                                    " Pipelines watching Slack are back on Automatic."
+                                }
+                            ))
+                            .title(title),
+                            cx,
+                        );
+                        cx.notify();
+                    }
+                    Err(e) => {
+                        crate::action_log::write(format!("slack: connect failed: {e}"));
+                        window.push_notification(Notification::error(e).title(title), cx);
+                    }
+                }
+            });
+        })
+        .detach();
+    }
 }

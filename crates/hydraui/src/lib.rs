@@ -50,6 +50,7 @@ pub mod search;
 pub mod settings;
 pub mod skills_list;
 pub mod slack;
+pub mod slack_connect;
 pub mod slack_watch;
 pub mod start_page;
 pub mod task_board;

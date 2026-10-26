@@ -667,3 +667,14 @@ watch = true                # start in Automatic
   (`link`, new); stage prompts get it as `{pr}` (or `{link}`). One it hasn't started within 5
   minutes is skipped with a notification.
 - **Take next PR** (Manual) starts the next waiting pull request, else looks now.
+- **Connect Slack** (Jordan, 2026-10-26: "if they all have to make a bot it's a bit crap"). One team
+  Slack app; each person signs in to it, and nobody makes an app. Slack only hands a token to
+  whoever holds the app's client secret, so the team's Canopy (`slack_connect_url` in
+  hydraui's config.toml) finishes the sign-in: hydraui listens on `127.0.0.1:<random port>`,
+  opens `<canopy>/api/slack/connect?port&state=<48-hex nonce>`, Canopy (signed in) sends the
+  browser through Slack's consent screen and answers with a page that posts the user token to
+  `http://127.0.0.1:<port>/slack` with the nonce. hydraui keeps only a post with its nonce and
+  an `xoxp-` token, stores it as `<env>/slack`, and puts Slack watchers in that environment that
+  had stopped back on Automatic. Canopy stores nothing (iov42/pw-dashboard branch
+  `slack-connect`). Reached from the launcher (**Connect Slack…**) or the card's **Connect
+  Slack** while its Slack watcher is stopped.

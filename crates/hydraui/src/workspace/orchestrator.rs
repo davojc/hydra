@@ -1174,7 +1174,7 @@ impl Workspace {
             .child(h_flex().gap(px(3.)).children(segments))
             .children(
                 self.current_ticket(orchestrator, cx)
-                    .and_then(|t| self.render_ticket_link(&t)),
+                    .and_then(|(t, prs)| self.render_ticket_link(&t, &prs)),
             )
             .into_any_element()
     }

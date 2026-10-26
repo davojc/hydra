@@ -200,3 +200,6 @@ mode:
   as a failed check, not a rejected key: only a missing key stops Automatic at once.
 - The list is 240 px wide by default (was 200), and **Ticket history** and **Pipeline
   settings** left it: the Pipeline tab has a bar, **Ticket · History · Settings**.
+- **PRs under the ticket.** Under **Open in Linear**, on the card and the Pipeline tab, each PR
+  the run's stages reported is a line of its own, labelled with its ticket:
+  `INTH-169 · PR version2-frontend #5546 ↗`. A PR shows once the stage that opened it reports.

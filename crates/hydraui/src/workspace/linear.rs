@@ -425,15 +425,37 @@ impl Workspace {
         }
     }
 
-    /// The ticket's SLA pill and its link to Linear (§5); `None` before Linear has said
-    /// anything about `ticket`.
-    pub(super) fn render_ticket_link(&self, ticket: &str) -> Option<AnyElement> {
-        let t = self.linear_tickets.get(&ticket.to_ascii_uppercase())?;
-        let pill = t.sla_breaches_at.as_deref().and_then(|b| {
-            linear_watch::sla_pill(b, t.sla_high_risk_at.as_deref(), SystemTime::now())
-        });
-        let url = t.url.clone();
-        Some(
+    /// A run's ticket under its card and on its Pipeline tab: the SLA pill and **Open in
+    /// Linear**, then each PR its stages reported, one per line, labelled with the ticket.
+    pub(super) fn render_ticket_link(&self, ticket: &str, prs: &[String]) -> Option<AnyElement> {
+        let t = self.linear_tickets.get(&ticket.to_ascii_uppercase());
+        let pr_rows: Vec<AnyElement> = prs
+            .iter()
+            .filter_map(|url| {
+                let label = linear_watch::pr_label(ticket, url)?;
+                let url = url.clone();
+                Some(
+                    div()
+                        .id(SharedString::from(format!("pr-link-{ticket}-{url}")))
+                        .text_xs()
+                        .text_color(color(theme::TEAL))
+                        .cursor_pointer()
+                        .hover(|d| d.underline())
+                        .truncate()
+                        .child(format!("{label} ↗"))
+                        .on_click(move |_, _, cx| cx.open_url(&url))
+                        .into_any_element(),
+                )
+            })
+            .collect();
+        if t.is_none() && pr_rows.is_empty() {
+            return None;
+        }
+        let linear = t.map(|t| {
+            let pill = t.sla_breaches_at.as_deref().and_then(|b| {
+                linear_watch::sla_pill(b, t.sla_high_risk_at.as_deref(), SystemTime::now())
+            });
+            let url = t.url.clone();
             h_flex()
                 .gap_2()
                 .children(pill.map(|(text, level)| {
@@ -463,16 +485,29 @@ impl Workspace {
                             .on_click(move |_, _, cx| cx.open_url(&url)),
                     )
                 })
+        });
+        Some(
+            v_flex()
+                .gap(px(3.))
+                .min_w_0()
+                .children(linear)
+                .children(pr_rows)
                 .into_any_element(),
         )
     }
 
-    /// The ticket of `orch`'s current run.
-    pub(super) fn current_ticket(&self, orch: PaneId, cx: &gpui::App) -> Option<String> {
+    /// The ticket of `orch`'s current run and the PRs its stages reported.
+    pub(super) fn current_ticket(
+        &self,
+        orch: PaneId,
+        cx: &gpui::App,
+    ) -> Option<(String, Vec<String>)> {
         let token = self.panes.get(&orch)?.read(cx).mcp_token()?.to_string();
         let sv = server::get()?;
         let reg = server::lock(sv.registry());
-        reg.runs.current(&token).map(|r| r.ticket.clone())
+        reg.runs
+            .current(&token)
+            .map(|r| (r.ticket.clone(), linear_watch::pr_links(r)))
     }
 
     /// The Linear lines under an orchestrator's card: the Automatic/Manual switch, its state,

@@ -253,6 +253,17 @@ pub fn pr_links(run: &Run) -> Vec<String> {
     found
 }
 
+/// How a PR shows under its ticket's Linear link: `INTH-169 · PR version2-frontend #5546`.
+/// Says which ticket it belongs to, as a card can sit beside others; `None` for a link that
+/// isn't a GitHub pull request.
+pub fn pr_label(ticket: &str, url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://github.com/")?;
+    let mut parts = rest.split('/');
+    let (_owner, repo, pull, n) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    (pull == "pull" && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| format!("{ticket} · PR {repo} #{n}"))
+}
+
 /// The comment an ended run leaves (§4): how it ended, each stage's score and summary, and
 /// its PR links.
 pub fn end_comment(run: &Run) -> String {
@@ -631,6 +642,20 @@ mod tests {
         let (ok, text) = pick_result(&s, &failed);
         assert!(!ok);
         assert!(text.starts_with("Couldn't look in Linear: "), "{text}");
+    }
+
+    #[test]
+    fn a_pr_is_labelled_with_its_ticket_repo_and_number() {
+        assert_eq!(
+            pr_label(
+                "INTH-169",
+                "https://github.com/iov42/version2-frontend/pull/5546"
+            )
+            .as_deref(),
+            Some("INTH-169 · PR version2-frontend #5546")
+        );
+        assert_eq!(pr_label("INTH-1", "https://github.com/a/b/issues/3"), None);
+        assert_eq!(pr_label("INTH-1", "https://example.com/a/b/pull/3"), None);
     }
 
     #[test]

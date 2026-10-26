@@ -145,6 +145,9 @@ impl Workspace {
             .iter()
             .map(|q| q.ticket.clone())
             .collect();
+        let passed_over: Vec<String> = self.slack_mine.iter().cloned().collect();
+        let exe = crate::mcp::server::get()
+            .and_then(|sv| crate::mcp::server::lock(sv.registry()).hydra_exe.clone());
         let w = self.linear_watch.entry(orch).or_default();
         w.checking = true;
         w.last = Some(SystemTime::now());
@@ -158,16 +161,42 @@ impl Workspace {
             let found = cx
                 .background_spawn(async move {
                     let token = hydra.slack_token(&env)?;
-                    let ran: Vec<String> = crate::run_history::read(hydra.paths.root(), &[])
+                    let mut ran: Vec<String> = crate::run_history::read(hydra.paths.root(), &[])
                         .into_iter()
                         .map(|e| e.ticket)
                         .collect();
+                    ran.extend(passed_over);
+                    // Pull requests the person watching opened are theirs: GitHub won't let
+                    // them approve their own, so they're left alone. Asked of GitHub as the
+                    // environment, who it is once per look.
+                    let login: std::cell::OnceCell<Result<String, String>> =
+                        std::cell::OnceCell::new();
+                    let mine = |pr: &crate::slack::Pr| -> Result<bool, LinearError> {
+                        let exe = exe.as_deref().ok_or(LinearError::Failed(
+                            "hydraui can't find hydra to ask GitHub".into(),
+                        ))?;
+                        let me = login
+                            .get_or_init(|| crate::branch_rule::gh_login(exe, &env))
+                            .clone()
+                            .map_err(|e| {
+                                LinearError::Failed(format!("can't ask GitHub who you are: {e}"))
+                            })?;
+                        let author =
+                            crate::branch_rule::gh_author_of(exe, &env, &pr.url).map_err(|e| {
+                                LinearError::Failed(format!(
+                                    "can't ask GitHub who opened {}: {e}",
+                                    pr.title()
+                                ))
+                            })?;
+                        Ok(author.eq_ignore_ascii_case(&me))
+                    };
                     slack_watch::find_and_mark(
                         &crate::slack::Http { token },
                         &s,
                         SystemTime::now(),
                         &ran,
                         &queued,
+                        &mine,
                     )
                 })
                 .await;
@@ -184,7 +213,7 @@ impl Workspace {
         orch: PaneId,
         pipeline: &Pipeline,
         settings: &SlackSettings,
-        found: Result<Vec<Queued>, LinearError>,
+        found: Result<slack_watch::Found, LinearError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -193,6 +222,20 @@ impl Workspace {
         };
         w.checking = false;
         let by_hand = std::mem::take(&mut w.by_hand);
+        if let Ok(f) = &found
+            && !f.mine.is_empty()
+        {
+            crate::action_log::write(format!(
+                "slack: {}: passed over {} (you opened them)",
+                pipeline.file,
+                f.mine.join(", ")
+            ));
+            self.slack_mine.extend(f.mine.iter().cloned());
+        }
+        let Some(w) = self.linear_watch.get_mut(&orch) else {
+            return;
+        };
+        let found = found.map(|f| f.queued);
         match found {
             Ok(prs) if !prs.is_empty() => {
                 w.failures.clear();

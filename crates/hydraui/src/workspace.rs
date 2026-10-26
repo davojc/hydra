@@ -238,6 +238,9 @@ pub struct Workspace {
     linear_watch: HashMap<PaneId, linear::Watch>,
     /// Pull requests a `[slack]` pipeline took and hasn't started yet, by pipeline file.
     slack_queues: HashMap<String, std::collections::VecDeque<crate::slack_watch::Queued>>,
+    /// Pull requests a Slack watcher passed over because their author is the person watching,
+    /// so GitHub isn't asked about them again.
+    slack_mine: std::collections::HashSet<String>,
     /// Runs' tickets as Linear last said, by identifier: the card's SLA and link (phase 2 §5).
     linear_tickets: HashMap<String, crate::linear::Ticket>,
     /// Cards being offered or just sent, so one card never goes to two sessions.
@@ -453,6 +456,7 @@ impl Workspace {
             ask_checks: HashMap::new(),
             linear_watch: HashMap::new(),
             slack_queues: HashMap::new(),
+            slack_mine: std::collections::HashSet::new(),
             linear_tickets: HashMap::new(),
             in_flight: Default::default(),
             _mcp_pump: mcp_pump,

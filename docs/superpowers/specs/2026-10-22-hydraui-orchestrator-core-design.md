@@ -667,6 +667,12 @@ watch = true                # start in Automatic
   (`link`, new); stage prompts get it as `{pr}` (or `{link}`). One it hasn't started within 5
   minutes is skipped with a notification.
 - **Take next PR** (Manual) starts the next waiting pull request, else looks now.
+- **Your own pull requests are skipped** (Jordan, 2026-10-26): the first real one, version2-frontend
+  #5548, was Jordan's own, and GitHub won't let an author approve. A look asks GitHub, as the
+  environment's `gh` login (`hydra run <env> -- gh`), who you are (once) and who opened each
+  candidate. Yours aren't queued, and a message carrying only yours gets no reaction, so someone
+  else can take it. Passed-over PRs are remembered while hydraui runs, so GitHub isn't asked
+  again. A failed lookup fails the look, like any other.
 - **In Pipeline settings** (added later the same day): a **Slack** section beside **Linear**, with
   the channel id, how it's shown, how often to check, how far back to look and the reaction.
   Turning one trigger on turns the other off, and saving refuses both at once. The table keeps

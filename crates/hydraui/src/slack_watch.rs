@@ -55,16 +55,26 @@ pub fn pick<'a>(
         .collect()
 }
 
+/// What a look found: the pull requests to run, and the ones passed over because the person
+/// watching opened them (GitHub won't let an author approve their own).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Found {
+    pub queued: Vec<Queued>,
+    pub mine: Vec<String>,
+}
+
 /// One look: the channel's messages from the last `lookback_hours`, each one to take marked
 /// with the reaction, and their pull requests in order. `ran` are tickets hydraui has run
-/// before; `queued` are waiting already.
+/// before or passed over; `queued` are waiting already. `mine` says whether the person watching
+/// opened a pull request: theirs are left alone, and a message with only theirs isn't marked.
 pub fn find_and_mark(
     api: &dyn SlackApi,
     settings: &SlackSettings,
     now: SystemTime,
     ran: &[String],
     queued: &[String],
-) -> Result<Vec<Queued>, LinearError> {
+    mine: &dyn Fn(&Pr) -> Result<bool, LinearError>,
+) -> Result<Found, LinearError> {
     let since = now
         .checked_sub(Duration::from_secs(
             u64::from(settings.lookback_hours) * 3600,
@@ -74,11 +84,24 @@ pub fn find_and_mark(
         .map_or(0, |d| d.as_secs());
     let messages = api.history(&settings.channel, since)?;
     let taken = |t: &str| ran.iter().chain(queued).any(|r| r.eq_ignore_ascii_case(t));
-    let mut found = Vec::new();
+    let mut found = Found::default();
     for (m, prs) in pick(&messages, &settings.reaction, taken) {
+        let mut theirs = Vec::new();
+        for p in prs {
+            if mine(&p)? {
+                found.mine.push(p.ticket());
+            } else {
+                theirs.push(p);
+            }
+        }
+        if theirs.is_empty() {
+            continue;
+        }
         // Marked first: if that fails, nothing is queued, and the next look tries again.
         api.react(&settings.channel, &m.ts, &settings.reaction)?;
-        found.extend(prs.iter().map(|p| Queued::of(p, &m.user)));
+        found
+            .queued
+            .extend(theirs.iter().map(|p| Queued::of(p, &m.user)));
     }
     Ok(found)
 }
@@ -224,8 +247,10 @@ mod tests {
             SystemTime::now(),
             &["svc-usage-60".into()],
             &["svc-usage-63".into()],
+            &|_| Ok(false),
         )
-        .unwrap();
+        .unwrap()
+        .queued;
         assert_eq!(
             found.iter().map(|q| q.ticket.as_str()).collect::<Vec<_>>(),
             ["svc-usage-61", "svc-usage-62"]
@@ -239,13 +264,48 @@ mod tests {
     }
 
     #[test]
+    fn pull_requests_the_watcher_opened_are_left_alone() {
+        let api = Fake {
+            messages: vec![
+                msg("1", &format!("{PR}70|mine>"), &[]),
+                msg("2", &format!("{PR}71|mine> and {PR}72|theirs>"), &[]),
+            ],
+            reacted: RefCell::default(),
+            fail_react: false,
+        };
+        let mine = |p: &Pr| Ok(p.number != 72);
+        let found = find_and_mark(&api, &settings(), SystemTime::now(), &[], &[], &mine).unwrap();
+        assert_eq!(
+            found
+                .queued
+                .iter()
+                .map(|q| q.ticket.as_str())
+                .collect::<Vec<_>>(),
+            ["svc-usage-72"]
+        );
+        assert_eq!(found.mine, ["svc-usage-70", "svc-usage-71"]);
+        assert_eq!(
+            *api.reacted.borrow(),
+            ["2:eyes"],
+            "a message of only mine isn't marked"
+        );
+        let down = |_: &Pr| Err(LinearError::Failed("gh down".into()));
+        assert!(find_and_mark(&api, &settings(), SystemTime::now(), &[], &[], &down).is_err());
+    }
+
+    #[test]
     fn nothing_is_queued_when_marking_fails() {
         let api = Fake {
             messages: vec![msg("1", &format!("{PR}60|x>"), &[])],
             reacted: RefCell::default(),
             fail_react: true,
         };
-        assert!(find_and_mark(&api, &settings(), SystemTime::now(), &[], &[]).is_err());
+        assert!(
+            find_and_mark(&api, &settings(), SystemTime::now(), &[], &[], &|_| Ok(
+                false
+            ))
+            .is_err()
+        );
     }
 
     #[test]

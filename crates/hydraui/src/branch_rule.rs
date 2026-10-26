@@ -144,6 +144,39 @@ pub fn gh_branch_of(hydra: &Path, env: &str, url: &str) -> Result<String, String
     }
 }
 
+/// `gh <args>` as `env`'s own GitHub login (`hydra run <env> -- gh …`): its trimmed output.
+/// Blocks, so not on the UI thread.
+fn gh(hydra: &Path, env: &str, args: &[&str]) -> Result<String, String> {
+    let mut cmd = std::process::Command::new(hydra);
+    cmd.args(["run", env, "--", "gh"]).args(args);
+    let out = output_within(cmd, LOOKUP_LIMIT)?;
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if out.status.success() && !stdout.is_empty() {
+        Ok(stdout)
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        Err(if err.is_empty() {
+            format!("gh {} gave nothing", args.join(" "))
+        } else {
+            err
+        })
+    }
+}
+
+/// Who `env` is on GitHub.
+pub fn gh_login(hydra: &Path, env: &str) -> Result<String, String> {
+    gh(hydra, env, &["api", "user", "-q", ".login"])
+}
+
+/// Who opened pull request `url`.
+pub fn gh_author_of(hydra: &Path, env: &str, url: &str) -> Result<String, String> {
+    gh(
+        hydra,
+        env,
+        &["pr", "view", url, "--json", "author", "-q", ".author.login"],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

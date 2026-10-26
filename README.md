@@ -74,6 +74,15 @@ hydraui runs the same environments as the CLI, in one window. Start it from the 
 
 hydraui terminals skip the CLI's folder guard; a terminal whose folder is bound to another environment shows a warning badge instead.
 
+### Phone access
+
+hydraui can serve one phone: its sessions and their alerts, and the task boards, where the phone can add cards and move them, including into Pickup. The phone talks straight to hydraui over an encrypted peer-to-peer link (iroh), with no server of ours in the middle. The Android app is coming (plan 2); this release has hydraui's side.
+
+- **Off until you turn it on.** In **Settings › Phone**, turn on **Let my phone connect**. While it's off, hydraui listens for nothing.
+- **Pair by QR code.** **Pair a phone** shows a QR code that works for two minutes. Scan it with the app, and check both screens show the same two words. Only the paired phone can connect, and only one phone is paired at a time: pairing another replaces it. **Unpair** forgets it.
+- **One window holds the link.** With several hydraui windows open, the phone connects to one of them and sees its terminals and boards; when that window closes, another takes over.
+- **Remote Control.** Each environment's page in Settings has **Claude sessions start with Remote Control**, so a stuck session is already reachable from the Claude app. From the phone, a session can also have it turned on when it is idle with nothing typed.
+
 ## Quick start: two GitHub and Claude accounts
 
 **1. One SSH key per GitHub account.** GitHub won't accept the same key on two accounts. Add each `.pub` file to the matching account under *Settings → SSH and GPG keys*.

@@ -63,6 +63,10 @@ pub struct UiConfig {
     pub colors: ColorsConfig,
     /// Command name → keys, e.g. `new_terminal = "ctrl-alt-d"`; `""` unbinds.
     pub keys: BTreeMap<String, String>,
+    /// The phone link is on.
+    pub phone_access: bool,
+    /// The paired phone's endpoint id.
+    pub phone: Option<String>,
     /// The share of the seven-day Claude limit, in percent, a pipeline stage needs left
     /// (orchestrator spec §5.1).
     pub min_week_left: u8,
@@ -79,6 +83,8 @@ impl Default for UiConfig {
             editor: None,
             colors: ColorsConfig::default(),
             keys: BTreeMap::new(),
+            phone_access: false,
+            phone: None,
             min_week_left: crate::runs::MIN_WEEK_LEFT,
         }
     }
@@ -130,6 +136,8 @@ pub fn parse(text: &str) -> (UiConfig, Vec<String>) {
             }),
             "editor" => get(value).map(|e| cfg.editor = Some(e)),
             "keys" => get(value).map(|k| cfg.keys = k),
+            "phone_access" => get(value).map(|b| cfg.phone_access = b),
+            "phone" => get(value).map(|p| cfg.phone = Some(p)),
             "min_week_left" => get::<i64>(value).and_then(|n| {
                 let n = u8::try_from(n)
                     .ok()
@@ -239,7 +247,15 @@ pub fn set(paths: &HydraPaths, key: &str, value: Option<toml_edit::Value>) -> Re
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    std::fs::write(&path, out).map_err(|e| format!("can't write {}: {e}", path.display()))
+    // Written beside it, then moved over it: another window reading the settings (the phone
+    // link reads them each time it tries to start) never sees a half-written file.
+    let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
+    let written = std::fs::write(&tmp, &out).and_then(|()| std::fs::rename(&tmp, &path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        std::fs::write(&path, out).map_err(|e| format!("can't write {}: {e}", path.display()))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -265,6 +281,21 @@ mod tests {
         let (cfg, problems) = parse(text);
         assert!(problems.is_empty(), "{problems:?}");
         cfg
+    }
+
+    #[test]
+    fn config_reads_phone_settings() {
+        let cfg = clean(
+            "phone_access = true
+phone = \"abc\"",
+        );
+        assert!(cfg.phone_access);
+        assert_eq!(cfg.phone.as_deref(), Some("abc"));
+        let cfg = clean("");
+        assert!(!cfg.phone_access);
+        assert_eq!(cfg.phone, None);
+        let (_, problems) = parse("phone_access = \"yes\"");
+        assert!(problems.iter().any(|p| p.starts_with("phone_access:")));
     }
 
     #[test]

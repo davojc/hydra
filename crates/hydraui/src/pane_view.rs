@@ -91,6 +91,13 @@ pub struct PaneView {
     claude: Option<SessionState>,
     /// Whether that session has a draft in its input and has clearly finished its turn.
     readiness: Readiness,
+    /// Whether Remote Control is on for the Claude session here: its environment starts
+    /// sessions with it, or the phone turned it on. Back to `env_remote_control` when the
+    /// session ends.
+    remote_control: bool,
+    /// The environment's `[claude] remote_control`, known once the terminal has started
+    /// (read by the launch, off the UI thread).
+    env_remote_control: bool,
     /// The user's name for this terminal (Rename, a layout's `title`); none: the folder's.
     name: Option<String>,
     /// The title the program set, kept for a tooltip; it never names the terminal.
@@ -171,6 +178,13 @@ fn hit_cell(dx: f32, dy: f32, cell: (f32, f32), size: GridSize) -> Option<(usize
     inside.then(|| grid_cell(dx, dy, cell, size))
 }
 
+/// Remote Control for a terminal once its Claude session state is `claude`: with no session
+/// it is the environment's setting; during one it stays as it is (the env's, or what the
+/// phone turned on).
+fn remote_control_after(claude: Option<SessionState>, now: bool, env: bool) -> bool {
+    if claude.is_none() { env } else { now }
+}
+
 /// A terminal's name: the user's, else its folder's name (spec §2.2 of the env-tabs design).
 pub fn label_for(name: Option<&str>, cwd: &Path) -> String {
     match name.map(str::trim).filter(|n| !n.is_empty()) {
@@ -233,6 +247,8 @@ impl PaneView {
             prompt: None,
             claude: None,
             readiness: Readiness::default(),
+            remote_control: false,
+            env_remote_control: false,
             name: None,
             title: None,
             focus,
@@ -308,7 +324,26 @@ impl PaneView {
             self.readiness.state(self.claude, state);
         }
         self.claude = (state != SessionState::Ended).then_some(state);
+        self.settle_remote_control();
         cx.notify();
+    }
+
+    /// Whether Remote Control is on for the Claude session here.
+    pub fn remote_control(&self) -> bool {
+        self.remote_control
+    }
+
+    /// Records that the phone typed `/remote-control`. Optimistic: nothing tells us whether
+    /// Claude accepted it, so we don't try to detect a failure; the flag falls back to the
+    /// environment's setting when the session ends.
+    pub fn set_remote_control(&mut self, on: bool) {
+        self.remote_control = on;
+    }
+
+    /// No Claude session here any more: Remote Control is back to what the environment says.
+    fn settle_remote_control(&mut self) {
+        self.remote_control =
+            remote_control_after(self.claude, self.remote_control, self.env_remote_control);
     }
 
     /// Whether the Claude session here has a draft and has clearly finished its turn.
@@ -433,6 +468,7 @@ impl PaneView {
         self.slot = Slot::Starting;
         self.prompt = None;
         self.claude = None;
+        self.settle_remote_control();
         // Layout restore resumes Claude's last conversation, which may end in a question.
         self.readiness =
             if self.request.command.as_deref() == Some(hydraui_sets::layout::RESUME_CLAUDE) {
@@ -477,6 +513,9 @@ impl PaneView {
                     .collect();
                 self._tasks.push(pump(s.events, generation, cx));
                 self.slot = Slot::Running(s.pane);
+                self.env_remote_control = s.remote_control;
+                self.remote_control =
+                    remote_control_after(self.claude, self.remote_control, s.remote_control);
             }
             Err(e) => self.slot = Slot::Failed(e),
         }
@@ -501,6 +540,7 @@ impl PaneView {
                 // Back at the prompt: whatever ran (Claude too) has ended.
                 if p != PromptState::CommandRunning {
                     self.claude = None;
+                    self.settle_remote_control();
                 }
                 cx.emit(PaneEvent::PromptChanged);
             }
@@ -513,6 +553,7 @@ impl PaneView {
                 self.slot = Slot::Exited(code);
                 self.prompt = None;
                 self.claude = None;
+                self.settle_remote_control();
                 self.finder = None;
                 cx.emit(PaneEvent::Exited);
                 cx.notify();
@@ -1425,6 +1466,18 @@ impl Render for PaneView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_control_follows_the_session() {
+        use crate::mcp::SessionState::*;
+        // Turned on by the phone: kept while the session lives, gone when it ends.
+        assert!(remote_control_after(Some(Idle), true, false));
+        assert!(!remote_control_after(None, true, false));
+        // On in the environment: stays on across sessions.
+        assert!(remote_control_after(None, true, true));
+        assert!(remote_control_after(None, false, true));
+        assert!(!remote_control_after(Some(Working), false, false));
+    }
 
     #[test]
     fn finishing_a_selection_copies_only_real_text() {

@@ -13,6 +13,8 @@ hydra-core.workspace = true
 hydra-platform.workspace = true
 hydra-providers.workspace = true
 hydra-update.workspace = true
+hydra-link.workspace = true
+qrcode = { version = "0.14", default-features = false }
 dirs.workspace = true
 hydraui-term.workspace = true
 hydraui-sets.workspace = true

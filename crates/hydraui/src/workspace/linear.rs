@@ -545,7 +545,8 @@ impl Workspace {
                         }))
                         .child(line),
                 )
-                .when(open_run.is_none(), |d| {
+                // Automatic picks by itself; a pick by hand is for Manual (or Stopped).
+                .when(!on && open_run.is_none(), |d| {
                     d.child(
                         h_flex().child(
                             Button::new(SharedString::from(format!("linear-now-{orch}")))

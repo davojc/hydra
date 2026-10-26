@@ -186,8 +186,8 @@ the orchestrator asking "which ticket?" while its log said it was watching. The 
 mode:
 
 - **A switch and a pill**: **● Automatic** (hydraui picks), **○ Manual** (only what you give it)
-  or **■ Stopped** (it switched itself off; the line says why). **Pick next ticket** picks
-  once in either mode (a spinner while it looks, then a notification saying what it picked or
+  or **■ Stopped** (it switched itself off; the line says why). **Pick next ticket**, shown only
+  in Manual or Stopped (Automatic picks by itself), picks once (a spinner while it looks, then a notification saying what it picked or
   why nothing), and is hidden while a ticket runs. A failed pick by hand doesn't count
   against Automatic.
 - **One line** on what happens next: `Nothing new · next look in 4 min`, `Looking in Linear…`,

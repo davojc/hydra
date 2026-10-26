@@ -976,8 +976,58 @@ impl Workspace {
                 crate::action_log::write(format!("run {run}: woke a session: {message}"));
                 self.reserved.insert(pane, std::time::Instant::now());
                 self.pending_wakes.remove(&pane);
+                let tries = self.wake_tries.remove(&pane).unwrap_or(0) + 1;
+                self.sent_wakes
+                    .insert(pane, (run, message, std::time::Instant::now(), tries));
             }
         }
+    }
+
+    /// A wake-up typed 30 seconds ago whose session never started working didn't reach Claude
+    /// (a Claude Code prompt was open over the input): it's sent again, up to 3 times, then
+    /// the user is told to look at that terminal.
+    pub(super) fn recheck_wakes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        const TAKE: std::time::Duration = std::time::Duration::from_secs(30);
+        let stale: Vec<PaneId> = self
+            .sent_wakes
+            .iter()
+            .filter(|(_, (_, _, at, _))| at.elapsed() >= TAKE)
+            .map(|(p, _)| *p)
+            .collect();
+        for pane in stale {
+            let Some((run, message, _, tries)) = self.sent_wakes.remove(&pane) else {
+                continue;
+            };
+            let Some(view) = self.panes.get(&pane) else {
+                continue;
+            };
+            if view.read(cx).claude() != Some(crate::mcp::SessionState::Idle) {
+                continue;
+            }
+            if tries >= 3 {
+                let name = self.pane_name(pane, cx);
+                crate::action_log::write(format!(
+                    "run {run}: {name} didn't take a wake-up after 3 tries"
+                ));
+                window.push_notification(
+                    Notification::warning(format!(
+                        "{name} isn't taking messages from hydraui. Look at its terminal: \
+                         Claude Code may be showing a question. Answer it, and hydraui carries \
+                         on."
+                    ))
+                    .title(run.clone()),
+                    cx,
+                );
+                continue;
+            }
+            crate::action_log::write(format!(
+                "run {run}: the wake-up didn't take; sending it again"
+            ));
+            // Back out, with the tries already made counted.
+            self.wake_tries.insert(pane, tries);
+            self.pending_wakes.insert(pane, (run, message));
+        }
+        self.send_wakes(window, cx);
     }
 
     /// The selected environment's pipeline cards (§7.1): for each terminal that started a run,

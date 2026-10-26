@@ -124,6 +124,11 @@ impl Workspace {
             self.pane_name(id, cx),
             if resumed { " (resumed session)" } else { "" }
         ));
+        // A wake-up typed to it took.
+        if state == SessionState::Working {
+            self.sent_wakes.remove(&id);
+            self.wake_tries.remove(&id);
+        }
         // Its first turn is over: it can be handed work.
         if before == Some(SessionState::Working) && state == SessionState::Idle {
             self.starting_up.remove(&id);

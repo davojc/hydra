@@ -66,7 +66,7 @@ use tree_ops::NameFor;
 
 /// The terminal list's width: it starts at the default, can't be dragged narrower than the
 /// minimum, and always leaves the middle at least `MIN_PANES_WIDTH` beside the tree.
-pub(super) const DEFAULT_LIST_WIDTH: f32 = 240.0;
+pub(super) const DEFAULT_LIST_WIDTH: f32 = 280.0;
 const MIN_LIST_WIDTH: f32 = 120.0;
 /// The divider between the list and the middle.
 const LIST_DIVIDER_WIDTH: f32 = 4.0;
@@ -232,6 +232,11 @@ pub struct Workspace {
     /// Each orchestrator's wake-up waiting to be typed, with its run (orchestrator spec §6): the
     /// newest only.
     pending_wakes: HashMap<PaneId, (String, String)>,
+    /// Wake-ups typed but not yet seen to start the session working: (run, message, when,
+    /// times sent). One that doesn't take (a Claude Code prompt was open) is sent again.
+    sent_wakes: HashMap<PaneId, (String, String, Instant, u8)>,
+    /// Times a wake-up waiting to be sent again was already sent.
+    wake_tries: HashMap<PaneId, u8>,
     /// When each run waiting on product last had its stage look in the Slack thread.
     ask_checks: HashMap<String, std::time::SystemTime>,
     /// Each orchestrator's Linear watcher (orchestrator phase 2 §3).
@@ -316,6 +321,8 @@ impl Workspace {
                         ws.linear_tick(window, cx);
                         // A stage waiting on product looks in its Slack thread.
                         ws.asking_tick(window, cx);
+                        // A wake-up that didn't take is sent again.
+                        ws.recheck_wakes(window, cx);
                         // The Pipeline tab's session times tick.
                         if ws
                             .envs
@@ -459,6 +466,8 @@ impl Workspace {
             board_events: HashMap::new(),
             reserved: HashMap::new(),
             pending_wakes: HashMap::new(),
+            sent_wakes: HashMap::new(),
+            wake_tries: HashMap::new(),
             ask_checks: HashMap::new(),
             linear_watch: HashMap::new(),
             slack_queues: HashMap::new(),

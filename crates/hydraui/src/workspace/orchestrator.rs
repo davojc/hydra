@@ -1037,6 +1037,102 @@ impl Workspace {
         self.send_wakes(window, cx);
     }
 
+    /// **End** on a pipeline's card: asks, then ends it (`end_pipeline`).
+    pub(super) fn end_pipeline_dialog(
+        &mut self,
+        orch: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = self
+            .pipeline_of(orch, cx)
+            .map_or_else(|| "this pipeline".to_string(), |(n, _)| n);
+        let slots = self.slots(orch, cx);
+        let open = slots.iter().filter(|s| self.has_open_run(**s, cx)).count();
+        let tickets = match open {
+            0 => "No ticket is in progress.".to_string(),
+            1 => "Its ticket in progress is stopped, recorded as stopped by you.".to_string(),
+            n => format!("Its {n} tickets in progress are stopped, recorded as stopped by you."),
+        };
+        let body = format!(
+            "{tickets} Its orchestrator{} and every session under {} close, and it stops \
+             looking for work. Start it again any time with Start pipeline.",
+            if slots.len() > 1 { "s" } else { "" },
+            if slots.len() > 1 { "them" } else { "it" },
+        );
+        let ws = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let ws = ws.clone();
+            dialog
+                .title(format!("End {name}?"))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(color(theme::TEXT))
+                        .child(body.clone()),
+                )
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("end-pipeline-cancel")
+                                .label("Cancel")
+                                .ghost()
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("end-pipeline-go")
+                                .label("End pipeline")
+                                .danger()
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    ws.update(cx, |ws, cx| ws.end_pipeline(orch, window, cx));
+                                }),
+                        ),
+                )
+        });
+    }
+
+    /// Ends the pipeline orchestrator `orch` runs: each of its orchestrators' open ticket
+    /// stops (as **Stop this ticket**), then they and every session under them close.
+    fn end_pipeline(&mut self, orch: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        let slots = self.slots(orch, cx);
+        let panes: Vec<PaneId> = self
+            .pipeline_cards(cx)
+            .into_iter()
+            .filter(|(o, _, _)| slots.contains(o))
+            .flat_map(|(o, _, p)| std::iter::once(o).chain(p))
+            .collect();
+        for s in &slots {
+            let token = self
+                .panes
+                .get(s)
+                .and_then(|v| v.read(cx).mcp_token().map(str::to_string));
+            let run = token.zip(server::get()).and_then(|(t, sv)| {
+                server::lock(sv.registry())
+                    .runs
+                    .current(&t)
+                    .filter(|r| r.state.open())
+                    .map(|r| r.id.clone())
+            });
+            if let Some(run) = run {
+                self.person_choice(*s, &run, crate::runs::Choice::Stop, window, cx);
+            }
+        }
+        let mut closed = std::collections::HashSet::new();
+        for p in panes {
+            if closed.insert(p) {
+                self.close_terminal_now(p, window, cx);
+            }
+        }
+        crate::action_log::write(format!(
+            "ended a pipeline: closed {} terminals",
+            closed.len()
+        ));
+        cx.notify();
+    }
+
     /// The colour of the pipeline terminal `pane` belongs to (its orchestrator or a stage's
     /// session), when it belongs to one.
     pub(super) fn pipeline_tint(&self, pane: PaneId, cx: &gpui::App) -> Option<gpui::Hsla> {
@@ -1254,6 +1350,17 @@ impl Workspace {
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(color(theme::TEXT))
                             .child(c.name.clone()),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("end-pipeline-{orchestrator}")))
+                            .label("End")
+                            .ghost()
+                            .xsmall()
+                            .tooltip("End this pipeline: stop its tickets and close its sessions")
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                cx.stop_propagation();
+                                ws.end_pipeline_dialog(orchestrator, window, cx);
+                            })),
                     ),
             )
             .child(

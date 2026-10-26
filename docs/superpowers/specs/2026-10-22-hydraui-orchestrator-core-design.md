@@ -818,3 +818,12 @@ The once-a-second redraw made the next-look bar step and the working dot blink o
   environment tab, the card's segment for the stage at work, and that stage's name in the
   Pipeline tab's timeline (its ring's dot stays steady).
 
+## 28. End a pipeline (added 2026-10-26)
+
+There was no way to end a pipeline short of closing its terminals one by one (Jordan,
+2026-10-26). Each pipeline's card now has **End** beside its name. It asks first, saying how many
+tickets are in progress; **End pipeline** then stops each of its orchestrators' open tickets (as
+**Stop this ticket**: logged as stopped by you) and closes its orchestrators and every session
+under them, so its trigger stops looking. **Start pipeline** starts it again; one with
+`[autostart]` also starts when hydraui does.
+

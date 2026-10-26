@@ -250,7 +250,7 @@ impl Workspace {
 
     /// A person's choice for run `run` (§5.3): applied under the registry's lock, written to the
     /// run's log with the note, then told to the app and the orchestrator.
-    fn person_choice(
+    pub(super) fn person_choice(
         &mut self,
         orch: PaneId,
         run: &str,

@@ -610,8 +610,8 @@ impl Workspace {
         }
     }
 
-    /// Starts `pipeline` in `env`: an orchestrator for each of its runs at once not open yet
-    /// (at least one).
+    /// Starts `pipeline` in `env` with one orchestrator; a pipeline allowed several tickets at
+    /// once gets more as its work needs them (`Workspace::slot_for_work`).
     fn open_orchestrator(
         &mut self,
         env: &str,
@@ -619,12 +619,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let want = crate::pipeline::load(self.hydra.paths.root(), pipeline)
-            .map_or(1, |p| usize::from(p.runs_at_once));
-        let open = self.open_slots(env, pipeline, cx);
-        for _ in 0..want.saturating_sub(open).max(1) {
-            self.open_orchestrator_slot(env, pipeline, window, cx);
-        }
+        self.open_orchestrator_slot(env, pipeline, window, cx);
     }
 
     /// How many orchestrators run `pipeline` in `env`.
@@ -637,14 +632,14 @@ impl Workspace {
             .count()
     }
 
-    /// One orchestrator for `pipeline`; the first in `env` holds its trigger.
-    fn open_orchestrator_slot(
+    /// One orchestrator for `pipeline`, its pane; the first in `env` holds its trigger.
+    pub(super) fn open_orchestrator_slot(
         &mut self,
         env: &str,
         pipeline: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> crate::envs::PaneId {
         let open = self.open_slots(env, pipeline, cx);
         let first = open == 0;
         let want = crate::pipeline::load(self.hydra.paths.root(), pipeline)
@@ -694,6 +689,7 @@ impl Workspace {
             "started an orchestrator for {pipeline} in {env}{}",
             if watch { ", in Automatic" } else { "" }
         ));
+        id
     }
 
     /// At launch: each pipeline with `[autostart] env` gets its orchestrator in that
@@ -718,9 +714,7 @@ impl Workspace {
                 ));
                 continue;
             }
-            let want =
-                crate::pipeline::load(&root, &name).map_or(1, |p| usize::from(p.runs_at_once));
-            if self.open_slots(&env, &name, cx) >= want {
+            if self.open_slots(&env, &name, cx) > 0 {
                 continue;
             }
             // Its window shows the pipelines, not the start page.
@@ -734,7 +728,7 @@ impl Workspace {
                 .iter()
                 .position(|i| i.run.pipeline.file == name && i.env == env);
             let Some(idx) = left else {
-                self.open_orchestrator(&env, &name, window, cx);
+                self.open_orchestrator_slot(&env, &name, window, cx);
                 continue;
             };
             self.resume_run(idx, window, cx);
@@ -752,10 +746,6 @@ impl Workspace {
                 "autostart: {name} resumed the run hydraui closed on{}",
                 if watch { ", in Automatic" } else { "" }
             ));
-            // Its other runs at once start fresh beside it.
-            for _ in self.open_slots(&env, &name, cx)..want {
-                self.open_orchestrator_slot(&env, &name, window, cx);
-            }
         }
     }
 

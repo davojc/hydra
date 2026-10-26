@@ -705,8 +705,12 @@ A pipeline may work on several tickets together: `runs_at_once = N` (1 to 6; Pip
 **Runs at once**). The one-ticket-at-a-time rule stays per orchestrator; a pipeline simply gets N
 of them (Jordan chose "one card per run"):
 
-- **Starting** a pipeline opens an orchestrator for each run not open yet, in its environment;
-  autostart does the same, after resuming a run hydraui closed on.
+- **Starting** (Jordan, revised: "spun up once the first picks up a ticket") a pipeline opens
+  one orchestrator. When work arrives and every orchestrator is busy, another starts, up to
+  `runs_at_once` (`slot_for_work`); the ticket waits for it to be ready. So **Tickets at once**
+  (Pipeline settings → Advanced) reads **One at a time** or **Up to 2…6**. Extra orchestrators stay
+  open once started and take later work. Names are `orchestrator 1`, `2`, … when the pipeline
+  allows more than one.
 - **In the sidebar** (Jordan, revised the same day: not separate cards): one block per pipeline,
   with one card (its name, "1 of 2 running", the most urgent state), its trigger row, then
   `orchestrator 1`, `orchestrator 2`, … each with its ticket line (ticket · stage · state, its SLA

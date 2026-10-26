@@ -1062,10 +1062,11 @@ impl Workspace {
                                             v_flex()
                                                 .gap_2()
                                                 .child(section_tip(
-                                                    "Runs at once",
-                                                    "How many tickets it works on together. More \
-                                                     use the Claude week faster. Applies when the \
-                                                     pipeline next starts.",
+                                                    "Tickets at once",
+                                                    "One at a time: one orchestrator, one ticket \
+                                                     after another. Up to N: when every \
+                                                     orchestrator is busy and more work is \
+                                                     waiting, another starts, up to N.",
                                                 ))
                                                 .child(runs_buttons(orch, draft.runs, cx)),
                                         )
@@ -1178,7 +1179,11 @@ fn runs_buttons(orch: PaneId, chosen: u8, cx: &mut Context<Workspace>) -> gpui::
         .gap_1()
         .children((1..=pipeline::MAX_RUNS_AT_ONCE).map(|n| {
             let b = Button::new(SharedString::from(format!("pipeline-runs-{orch}-{n}")))
-                .label(n.to_string())
+                .label(if n == 1 {
+                    "One at a time".to_string()
+                } else {
+                    format!("Up to {n}")
+                })
                 .small()
                 .on_click(cx.listener(move |ws, _, _, cx| ws.with_draft(orch, cx, |d| d.runs = n)));
             if n == chosen { b.primary() } else { b.ghost() }

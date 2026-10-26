@@ -89,12 +89,12 @@ impl Workspace {
                 cx,
             );
         }
-        let Some(slot) = self.free_slot(orch, cx) else {
+        if self.slack_queue(&pipeline.file).is_empty() {
+            return self.can_take(orch, cx);
+        }
+        let Some(slot) = self.slot_for_work(orch, window, cx) else {
             return false;
         };
-        if self.slack_queue(&pipeline.file).is_empty() {
-            return true;
-        }
         self.start_next_pr(orch, slot, &pipeline, &settings, window, cx);
         false
     }
@@ -257,7 +257,7 @@ impl Workspace {
                 }
                 self.slack_queue(&pipeline.file).extend(prs);
                 self.save_slack_queue(&pipeline.file);
-                if let Some(slot) = self.free_slot(orch, cx) {
+                if let Some(slot) = self.slot_for_work(orch, window, cx) {
                     self.start_next_pr(orch, slot, pipeline, settings, window, cx);
                 }
             }

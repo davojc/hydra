@@ -118,6 +118,44 @@ impl Workspace {
         })
     }
 
+    /// Whether `orch`'s pipeline can take another ticket now: a free orchestrator, or room for
+    /// one more (`runs_at_once`).
+    pub(super) fn can_take(&self, orch: PaneId, cx: &gpui::App) -> bool {
+        self.free_slot(orch, cx).is_some() || self.slots(orch, cx).len() < self.max_runs(orch)
+    }
+
+    /// `orch`'s pipeline's `runs_at_once`.
+    fn max_runs(&self, orch: PaneId) -> usize {
+        self.orchestrators
+            .get(&orch)
+            .and_then(|f| crate::pipeline::load(self.hydra.paths.root(), f).ok())
+            .map_or(1, |p| usize::from(p.runs_at_once))
+    }
+
+    /// The orchestrator a new ticket goes to: a free one, else a new one when the pipeline may
+    /// run another (each starts only when the others are busy and work is waiting).
+    pub(super) fn slot_for_work(
+        &mut self,
+        orch: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<PaneId> {
+        if let Some(slot) = self.free_slot(orch, cx) {
+            return Some(slot);
+        }
+        let slots = self.slots(orch, cx);
+        if slots.len() >= self.max_runs(orch) {
+            return None;
+        }
+        let file = self.orchestrators.get(&orch)?.clone();
+        let env = self.panes.get(&orch)?.read(cx).env().to_string();
+        crate::action_log::write(format!(
+            "{file}: every orchestrator is busy, starting orchestrator {}",
+            slots.len() + 1
+        ));
+        Some(self.open_orchestrator_slot(&env, &file, window, cx))
+    }
+
     /// Whether `orch` has a run open (one ticket at a time).
     pub(super) fn has_open_run(&self, orch: PaneId, cx: &gpui::App) -> bool {
         let token = self
@@ -234,7 +272,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(slot) = self.free_slot(orch, cx) else {
+        let Some(slot) = self.slot_for_work(orch, window, cx) else {
             window.push_notification(
                 Notification::info("Every run is busy: the next is picked when one ends.")
                     .title("Check Linear"),
@@ -301,7 +339,7 @@ impl Workspace {
                 let w = &self.linear_watch[id];
                 linear_watch::due(
                     w.on,
-                    self.free_slot(*id, cx).is_none(),
+                    !self.can_take(*id, cx),
                     w.last,
                     now,
                     Duration::from_secs(u64::from(every) * 60),
@@ -393,7 +431,7 @@ impl Workspace {
                 ));
                 let prompt = linear_watch::start_prompt(pipeline, &ticket);
                 // To whichever of the pipeline's runs at once is free.
-                let slot = self.free_slot(orch, cx).unwrap_or(orch);
+                let slot = self.slot_for_work(orch, window, cx).unwrap_or(orch);
                 self.linear_watch.entry(slot).or_default().starting =
                     Some((ticket.identifier.clone(), SystemTime::now()));
                 self.pending_wakes

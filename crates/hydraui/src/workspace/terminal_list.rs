@@ -14,6 +14,7 @@ use gpui_component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
 use super::Workspace;
 use crate::activity::Activity;
 use crate::envs::PaneId;
+use crate::orchestrator_theme::color;
 use crate::pane_view::label_for;
 
 /// `terminals` (each with its project) grouped by project: groups in the order their first
@@ -181,7 +182,8 @@ impl Workspace {
                 .gap_0p5()
                 .rounded(px(10.))
                 .border_1()
-                .border_color(tint.opacity(if active { 0.45 } else { 0.2 }))
+                // The pipeline's own colour, so pipelines are told apart at a glance.
+                .border_color(color(card.accent).opacity(if active { 0.55 } else { 0.3 }))
                 .child(self.render_pipeline_card(*orch, card, active, cx))
                 .children(self.render_question(*orch, cx))
                 .children(self.render_linear_row(*orch, cx));
@@ -205,7 +207,7 @@ impl Workspace {
                         .pl(px(6.))
                         .gap_0p5()
                         .border_l_2()
-                        .border_color(tint.opacity(0.35))
+                        .border_color(color(card.accent).opacity(0.45))
                         .children(stage_rows),
                 );
             }

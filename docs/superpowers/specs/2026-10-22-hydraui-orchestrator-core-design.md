@@ -678,3 +678,13 @@ watch = true                # start in Automatic
   had stopped back on Automatic. Canopy stores nothing (iov42/pw-dashboard branch
   `slack-connect`). Reached from the launcher (**Connect Slack…**) or the card's **Connect
   Slack** while its Slack watcher is stopped.
+
+## 19. A colour per pipeline (added 2026-10-26)
+
+With INTH and Review PR's side by side, their cards looked the same. A pipeline may set
+`color = "#rrggbb"`: its card's ◆, the selected card's tint and border, its progress segments, and
+the frame and guide line round its sessions take it. Without one it's the default teal. Pipeline
+settings → **Colour** offers eight (`pipeline::COLORS`: Teal, Blue, Violet, Pink, Orange, Yellow,
+Green, Slate); choosing Teal removes the key. The card reads the file each time it's drawn, so a
+change shows at once, even mid-run. State colours (the pill: working, needs you, asked product,
+done) are unchanged.

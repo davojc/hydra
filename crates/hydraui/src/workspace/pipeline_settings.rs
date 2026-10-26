@@ -50,6 +50,8 @@ pub(super) struct SettingsDraft {
     branch: Entity<InputState>,
     /// The Slack channel for product questions; empty: stages ask the user in hydraui.
     product: Entity<InputState>,
+    /// The card's accent; `None`: the default teal.
+    color: Option<u32>,
     bar: Entity<SliderState>,
     stages: Vec<DraftStage>,
     skills: Vec<String>,
@@ -120,6 +122,7 @@ impl SettingsDraft {
             autostart: self.saved.autostart.clone(),
             product_channel: Some(self.product.read(cx).value().trim().to_string())
                 .filter(|c| !c.is_empty()),
+            color: self.color,
             bar: slider_value(&self.bar, cx),
             stages: self
                 .stages
@@ -275,6 +278,7 @@ impl Workspace {
             name,
             branch,
             product,
+            color: saved.color,
             bar,
             stages: Vec::new(),
             skills,
@@ -906,6 +910,16 @@ impl Workspace {
                             .child(
                                 v_flex()
                                     .gap_2()
+                                    .child(section("Colour"))
+                                    .child(color_swatches(orch, draft.color, cx))
+                                    .child(text(12., theme::TEXT_MUTED).child(
+                                        "The card's diamond, progress and frame in the sidebar, so \
+                                         this pipeline stands out from the others.",
+                                    )),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_2()
                                     .child(section("Product questions"))
                                     .child(div().max_w(px(480.)).child(Input::new(&draft.product)))
                                     .child(text(12., theme::TEXT_MUTED).child(
@@ -1008,4 +1022,43 @@ impl Workspace {
             .child(save_bar)
             .into_any_element()
     }
+}
+
+/// The Colour row: one swatch per `pipeline::COLORS`, the chosen one ringed.
+fn color_swatches(
+    orch: PaneId,
+    chosen: Option<u32>,
+    cx: &mut Context<Workspace>,
+) -> gpui::AnyElement {
+    let chosen = chosen.unwrap_or(theme::TEAL);
+    h_flex()
+        .gap_2()
+        .children(pipeline::COLORS.iter().map(|(name, hex)| {
+            let (name, hex) = (*name, *hex);
+            let on = hex == chosen;
+            div()
+                .id(SharedString::from(format!(
+                    "pipeline-color-{orch}-{hex:06x}"
+                )))
+                .size(px(22.))
+                .rounded_full()
+                .p(px(3.))
+                .border_2()
+                .border_color(if on {
+                    color(theme::TEXT)
+                } else {
+                    gpui::transparent_black()
+                })
+                .cursor_pointer()
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(name).build(window, cx)
+                })
+                .child(div().size_full().rounded_full().bg(color(hex)))
+                .on_click(cx.listener(move |ws, _, _, cx| {
+                    // Teal is the default: chosen, the file needs no colour.
+                    let pick = (hex != theme::TEAL).then_some(hex);
+                    ws.with_draft(orch, cx, |d| d.color = pick)
+                }))
+        }))
+        .into_any_element()
 }

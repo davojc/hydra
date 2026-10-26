@@ -31,6 +31,9 @@ pub struct Pipeline {
     /// The Slack channel a stage asks a product question in, rather than deciding it
     /// (`[product] channel`); `None`: it asks the user in hydraui.
     pub product_channel: Option<String>,
+    /// Its accent on the card and the frame round its sessions (`color = "#rrggbb"`), so
+    /// pipelines are told apart at a glance; `None`: the default teal.
+    pub color: Option<u32>,
     /// Where its work comes from in Slack instead (`[slack]`): pull requests posted in a
     /// channel. A pipeline has one trigger, this or `linear`.
     pub slack: Option<SlackSettings>,
@@ -181,6 +184,33 @@ struct File {
     autostart: Option<FileAutostart>,
     product: Option<FileProduct>,
     slack: Option<FileSlack>,
+    color: Option<String>,
+}
+
+/// The colours Pipeline settings offers, by name: distinct from each other and from the card's
+/// state colours' meanings, and readable on the dark sidebar.
+pub const COLORS: [(&str, u32); 8] = [
+    ("Teal", 0x3fbfa6),
+    ("Blue", 0x5b9cf0),
+    ("Violet", 0x9b7cf0),
+    ("Pink", 0xe27bb8),
+    ("Orange", 0xe8935a),
+    ("Yellow", 0xd8c35a),
+    ("Green", 0x7cc46a),
+    ("Slate", 0x8fa1b3),
+];
+
+/// `#rrggbb` as a number.
+pub fn parse_color(text: &str) -> Result<u32, String> {
+    let hex = text.trim().strip_prefix('#').unwrap_or("");
+    if hex.len() != 6 {
+        return Err(format!("color {text:?} must be #rrggbb, e.g. \"#5b9cf0\""));
+    }
+    u32::from_str_radix(hex, 16).map_err(|_| format!("color {text:?} must be #rrggbb"))
+}
+
+pub fn color_text(c: u32) -> String {
+    format!("#{c:06x}")
 }
 
 #[derive(Deserialize)]
@@ -406,6 +436,7 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
             None => None,
         },
         slack: file.slack.map(slack_settings).transpose()?,
+        color: file.color.as_deref().map(parse_color).transpose()?,
     })
 }
 
@@ -425,6 +456,7 @@ pub struct Edit {
     pub linear: Option<LinearSettings>,
     pub autostart: Option<String>,
     pub product_channel: Option<String>,
+    pub color: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -463,6 +495,7 @@ impl From<&Pipeline> for Edit {
             linear: p.linear.clone(),
             autostart: p.autostart.clone(),
             product_channel: p.product_channel.clone(),
+            color: p.color,
         }
     }
 }
@@ -612,6 +645,12 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
         }
         None => {
             doc.remove("product");
+        }
+    }
+    match edit.color {
+        Some(c) => doc["color"] = value(color_text(c)),
+        None => {
+            doc.remove("color");
         }
     }
     let old: Vec<Table> = doc
@@ -868,6 +907,29 @@ What the previous stage handed over: {handoff}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_pipeline_colour_is_read_saved_and_cleared() {
+        let base = "name = \"PRs\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n";
+        assert_eq!(parse(base).unwrap().color, None);
+        let p = parse(&format!("color = \"#5B9CF0\"\n{base}")).unwrap();
+        assert_eq!(p.color, Some(0x5b9cf0));
+        let bad = parse(&format!("color = \"blue\"\n{base}")).unwrap_err();
+        assert!(bad.contains("#rrggbb"), "{bad}");
+
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(folder(d.path()).join("prs.toml"), format!("# mine\n{base}")).unwrap();
+        let mut edit = Edit::from(&load(d.path(), "prs").unwrap());
+        edit.color = Some(COLORS[2].1);
+        save(d.path(), "prs", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("prs.toml")).unwrap();
+        assert!(text.contains("color = \"#9b7cf0\""), "{text}");
+        assert_eq!(load(d.path(), "prs").unwrap().color, Some(0x9b7cf0));
+        edit.color = None;
+        save(d.path(), "prs", &edit).unwrap();
+        assert_eq!(load(d.path(), "prs").unwrap().color, None);
+    }
+
     #[test]
     fn a_slack_trigger_is_read_with_its_defaults() {
         let base =

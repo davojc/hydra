@@ -49,6 +49,13 @@ pub struct Card {
     pub line: String,
     pub state: CardState,
     pub segments: Vec<Segment>,
+    /// Its pipeline's colour (`color`), else the default teal.
+    pub accent: u32,
+}
+
+/// `pipeline`'s accent on its card.
+pub fn accent(pipeline: &crate::pipeline::Pipeline) -> u32 {
+    pipeline.color.unwrap_or(crate::orchestrator_theme::TEAL)
 }
 
 /// What the card says about `run`.
@@ -98,6 +105,7 @@ pub fn card(run: &Run) -> Card {
         line: format!("{} · {stage}{paused_for}", run.ticket),
         state,
         segments,
+        accent: accent(&run.pipeline),
     }
 }
 
@@ -109,6 +117,7 @@ pub fn ready_card(pipeline: &crate::pipeline::Pipeline) -> Card {
         line: "No ticket yet".into(),
         state: CardState::Ready,
         segments: vec![Segment::Pending; pipeline.stages.len()],
+        accent: accent(pipeline),
     }
 }
 

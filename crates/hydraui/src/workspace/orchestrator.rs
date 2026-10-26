@@ -988,7 +988,12 @@ impl Workspace {
                     .iter()
                     .filter_map(|t| tokens.iter().find(|(_, x)| x == t).map(|(p, _)| *p))
                     .collect();
-                Some((*id, card(run), panes))
+                // The colour as the file has it now, so a change in Settings shows at once.
+                let mut c = card(run);
+                if let Ok(p) = crate::pipeline::load(root, &run.pipeline.file) {
+                    c.accent = crate::pipeline_card::accent(&p);
+                }
+                Some((*id, c, panes))
             })
             .collect()
     }
@@ -1112,8 +1117,8 @@ impl Workspace {
         };
         let segments = c.segments.iter().map(|s| {
             let fill = match s {
-                Segment::Passed => color(theme::TEAL),
-                Segment::Running => color(theme::TEAL).opacity(0.53),
+                Segment::Passed => color(c.accent),
+                Segment::Running => color(c.accent).opacity(0.53),
                 Segment::Stopped => color(theme::RED),
                 Segment::Pending => color(theme::BORDER),
             };
@@ -1127,16 +1132,16 @@ impl Workspace {
             .gap(px(6.))
             .rounded(px(8.))
             .border_1()
-            .bg(color(if active {
-                theme::TEAL_TINT
+            .bg(if active {
+                color(c.accent).opacity(0.13)
             } else {
-                theme::SURFACE
-            }))
-            .border_color(color(if active {
-                theme::TEAL_BORDER
+                color(theme::SURFACE)
+            })
+            .border_color(if active {
+                color(c.accent).opacity(0.45)
             } else {
-                theme::BORDER_SUBTLE
-            }))
+                color(theme::BORDER_SUBTLE)
+            })
             .cursor_pointer()
             .on_click(
                 cx.listener(move |ws, _, window, cx| ws.open_pipeline(orchestrator, window, cx)),
@@ -1144,7 +1149,7 @@ impl Workspace {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().text_xs().text_color(color(theme::TEAL)).child("◆"))
+                    .child(div().text_xs().text_color(color(c.accent)).child("◆"))
                     .child(
                         div()
                             .flex_1()

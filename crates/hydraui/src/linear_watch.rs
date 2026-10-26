@@ -109,9 +109,10 @@ pub fn trigger(f: &TriggerFacts) -> (Mode, String) {
             .last
             .and_then(|l| f.now.duration_since(l).ok())
             .map_or(Duration::ZERO, |since| every.saturating_sub(since));
-        let next = match left.as_secs().div_ceil(60) {
+        // Counted down to the second (the card repaints every second).
+        let next = match left.as_secs() {
             0 => "next look now".to_string(),
-            m => format!("next look in {m} min"),
+            s => format!("next look in {}:{:02}", s / 60, s % 60),
         };
         match f.found {
             Some(found) => format!("{found} · {next}"),
@@ -610,9 +611,9 @@ mod tests {
         assert_eq!(trigger(&f), (Mode::Automatic, "Next look now".to_string()));
         f.last = Some(f.now - Duration::from_secs(61));
         f.found = Some("Nothing new");
-        assert_eq!(trigger(&f).1, "Nothing new · next look in 4 min");
+        assert_eq!(trigger(&f).1, "Nothing new · next look in 3:59");
         f.last = Some(f.now - Duration::from_secs(250));
-        assert_eq!(trigger(&f).1, "Nothing new · next look in 1 min");
+        assert_eq!(trigger(&f).1, "Nothing new · next look in 0:50");
         f.last = Some(f.now - Duration::from_secs(400));
         assert_eq!(trigger(&f).1, "Nothing new · next look now");
         f.checking = true;

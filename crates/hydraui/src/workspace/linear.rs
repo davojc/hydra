@@ -44,7 +44,7 @@ fn linear_job(
 ) -> Result<(Vec<&'static str>, Option<crate::linear::Ticket>), LinearError> {
     use crate::linear::LinearApi;
     let api = Http {
-        key: hydra.linear_key(env).map_err(LinearError::Rejected)?,
+        key: hydra.linear_key(env)?,
     };
     if start {
         let ticket = api.ticket(&run.ticket)?;
@@ -199,7 +199,7 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             let found = cx
                 .background_spawn(async move {
-                    let key = hydra.linear_key(&env).map_err(LinearError::Rejected)?;
+                    let key = hydra.linear_key(&env)?;
                     // Every ticket a run log names: hydraui ran it before (§3).
                     let ran: Vec<String> = crate::run_history::read(hydra.paths.root(), &[])
                         .into_iter()

@@ -6,7 +6,6 @@ rust-version.workspace = true
 
 [dependencies]
 hydra-core.workspace = true
-keyring.workspace = true
 serde.workspace = true
 toml.workspace = true
 
@@ -17,5 +16,6 @@ tempfile.workspace = true
 junction.workspace = true
 keyring = { workspace = true, features = ["windows-native"] }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-keyring = { workspace = true, features = ["apple-native"] }
+# macOS goes through /usr/bin/security instead (src/macos_keychain.rs).
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+keyring.workspace = true

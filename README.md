@@ -130,7 +130,7 @@ hydra starts each terminal with environment variables that point every tool at t
 
 - **Inherited variables are cleared.** Identity variables picked up from the terminal you launched from, such as `GH_TOKEN`, `AWS_PROFILE` or `ANTHROPIC_API_KEY`, are removed. This includes those of tools the environment doesn't use, so nothing leaks between environments, even when one hydra terminal is started from inside another.
 - **Launch fails closed.** If something could make a tool fall back to another identity, hydra refuses to open the terminal and says how to fix it. Examples are a configured SSH key that doesn't exist, or a secret you referenced but never stored. A tool that simply isn't signed in yet doesn't block anything.
-- **Secrets live in Windows Credential Manager** (the login Keychain on macOS). Config files only reference them (`secret:work/linear`). Values never go to disk or into hydra's output. The one exception is a gws credentials file, which is written readable by your Windows account only.
+- **Secrets live in Windows Credential Manager** (the login Keychain on macOS, read and written through Apple's `security` tool, so one Always Allow per secret lasts across hydra updates). Config files only reference them (`secret:work/linear`). Values never go to disk or into hydra's output. The one exception is a gws credentials file, which is written readable by your Windows account only.
 
 ## Tools
 

@@ -6,6 +6,9 @@ use hydra_core::paths::HydraPaths;
 use hydra_core::secret::{SecretRef, SecretStore, StoreError};
 use serde::{Deserialize, Serialize};
 
+#[cfg(target_os = "macos")]
+use crate::macos_keychain::Keychain;
+
 /// Names (never values) of stored secrets, because Credential Manager can't be listed through keyring.
 #[derive(Default, Serialize, Deserialize)]
 struct Index {
@@ -13,13 +16,15 @@ struct Index {
     keys: BTreeMap<String, BTreeSet<String>>,
 }
 
-/// Secret values in the OS credential store (Windows Credential Manager), names in `~/.hydra/secrets.toml`.
+/// Secret values in the OS credential store (Windows Credential Manager, the macOS keychain
+/// through `security`, see [`crate::macos_keychain`]), names in `~/.hydra/secrets.toml`.
 pub struct KeyringStore {
     service: String,
     index_path: PathBuf,
 }
 
 /// Named when a value is rejected as too long; Credential Manager holds at most 2560 bytes of UTF-16.
+#[cfg(not(target_os = "macos"))]
 const TOO_LONG_LIMIT: &str = if cfg!(windows) {
     "Windows Credential Manager (max ~1280 characters)"
 } else {
@@ -45,6 +50,7 @@ impl KeyringStore {
         Self::new(service, paths.secret_index())
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn entry(&self, r: &SecretRef) -> Result<keyring::Entry, StoreError> {
         keyring::Entry::new(&self.service, &r.path()).map_err(backend)
     }
@@ -70,6 +76,14 @@ impl KeyringStore {
 }
 
 impl SecretStore for KeyringStore {
+    #[cfg(target_os = "macos")]
+    fn get(&self, r: &SecretRef) -> Result<Option<String>, StoreError> {
+        Keychain::user()
+            .get(&self.service, &r.path())
+            .map_err(backend)
+    }
+
+    #[cfg(not(target_os = "macos"))]
     fn get(&self, r: &SecretRef) -> Result<Option<String>, StoreError> {
         match self.entry(r)?.get_password() {
             Ok(v) => Ok(Some(v)),
@@ -79,6 +93,11 @@ impl SecretStore for KeyringStore {
     }
 
     fn set(&self, r: &SecretRef, value: &str) -> Result<(), StoreError> {
+        #[cfg(target_os = "macos")]
+        Keychain::user()
+            .set(&self.service, &r.path(), value)
+            .map_err(backend)?;
+        #[cfg(not(target_os = "macos"))]
         self.entry(r)?.set_password(value).map_err(|e| match e {
             keyring::Error::TooLong(..) => {
                 StoreError::Backend(format!("{} is too long for {TOO_LONG_LIMIT}", r.path()))
@@ -94,6 +113,11 @@ impl SecretStore for KeyringStore {
     }
 
     fn delete(&self, r: &SecretRef) -> Result<bool, StoreError> {
+        #[cfg(target_os = "macos")]
+        let deleted = Keychain::user()
+            .delete(&self.service, &r.path())
+            .map_err(backend)?;
+        #[cfg(not(target_os = "macos"))]
         let deleted = match self.entry(r)?.delete_credential() {
             Ok(()) => true,
             Err(keyring::Error::NoEntry) => false,

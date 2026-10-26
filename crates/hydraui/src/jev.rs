@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[cfg(target_os = "macos")]
+use hydra_platform::macos_keychain::Keychain;
 use serde::Deserialize;
 
 /// Credential Manager user the key is stored under.
@@ -15,6 +17,7 @@ pub struct JevKey {
     service: String,
 }
 
+#[cfg(not(target_os = "macos"))]
 fn failed(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
@@ -32,11 +35,19 @@ impl JevKey {
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn entry(&self) -> Result<keyring::Entry, String> {
         keyring::Entry::new(&self.service, USER).map_err(failed)
     }
 
     /// The stored key, or `None` when none is set.
+    #[cfg(target_os = "macos")]
+    pub fn get(&self) -> Result<Option<String>, String> {
+        Keychain::user().get(&self.service, USER)
+    }
+
+    /// The stored key, or `None` when none is set.
+    #[cfg(not(target_os = "macos"))]
     pub fn get(&self) -> Result<Option<String>, String> {
         match self.entry()?.get_password() {
             Ok(v) => Ok(Some(v)),
@@ -51,10 +62,20 @@ impl JevKey {
         if key.is_empty() {
             return Err("the Jev API key is empty".to_string());
         }
+        #[cfg(target_os = "macos")]
+        return Keychain::user().set(&self.service, USER, key);
+        #[cfg(not(target_os = "macos"))]
         self.entry()?.set_password(key).map_err(failed)
     }
 
     /// Forgets the key; false when there was none.
+    #[cfg(target_os = "macos")]
+    pub fn remove(&self) -> Result<bool, String> {
+        Keychain::user().delete(&self.service, USER)
+    }
+
+    /// Forgets the key; false when there was none.
+    #[cfg(not(target_os = "macos"))]
     pub fn remove(&self) -> Result<bool, String> {
         match self.entry()?.delete_credential() {
             Ok(()) => Ok(true),

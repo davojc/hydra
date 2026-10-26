@@ -5,7 +5,7 @@
 use std::time::{Duration, SystemTime};
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, SharedString, Window, div, px, relative};
+use gpui::{Animation, AnimationExt, AnyElement, Context, SharedString, Window, div, px, relative};
 use gpui_component::WindowExt;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::notification::Notification;
@@ -795,6 +795,7 @@ impl Workspace {
             })
             .flatten();
         let tooltip = source.tooltip;
+        let (last, every) = (w.and_then(|w| w.last), source.every_minutes);
         Some(
             v_flex()
                 .id(SharedString::from(format!("linear-row-{orch}")))
@@ -844,11 +845,28 @@ impl Workspace {
                             .rounded_full()
                             .bg(color(theme::RAISED))
                             .child(
+                                // Slides every frame (at most 30 a second) from the clock,
+                                // rather than stepping once a second with the card.
                                 div()
                                     .h_full()
                                     .rounded_full()
                                     .w(relative(p))
-                                    .bg(color(accent).opacity(0.8)),
+                                    .bg(color(accent).opacity(0.8))
+                                    .with_animation(
+                                        SharedString::from(format!("look-bar-{orch}")),
+                                        Animation::new(Duration::from_secs(60))
+                                            .repeat()
+                                            .with_max_fps(30.),
+                                        move |d, _| {
+                                            let p = linear_watch::look_progress(
+                                                last,
+                                                SystemTime::now(),
+                                                every,
+                                            )
+                                            .unwrap_or(p);
+                                            d.w(relative(p))
+                                        },
+                                    ),
                             ),
                     )
                 })

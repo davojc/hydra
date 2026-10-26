@@ -802,3 +802,15 @@ a run line) gives the others theirs too, behind it.
 - **History shows one pipeline.** The run log's `run started` names its pipeline
   (`run_history::Entry.pipeline`); an orchestrator's History lists only its own pipeline's runs.
 
+## 27. Motion (added 2026-10-26)
+
+The once-a-second redraw made the next-look bar step and the working dot blink on and off
+(Jordan, 2026-10-26: "so stuttery").
+
+- **Next look** counts down to the second (`next look in 3:59`), and its bar slides every frame
+  from the clock (a repeating gpui animation, at most 30 frames a second).
+- **What's at work breathes** (`busy::pulse`: a 1.6 s pulse between 30% and full, in step
+  everywhere, at most 30 frames a second): a working terminal's dot in the sidebar and the
+  environment tab, the card's segment for the stage at work, and that stage's ring in the
+  Pipeline tab.
+

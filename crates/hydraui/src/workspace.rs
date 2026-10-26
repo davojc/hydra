@@ -1766,7 +1766,8 @@ impl Workspace {
             let env = tab.env.clone();
             let tint = self.tint(&env);
             let busy = self.tab_activity(&tab.terminals);
-            let dot = self.render_tab_dot(busy, tint, cx);
+            let dot =
+                self.render_tab_dot(SharedString::from(format!("env-dot-{env}")), busy, tint, cx);
             let (click_env, close_env) = (env.clone(), env.clone());
             let close_id = SharedString::from(format!("env-close-{env}"));
             strip = strip.child(

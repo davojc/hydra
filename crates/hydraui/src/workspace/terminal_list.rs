@@ -330,7 +330,12 @@ impl Workspace {
         let v = view.read(cx);
         let (label, program) = (v.label(), v.program_title().map(str::to_string));
         let activity = self.activity.get(&id).copied();
-        let dot = self.render_tab_dot(activity, tint, cx);
+        let dot = self.render_tab_dot(
+            SharedString::from(format!("row-dot-{id}")),
+            activity,
+            tint,
+            cx,
+        );
         // What a Claude session here says it is doing (its hooks), beside its name.
         let claude = activity.filter(|a| a.claude).map(|a| match a.state {
             Activity::Working => ("working", muted),

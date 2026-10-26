@@ -3,7 +3,10 @@
 use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, Hsla, SharedString, Window, div, px};
+use gpui::{
+    Animation, AnimationExt, AnyElement, Context, ElementId, Hsla, SharedString, Window, div,
+    pulsating_between, px,
+};
 use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, WindowExt};
 
@@ -51,7 +54,7 @@ pub(super) fn tooltip_text(a: PaneActivity) -> String {
 
 impl Workspace {
     /// Recomputes every terminal's activity. Redraws when one changed, and while any is
-    /// working (once a second, for the blinking dot: no per-frame animation).
+    /// working (once a second, for the times beside them).
     pub(super) fn tick_activity(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
         let mut changed = false;
@@ -228,12 +231,21 @@ impl Workspace {
     /// while quiet, steady when idle.
     pub(super) fn render_tab_dot(
         &self,
+        key: impl Into<ElementId>,
         a: Option<PaneActivity>,
         tint: Hsla,
         cx: &Context<Self>,
     ) -> AnyElement {
+        let key = key.into();
         let state = a.map(|a| a.state).unwrap_or_default();
-        let dim = state == Activity::Working && !self.blink;
+        let inner = div().size(px(8.)).rounded_full().bg(tint);
+        let inner = if state == Activity::Working {
+            inner
+                .with_animation(key, pulse(), |d, a| d.opacity(a))
+                .into_any_element()
+        } else {
+            inner.into_any_element()
+        };
         div()
             .size(px(12.))
             .flex_none()
@@ -244,15 +256,17 @@ impl Workspace {
             .when(state == Activity::Waiting, |d| {
                 d.border_2().border_color(cx.theme().warning)
             })
-            .child(
-                div()
-                    .size(px(8.))
-                    .rounded_full()
-                    .bg(tint)
-                    .opacity(if dim { 0.3 } else { 1.0 }),
-            )
+            .child(inner)
             .into_any_element()
     }
+}
+
+/// Something at work breathing: a slow pulse, in step everywhere, at most 30 frames a second.
+pub(super) fn pulse() -> Animation {
+    Animation::new(Duration::from_millis(1600))
+        .repeat_synced()
+        .with_easing(pulsating_between(0.3, 1.0))
+        .with_max_fps(30.)
 }
 
 #[cfg(test)]

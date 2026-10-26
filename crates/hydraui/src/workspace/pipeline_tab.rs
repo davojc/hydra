@@ -8,7 +8,10 @@ use std::rc::Rc;
 use std::time::SystemTime;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Div, FontWeight, SharedString, Window, div, px, relative};
+use gpui::{
+    AnimationExt, AnyElement, App, Context, Div, FontWeight, SharedString, Window, div, px,
+    relative,
+};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_component::notification::Notification;
@@ -796,10 +799,17 @@ impl Workspace {
                         .bg(color(theme::GREEN_TINT))
                         .text_color(color(theme::GREEN))
                         .child("✓"),
-                    st if st.busy() => d
-                        .border_2()
-                        .border_color(color(accent))
-                        .child(div().size(px(7.)).rounded_full().bg(color(accent))),
+                    st if st.busy() => d.border_2().border_color(color(accent)).child(
+                        div()
+                            .size(px(7.))
+                            .rounded_full()
+                            .bg(color(accent))
+                            .with_animation(
+                                SharedString::from(format!("stage-dot-{orch}-{i}")),
+                                super::busy::pulse(),
+                                |d, a| d.opacity(a),
+                            ),
+                    ),
                     StageStatus::Stopped | StageStatus::Failed => d
                         .bg(color(theme::RED_TINT))
                         .text_color(color(theme::RED))

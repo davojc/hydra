@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, SharedString, Window, div, px, relative};
+use gpui::{AnimationExt, AnyElement, Context, SharedString, Window, div, px, relative};
 use gpui_component::WindowExt;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::notification::Notification;
@@ -1190,14 +1190,23 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (pill_fg, pill_bg) = pill_colors(c.state, c.accent);
-        let segments = c.segments.iter().map(|s| {
-            let fill = match s {
-                Segment::Passed => color(c.accent),
-                Segment::Running => color(c.accent).opacity(0.53),
-                Segment::Stopped => color(theme::RED),
-                Segment::Pending => color(theme::BORDER),
-            };
-            div().flex_1().h(px(3.)).rounded_full().bg(fill)
+        let accent = c.accent;
+        let segments = c.segments.iter().enumerate().map(|(i, s)| {
+            let bar = div().flex_1().h(px(3.)).rounded_full();
+            match s {
+                // The stage at work breathes.
+                Segment::Running => bar
+                    .bg(color(accent))
+                    .with_animation(
+                        SharedString::from(format!("segment-{orchestrator}-{i}")),
+                        super::busy::pulse(),
+                        move |d, a| d.bg(color(accent).opacity(a)),
+                    )
+                    .into_any_element(),
+                Segment::Passed => bar.bg(color(accent)).into_any_element(),
+                Segment::Stopped => bar.bg(color(theme::RED)).into_any_element(),
+                Segment::Pending => bar.bg(color(theme::BORDER)).into_any_element(),
+            }
         });
         v_flex()
             .id(SharedString::from(format!("pipeline-card-{orchestrator}")))

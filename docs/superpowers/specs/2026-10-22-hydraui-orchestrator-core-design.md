@@ -716,3 +716,17 @@ of them (Jordan chose "one card per run"):
 - **Limits.** Each run is its own Claude orchestrator and stage session, so more runs use the
   Claude week faster. Only the first run hydraui closed on is resumed at launch; any other shows
   as Interrupted to resume by hand.
+
+## 21. A simpler Pipeline settings page (added 2026-10-26)
+
+Jordan: "so much text … it needs to be super simple and straightforward for non-technical people".
+The page is now four parts, with explanations moved from paragraphs to an ⓘ beside each heading:
+
+1. **Name**: the name, and the colour swatches under it.
+2. **Where work comes from**: the dropdown (None, Linear, Slack), then that trigger's fields with
+   plain labels (Linear: Team, Pick tickets in, Whose tickets, Then move it to, When done, move it
+   to; Slack: Channel name, Channel ID, Mark taken with), hints as placeholders.
+3. **Steps**: the stages and **+ Add step**. The fixed "Done" row and the prompt-placeholder
+   paragraph are gone (the ⓘ names `{ticket}`, `{pr}`, `{handoff}`).
+4. **▸ Advanced**, folded by default: Runs at once, Pass mark (the default bar), Branch name,
+   Product questions channel, and one line on retries and the Claude-week floor.

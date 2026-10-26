@@ -622,7 +622,8 @@ clears its bar goes on regardless. A person can now hold a stage to them.
 Until now a pipeline could be edited in **Pipeline settings** but not made in the app: another
 meant copying a TOML file by hand.
 
-- **Where.** **New pipeline…** in the launcher, and as the last entry of **Start orchestrator…**'s
+- **Where.** **▶ Start pipeline** and **+ New pipeline** under the sidebar's **+ New**, for the
+  selected environment (shown only where Claude is set up); **New pipeline…** in the launcher, and as the last entry of **Start orchestrator…**'s
   pipeline list (which now always shows, even with one pipeline).
 - **Start from.** **Blank** (one stage, `first`, to rename and fill in) or **Copy of <pipeline>**:
   its stages, bars, prompts, branch and product channel, comments kept.

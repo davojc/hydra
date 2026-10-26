@@ -413,7 +413,12 @@ impl Workspace {
 
     /// Picks the orchestrator's pipeline (the example is written when there is none); one
     /// pipeline is taken without asking.
-    fn choose_pipeline(&mut self, env: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn choose_pipeline(
+        &mut self,
+        env: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let root = self.hydra.paths.root().to_path_buf();
         if let Err(e) = crate::pipeline::ensure_example(&root) {
             crate::action_log::write(format!("example pipeline: {e}"));
@@ -451,7 +456,12 @@ impl Workspace {
 
     /// **New pipeline…**: start blank or from a copy of a pipeline, name it, then its
     /// orchestrator starts (in `env`, else one picked) with its settings open to fill in.
-    fn new_pipeline(&mut self, env: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn new_pipeline(
+        &mut self,
+        env: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let root = self.hydra.paths.root().to_path_buf();
         let names = crate::pipeline::names(&root);
         let mut labels = vec!["Blank: one stage to fill in".to_string()];

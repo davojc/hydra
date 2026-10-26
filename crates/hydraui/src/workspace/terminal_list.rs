@@ -98,6 +98,9 @@ impl Workspace {
         list = list
             .child(self.render_all_tasks_entry(tint, cx))
             .child(div().h(px(1.)).mx_2().my_0p5().bg(cx.theme().border));
+        // Pipelines start where Claude is set up: their orchestrator is a Claude session.
+        let claude = self.hydra.sign_ins(&env).iter().any(|t| t == "claude");
+        let (start_env, new_env) = (env.clone(), env.clone());
         list = list.child(
             Button::new("list-new-terminal")
                 .label("+ New")
@@ -108,6 +111,32 @@ impl Workspace {
                     ws.new_terminal(&env, None, window, cx);
                 })),
         );
+        list = list.when(claude, |l| {
+            l.child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Button::new("list-start-pipeline")
+                            .label("▶ Start pipeline")
+                            .ghost()
+                            .small()
+                            .tooltip("Start an orchestrator on one of your pipelines")
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                ws.choose_pipeline(start_env.clone(), window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("list-new-pipeline")
+                            .label("+ New pipeline")
+                            .ghost()
+                            .small()
+                            .tooltip("Make a pipeline, blank or from a copy, and edit its settings")
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                ws.new_pipeline(Some(new_env.clone()), window, cx);
+                            })),
+                    ),
+            )
+        });
         // Terminals in the same project sit together, a line between one project's and the
         // next's.
         let all_tasks = self.all_tasks_shown();

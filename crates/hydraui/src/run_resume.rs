@@ -245,13 +245,12 @@ fn replay(id: &str, pipeline: Pipeline, events: &[Value]) -> Option<Run> {
             "asked" => {
                 let token = latest(&runs, text(e, "stage"))?;
                 let link = e.get("link").and_then(Value::as_str);
-                runs.ask(
-                    &token,
-                    text(e, "question"),
-                    link,
-                    std::time::SystemTime::now(),
-                )
-                .ok()?;
+                // When it was asked, as logged, so the wait doesn't restart with hydraui.
+                let now = std::time::SystemTime::now();
+                let asked = crate::run_history::ago(text(e, "at"), &crate::action_log::now())
+                    .and_then(|d| now.checked_sub(d))
+                    .unwrap_or(now);
+                runs.ask(&token, text(e, "question"), link, asked).ok()?;
             }
             "answered" => {
                 runs.answered(id, text(e, "answer")).ok()?;

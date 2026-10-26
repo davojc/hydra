@@ -68,6 +68,13 @@ fn secs(at: &str) -> Option<i64> {
     Some(days * 86_400 + h * 3_600 + min * 60 + s)
 }
 
+/// How long before `now` the log time `at` was (both local log times, `2026-10-22 09:00:00.000`);
+/// `None` when either is unreadable or `at` is later.
+pub fn ago(at: &str, now: &str) -> Option<std::time::Duration> {
+    let d = secs(now)? - secs(at)?;
+    (d >= 0).then(|| std::time::Duration::from_secs(d as u64))
+}
+
 /// How long a run took as the design shows it: `1h 48m`, `9m`; `–` while it runs.
 pub fn took_text(took: Option<u64>) -> String {
     match took {
@@ -230,6 +237,23 @@ pub fn read(hydra_root: &Path, live: &[String]) -> Vec<Entry> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_log_time_is_read_back_as_how_long_ago() {
+        assert_eq!(
+            ago("2026-10-26 19:50:00.000", "2026-10-26 20:02:30.500"),
+            Some(std::time::Duration::from_secs(750))
+        );
+        assert_eq!(
+            ago("2026-10-26 23:59:00.000", "2026-10-27 00:01:00.000").map(|d| d.as_secs()),
+            Some(120)
+        );
+        assert_eq!(
+            ago("2026-10-26 20:00:00.000", "2026-10-26 19:00:00.000"),
+            None
+        );
+        assert_eq!(ago("nonsense", "2026-10-26 19:00:00.000"), None);
+    }
+
     use super::*;
 
     /// Writes run `run`'s log from `lines`, each `(at, event, fields)`.

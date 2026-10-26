@@ -1008,9 +1008,24 @@ impl Workspace {
                                         "Linear: picks tickets from a team. Slack: takes pull \
                                          requests posted in a channel. None: you give it work.",
                                     ))
-                                    .child(div().w(px(220.)).child(
-                                        Select::new(&draft.trigger).small().menu_width(px(220.)),
-                                    ))
+                                    // A row like the options under it: label, then the choice.
+                                    .child(
+                                        h_flex()
+                                            .gap_3()
+                                            .child(
+                                                text(12.5, theme::TEXT_SECONDARY)
+                                                    .w(px(170.))
+                                                    .flex_none()
+                                                    .child("Source"),
+                                            )
+                                            .child(
+                                                div().w(px(300.)).child(
+                                                    Select::new(&draft.trigger)
+                                                        .small()
+                                                        .menu_width(px(300.)),
+                                                ),
+                                            ),
+                                    )
                                     .child(self.render_linear_settings(orch, draft, cx))
                                     .child(self.render_slack_settings(draft)),
                             )

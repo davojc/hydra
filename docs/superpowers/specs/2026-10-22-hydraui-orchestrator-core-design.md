@@ -574,8 +574,8 @@ for a stage. Every stage is now told so, and has a way to ask.
   message's link. Without a channel it calls `stage_ask` alone and the user answers in hydraui.
 - **The ticket waits** (the user's choice: one ticket at a time, nothing else starts): the run
   is needs-you with its question kept on the run (`Run.asking`); the card shows **Asked
-  product** in amber with the line `<ticket> · <stage> · paused for product`, then a block
-  headed **⏸ Paused: waiting for product's answer** with the question, where and when it was
+  product** in amber with the line `<ticket> · <stage> · paused for product`, then (since simplified, Jordan: too much text) one line, **⏸ Waiting for product · N min · see
+  question**, which opens a dialog with with the question, where and when it was
   asked, when it next checks for a reply, **Open thread ↗**, **Check now** and **Answer…**; the
   Automatic line says the ticket is paused for a product answer, and a notification says so. The orchestrator is told to do nothing until it's answered. A person can't re-run or go
   back while it asks (the question would be lost), only stop the ticket.

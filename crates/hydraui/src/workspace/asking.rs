@@ -10,7 +10,7 @@ use gpui_component::WindowExt;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_component::notification::Notification;
-use gpui_component::{Sizable, h_flex, v_flex};
+use gpui_component::{h_flex, v_flex};
 
 use super::Workspace;
 use super::orchestrator::tell;
@@ -206,20 +206,69 @@ impl Workspace {
         }
     }
 
-    /// Under an orchestrator's card while its ticket waits on product: the question, where it
-    /// was asked, its thread and **Answer…**.
+    /// The question `run` asked, where and when, and the thread, for the dialog and the line.
+    fn asked(&self, orch: PaneId, cx: &App) -> Option<(String, Ask, Option<String>)> {
+        let token = self.panes.get(&orch)?.read(cx).mcp_token()?.to_string();
+        let sv = server::get()?;
+        let reg = server::lock(sv.registry());
+        let r = reg.runs.current(&token)?;
+        Some((
+            r.id.clone(),
+            r.asking.clone()?,
+            r.pipeline.product_channel.clone(),
+        ))
+    }
+
+    /// Under an orchestrator while its ticket waits on product: one short line; clicking it
+    /// shows the question, its thread, **Check now** and **Answer…**.
     pub(super) fn render_question(
         &self,
         orch: PaneId,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let token = self.panes.get(&orch)?.read(cx).mcp_token()?.to_string();
-        let sv = server::get()?;
-        let (run, ask, channel) = {
-            let reg = server::lock(sv.registry());
-            let r = reg.runs.current(&token)?;
-            let ask = r.asking.clone()?;
-            (r.id.clone(), ask, r.pipeline.product_channel.clone())
+        let (_, ask, _) = self.asked(orch, cx)?;
+        let waited = SystemTime::now()
+            .duration_since(ask.since)
+            .map_or(0, |d| d.as_secs() / 60);
+        Some(
+            h_flex()
+                .id(SharedString::from(format!("question-{orch}")))
+                .ml(px(26.))
+                .mr_1()
+                .my_1()
+                .px_2()
+                .py_1()
+                .gap_2()
+                .rounded(px(6.))
+                .bg(color(theme::AMBER_TINT))
+                .cursor_pointer()
+                .hover(|d| d.opacity(0.85))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(color(theme::AMBER))
+                        .child("⏸ Waiting for product"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(color(theme::TEXT_SECONDARY))
+                        .child(format!("{waited} min · see question")),
+                )
+                .on_click(
+                    cx.listener(move |ws, _, window, cx| ws.question_dialog(orch, window, cx)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The question in full, where it was asked, when hydraui next looks for the reply, and
+    /// what can be done about it.
+    fn question_dialog(&mut self, orch: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((run, ask, channel)) = self.asked(orch, cx) else {
+            return;
         };
         let now = SystemTime::now();
         let waited = now
@@ -229,8 +278,6 @@ impl Workspace {
             Some(ch) => format!("Asked in {ch} {waited} min ago"),
             None => format!("Asked you {waited} min ago"),
         };
-        // Only a question with a Slack thread is looked for; one asked of the user waits for
-        // Answer….
         let meta = if ask.link.is_some() {
             match crate::asking::next_check_in(ask.since, self.ask_checks.get(&run).copied(), now) {
                 0 => format!("{asked} · checking Slack for a reply"),
@@ -239,74 +286,57 @@ impl Workspace {
         } else {
             asked
         };
-        let has_thread = ask.link.is_some();
-        Some(
-            v_flex()
-                .id(SharedString::from(format!("question-{orch}")))
-                .ml(px(26.))
-                .mr_1()
-                .my_1()
-                .p_2()
-                .gap_1()
-                .rounded(px(6.))
-                .bg(color(theme::AMBER_TINT))
+        let ws = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (ws, run, link) = (ws.clone(), run.clone(), ask.link.clone());
+            let (ws2, run2) = (ws.clone(), run.clone());
+            dialog
+                .title("Waiting for product")
                 .child(
-                    div()
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(color(theme::AMBER))
-                        .child("⏸ Paused: waiting for product's answer"),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(color(theme::TEXT))
-                        .line_clamp(4)
-                        .child(ask.question.clone()),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(color(theme::TEXT_SECONDARY))
-                        .child(meta),
-                )
-                .child(
-                    h_flex()
+                    v_flex()
                         .gap_2()
-                        .items_center()
-                        .children(ask.link.clone().map(|url| {
-                            div()
-                                .id(SharedString::from(format!("question-link-{orch}")))
-                                .text_xs()
-                                .text_color(color(theme::TEAL))
-                                .cursor_pointer()
-                                .hover(|d| d.underline())
-                                .child("Open thread ↗")
-                                .on_click(move |_, _, cx| cx.open_url(&url))
-                        }))
-                        .when(has_thread, |d| {
-                            let run = run.clone();
-                            d.child(
-                                Button::new(SharedString::from(format!("question-check-{orch}")))
-                                    .label("Check now")
-                                    .ghost()
-                                    .xsmall()
-                                    .on_click(cx.listener(move |ws, _, window, cx| {
-                                        ws.check_answer_now(&run, window, cx)
-                                    })),
-                            )
-                        })
                         .child(
-                            Button::new(SharedString::from(format!("question-answer-{orch}")))
-                                .label("Answer…")
-                                .outline()
-                                .xsmall()
-                                .on_click(cx.listener(move |ws, _, window, cx| {
-                                    ws.answer_dialog(run.clone(), window, cx)
-                                })),
+                            div()
+                                .text_size(px(13.))
+                                .text_color(color(theme::TEXT))
+                                .child(ask.question.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(color(theme::TEXT_SECONDARY))
+                                .child(meta.clone()),
                         ),
                 )
-                .into_any_element(),
-        )
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .children(link.clone().map(|url| {
+                            Button::new("question-thread")
+                                .label("Open thread ↗")
+                                .ghost()
+                                .on_click(move |_, _, cx| cx.open_url(&url))
+                        }))
+                        .when(link.is_some(), |d| {
+                            d.child(Button::new("question-check").label("Check now").on_click(
+                                move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    ws.update(cx, |ws, cx| ws.check_answer_now(&run, window, cx));
+                                },
+                            ))
+                        })
+                        .child(
+                            Button::new("question-answer")
+                                .label("Answer…")
+                                .primary()
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let run = run2.clone();
+                                    ws2.update(cx, |ws, cx| ws.answer_dialog(run, window, cx));
+                                }),
+                        ),
+                )
+        });
     }
 }

@@ -246,16 +246,20 @@ impl Workspace {
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
+                        .truncate()
                         .text_xs()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(color(theme::AMBER))
-                        .child("⏸ Waiting for product"),
+                        .child(format!("⏸ Waiting for product · {waited}m")),
                 )
+                // Never cut off: the line opens the question.
                 .child(
                     div()
+                        .flex_none()
                         .text_xs()
-                        .text_color(color(theme::TEXT_SECONDARY))
-                        .child(format!("{waited} min · see question")),
+                        .text_color(color(theme::AMBER))
+                        .child("›"),
                 )
                 .on_click(
                     cx.listener(move |ws, _, window, cx| ws.question_dialog(orch, window, cx)),

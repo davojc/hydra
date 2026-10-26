@@ -64,7 +64,7 @@ use tree_ops::NameFor;
 
 /// The terminal list's width: it starts at the default, can't be dragged narrower than the
 /// minimum, and always leaves the middle at least `MIN_PANES_WIDTH` beside the tree.
-pub(super) const DEFAULT_LIST_WIDTH: f32 = 200.0;
+pub(super) const DEFAULT_LIST_WIDTH: f32 = 240.0;
 const MIN_LIST_WIDTH: f32 = 120.0;
 /// The divider between the list and the middle.
 const LIST_DIVIDER_WIDTH: f32 = 4.0;

@@ -178,3 +178,22 @@ environment didn't come up under the expected name. The fix is a hard rule:
   registry lock, with a 30 s limit. A branch it can't read refuses too (fail closed), saying why.
 - **Not covered.** Work pushed without a pull request in the report isn't checked. The orchestrator
   and the person see the report, and Verify works against the feature environment anyway.
+
+## 11. Automatic and Manual (added 2026-10-26)
+
+**Watch Linear** read as a button, and nothing said whether it was on: a card could sit off with
+the orchestrator asking "which ticket?" while its log said it was watching. The card now shows a
+mode:
+
+- **A switch and a pill**: **● Automatic** (hydraui picks), **○ Manual** (only what you give it)
+  or **■ Stopped** (it switched itself off; the line says why). **Pick now** picks once in
+  either mode, and is hidden while a ticket runs.
+- **One line** on what happens next: `Nothing new · next look in 4 min`, `Looking in Linear…`,
+  `Next ticket after INTH-169`, `Only runs tickets you give it`. What Automatic picks is the
+  switch's tooltip; the full check results stay in `hydraui.log`, with every switch logged.
+- **The orchestrator waits.** Its first prompt, for a pipeline with `[linear]`, says tickets come
+  from hydraui or from you and not to ask; a finished run waits "for the next ticket, from
+  hydraui or from them". Switching mode needs no new prompt.
+- **A secret store that can't be read just now** (a keychain that can't show its prompt) counts
+  as a failed check, not a rejected key: only a missing key stops Automatic at once.
+- The list is 240 px wide by default (was 200).

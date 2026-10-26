@@ -20,14 +20,22 @@ use crate::rating::{Outcome, Side};
 use crate::runs::{Change, Decided, MAX_ATTEMPTS, Role, Run, RunState, StageStatus, StartStage};
 use crate::worktrees;
 
-/// The first prompt of a terminal started as an orchestrator (spec §3.0, §9).
-pub fn orchestrator_prompt(pipeline: &str) -> String {
+/// The first prompt of a terminal started as an orchestrator (spec §3.0, §9). A pipeline
+/// with a `[linear]` table may get its tickets from hydraui, whichever mode its card is in, so
+/// its orchestrator waits for one rather than asking.
+pub fn orchestrator_prompt(pipeline: &str, from_linear: bool) -> String {
+    let ticket = if from_linear {
+        "Tickets reach you from hydraui, which picks them from Linear and sends you one, or from \
+         me. Don't ask me for one: say you're ready and wait."
+    } else {
+        "Ask me which ticket to run."
+    };
     format!(
         "You are the orchestrator for hydraui's pipeline \"{pipeline}\". You coordinate one \
-         ticket at a time through its stages and never do a stage's work yourself. Ask me which \
-         ticket to run. Then call run_start with pipeline \"{pipeline}\", the ticket and its \
-         title, and start each stage in order with stage_start. After each one, wait: hydraui \
-         tells you when it reports. When a run needs a person, tell me why and wait."
+         ticket at a time through its stages and never do a stage's work yourself. {ticket} \
+         Then call run_start with pipeline \"{pipeline}\", the ticket and its title, and start \
+         each stage in order with stage_start. After each one, wait: hydraui tells you when it \
+         reports. When a run needs a person, tell me why and wait."
     )
 }
 
@@ -108,8 +116,8 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
     }
     Some(if finished {
         format!(
-            "Run {id} finished: every stage passed. Tell the user, then wait for them to ask for \
-             the next ticket."
+            "Run {id} finished: every stage passed. Tell the user, then wait for the next \
+             ticket, from hydraui or from them."
         )
     } else if let Some(why) = ended {
         format!(
@@ -1497,8 +1505,16 @@ mod tests {
     }
 
     #[test]
+    fn a_linear_orchestrator_waits_for_tickets_instead_of_asking() {
+        let p = orchestrator_prompt("inth", true);
+        assert!(p.contains("Don't ask me for one"), "{p}");
+        assert!(!p.contains("Ask me which ticket"), "{p}");
+        assert!(orchestrator_prompt("inth", false).contains("Ask me which ticket to run."));
+    }
+
+    #[test]
     fn the_orchestrator_prompt_names_the_pipeline_and_its_role() {
-        let p = orchestrator_prompt("ticket");
+        let p = orchestrator_prompt("ticket", false);
         for says in [
             "\"ticket\"",
             "run_start",

@@ -1,5 +1,5 @@
-//! The orchestrator's Linear watcher in the app (phase 2 spec §3, §4): the **Watch Linear**
-//! switch, the checks it makes, and the writes back when a run starts or ends. The decisions
+//! The orchestrator's Linear watcher in the app (phase 2 spec §3, §4): the card's
+//! Automatic/Manual switch, the checks it makes, and the writes back when a run starts or ends. The decisions
 //! are `linear_watch`'s; the calls are `linear::Http`'s, made off the UI thread.
 
 use std::time::{Duration, SystemTime};
@@ -9,7 +9,8 @@ use gpui::{AnyElement, Context, SharedString, Window, div, px};
 use gpui_component::WindowExt;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::notification::Notification;
-use gpui_component::{Sizable, h_flex};
+use gpui_component::switch::Switch;
+use gpui_component::{Sizable, h_flex, v_flex};
 
 use super::Workspace;
 use crate::envs::PaneId;
@@ -31,6 +32,8 @@ pub(super) struct Watch {
     pub checking: bool,
     /// What the last check found, for the card.
     pub status: Option<String>,
+    /// Why it switched itself off, until a person switches it again.
+    pub stopped: Option<String>,
 }
 
 /// The Linear side of a run that started (`start`) or ended, off the UI thread: what was
@@ -83,7 +86,19 @@ impl Workspace {
         }
     }
 
-    /// **Watch Linear**: on looks at once; only one orchestrator may watch a team (§3).
+    /// The ticket of `orch`'s run in progress.
+    fn open_run_ticket(&self, orch: PaneId, cx: &gpui::App) -> Option<String> {
+        let token = self.panes.get(&orch)?.read(cx).mcp_token()?.to_string();
+        let sv = server::get()?;
+        let reg = server::lock(sv.registry());
+        reg.runs
+            .current(&token)
+            .filter(|r| r.state.open())
+            .map(|r| r.ticket.clone())
+    }
+
+    /// **Pick tickets automatically**: on looks at once; only one orchestrator may watch a team
+    /// (§3). Either way the choice is logged, so a card that changed mode can be traced.
     pub(super) fn toggle_linear_watch(
         &mut self,
         orch: PaneId,
@@ -91,11 +106,14 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let on = self.linear_watch.get(&orch).is_some_and(|w| w.on);
+        let file = self.orchestrators.get(&orch).cloned().unwrap_or_default();
         if on {
             if let Some(w) = self.linear_watch.get_mut(&orch) {
                 w.on = false;
                 w.status = None;
+                w.stopped = None;
             }
+            crate::action_log::write(format!("linear: {file}: switched to manual"));
             cx.notify();
             return;
         }
@@ -120,7 +138,7 @@ impl Workspace {
                      tickets.",
                     settings.team
                 ))
-                .title("Watch Linear"),
+                .title("Automatic tickets"),
                 cx,
             );
             return;
@@ -129,11 +147,13 @@ impl Workspace {
         w.on = true;
         w.last = None;
         w.failures.clear();
-        w.status = Some("Looking…".into());
+        w.status = None;
+        w.stopped = None;
+        crate::action_log::write(format!("linear: {file}: switched to automatic"));
         self.linear_tick(window, cx);
     }
 
-    /// **Check Linear now**.
+    /// **Pick now**: one pick, whatever the mode.
     pub(super) fn check_linear_now(
         &mut self,
         orch: PaneId,
@@ -240,11 +260,11 @@ impl Workspace {
                 let also = skipped(&check);
                 let ticket = check.claimed.expect("matched Some");
                 w.failures.clear();
-                w.status = Some(format!("Picked {}{also}", ticket.identifier));
+                w.status = Some(format!("Picked {}", ticket.identifier));
                 self.linear_tickets
                     .insert(ticket.identifier.to_ascii_uppercase(), ticket.clone());
                 crate::action_log::write(format!(
-                    "linear: claimed {} for the {} orchestrator",
+                    "linear: claimed {} for the {} orchestrator{also}",
                     ticket.identifier, pipeline.file
                 ));
                 let prompt = linear_watch::start_prompt(pipeline, &ticket);
@@ -254,7 +274,7 @@ impl Workspace {
             }
             Ok(check) => {
                 w.failures.clear();
-                w.status = Some(format!("Nothing to pick{}", skipped(&check)));
+                w.status = Some("Nothing new".to_string());
                 crate::action_log::write(format!(
                     "linear: {}: nothing to pick{}",
                     pipeline.file,
@@ -266,14 +286,16 @@ impl Workspace {
                 match w.failures.record(&e) {
                     Some(reason) => {
                         w.on = false;
-                        w.status = Some(format!("Stopped: {reason}"));
+                        w.status = None;
+                        w.stopped = Some(reason.clone());
                         window.push_notification(
                             Notification::error(format!("Stopped watching Linear: {reason}"))
                                 .title(pipeline.name.clone()),
                             cx,
                         );
                     }
-                    None => w.status = Some(format!("{e} (will try again)")),
+                    // The reason is in the log; the card has room for the fact.
+                    None => w.status = Some("Last look failed".to_string()),
                 }
             }
         }
@@ -437,8 +459,9 @@ impl Workspace {
         reg.runs.current(&token).map(|r| r.ticket.clone())
     }
 
-    /// The Linear line under an orchestrator's card: **Watch Linear** and **Check now**, and
-    /// what the last check found; `None` when its pipeline has no `[linear]` table.
+    /// The Linear lines under an orchestrator's card: the Automatic/Manual switch, its state,
+    /// **Pick now**, and one line on what that means now; `None` when its pipeline has no
+    /// `[linear]` table.
     pub(super) fn render_linear_row(
         &self,
         orch: PaneId,
@@ -446,63 +469,80 @@ impl Workspace {
     ) -> Option<AnyElement> {
         let (_, settings, _) = self.linear_of(orch, cx)?;
         let w = self.linear_watch.get(&orch);
-        let on = w.is_some_and(|w| w.on);
-        let status = match w {
-            Some(w) if w.checking => "Looking…".to_string(),
-            Some(w) if w.on => {
-                let ago = w
-                    .last
-                    .and_then(|l| SystemTime::now().duration_since(l).ok())
-                    .map(|d| format!(" · looked {}m ago", d.as_secs() / 60))
-                    .unwrap_or_default();
-                format!("{}{ago}", w.status.clone().unwrap_or_default())
-            }
-            Some(w) => w.status.clone().unwrap_or_default(),
-            None => String::new(),
+        let open_run = self.open_run_ticket(orch, cx);
+        let (mode, line) = linear_watch::trigger(&linear_watch::TriggerFacts {
+            on: w.is_some_and(|w| w.on),
+            checking: w.is_some_and(|w| w.checking),
+            stopped: w.and_then(|w| w.stopped.as_deref()),
+            open_run: open_run.as_deref(),
+            found: w.and_then(|w| w.status.as_deref()),
+            last: w.and_then(|w| w.last),
+            now: SystemTime::now(),
+            settings: &settings,
+        });
+        let (fg, bg, dot) = match mode {
+            linear_watch::Mode::Automatic => (theme::GREEN, theme::GREEN_TINT, "●"),
+            linear_watch::Mode::Manual => (theme::TEXT_SECONDARY, theme::RAISED, "○"),
+            linear_watch::Mode::Stopped => (theme::RED, theme::RED_TINT, "■"),
         };
+        let on = mode == linear_watch::Mode::Automatic;
+        let tooltip = linear_watch::trigger_tooltip(&settings);
         Some(
-            h_flex()
+            v_flex()
                 .id(SharedString::from(format!("linear-row-{orch}")))
                 .ml(px(26.))
                 .mr_1()
+                .my_1()
                 .gap_1()
-                .flex_wrap()
                 .child(
-                    Button::new(SharedString::from(format!("linear-watch-{orch}")))
-                        .label(if on {
-                            "Watching Linear".to_string()
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            Switch::new(SharedString::from(format!("linear-watch-{orch}")))
+                                .checked(on)
+                                .small()
+                                .tooltip(tooltip)
+                                .on_click(cx.listener(move |ws, _: &bool, window, cx| {
+                                    ws.toggle_linear_watch(orch, window, cx)
+                                })),
+                        )
+                        .child(
+                            div()
+                                .px(px(6.))
+                                .py(px(1.))
+                                .rounded(px(4.))
+                                .text_xs()
+                                .bg(color(bg))
+                                .text_color(color(fg))
+                                .child(format!("{dot} {}", mode.label())),
+                        )
+                        .when(open_run.is_none(), |d| {
+                            d.child(
+                                Button::new(SharedString::from(format!("linear-now-{orch}")))
+                                    .label("Pick now")
+                                    .ghost()
+                                    .xsmall()
+                                    .tooltip(format!(
+                                        "Pick the {} ticket in {} whose SLA breaches first, once",
+                                        settings.team, settings.pick
+                                    ))
+                                    .on_click(cx.listener(move |ws, _, window, cx| {
+                                        ws.check_linear_now(orch, window, cx)
+                                    })),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(color(if mode == linear_watch::Mode::Stopped {
+                            theme::RED
                         } else {
-                            format!("Watch Linear ({})", settings.team)
-                        })
-                        .when(on, |b| b.primary())
-                        .when(!on, |b| b.outline())
-                        .xsmall()
-                        .tooltip(format!(
-                            "Pick {} tickets in {} every {} min",
-                            settings.team, settings.pick, settings.every_minutes
-                        ))
-                        .on_click(cx.listener(move |ws, _, window, cx| {
-                            ws.toggle_linear_watch(orch, window, cx)
-                        })),
+                            theme::TEXT_SECONDARY
+                        }))
+                        .child(line),
                 )
-                .child(
-                    Button::new(SharedString::from(format!("linear-now-{orch}")))
-                        .label("Check now")
-                        .ghost()
-                        .xsmall()
-                        .on_click(cx.listener(move |ws, _, window, cx| {
-                            ws.check_linear_now(orch, window, cx)
-                        })),
-                )
-                .when(!status.is_empty(), |d| {
-                    d.child(
-                        div()
-                            .w_full()
-                            .text_xs()
-                            .text_color(color(theme::TEXT_SECONDARY))
-                            .child(status),
-                    )
-                })
                 .into_any_element(),
         )
     }

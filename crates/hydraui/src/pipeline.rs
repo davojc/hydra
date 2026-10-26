@@ -44,7 +44,7 @@ pub struct LinearSettings {
     /// The state a ticket moves to when every stage passed.
     pub passed: String,
     pub every_minutes: u32,
-    /// Its orchestrator starts with Watch Linear on.
+    /// Its orchestrator starts in Automatic (the card's switch on).
     pub watch: bool,
 }
 

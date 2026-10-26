@@ -416,8 +416,9 @@ impl Workspace {
                 .child(row("When every stage passed", &l.passed))
                 .child(row("Check every (minutes)", &l.every))
                 .child(text(12., theme::TEXT_MUTED).child(
-                    "Watch Linear on the card picks the ticket in the trigger state whose SLA \
-                     breaches soonest, claims it and starts it. The environment needs Linear set \
+                    "With the card's switch on (Automatic), hydraui picks the ticket in the \
+                     trigger state whose SLA breaches soonest, claims it and starts it; off \
+                     (Manual), nothing starts unless you ask. The environment needs Linear set \
                      up (Set up linear…).",
                 ));
         }

@@ -475,7 +475,11 @@ impl Workspace {
             shell,
             &[
                 "claude".to_string(),
-                super::orchestrator::orchestrator_prompt(pipeline),
+                super::orchestrator::orchestrator_prompt(
+                    pipeline,
+                    crate::pipeline::load(self.hydra.paths.root(), pipeline)
+                        .is_ok_and(|p| p.linear.is_some()),
+                ),
             ],
         ));
         let id = self.open_terminal(env, request, window, cx);
@@ -492,7 +496,6 @@ impl Workspace {
         if watch {
             let w = self.linear_watch.entry(id).or_default();
             w.on = true;
-            w.status = Some("Looking…".into());
         }
         crate::action_log::write(format!(
             "started an orchestrator for {pipeline} in {env}{}",
@@ -552,7 +555,6 @@ impl Workspace {
             if let (true, Some(orch)) = (watch, orch) {
                 let w = self.linear_watch.entry(orch).or_default();
                 w.on = true;
-                w.status = Some("Watching (after the run in progress)".into());
             }
             crate::action_log::write(format!(
                 "autostart: {name} resumed the run hydraui closed on{}",

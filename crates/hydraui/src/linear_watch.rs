@@ -34,6 +34,94 @@ pub fn due(
         && last.is_none_or(|l| now.duration_since(l).is_ok_and(|since| since >= every))
 }
 
+/// How an orchestrator gets its tickets, as its card says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// It picks tickets from Linear itself.
+    Automatic,
+    /// A person tells it which ticket to run.
+    Manual,
+    /// It was picking automatically until something went wrong.
+    Stopped,
+}
+
+impl Mode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Automatic => "Automatic",
+            Mode::Manual => "Manual",
+            Mode::Stopped => "Stopped",
+        }
+    }
+}
+
+/// What the card needs to say how tickets arrive.
+pub struct TriggerFacts<'a> {
+    pub on: bool,
+    pub checking: bool,
+    /// Why automatic picking stopped by itself.
+    pub stopped: Option<&'a str>,
+    /// The ticket of the run in progress.
+    pub open_run: Option<&'a str>,
+    /// What the last look found (`nothing new`), shown before when the next one is.
+    pub found: Option<&'a str>,
+    pub last: Option<SystemTime>,
+    pub now: SystemTime,
+    pub settings: &'a LinearSettings,
+}
+
+/// The card's mode and one short line saying what it means right now; the card is narrow, so
+/// what the mode watches is in the switch's tooltip ([`trigger_tooltip`]).
+pub fn trigger(f: &TriggerFacts) -> (Mode, String) {
+    if let Some(why) = f.stopped.filter(|_| !f.on) {
+        return (Mode::Stopped, format!("Stopped: {why}"));
+    }
+    if !f.on {
+        return (Mode::Manual, "Only runs tickets you give it".to_string());
+    }
+    let line = if let Some(ticket) = f.open_run {
+        format!("Next ticket after {ticket}")
+    } else if f.checking {
+        "Looking in Linear…".to_string()
+    } else {
+        let every = Duration::from_secs(u64::from(f.settings.every_minutes) * 60);
+        let left = f
+            .last
+            .and_then(|l| f.now.duration_since(l).ok())
+            .map_or(Duration::ZERO, |since| every.saturating_sub(since));
+        let next = match left.as_secs().div_ceil(60) {
+            0 => "next look now".to_string(),
+            m => format!("next look in {m} min"),
+        };
+        match f.found {
+            Some(found) => format!("{found} · {next}"),
+            None => capitalised(&next),
+        }
+    };
+    (Mode::Automatic, line)
+}
+
+/// The switch's tooltip: what automatic picks, and that off means nothing starts by itself.
+pub fn trigger_tooltip(s: &LinearSettings) -> String {
+    let who = match s.assignee {
+        Assignee::Unassigned => "unassigned ",
+        Assignee::Any => "",
+    };
+    format!(
+        "On: every {} min, picks the {who}{} ticket in {} whose SLA breaches first, one at a \
+         time. Off: nothing starts unless you give the orchestrator a ticket or press Pick \
+         now.",
+        s.every_minutes, s.team, s.pick
+    )
+}
+
+fn capitalised(s: &str) -> String {
+    let mut c = s.chars();
+    c.next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
+}
+
 /// Failed checks in a row (§3).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Failures(pub u32);
@@ -391,6 +479,81 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(pick(&rest, true).unwrap().identifier, "INTH-1");
+    }
+
+    fn inth() -> LinearSettings {
+        crate::pipeline::LinearSettings {
+            team: "INTH".into(),
+            pick: "Ready for Investigation".into(),
+            assignee: Assignee::Unassigned,
+            claim: "In Investigation".into(),
+            passed: "Ready for Peer Review".into(),
+            every_minutes: 5,
+            watch: true,
+        }
+    }
+
+    fn facts(settings: &LinearSettings) -> TriggerFacts<'_> {
+        TriggerFacts {
+            on: true,
+            checking: false,
+            stopped: None,
+            open_run: None,
+            found: None,
+            last: None,
+            now: SystemTime::UNIX_EPOCH + Duration::from_secs(10_000),
+            settings,
+        }
+    }
+
+    #[test]
+    fn automatic_says_what_it_found_and_when_it_looks_next() {
+        let s = inth();
+        let mut f = facts(&s);
+        assert_eq!(trigger(&f), (Mode::Automatic, "Next look now".to_string()));
+        f.last = Some(f.now - Duration::from_secs(61));
+        f.found = Some("Nothing new");
+        assert_eq!(trigger(&f).1, "Nothing new · next look in 4 min");
+        f.last = Some(f.now - Duration::from_secs(250));
+        assert_eq!(trigger(&f).1, "Nothing new · next look in 1 min");
+        f.last = Some(f.now - Duration::from_secs(400));
+        assert_eq!(trigger(&f).1, "Nothing new · next look now");
+        f.checking = true;
+        assert_eq!(trigger(&f).1, "Looking in Linear…");
+        f.open_run = Some("INTH-169");
+        assert_eq!(trigger(&f).1, "Next ticket after INTH-169");
+    }
+
+    #[test]
+    fn off_is_manual_and_a_stop_by_itself_says_why() {
+        let s = inth();
+        let mut f = facts(&s);
+        f.on = false;
+        assert_eq!(
+            trigger(&f),
+            (Mode::Manual, "Only runs tickets you give it".to_string())
+        );
+        f.stopped = Some("the API key was rejected");
+        assert_eq!(
+            trigger(&f),
+            (
+                Mode::Stopped,
+                "Stopped: the API key was rejected".to_string()
+            )
+        );
+        // Back on, an old stop no longer counts.
+        f.on = true;
+        assert_eq!(trigger(&f).0, Mode::Automatic);
+    }
+
+    #[test]
+    fn the_tooltip_says_what_automatic_picks_and_what_off_means() {
+        let tip = trigger_tooltip(&inth());
+        assert!(
+            tip.contains("picks the unassigned INTH ticket in Ready for Investigation"),
+            "{tip}"
+        );
+        assert!(tip.contains("Off: nothing starts unless you"), "{tip}");
     }
 
     #[test]

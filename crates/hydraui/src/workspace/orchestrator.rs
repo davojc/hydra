@@ -100,6 +100,7 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
         (false, None, None, None, None);
     let (mut retrying, mut run_resumed, mut resumed) = (None, false, false);
     let mut reopened = None;
+    let (mut asked, mut answered) = (None, None);
     for c in changes.iter().filter(|c| &c.run == id) {
         match (&c.what, c.stage) {
             (Decided::RunFinished, _) => finished = true,
@@ -111,6 +112,8 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
             (Decided::Reopened, Some(i)) => reopened = Some(i),
             (Decided::RunResumed, _) => run_resumed = true,
             (Decided::Resumed, _) => resumed = true,
+            (Decided::Asked(q), Some(i)) => asked = Some((i, q)),
+            (Decided::Answered(_), Some(i)) => answered = Some(i),
             _ => {}
         }
     }
@@ -128,6 +131,18 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
         format!(
             "Run {id} needs a person: {why}. Tell the user why and wait: nothing you can call \
              moves it on."
+        )
+    } else if let Some((i, question)) = asked {
+        format!(
+            "Run {id}: stage {} asked product a question, and the ticket waits for the answer: \
+             {question} Do nothing meanwhile: hydraui tells you when it's answered.",
+            stage(i)
+        )
+    } else if let Some(i) = answered {
+        format!(
+            "Run {id}: stage {} has its answer and carries on. Wait: hydraui tells you when it \
+             reports.",
+            stage(i)
         )
     } else if let Some((i, why)) = failed {
         format!(
@@ -773,6 +788,7 @@ impl Workspace {
             }
         }
         self.send_wakes(window, cx);
+        self.asked_notify(&changes, window, cx);
         let mut needs_you: Vec<&str> = changes
             .iter()
             .filter(|c| matches!(c.what, Decided::RunNeedsYou(_)))
@@ -942,7 +958,7 @@ impl Workspace {
                 .cloned()
                 .is_some_and(|v| v.update(cx, |v, cx| v.type_prompt(&message, cx)));
             if typed {
-                crate::action_log::write(format!("run {run}: woke the orchestrator: {message}"));
+                crate::action_log::write(format!("run {run}: woke a session: {message}"));
                 self.reserved.insert(pane, std::time::Instant::now());
                 self.pending_wakes.remove(&pane);
             }
@@ -1097,6 +1113,7 @@ impl Workspace {
             CardState::Ready => (theme::TEXT_SECONDARY, theme::RAISED),
             CardState::Working => (theme::TEAL, theme::TEAL_TINT),
             CardState::NeedsYou => (theme::RED, theme::RED_TINT),
+            CardState::Asking => (theme::AMBER, theme::AMBER_TINT),
             CardState::Paused => (theme::AMBER, theme::AMBER_TINT),
             CardState::Done => (theme::GREEN, theme::GREEN_TINT),
             CardState::Stopped => (theme::TEXT_SECONDARY, theme::RAISED),
@@ -1312,6 +1329,25 @@ mod tests {
 
     fn wake(runs: &Runs, id: &str, changes: &[Change]) -> String {
         wake_message(runs.run(id).unwrap(), changes).unwrap()
+    }
+
+    #[test]
+    fn the_orchestrator_waits_while_a_stage_asks_product() {
+        let (mut runs, id) = runs_of(&["a", "b"]);
+        let s = runs.begin("orch", &id, "a", "", 30).unwrap();
+        runs.link(&id, s.stage, "t1", "t1");
+        let asked = runs
+            .ask("t1", "Remove it?", None, std::time::SystemTime::now())
+            .unwrap();
+        let m = wake_message(runs.run(&id).unwrap(), &asked).unwrap();
+        assert!(
+            m.contains("asked product") && m.contains("Remove it?"),
+            "{m}"
+        );
+        assert!(m.contains("Do nothing"), "{m}");
+        let answered = runs.answered(&id, "No").unwrap();
+        let m = wake_message(runs.run(&id).unwrap(), &answered).unwrap();
+        assert!(m.contains("has its answer"), "{m}");
     }
 
     #[test]

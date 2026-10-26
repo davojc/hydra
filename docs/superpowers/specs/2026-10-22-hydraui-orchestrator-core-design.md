@@ -559,3 +559,26 @@ waits for them can now choose **Go back…** in the Pipeline tab's banner:
   the stage fails as if its session had gone, so the orchestrator starts it afresh.
 - **Logged** as `person {choice: "back", stage, note}`, `went back`, and `stage reopened {stage,
   label}`. A restart replays it.
+
+## 15. Asking product instead of deciding (added 2026-10-26)
+
+INTH-166's Develop stage removed the browser's automatic translation: a call for product, not
+for a stage. Every stage is now told so, and has a way to ask.
+
+- **The rule**, in every stage's note: a change beyond the ticket that alters what users see or
+  do (removing or changing a feature, copy or a flow) is a product decision; ask before making
+  it, and wait.
+- **Where it asks.** A pipeline's `[product] channel = "#…"` (Pipeline settings → Product
+  questions): the stage posts the question there itself (the ticket, the options, its pick)
+  with the environment's Slack tools, then calls **`stage_ask`** with the question and the
+  message's link. Without a channel it calls `stage_ask` alone and the user answers in hydraui.
+- **The ticket waits** (the user's choice: one ticket at a time, nothing else starts): the run
+  is needs-you with its question kept on the run (`Run.asking`); the card shows **Asked
+  product** in amber, the question, **Open thread ↗** and **Answer…**, and a notification says
+  so. The orchestrator is told to do nothing until it's answered. A person can't re-run or go
+  back while it asks (the question would be lost), only stop the ticket.
+- **The answer.** Every 15 minutes hydraui types to the waiting session: look in the thread; if
+  it's answered, call **`stage_answer`** with it and carry on. Or the user's **Answer…** records
+  it and types it to the session. A stage that reports or fails while asking drops the question.
+- **Logged and resumed**: `asked` (stage, question, link) and `answered` (answer) in the run's
+  log; a restart brings a waiting question back.

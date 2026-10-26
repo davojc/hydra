@@ -474,7 +474,9 @@ mod tests {
                 "stage_start",
                 "run_status",
                 "stage_brief",
-                "stage_report"
+                "stage_report",
+                "stage_ask",
+                "stage_answer"
             ]
         );
         assert_eq!(names, hydra_providers::claude_files::HYDRAUI_TOOLS);

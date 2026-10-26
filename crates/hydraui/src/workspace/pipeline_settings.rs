@@ -48,6 +48,8 @@ pub(super) struct SettingsDraft {
     name: Entity<InputState>,
     /// The branch rule, e.g. `{ticket}`; empty: none.
     branch: Entity<InputState>,
+    /// The Slack channel for product questions; empty: stages ask the user in hydraui.
+    product: Entity<InputState>,
     bar: Entity<SliderState>,
     stages: Vec<DraftStage>,
     skills: Vec<String>,
@@ -116,6 +118,8 @@ impl SettingsDraft {
             branch: Some(self.branch.read(cx).value().trim().to_string()).filter(|b| !b.is_empty()),
             linear: self.linear.edit(cx),
             autostart: self.saved.autostart.clone(),
+            product_channel: Some(self.product.read(cx).value().trim().to_string())
+                .filter(|c| !c.is_empty()),
             bar: slider_value(&self.bar, cx),
             stages: self
                 .stages
@@ -213,10 +217,16 @@ impl Workspace {
                 .placeholder("{ticket}")
                 .default_value(saved.branch.clone().unwrap_or_default())
         });
+        let product = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("#product")
+                .default_value(saved.product_channel.clone().unwrap_or_default())
+        });
         let bar = slider(saved.bar, cx);
         let mut subs = vec![
             cx.subscribe_in(&name, window, |_, _, _: &InputEvent, _, cx| cx.notify()),
             cx.subscribe_in(&branch, window, |_, _, _: &InputEvent, _, cx| cx.notify()),
+            cx.subscribe_in(&product, window, |_, _, _: &InputEvent, _, cx| cx.notify()),
             cx.subscribe_in(&bar, window, move |ws, _, _: &SliderEvent, window, cx| {
                 ws.default_bar_moved(orch, window, cx)
             }),
@@ -264,6 +274,7 @@ impl Workspace {
             saved: saved.clone(),
             name,
             branch,
+            product,
             bar,
             stages: Vec::new(),
             skills,
@@ -890,6 +901,18 @@ impl Workspace {
                                          for INTH-166. Stages are told it, and a report whose \
                                          pull request is on another branch is refused. Empty: \
                                          no rule.",
+                                    )),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_2()
+                                    .child(section("Product questions"))
+                                    .child(div().max_w(px(480.)).child(Input::new(&draft.product)))
+                                    .child(text(12., theme::TEXT_MUTED).child(
+                                        "The Slack channel a stage asks in when a change needs a \
+                                         product decision (removing or changing what users see or \
+                                         do, beyond what the ticket asks). The ticket waits for \
+                                         the answer. Empty: the stage asks you in hydraui.",
                                     )),
                             )
                             .child(

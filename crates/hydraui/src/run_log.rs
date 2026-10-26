@@ -71,6 +71,15 @@ pub fn record(hydra_root: &Path, runs: &Runs, changes: &[Change]) {
             Decided::Reopened => ("went back", json!({"stage": stage})),
             Decided::Paused => ("paused", json!({})),
             Decided::Resumed => ("resumed", json!({})),
+            Decided::Asked(question) => (
+                "asked",
+                json!({
+                    "stage": stage,
+                    "question": question,
+                    "link": run.asking.as_ref().and_then(|a| a.link.clone()),
+                }),
+            ),
+            Decided::Answered(answer) => ("answered", json!({"stage": stage, "answer": answer})),
             Decided::RunNeedsYou(why) => ("needs you", json!({"reason": why})),
             Decided::RunFinished => ("run ended", json!({"outcome": "done", "scores": scores()})),
             Decided::RunStopped(why) => (

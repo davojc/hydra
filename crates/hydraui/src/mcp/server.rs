@@ -967,6 +967,45 @@ mod tests {
     }
 
     #[test]
+    fn a_stage_asks_product_and_records_the_answer() {
+        use crate::runs::Decided;
+        let (home, reg, orch) = with_pipeline();
+        let stage = first_stage_open(&reg, &orch);
+        let ask = json!({"question": "Remove auto-translate?", "link": "https://s/t/1"});
+        assert!(
+            call(&reg, &orch, "stage_ask", ask.clone()).1,
+            "not the orchestrator's"
+        );
+        let (text, err, event) = call(&reg, &stage, "stage_ask", ask);
+        assert!(!err && text.contains("waits"), "{text}");
+        assert!(
+            matches!(&event, Some(McpEvent::RunChanged(c)) if matches!(&c[0].what, Decided::Asked(q) if q == "Remove auto-translate?"))
+        );
+        let st: Value =
+            serde_json::from_str(&call(&reg, &orch, "run_status", json!({})).0).unwrap();
+        assert_eq!(st["state"], "needs_you");
+        let log =
+            std::fs::read_to_string(crate::run_log::file_for(home.path(), "INTH-7-1")).unwrap();
+        assert!(
+            log.contains(r#""event":"asked""#) && log.contains("https://s/t/1"),
+            "{log}"
+        );
+
+        assert!(call(&reg, &orch, "stage_answer", json!({"answer": "x"})).1);
+        let (text, err, _) = call(
+            &reg,
+            &stage,
+            "stage_answer",
+            json!({"answer": "Keep it (Ana)"}),
+        );
+        assert!(!err, "{text}");
+        let st: Value =
+            serde_json::from_str(&call(&reg, &orch, "run_status", json!({})).0).unwrap();
+        assert_eq!(st["state"], "running");
+        assert!(call(&reg, &stage, "stage_answer", json!({"answer": "again"})).1);
+    }
+
+    #[test]
     fn closing_a_stage_terminal_fails_its_stage() {
         use crate::runs::Decided;
         let (_home, reg, orch) = with_pipeline();
@@ -1123,7 +1162,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 11);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 13);
         let bad: Value = serde_json::from_str(&rpc(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"tasks_delete","arguments":{}}}"#).body.unwrap()).unwrap();
         assert_eq!(bad["error"]["code"], -32602);
         let junk: Value = serde_json::from_str(&rpc("{not json").body.unwrap()).unwrap();

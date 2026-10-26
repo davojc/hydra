@@ -11,6 +11,8 @@ pub enum CardState {
     Ready,
     Working,
     NeedsYou,
+    /// A stage asked product a question; the ticket waits for the answer.
+    Asking,
     Paused,
     Done,
     Stopped,
@@ -22,6 +24,7 @@ impl CardState {
             CardState::Ready => "Ready",
             CardState::Working => "Working",
             CardState::NeedsYou => "Needs you",
+            CardState::Asking => "Asked product",
             CardState::Paused => "Paused",
             CardState::Done => "Done",
             CardState::Stopped => "Stopped",
@@ -53,6 +56,7 @@ pub fn card(run: &Run) -> Card {
     let state = match &run.state {
         RunState::Finished => CardState::Done,
         RunState::Stopped(_) => CardState::Stopped,
+        RunState::NeedsYou(_) if run.asking.is_some() => CardState::Asking,
         RunState::NeedsYou(_) => CardState::NeedsYou,
         RunState::Running if run.paused => CardState::Paused,
         RunState::Running => CardState::Working,
@@ -250,6 +254,21 @@ mod tests {
         );
         runs.person(&id, crate::runs::Choice::Stop).unwrap();
         assert_eq!(card(runs.run(&id).unwrap()).state, CardState::Stopped);
+    }
+
+    #[test]
+    fn a_ticket_waiting_on_product_says_so_not_needs_you() {
+        let (mut runs, id) = runs_of(&STAGES);
+        start(&mut runs, &id, "replicate", "t1");
+        runs.ask("t1", "Remove it?", None, std::time::SystemTime::now())
+            .unwrap();
+        let c = card(runs.run(&id).unwrap());
+        assert_eq!(
+            (c.state, c.state.word()),
+            (CardState::Asking, "Asked product")
+        );
+        runs.answered(&id, "No").unwrap();
+        assert_eq!(card(runs.run(&id).unwrap()).state, CardState::Working);
     }
 
     #[test]

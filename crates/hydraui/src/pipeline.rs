@@ -28,6 +28,9 @@ pub struct Pipeline {
     /// The environment its orchestrator starts in when hydraui launches (`[autostart] env`);
     /// `None`: started from the launcher.
     pub autostart: Option<String>,
+    /// The Slack channel a stage asks a product question in, rather than deciding it
+    /// (`[product] channel`); `None`: it asks the user in hydraui.
+    pub product_channel: Option<String>,
 }
 
 /// A pipeline's `[linear]` table (phase 2 spec §2): which tickets it takes, and the states it
@@ -127,12 +130,19 @@ struct File {
     stages: Vec<FileStage>,
     linear: Option<FileLinear>,
     autostart: Option<FileAutostart>,
+    product: Option<FileProduct>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileAutostart {
     env: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileProduct {
+    channel: String,
 }
 
 #[derive(Deserialize)]
@@ -279,6 +289,15 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
             Some(a) => Some(a.env.trim().to_string()),
             None => None,
         },
+        product_channel: match file.product {
+            Some(p) if p.channel.trim().is_empty() => {
+                return Err(
+                    "[product] needs the Slack channel, e.g. channel = \"#product\"".into(),
+                );
+            }
+            Some(p) => Some(p.channel.trim().to_string()),
+            None => None,
+        },
     })
 }
 
@@ -297,6 +316,7 @@ pub struct Edit {
     pub stages: Vec<EditStage>,
     pub linear: Option<LinearSettings>,
     pub autostart: Option<String>,
+    pub product_channel: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -334,6 +354,7 @@ impl From<&Pipeline> for Edit {
                 .collect(),
             linear: p.linear.clone(),
             autostart: p.autostart.clone(),
+            product_channel: p.product_channel.clone(),
         }
     }
 }
@@ -467,6 +488,22 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
         }
         None => {
             doc.remove("autostart");
+        }
+    }
+    match edit
+        .product_channel
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    {
+        Some(channel) => {
+            if !doc.get("product").is_some_and(Item::is_table) {
+                doc["product"] = Item::Table(Table::new());
+            }
+            doc["product"]["channel"] = value(channel);
+        }
+        None => {
+            doc.remove("product");
         }
     }
     let old: Vec<Table> = doc
@@ -842,6 +879,31 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
         let quiet = parse(&format!("{ONE_STAGE}[linear]\nteam = \"INTH\"\n")).unwrap();
         assert!(!quiet.linear.unwrap().watch, "off unless asked");
         assert!(parse(&format!("{ONE_STAGE}[autostart]\nenv = \" \"\n")).is_err());
+    }
+
+    #[test]
+    fn a_pipeline_names_the_channel_its_product_questions_go_to() {
+        assert_eq!(parse(ONE_STAGE).unwrap().product_channel, None);
+        let p = parse(&format!(
+            "{ONE_STAGE}[product]\nchannel = \" #product- \"\n"
+        ))
+        .unwrap();
+        assert_eq!(p.product_channel.as_deref(), Some("#product-"));
+        assert!(parse(&format!("{ONE_STAGE}[product]\nchannel = \"\"\n")).is_err());
+
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(folder(d.path()).join("t.toml"), ONE_STAGE).unwrap();
+        let mut edit = Edit::from(&load(d.path(), "t").unwrap());
+        edit.product_channel = Some("#product-".into());
+        save(d.path(), "t", &edit).unwrap();
+        assert_eq!(
+            load(d.path(), "t").unwrap().product_channel.as_deref(),
+            Some("#product-")
+        );
+        edit.product_channel = Some(" ".into());
+        save(d.path(), "t", &edit).unwrap();
+        assert_eq!(load(d.path(), "t").unwrap().product_channel, None);
     }
 
     #[test]

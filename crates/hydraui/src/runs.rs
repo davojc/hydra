@@ -115,6 +115,17 @@ impl RunState {
     }
 }
 
+/// A stage's question for a person, a decision that isn't the stage's to make (product): its
+/// ticket waits for the answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ask {
+    pub stage: usize,
+    pub question: String,
+    /// Where it was asked, a Slack thread, when the stage gave one.
+    pub link: Option<String>,
+    pub since: SystemTime,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Run {
     /// `<ticket>-<n>`.
@@ -136,6 +147,8 @@ pub struct Run {
     pub worktree: Option<PathBuf>,
     /// The latest seven-day Claude usage reported by one of its sessions, in percent.
     pub week_used: Option<f64>,
+    /// A stage's question waiting for its answer.
+    pub asking: Option<Ask>,
 }
 
 /// What a terminal is to the runs (§3.3).
@@ -177,6 +190,10 @@ pub enum Decided {
     Reopened,
     Paused,
     Resumed,
+    /// A stage asked a person a question; the ticket waits.
+    Asked(String),
+    /// Its answer came; the stage goes on.
+    Answered(String),
     RunResumed,
     RunFinished,
     RunNeedsYou(String),
@@ -341,6 +358,7 @@ impl Runs {
             sessions: 0,
             worktree: None,
             week_used: None,
+            asking: None,
         });
         Ok(self.runs.last().expect("just pushed"))
     }
@@ -596,6 +614,9 @@ impl Runs {
 
     fn fail_stage(&mut self, ri: usize, si: usize, why: &str) -> Vec<Change> {
         let r = &mut self.runs[ri];
+        if r.asking.take().is_some() {
+            r.state = RunState::Running;
+        }
         let s = &mut r.stages[si];
         s.status = StageStatus::Failed;
         let attempts = s.tries();
@@ -633,6 +654,10 @@ impl Runs {
                      report again."
                 ));
             }
+        }
+        // A stage that reports without waiting for its answer has decided after all.
+        if r.asking.take().is_some() {
+            r.state = RunState::Running;
         }
         let bar = r.pipeline.bar_for(si);
         let id = r.pipeline.stages[si].id.clone();
@@ -774,6 +799,71 @@ impl Runs {
     }
 
     /// A person's choice for run `run` (§5.3).
+    /// `token`'s running stage asks a person `question` (asked at `link`, a Slack thread): the
+    /// ticket waits until [`Runs::answered`].
+    pub fn ask(
+        &mut self,
+        token: &str,
+        question: &str,
+        link: Option<&str>,
+        now: SystemTime,
+    ) -> Result<Vec<Change>, String> {
+        let Some((ri, si)) = self.stage_of(token) else {
+            return Err("only a running stage's own session asks".into());
+        };
+        let r = &mut self.runs[ri];
+        if r.stages[si].status != StageStatus::Running {
+            return Err("this stage isn't running".into());
+        }
+        if r.asking.is_some() {
+            return Err("this run is already waiting for an answer".into());
+        }
+        let question = question.trim();
+        if question.is_empty() {
+            return Err("the question is empty".into());
+        }
+        r.asking = Some(Ask {
+            stage: si,
+            question: question.to_string(),
+            link: link
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string),
+            since: now,
+        });
+        r.state = RunState::NeedsYou(format!(
+            "{} is waiting for an answer: {question}",
+            r.pipeline.stages[si].title
+        ));
+        Ok(vec![Change {
+            run: r.id.clone(),
+            stage: Some(si),
+            what: Decided::Asked(question.to_string()),
+        }])
+    }
+
+    /// The answer to run `run`'s question came (found by its stage, or given in hydraui): the
+    /// stage goes on.
+    pub fn answered(&mut self, run: &str, answer: &str) -> Result<Vec<Change>, String> {
+        let Some(ri) = self.index(run) else {
+            return Err(format!("no run {run}"));
+        };
+        let answer = answer.trim();
+        if answer.is_empty() {
+            return Err("the answer is empty".into());
+        }
+        let r = &mut self.runs[ri];
+        let Some(ask) = r.asking.take() else {
+            return Err(format!("run {run} isn't waiting for an answer"));
+        };
+        r.state = RunState::Running;
+        Ok(vec![Change {
+            run: r.id.clone(),
+            stage: Some(ask.stage),
+            what: Decided::Answered(answer.to_string()),
+        }])
+    }
+
     pub fn person(&mut self, run: &str, choice: Choice) -> Result<Vec<Change>, String> {
         let Some(ri) = self.index(run) else {
             return Err(format!("no run {run}"));
@@ -791,7 +881,14 @@ impl Runs {
                 let at = waiting.map_or("the end".to_string(), |si| {
                     r.pipeline.stages[si].title.clone()
                 });
+                self.runs[ri].asking = None;
                 return Ok(self.end(ri, format!("stopped by you at {at}")));
+            }
+            _ if r.asking.is_some() => {
+                return Err(format!(
+                    "run {run} is waiting for the answer to its stage's question: answer it, or \
+                     stop the ticket"
+                ));
             }
             Choice::Retry { note } => note.trim().to_string(),
             Choice::Back { stage, note } => return self.go_back(ri, &stage, note.trim()),
@@ -999,10 +1096,24 @@ fn stage_note(run: &Run, i: usize) -> String {
              another branch is refused."
         )
     });
+    // Product decisions aren't a stage's to make (INTH-166 removed browser translation): it
+    // asks, in the pipeline's Slack channel when it has one, and its ticket waits.
+    let ask = match &run.pipeline.product_channel {
+        Some(channel) => format!(
+            "post it in Slack {channel} (the ticket, the options, your pick), then call \
+             stage_ask with the question and the message's link"
+        ),
+        None => "call stage_ask with the question, the options and your pick".to_string(),
+    };
+    let product = format!(
+        "\nNot your call: a change beyond the ticket that alters what users see or do (removing \
+         or changing a feature, copy or a flow) is a product decision. Ask before making it: \
+         {ask}, and wait."
+    );
     format!(
         "---\nhydraui pipeline \"{}\" · {} · stage {} of {}: {}{skill}.\n{around}Do only this \
          stage. When it's done, call stage_report (score, evidence, reasons for and against, \
-         handoff); stage_brief has what earlier stages handed over.{branch}",
+         handoff); stage_brief has what earlier stages handed over.{branch}{product}",
         run.pipeline.name,
         run.ticket,
         i + 1,
@@ -1129,6 +1240,70 @@ mod tests {
             stage: stage.to_string(),
             note: note.to_string(),
         }
+    }
+
+    #[test]
+    fn a_stage_asks_and_its_ticket_waits_for_the_answer() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b"]);
+        started(&mut runs, &id, "a", "s1");
+        let now = SystemTime::now();
+        assert!(runs.ask("nobody", "Remove it?", None, now).is_err());
+        assert!(runs.ask("s1", "  ", None, now).is_err());
+        let changes = runs
+            .ask(
+                "s1",
+                "Remove auto-translate?",
+                Some("https://x.slack.com/t/1"),
+                now,
+            )
+            .unwrap();
+        assert_eq!(
+            changes[0].what,
+            Decided::Asked("Remove auto-translate?".into())
+        );
+        let r = runs.run(&id).unwrap();
+        assert!(
+            matches!(&r.state, RunState::NeedsYou(why) if why.contains("Remove auto-translate?"))
+        );
+        assert_eq!(
+            r.asking.as_ref().unwrap().link.as_deref(),
+            Some("https://x.slack.com/t/1")
+        );
+        assert!(
+            runs.ask("s1", "Again?", None, now).is_err(),
+            "one question at a time"
+        );
+        // A person's re-run or go-back would lose the question; only stopping is allowed.
+        assert!(runs.person(&id, retry("redo")).is_err());
+        assert!(runs.answered(&id, " ").is_err());
+        let changes = runs.answered(&id, "Keep it, product says").unwrap();
+        assert_eq!(
+            changes[0].what,
+            Decided::Answered("Keep it, product says".into())
+        );
+        let r = runs.run(&id).unwrap();
+        assert_eq!(r.state, RunState::Running);
+        assert!(r.asking.is_none());
+        assert!(runs.answered(&id, "twice").is_err());
+    }
+
+    #[test]
+    fn reporting_or_failing_while_asking_drops_the_question() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b"]);
+        started(&mut runs, &id, "a", "s1");
+        runs.ask("s1", "Q?", None, SystemTime::now()).unwrap();
+        runs.report("s1", rated(90)).unwrap();
+        let r = runs.run(&id).unwrap();
+        assert!(r.asking.is_none());
+        assert_eq!(r.state, RunState::Running);
+        started(&mut runs, &id, "b", "s2");
+        runs.ask("s2", "Q2?", None, SystemTime::now()).unwrap();
+        runs.session_gone("s2");
+        let r = runs.run(&id).unwrap();
+        assert!(r.asking.is_none());
+        assert_eq!(r.state, RunState::Running);
     }
 
     #[test]
@@ -1335,7 +1510,8 @@ mod tests {
         // The pipeline's own words first, as the user would type them.
         assert!(p.starts_with("do develop. after 88"), "{p}");
         let note = &p[p.find("\n\n---\n").expect("a note after the prompt")..];
-        assert!(note.len() < 500, "{} chars: {note}", note.len());
+        // Short beside the pipeline's own words, though the product rule is in every note.
+        assert!(note.len() < 800, "{} chars: {note}", note.len());
         for says in [
             "stage 2 of 3: develop",
             "Earlier: 1. replicate passed (88)",
@@ -1345,6 +1521,28 @@ mod tests {
         ] {
             assert!(note.contains(says), "{says}: {note}");
         }
+    }
+
+    #[test]
+    fn every_stage_is_told_to_ask_before_a_product_decision() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["develop"]);
+        let p = runs.begin("orch", &id, "develop", "", 30).unwrap().prompt;
+        assert!(p.contains("is a product decision"), "{p}");
+        assert!(p.contains("call stage_ask with the question"), "{p}");
+        assert!(!p.contains("Slack"), "{p}");
+
+        let mut runs = Runs::default();
+        let mut pipe = pipeline(&["develop"]);
+        pipe.product_channel = Some("#product-".into());
+        let id = runs
+            .start_run("orch", pipe, "INTH-166", "x")
+            .unwrap()
+            .id
+            .clone();
+        let p = runs.begin("orch", &id, "develop", "", 30).unwrap().prompt;
+        assert!(p.contains("post it in Slack #product-"), "{p}");
+        assert!(p.contains("the message's link"), "{p}");
     }
 
     #[test]

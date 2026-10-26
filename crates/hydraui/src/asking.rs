@@ -1,0 +1,56 @@
+//! A stage's question for product (a decision that isn't the stage's to make): when hydraui
+//! has the waiting session look for the answer in its Slack thread, and what it types to it.
+
+use std::time::{Duration, SystemTime};
+
+/// How often a waiting session is asked to look in its Slack thread.
+pub const CHECK_EVERY: Duration = Duration::from_secs(15 * 60);
+
+/// Whether the session asked at `since`, last told to look at `last`, should look again.
+pub fn check_due(since: SystemTime, last: Option<SystemTime>, now: SystemTime) -> bool {
+    now.duration_since(last.unwrap_or(since))
+        .is_ok_and(|waited| waited >= CHECK_EVERY)
+}
+
+/// Typed to the waiting session to have it look for the answer.
+pub fn check_prompt(question: &str, link: &str) -> String {
+    format!(
+        "Look in the Slack thread {link} for an answer to your question: {question} If it's \
+         answered, call stage_answer with the answer and who gave it, then carry on. If not, \
+         say so in one line and stop: you'll be asked again."
+    )
+}
+
+/// Typed to the waiting session when the user answers in hydraui.
+pub fn answer_prompt(answer: &str) -> String {
+    format!(
+        "The answer to your question, from the user: {answer} It's recorded; carry on with your \
+         stage as it says (don't call stage_answer)."
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_waiting_session_looks_every_fifteen_minutes() {
+        let asked = SystemTime::UNIX_EPOCH + Duration::from_secs(100_000);
+        let min = |m: u64| Duration::from_secs(m * 60);
+        assert!(!check_due(asked, None, asked + min(14)));
+        assert!(check_due(asked, None, asked + min(15)));
+        assert!(!check_due(asked, Some(asked + min(15)), asked + min(29)));
+        assert!(check_due(asked, Some(asked + min(15)), asked + min(30)));
+    }
+
+    #[test]
+    fn the_prompts_say_what_to_do_with_the_answer() {
+        let check = check_prompt("Remove auto-translate?", "https://s/t/1");
+        assert!(
+            check.contains("https://s/t/1") && check.contains("stage_answer"),
+            "{check}"
+        );
+        let answer = answer_prompt("Keep it");
+        assert!(answer.contains("Keep it") && answer.contains("don't call stage_answer"));
+    }
+}

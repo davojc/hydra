@@ -217,6 +217,21 @@ fn replay(id: &str, pipeline: Pipeline, events: &[Value]) -> Option<Run> {
             "paused" => {
                 runs.pause(id, true).ok()?;
             }
+            // A stage asked a person (product) and the ticket waited.
+            "asked" => {
+                let token = latest(&runs, text(e, "stage"))?;
+                let link = e.get("link").and_then(Value::as_str);
+                runs.ask(
+                    &token,
+                    text(e, "question"),
+                    link,
+                    std::time::SystemTime::now(),
+                )
+                .ok()?;
+            }
+            "answered" => {
+                runs.answered(id, text(e, "answer")).ok()?;
+            }
             "resumed" => {
                 runs.pause(id, false).ok()?;
             }
@@ -278,6 +293,30 @@ mod tests {
             line("stage folder", r#","label":"s-02","folder":"/w/dev""#),
             line("claude session", r#","who":"s-02","id":"b-c""#),
         ]
+    }
+
+    #[test]
+    fn a_question_waiting_for_its_answer_comes_back_and_an_answered_one_does_not() {
+        let mut log = mid_run();
+        log.push(line(
+            "asked",
+            r#","stage":"b","question":"Remove auto-translate?","link":"https://s/t/1""#,
+        ));
+        let home = home_with(&log);
+        let i = &interrupted(home.path(), |_| false)[0];
+        let ask = i.run.asking.as_ref().expect("still asking");
+        assert_eq!(
+            (ask.stage, ask.question.as_str()),
+            (1, "Remove auto-translate?")
+        );
+        assert_eq!(ask.link.as_deref(), Some("https://s/t/1"));
+        assert!(matches!(i.run.state, RunState::NeedsYou(_)));
+
+        log.push(line("answered", r#","stage":"b","answer":"Keep it""#));
+        let home = home_with(&log);
+        let i = &interrupted(home.path(), |_| false)[0];
+        assert!(i.run.asking.is_none());
+        assert_eq!(i.run.state, RunState::Running);
     }
 
     #[test]

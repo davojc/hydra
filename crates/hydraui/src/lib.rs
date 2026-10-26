@@ -5,6 +5,7 @@ pub mod action_log;
 pub mod activity;
 pub mod agent_access;
 pub mod app_icon;
+pub mod asking;
 pub mod assets;
 pub mod branch_rule;
 pub mod claim;

@@ -154,6 +154,7 @@ impl Workspace {
                 .border_1()
                 .border_color(tint.opacity(if active { 0.45 } else { 0.2 }))
                 .child(self.render_pipeline_card(*orch, card, active, cx))
+                .children(self.render_question(*orch, cx))
                 .children(self.render_linear_row(*orch, cx));
             let orch = *orch;
             if let Some(row) =

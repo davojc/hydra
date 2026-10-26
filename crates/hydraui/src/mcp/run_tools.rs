@@ -14,12 +14,14 @@ use crate::run_log;
 use crate::runs::{Change, Decided, Refusal, Role, StageStatus};
 
 /// The tools this module answers, in the order `tools/list` shows them.
-pub const NAMES: [&str; 5] = [
+pub const NAMES: [&str; 7] = [
     "run_start",
     "stage_start",
     "run_status",
     "stage_brief",
     "stage_report",
+    "stage_ask",
+    "stage_answer",
 ];
 
 /// The `tools/list` entries for `NAMES`.
@@ -130,6 +132,35 @@ pub fn schemas() -> Vec<Value> {
                 "required": ["outcome", "score", "summary", "evidence", "reasons"],
             },
         }),
+        json!({
+            "name": "stage_ask",
+            "description": "Stage session: a decision isn't yours to make (product: a change \
+                beyond the ticket that alters what users see or do). Ask it, once you've posted \
+                it where your stage note says, and the ticket waits for the answer. Then stop \
+                and wait: hydraui tells you when to look for the answer, or gives it to you. \
+                Don't make the change meanwhile.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "question": string("The decision needed, in a sentence or two: what you'd \
+                        change, the options and your recommendation."),
+                    "link": string("The Slack message you asked in (optional)."),
+                },
+                "required": ["question"],
+            },
+        }),
+        json!({
+            "name": "stage_answer",
+            "description": "Stage session: the answer to your stage_ask came (you found it in \
+                the Slack thread). Record it, then carry on with your stage as it says.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "answer": string("The answer, and who gave it."),
+                },
+                "required": ["answer"],
+            },
+        }),
     ]
 }
 
@@ -168,6 +199,8 @@ pub fn call(
         "stage_start" => stage_start(reg, &root, token, &arg("run"), &arg("stage"), &arg("brief")),
         "run_status" => (run_status(reg, token, &arg("run")), None),
         "stage_brief" => (stage_brief(reg, token), None),
+        "stage_ask" => stage_ask(reg, &root, token, &arg("question"), &arg("link")),
+        "stage_answer" => stage_answer(reg, &root, token, &arg("answer")),
         _ => stage_report(reg, &root, token, args),
     })
 }
@@ -332,6 +365,59 @@ fn stage_brief(reg: &Registry, token: &str) -> Outcome {
         "note": latest.and_then(|a| a.note.as_deref()),
         "previous": previous,
     })))
+}
+
+fn stage_ask(
+    reg: &mut Registry,
+    root: &Path,
+    token: &str,
+    question: &str,
+    link: &str,
+) -> (Outcome, Option<McpEvent>) {
+    let link = (!link.is_empty()).then_some(link);
+    let changes = match reg
+        .runs
+        .ask(token, question, link, std::time::SystemTime::now())
+    {
+        Ok(changes) => changes,
+        Err(e) => return (Outcome::err(e), None),
+    };
+    run_log::record(root, &reg.runs, &changes);
+    (
+        Outcome::ok(
+            "Recorded: your ticket waits for the answer. Stop here and don't make the change: \
+             hydraui will ask you to look for the answer, or give it to you."
+                .to_string(),
+        ),
+        Some(McpEvent::RunChanged(changes)),
+    )
+}
+
+fn stage_answer(
+    reg: &mut Registry,
+    root: &Path,
+    token: &str,
+    answer: &str,
+) -> (Outcome, Option<McpEvent>) {
+    let Role::Stage(r, i) = reg.runs.role(token) else {
+        return (
+            Outcome::err("only the stage that asked records the answer"),
+            None,
+        );
+    };
+    if r.asking.as_ref().map(|a| a.stage) != Some(i) {
+        return (Outcome::err("your stage isn't waiting for an answer"), None);
+    }
+    let run = r.id.clone();
+    let changes = match reg.runs.answered(&run, answer) {
+        Ok(changes) => changes,
+        Err(e) => return (Outcome::err(e), None),
+    };
+    run_log::record(root, &reg.runs, &changes);
+    (
+        Outcome::ok("Recorded. Carry on with your stage as the answer says.".to_string()),
+        Some(McpEvent::RunChanged(changes)),
+    )
 }
 
 fn stage_report(

@@ -3,6 +3,7 @@
 //! commands bound to keys.
 mod accounts;
 mod all_tasks;
+mod asking;
 mod busy;
 mod finder;
 mod launcher;
@@ -230,6 +231,8 @@ pub struct Workspace {
     /// Each orchestrator's wake-up waiting to be typed, with its run (orchestrator spec §6): the
     /// newest only.
     pending_wakes: HashMap<PaneId, (String, String)>,
+    /// When each run waiting on product last had its stage look in the Slack thread.
+    ask_checks: HashMap<String, std::time::SystemTime>,
     /// Each orchestrator's Linear watcher (orchestrator phase 2 §3).
     linear_watch: HashMap<PaneId, linear::Watch>,
     /// Runs' tickets as Linear last said, by identifier: the card's SLA and link (phase 2 §5).
@@ -299,6 +302,8 @@ impl Workspace {
                         ws.send_wakes(window, cx);
                         // A Linear watcher whose check is due looks (phase 2 §3).
                         ws.linear_tick(window, cx);
+                        // A stage waiting on product looks in its Slack thread.
+                        ws.asking_tick(window, cx);
                         // The Pipeline tab's session times tick.
                         if ws
                             .envs
@@ -442,6 +447,7 @@ impl Workspace {
             board_events: HashMap::new(),
             reserved: HashMap::new(),
             pending_wakes: HashMap::new(),
+            ask_checks: HashMap::new(),
             linear_watch: HashMap::new(),
             linear_tickets: HashMap::new(),
             in_flight: Default::default(),

@@ -121,6 +121,14 @@ pub fn trigger(f: &TriggerFacts) -> (Mode, String) {
     (Mode::Automatic, line)
 }
 
+/// How far through the wait for its next look a watcher is, 0.0 just after a look to 1.0 when
+/// one is due; `None` before its first look.
+pub fn look_progress(last: Option<SystemTime>, now: SystemTime, every_minutes: u32) -> Option<f32> {
+    let since = now.duration_since(last?).unwrap_or_default();
+    let every = Duration::from_secs(u64::from(every_minutes.max(1)) * 60);
+    Some((since.as_secs_f32() / every.as_secs_f32()).min(1.0))
+}
+
 /// What a **Pick next ticket** found, for the notification it ends with.
 pub fn pick_result(s: &LinearSettings, found: &Result<Check, LinearError>) -> (bool, String) {
     match found {
@@ -509,6 +517,26 @@ pub fn inside_sla(breaches_at: &str, at: SystemTime) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_wait_fills_from_a_look_to_the_next() {
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+        assert_eq!(look_progress(None, at, 2), None);
+        assert_eq!(look_progress(Some(at), at, 2), Some(0.0));
+        assert_eq!(
+            look_progress(Some(at), at + Duration::from_secs(60), 2),
+            Some(0.5)
+        );
+        assert_eq!(
+            look_progress(Some(at), at + Duration::from_secs(600), 2),
+            Some(1.0)
+        );
+        assert_eq!(
+            look_progress(Some(at + Duration::from_secs(5)), at, 2),
+            Some(0.0),
+            "clock skew"
+        );
+    }
+
     use super::*;
     use crate::runs::{Choice, Runs};
     use serde_json::json;

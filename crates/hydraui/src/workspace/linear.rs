@@ -5,7 +5,7 @@
 use std::time::{Duration, SystemTime};
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, SharedString, Window, div, px};
+use gpui::{AnyElement, Context, SharedString, Window, div, px, relative};
 use gpui_component::WindowExt;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::notification::Notification;
@@ -310,6 +310,10 @@ impl Workspace {
                 w.starting = None;
             }
             self.slack_inflight.remove(&id);
+        }
+        // The wait bars move: redraw each second while anything watches.
+        if self.linear_watch.values().any(|w| w.on) {
+            cx.notify();
         }
         // A Slack watcher starts what it took before it looks again.
         let slack: Vec<PaneId> = self
@@ -768,6 +772,16 @@ impl Workspace {
         };
         let on = mode == linear_watch::Mode::Automatic;
         let checking = w.is_some_and(|w| w.checking);
+        // How far through the wait for the next look, while it's waiting to look.
+        let progress = (mode == linear_watch::Mode::Automatic && !checking && open_run.is_none())
+            .then(|| {
+                linear_watch::look_progress(
+                    w.and_then(|w| w.last),
+                    SystemTime::now(),
+                    source.every_minutes,
+                )
+            })
+            .flatten();
         let tooltip = source.tooltip;
         Some(
             v_flex()
@@ -810,6 +824,22 @@ impl Workspace {
                         }))
                         .child(line),
                 )
+                .when_some(progress, |d, p| {
+                    d.child(
+                        div()
+                            .w_full()
+                            .h(px(3.))
+                            .rounded_full()
+                            .bg(color(theme::RAISED))
+                            .child(
+                                div()
+                                    .h_full()
+                                    .rounded_full()
+                                    .w(relative(p))
+                                    .bg(color(theme::GREEN).opacity(0.7)),
+                            ),
+                    )
+                })
                 .when_some(
                     source
                         .env

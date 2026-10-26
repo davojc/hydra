@@ -385,7 +385,21 @@ impl Workspace {
         let Some(view) = self.panes.get(&id).cloned() else {
             return;
         };
-        view.update(cx, |v, cx| v.set_name(Some("orchestrator".into()), cx));
+        // Numbered like a fresh one when its pipeline runs several at once.
+        let n = self
+            .orchestrators
+            .iter()
+            .filter(|(o, f)| {
+                **f == i.run.pipeline.file
+                    && self.panes.get(o).is_some_and(|v| v.read(cx).env() == i.env)
+            })
+            .count();
+        let name = if i.run.pipeline.runs_at_once > 1 {
+            format!("orchestrator {}", n + 1)
+        } else {
+            "orchestrator".to_string()
+        };
+        view.update(cx, |v, cx| v.set_name(Some(name), cx));
         self.orchestrators.insert(id, i.run.pipeline.file.clone());
         let (Some(token), Some(sv)) =
             (view.read(cx).mcp_token().map(str::to_string), server::get())

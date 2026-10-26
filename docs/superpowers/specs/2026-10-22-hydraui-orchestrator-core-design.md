@@ -768,3 +768,15 @@ a new session, losing the fix's context and spending a try.
   report does. The orchestrator is told to wait for it.
 - **Logged and resumed** as `scoring again {stage}`; a restart replays it.
 
+## 24. How product questions are written (added 2026-10-26)
+
+Different pipelines ask different readers (Jordan, 2026-10-26): one wants product questions short,
+casual and about the purpose; another wants them technical and data-driven.
+
+- **Setting.** `[product] style` in the pipeline file: what each stage is told about writing a
+  product question, appended to the product rule in its note (`How to write a product question:
+  …`). A style needs no channel; `[product]` now takes either key.
+- **Pipeline settings.** A **Product questions** section (no longer under Advanced) has the two
+  ready-made styles from `pipeline::PRODUCT_STYLES` (**Short and plain**, **Technical, with
+  data**; the chosen one is filled), a box for the person's own words, and the channel.
+

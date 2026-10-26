@@ -1322,6 +1322,10 @@ fn stage_note(run: &Run, i: usize) -> String {
          stage_ask with it and its link rather than carrying it on as pending or marking its \
          test @fixme, so the run shows what holds it up."
     );
+    let product = match &run.pipeline.product_style {
+        Some(style) => format!("{product} How to write a product question: {style}"),
+        None => product,
+    };
     format!(
         "---\nhydraui pipeline \"{}\" · {} · stage {} of {}: {}{skill}.\n{around}Do only this \
          stage. When it's done, call stage_report (score, evidence, reasons for and against, \
@@ -1906,6 +1910,21 @@ mod tests {
         let p = s.prompt;
         assert!(p.contains("post it in Slack #product-"), "{p}");
         assert!(p.contains("the message's link"), "{p}");
+        assert!(!p.contains("How to write a product question"), "{p}");
+
+        let mut runs = Runs::default();
+        let mut pipe = pipeline(&["develop"]);
+        pipe.product_style = Some("Keep it short.".into());
+        let id = runs
+            .start_run("orch", pipe, "INTH-167", "x")
+            .unwrap()
+            .id
+            .clone();
+        let p = runs.begin("orch", &id, "develop", "", 30).unwrap().prompt;
+        assert!(
+            p.contains("How to write a product question: Keep it short."),
+            "{p}"
+        );
     }
 
     #[test]

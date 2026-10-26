@@ -31,6 +31,9 @@ pub struct Pipeline {
     /// The Slack channel a stage asks a product question in, rather than deciding it
     /// (`[product] channel`); `None`: it asks the user in hydraui.
     pub product_channel: Option<String>,
+    /// How a stage writes the questions it asks product (`[product] style`), e.g. short and
+    /// plain, or technical with data; `None`: as the stage sees fit.
+    pub product_style: Option<String>,
     /// How many tickets it runs at once (`runs_at_once`, 1 to `MAX_RUNS_AT_ONCE`): each has
     /// its own orchestrator and card, and the trigger hands work to whichever is free.
     pub runs_at_once: u8,
@@ -113,6 +116,21 @@ pub struct Stage {
     /// from the skill and title when it has none (§2).
     pub prompt: String,
 }
+
+/// The ready-made ways to write product questions, as Pipeline settings offers them: a label
+/// and what the stage is told.
+pub const PRODUCT_STYLES: [(&str, &str); 2] = [
+    (
+        "Short and plain",
+        "Keep it short and casual, in plain words with no technical terms. Lead with why it \
+         matters to users and what you need decided.",
+    ),
+    (
+        "Technical, with data",
+        "Be precise and technical. Give the data behind it: what you measured or found, the \
+         code and flows it touches, and the trade-offs of each option.",
+    ),
+];
 
 /// What a stage may do without asking when its pipeline has a product channel (core spec §15):
 /// post its product question in Slack and read the replies, so asking product never waits on
@@ -287,7 +305,10 @@ struct FileAutostart {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileProduct {
-    channel: String,
+    #[serde(default)]
+    channel: Option<String>,
+    #[serde(default)]
+    style: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -437,15 +458,22 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
             Some(a) => Some(a.env.trim().to_string()),
             None => None,
         },
-        product_channel: match file.product {
-            Some(p) if p.channel.trim().is_empty() => {
+        product_channel: match file.product.as_ref().and_then(|p| p.channel.as_deref()) {
+            Some(c) if c.trim().is_empty() => {
                 return Err(
                     "[product] needs the Slack channel, e.g. channel = \"#product\"".into(),
                 );
             }
-            Some(p) => Some(p.channel.trim().to_string()),
+            Some(c) => Some(c.trim().to_string()),
             None => None,
         },
+        product_style: file
+            .product
+            .as_ref()
+            .and_then(|p| p.style.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
         slack: file.slack.map(slack_settings).transpose()?,
         color: file.color.as_deref().map(parse_color).transpose()?,
         runs_at_once: match file.runs_at_once.unwrap_or(1) {
@@ -475,6 +503,7 @@ pub struct Edit {
     pub linear: Option<LinearSettings>,
     pub autostart: Option<String>,
     pub product_channel: Option<String>,
+    pub product_style: Option<String>,
     pub color: Option<u32>,
     pub slack: Option<SlackSettings>,
     pub runs_at_once: u8,
@@ -516,6 +545,7 @@ impl From<&Pipeline> for Edit {
             linear: p.linear.clone(),
             autostart: p.autostart.clone(),
             product_channel: p.product_channel.clone(),
+            product_style: p.product_style.clone(),
             color: p.color,
             slack: p.slack.clone(),
             runs_at_once: p.runs_at_once,
@@ -674,20 +704,27 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
             doc.remove("autostart");
         }
     }
-    match edit
-        .product_channel
-        .as_deref()
-        .map(str::trim)
-        .filter(|c| !c.is_empty())
-    {
-        Some(channel) => {
-            if !doc.get("product").is_some_and(Item::is_table) {
-                doc["product"] = Item::Table(Table::new());
-            }
-            doc["product"]["channel"] = value(channel);
+    let product = [
+        ("channel", edit.product_channel.as_deref()),
+        ("style", edit.product_style.as_deref()),
+    ]
+    .map(|(k, v)| (k, v.map(str::trim).filter(|v| !v.is_empty())));
+    if product.iter().all(|(_, v)| v.is_none()) {
+        doc.remove("product");
+    } else {
+        if !doc.get("product").is_some_and(Item::is_table) {
+            doc["product"] = Item::Table(Table::new());
         }
-        None => {
-            doc.remove("product");
+        let table = doc["product"].as_table_mut().expect("made a table above");
+        for (k, v) in product {
+            match v {
+                Some(v) => {
+                    table[k] = value(v);
+                }
+                None => {
+                    table.remove(k);
+                }
+            }
         }
     }
     match &edit.slack {
@@ -1370,6 +1407,35 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
         let quiet = parse(&format!("{ONE_STAGE}[linear]\nteam = \"INTH\"\n")).unwrap();
         assert!(!quiet.linear.unwrap().watch, "off unless asked");
         assert!(parse(&format!("{ONE_STAGE}[autostart]\nenv = \" \"\n")).is_err());
+    }
+
+    #[test]
+    fn a_pipeline_keeps_how_its_product_questions_are_written() {
+        let p = parse(&format!("{ONE_STAGE}[product]\nstyle = \" Short. \"\n")).unwrap();
+        assert_eq!(p.product_style.as_deref(), Some("Short."));
+        assert_eq!(p.product_channel, None, "a style needs no channel");
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(folder(d.path()).join("t.toml"), ONE_STAGE).unwrap();
+        let mut edit = edit_of(&load(d.path(), "t").unwrap());
+        edit.product_style = Some(PRODUCT_STYLES[1].1.into());
+        edit.product_channel = Some("#product-".into());
+        save(d.path(), "t", &edit).unwrap();
+        let back = load(d.path(), "t").unwrap();
+        assert_eq!(back.product_style.as_deref(), Some(PRODUCT_STYLES[1].1));
+        assert_eq!(back.product_channel.as_deref(), Some("#product-"));
+        edit.product_channel = None;
+        save(d.path(), "t", &edit).unwrap();
+        let back = load(d.path(), "t").unwrap();
+        assert_eq!(back.product_channel, None);
+        assert!(
+            back.product_style.is_some(),
+            "the style stays without the channel"
+        );
+        edit.product_style = Some(" ".into());
+        save(d.path(), "t", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("t.toml")).unwrap();
+        assert!(!text.contains("[product]"), "{text}");
     }
 
     #[test]

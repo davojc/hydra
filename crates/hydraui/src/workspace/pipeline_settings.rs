@@ -51,6 +51,8 @@ pub(super) struct SettingsDraft {
     branch: Entity<InputState>,
     /// The Slack channel for product questions; empty: stages ask the user in hydraui.
     product: Entity<InputState>,
+    /// How steps write product questions; empty: as each sees fit.
+    product_style: Entity<InputState>,
     /// The card's accent; `None`: the default teal.
     color: Option<u32>,
     /// Tickets run at once, each with its own orchestrator.
@@ -162,6 +164,8 @@ impl SettingsDraft {
             autostart: self.saved.autostart.clone(),
             product_channel: Some(self.product.read(cx).value().trim().to_string())
                 .filter(|c| !c.is_empty()),
+            product_style: Some(self.product_style.read(cx).value().trim().to_string())
+                .filter(|c| !c.is_empty()),
             color: self.color,
             runs_at_once: self.runs,
             bar: slider_value(&self.bar, cx),
@@ -266,11 +270,19 @@ impl Workspace {
                 .placeholder("#product")
                 .default_value(saved.product_channel.clone().unwrap_or_default())
         });
+        let product_style = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Or say how, e.g. one line on why it matters, then the options")
+                .default_value(saved.product_style.clone().unwrap_or_default())
+        });
         let bar = slider(saved.bar, cx);
         let mut subs = vec![
             cx.subscribe_in(&name, window, |_, _, _: &InputEvent, _, cx| cx.notify()),
             cx.subscribe_in(&branch, window, |_, _, _: &InputEvent, _, cx| cx.notify()),
             cx.subscribe_in(&product, window, |_, _, _: &InputEvent, _, cx| cx.notify()),
+            cx.subscribe_in(&product_style, window, |_, _, _: &InputEvent, _, cx| {
+                cx.notify()
+            }),
             cx.subscribe_in(&bar, window, move |ws, _, _: &SliderEvent, window, cx| {
                 ws.default_bar_moved(orch, window, cx)
             }),
@@ -380,6 +392,7 @@ impl Workspace {
             name,
             branch,
             product,
+            product_style,
             color: saved.color,
             runs: saved.runs_at_once,
             advanced: false,
@@ -1034,7 +1047,9 @@ impl Workspace {
                                             })),
                                     ),
                             )
-                            // 4. Everything else, folded away.
+                            // 4. How it asks product.
+                            .child(self.render_product_settings(orch, draft, cx))
+                            // 5. Everything else, folded away.
                             .child(
                                 div()
                                     .id(SharedString::from(format!("settings-advanced-{orch}")))
@@ -1107,20 +1122,6 @@ impl Workspace {
                                                         .child(Input::new(&draft.branch)),
                                                 ),
                                         )
-                                        .child(
-                                            v_flex()
-                                                .gap_2()
-                                                .child(section_tip(
-                                                    "Product questions channel",
-                                                    "Where a step asks product before changing \
-                                                     what users see. Empty: it asks you here.",
-                                                ))
-                                                .child(
-                                                    div()
-                                                        .max_w(px(480.))
-                                                        .child(Input::new(&draft.product)),
-                                                ),
-                                        )
                                         .child(text(12., theme::TEXT_MUTED).child(format!(
                                             "A step that fails is retried up to {MAX_ATTEMPTS} \
                                              times. Steps pause below {floor}% of the Claude week."
@@ -1171,6 +1172,70 @@ fn color_swatches(
                 }))
         }))
         .into_any_element()
+}
+
+impl Workspace {
+    /// **Product questions**: where a step asks product, and how it writes the question (one of
+    /// `pipeline::PRODUCT_STYLES`, or the person's own words).
+    fn render_product_settings(
+        &self,
+        orch: PaneId,
+        draft: &SettingsDraft,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let style = draft.product_style.read(cx).value().trim().to_string();
+        let presets = h_flex()
+            .gap_1()
+            .children(
+                pipeline::PRODUCT_STYLES
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (label, text))| {
+                        let b =
+                            Button::new(SharedString::from(format!("product-style-{orch}-{i}")))
+                                .label(*label)
+                                .small()
+                                .tooltip(*text)
+                                .on_click(cx.listener(move |ws, _, window, cx| {
+                                    let Some(input) = ws
+                                        .pipeline_settings
+                                        .get(&orch)
+                                        .map(|d| d.product_style.clone())
+                                    else {
+                                        return;
+                                    };
+                                    input.update(cx, |s, cx| s.set_value(*text, window, cx));
+                                    cx.notify();
+                                }));
+                        if style == *text {
+                            b.primary()
+                        } else {
+                            b.ghost()
+                        }
+                    }),
+            );
+        v_flex()
+            .gap_2()
+            .child(section_tip(
+                "Product questions",
+                "When a step meets a product decision it asks instead of deciding. Choose how \
+                 it writes the question, and the Slack channel it goes to (empty: it asks you \
+                 here).",
+            ))
+            .child(presets)
+            .child(
+                div()
+                    .max_w(px(640.))
+                    .child(Input::new(&draft.product_style)),
+            )
+            .child(
+                div().max_w(px(480.)).child(
+                    Input::new(&draft.product)
+                        .prefix(text(11.5, theme::TEXT_MUTED).pr(px(6.)).child("Channel")),
+                ),
+            )
+            .into_any_element()
+    }
 }
 
 /// The Runs at once row: 1 to `pipeline::MAX_RUNS_AT_ONCE`, the chosen one filled.

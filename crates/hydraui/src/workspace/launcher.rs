@@ -734,12 +734,22 @@ impl Workspace {
                 continue;
             };
             self.resume_run(idx, window, cx);
+            // Its other open runs (several at once) carry on too, each in its orchestrator.
+            while let Some(idx) = self
+                .interrupted
+                .iter()
+                .position(|i| i.run.pipeline.file == name && i.env == env)
+            {
+                self.resume_run(idx, window, cx);
+            }
             let watch = crate::pipeline::load(&root, &name).is_ok_and(|p| p.watches());
+            // The first orchestrator holds the trigger.
             let orch = self
                 .orchestrators
                 .iter()
-                .find(|(_, f)| **f == name)
-                .map(|(id, _)| *id);
+                .filter(|(_, f)| **f == name)
+                .map(|(id, _)| *id)
+                .min();
             if let (true, Some(orch)) = (watch, orch) {
                 let w = self.linear_watch.entry(orch).or_default();
                 w.on = true;

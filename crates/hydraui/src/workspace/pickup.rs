@@ -54,7 +54,7 @@ impl Workspace {
 
     /// The sessions, each draft that may have been cleared settled from its screen first.
     /// `away`: the user isn't at the window (a card from the phone), so none is in front.
-    fn fresh_sessions(
+    pub(super) fn fresh_sessions(
         &mut self,
         away: bool,
         window: &Window,
@@ -74,7 +74,7 @@ impl Workspace {
                 .active()
                 .and_then(|t| t.shown)
                 .filter(|_| !self.all_tasks_shown()),
-            |id| self.tasks_tabs.get(&id) == Some(&true),
+            |id| self.tasks_tabs.get(&id) == Some(&true) || self.pipeline_shown(id),
         );
         self.sessions(focused, cx)
     }

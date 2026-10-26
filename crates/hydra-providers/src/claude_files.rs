@@ -220,7 +220,7 @@ pub fn add_status_line(settings_json: &str, hydra: &str) -> Result<String, Strin
 /// source: a new session (`startup`, `/clear`) is idle and fresh, a resumed one (`claude -c`,
 /// `claude -r`, `/resume`) is `resumed`, idle but not fresh. `compact` is left out: compacting
 /// changes neither what the session is doing nor whether it is new.
-pub const STATUS_HOOKS: [(&str, Option<&str>, &str); 8] = [
+pub const STATUS_HOOKS: [(&str, Option<&str>, &str); 9] = [
     ("SessionStart", Some("startup|clear"), "idle"),
     ("SessionStart", Some("resume"), "resumed"),
     ("UserPromptSubmit", None, "working"),
@@ -230,6 +230,9 @@ pub const STATUS_HOOKS: [(&str, Option<&str>, &str); 8] = [
         Some("AskUserQuestion|ExitPlanMode"),
         "waiting",
     ),
+    // A skill being invoked: `hydra hook skill` names it (from the hook's input), so a
+    // pipeline stage can be held to the skill it was given (orchestrator spec §4).
+    ("PreToolUse", Some("Skill"), "skill"),
     // A tool ran: any question or permission before it has been answered.
     ("PostToolUse", Some("*"), "working"),
     (
@@ -328,13 +331,18 @@ pub fn render_claude_md(env: &str, base: Option<&str>, over: Option<&str>) -> Op
 pub const HYDRAUI_SERVER: &str = "hydraui";
 
 /// The tools that server offers; Claude Code may call them without asking.
-pub const HYDRAUI_TOOLS: [&str; 6] = [
+pub const HYDRAUI_TOOLS: [&str; 11] = [
     "tasks_read",
     "tasks_add",
     "tasks_take",
     "tasks_verify",
     "tasks_mine",
     "hydra_access",
+    "run_start",
+    "stage_start",
+    "run_status",
+    "stage_brief",
+    "stage_report",
 ];
 
 /// Appends each missing `mcp__hydraui__<tool>` to `permissions.allow` in the settings JSON
@@ -450,7 +458,12 @@ mod tests {
                 "mcp__hydraui__tasks_take",
                 "mcp__hydraui__tasks_verify",
                 "mcp__hydraui__tasks_mine",
-                "mcp__hydraui__hydra_access"
+                "mcp__hydraui__hydra_access",
+                "mcp__hydraui__run_start",
+                "mcp__hydraui__stage_start",
+                "mcp__hydraui__run_status",
+                "mcp__hydraui__stage_brief",
+                "mcp__hydraui__stage_report"
             ])
         );
         assert!(
@@ -525,6 +538,18 @@ mod tests {
             });
             assert!(found, "{event} {matcher:?} {state}");
         }
+        // Every skill a session invokes is reported, so hydraui can hold a pipeline stage to
+        // the skill it was given.
+        assert!(
+            v["hooks"]["PreToolUse"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e
+                    == &json!({"matcher": "Skill",
+                           "hooks": [{"type": "command", "command": "hydra hook skill"}]}))
+        );
+        assert!(is_status_hook("hydra hook skill"));
         assert!(!is_status_hook("hydra hook later"));
         assert!(!is_status_hook("\"C:/h/hydra.exe\" guard claude"));
     }

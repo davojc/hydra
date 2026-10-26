@@ -66,6 +66,13 @@ pub fn idle_in_project(sessions: &[Session], project: &Path) -> Vec<PaneId> {
         .collect()
 }
 
+/// Whether a prompt may be typed into `s` now: its Claude is idle, nothing was just sent to it
+/// and its input holds no draft (§5.1 checks 3 and 6). The orchestrator's wake-up uses it
+/// (orchestrator spec §6); being in front of the user doesn't matter there.
+pub fn ready_for_prompt(s: &Session) -> bool {
+    s.claude == Some(SessionState::Idle) && !s.reserved && !s.draft
+}
+
 /// The sessions that pass every fact of §5.1: idle in the project, not in front of the user,
 /// not reserved and with no draft.
 pub fn candidates(sessions: &[Session], project: &Path) -> Vec<PaneId> {
@@ -283,6 +290,26 @@ mod tests {
             draft: false,
             finished: true,
         }
+    }
+
+    #[test]
+    fn ready_for_prompt_needs_idle_no_draft_not_reserved() {
+        assert!(ready_for_prompt(&free(1)));
+        let mut s = free(1);
+        s.claude = Some(SessionState::Working);
+        assert!(!ready_for_prompt(&s));
+        s.claude = None;
+        assert!(!ready_for_prompt(&s));
+        let mut s = free(1);
+        s.draft = true;
+        assert!(!ready_for_prompt(&s));
+        let mut s = free(1);
+        s.reserved = true;
+        assert!(!ready_for_prompt(&s));
+        // In front of the user is fine: they started the orchestrator to watch it.
+        let mut s = free(1);
+        s.focused = true;
+        assert!(ready_for_prompt(&s));
     }
 
     #[test]

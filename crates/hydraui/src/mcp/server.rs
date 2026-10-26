@@ -10,7 +10,7 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use serde_json::{Value, json};
 
 use super::registry::{Peer, Registry, Terminal};
-use super::tools::{INSTRUCTIONS, call_with, list};
+use super::tools::{INSTRUCTIONS, Outcome, call_with, list};
 use super::{SessionState, Usage};
 
 /// Largest request body read; a tool call is a few lines of JSON.
@@ -28,6 +28,8 @@ pub enum McpEvent {
         token: String,
         state: SessionState,
         resumed: bool,
+        /// Claude's own session id, when the hook passed it (orchestrator spec §13).
+        claude: Option<String>,
     },
     /// A Claude session's status line (`hydra statusline`) said how much of its account's
     /// limits are used: the terminal's token and the usage.
@@ -35,6 +37,13 @@ pub enum McpEvent {
     /// A Claude session moved a card to Verify (`tasks_verify`), so its turn is finished: the
     /// terminal's token.
     Verified(String),
+    /// The gate let a stage start: open its terminal and link it (orchestrator spec §3.2).
+    StageStart(crate::runs::StartStage),
+    /// Runs changed: re-draw them, and tell their orchestrators (orchestrator spec §6).
+    RunChanged(Vec<crate::runs::Change>),
+    /// A Claude session invoked a skill (`hydra hook skill`): the terminal's token and the
+    /// skill's name.
+    Skill(String, String),
 }
 
 /// What `handle` answers: an HTTP status and, for 200, the JSON body.
@@ -49,7 +58,7 @@ fn status(status: u16) -> Reply {
 }
 
 /// Locks `m`, even after a panic poisoned it: the registry stays usable (and revocable).
-pub(super) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -104,12 +113,88 @@ fn reply_to(
     token: &str,
     body: &str,
 ) -> (Reply, Option<McpEvent>) {
+    if let Some(done) = run_call(registry, token, body) {
+        return done;
+    }
     let peers = lock(registry).peers(token);
     let (reply, event) = answer(terminal, token, &peers, body);
-    if let Some(McpEvent::Session { token, state, .. }) = &event {
-        lock(registry).set_session(token, *state);
+    match &event {
+        Some(McpEvent::Session {
+            token,
+            state,
+            claude,
+            ..
+        }) => {
+            let mut reg = lock(registry);
+            reg.set_session(token, *state);
+            let new = claude
+                .as_deref()
+                .and_then(|id| reg.claude_session(token, id));
+            if let (Some((run, who)), Some(root)) = (new, reg.hydra_root.clone()) {
+                let file = crate::run_log::file_for(&root, &run);
+                let id = claude.as_deref().unwrap_or_default();
+                if let Err(e) =
+                    crate::run_log::append(&file, "claude session", json!({"who": who, "id": id}))
+                {
+                    crate::action_log::write(format!("run log {run}: {e}"));
+                }
+            }
+        }
+        // A stage reports only after using its skill (orchestrator §4); the run log keeps it.
+        Some(McpEvent::Skill(token, skill)) => {
+            let mut reg = lock(registry);
+            reg.runs.skill_used(token, skill);
+            let stage = match reg.runs.role(token) {
+                crate::runs::Role::Stage(r, i) => {
+                    Some((r.id.clone(), r.pipeline.stages[i].id.clone()))
+                }
+                _ => None,
+            };
+            if let (Some((run, stage)), Some(root)) = (stage, reg.hydra_root.clone()) {
+                let file = crate::run_log::file_for(&root, &run);
+                let _ = crate::run_log::append(
+                    &file,
+                    "skill used",
+                    json!({"stage": stage, "skill": skill}),
+                );
+            }
+        }
+        // The weekly check reads what the run's sessions last reported (orchestrator §5.1).
+        Some(McpEvent::Usage(token, usage)) => {
+            if let Some(week) = usage.seven_day {
+                lock(registry).runs.usage(token, week.used);
+            }
+        }
+        _ => {}
     }
     (reply, event)
+}
+
+/// A `tools/call` of a run tool, answered under the registry's lock; `None` for any other
+/// message.
+fn run_call(
+    registry: &Mutex<Registry>,
+    token: &str,
+    body: &str,
+) -> Option<(Reply, Option<McpEvent>)> {
+    let msg: Value = serde_json::from_str(body).ok()?;
+    let id = msg.get("id")?;
+    if msg.get("method")?.as_str()? != "tools/call" {
+        return None;
+    }
+    let params = msg.get("params")?;
+    let name = params.get("name")?.as_str()?;
+    let empty = json!({});
+    let args = params.get("arguments").unwrap_or(&empty);
+    let (out, event) = super::run_tools::call(&mut lock(registry), token, name, args)?;
+    Some((ok(id, tool_result(&out)), event))
+}
+
+fn tool_result(out: &Outcome) -> Value {
+    json!({
+        "content": [{"type": "text", "text": out.text}],
+        "isError": out.is_error,
+    })
 }
 
 /// The token in an `Authorization: Bearer <token>` header; empty without one.
@@ -173,8 +258,17 @@ pub fn answer(
                     token: token.to_string(),
                     state,
                     resumed,
+                    claude: params
+                        .get("session")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
                 }),
             Some("hydraui/usage") => Some(McpEvent::Usage(token.to_string(), Usage::parse(params))),
+            Some("hydraui/skill") => params
+                .get("skill")
+                .and_then(Value::as_str)
+                .map(|s| McpEvent::Skill(token.to_string(), s.to_string())),
             _ => None,
         };
         return (status(202), event);
@@ -202,10 +296,7 @@ pub fn answer(
             match call_with(terminal, peers, name, args) {
                 None => (fail(id, -32602, "unknown tool"), None),
                 Some(out) => {
-                    let result = json!({
-                        "content": [{"type": "text", "text": out.text}],
-                        "isError": out.is_error,
-                    });
+                    let result = tool_result(&out);
                     // Only tasks_add makes a board, and only tasks_verify verifies.
                     let event = if out.verified {
                         Some(McpEvent::Verified(token.to_string()))
@@ -259,6 +350,16 @@ impl Server {
         &self.registry
     }
 
+    /// `<HYDRA_HOME>`, for the run tools' pipelines and logs.
+    pub fn set_hydra_root(&self, root: PathBuf) {
+        lock(&self.registry).hydra_root = Some(root);
+    }
+
+    /// Sends `event` to every subscriber still listening.
+    pub fn broadcast(&self, event: McpEvent) {
+        lock(&self.events).retain(|tx| tx.unbounded_send(event.clone()).is_ok());
+    }
+
     pub fn subscribe(&self) -> UnboundedReceiver<McpEvent> {
         let (tx, rx) = unbounded();
         lock(&self.events).push(tx);
@@ -301,7 +402,7 @@ impl Server {
         };
         let (reply, event) = handled.unwrap_or_else(|| (status(500), None));
         if let Some(event) = event {
-            lock(&self.events).retain(|tx| tx.unbounded_send(event.clone()).is_ok());
+            self.broadcast(event);
         }
         respond(request, reply);
     }
@@ -469,7 +570,8 @@ mod tests {
             Some(McpEvent::Session {
                 token: token.clone(),
                 state: SessionState::Waiting,
-                resumed: false
+                resumed: false,
+                claude: None,
             })
         );
         let (_, event) =
@@ -479,7 +581,8 @@ mod tests {
             Some(McpEvent::Session {
                 token: token.clone(),
                 state: SessionState::Idle,
-                resumed: true
+                resumed: true,
+                claude: None,
             }),
             "a resumed session is idle, but not a new one"
         );
@@ -509,6 +612,417 @@ mod tests {
         assert_eq!((reply.status, event), (401, None), "a stranger");
     }
 
+    /// A registry whose hydra home holds the pipeline `two.toml`, and an orchestrator's token.
+    fn with_pipeline() -> (tempfile::TempDir, Mutex<Registry>, String) {
+        let home = tempfile::tempdir().unwrap();
+        write_two(home.path(), 80);
+        let reg = Mutex::new(Registry::default());
+        reg.lock().unwrap().hydra_root = Some(home.path().to_path_buf());
+        let orch = reg
+            .lock()
+            .unwrap()
+            .register("orchestrator", home.path().to_path_buf());
+        (home, reg, orch)
+    }
+
+    /// Writes `two.toml`: stages a (bar `bar_a`) and b (bar 90).
+    fn write_two(home: &std::path::Path, bar_a: u8) {
+        let dir = crate::pipeline::folder(home);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("two.toml"),
+            format!(
+                "name = \"Two\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\nskill = \"QA-Skills\"\n\
+                 bar = {bar_a}\n[[stage]]\nid = \"b\"\ntitle = \"B\"\nbar = 90\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Calls tool `name` as `token`: the result's text, whether it is an error, and the event.
+    fn call(
+        reg: &Mutex<Registry>,
+        token: &str,
+        name: &str,
+        args: Value,
+    ) -> (String, bool, Option<McpEvent>) {
+        let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                          "params": {"name": name, "arguments": args}})
+        .to_string();
+        let auth = format!("Bearer {token}");
+        let (reply, event) = handle(reg, "POST", "/mcp", Some(&auth), None, &body);
+        let msg: Value = serde_json::from_str(&reply.body.unwrap()).unwrap();
+        let r = &msg["result"];
+        (
+            r["content"][0]["text"].as_str().unwrap().to_string(),
+            r["isError"].as_bool().unwrap(),
+            event,
+        )
+    }
+
+    fn report(score: u8) -> Value {
+        json!({"outcome": "done", "score": score, "summary": "Done it.",
+               "evidence": [{"kind": "test", "detail": "t"}],
+               "reasons": [{"side": "for", "text": "r"}], "handoff": "h"})
+    }
+
+    /// What the workspace does on `StageStart`: opens a terminal for the stage and links it.
+    fn open_stage(reg: &Mutex<Registry>, event: Option<McpEvent>) -> String {
+        let Some(McpEvent::StageStart(s)) = event else {
+            panic!("a stage start: {event:?}");
+        };
+        let mut r = reg.lock().unwrap();
+        let name = format!("{} · {}", s.label, s.title);
+        let tok = r.register(&name, PathBuf::from("."));
+        r.runs.link(&s.run, s.stage, &tok, &name);
+        // A real session invokes its stage's skill first (`hydra hook skill`).
+        r.runs.skill_used(&tok, "QA-Skills");
+        tok
+    }
+
+    /// A run of `two` started by `orch`, with its first stage open: the stage's token.
+    fn first_stage_open(reg: &Mutex<Registry>, orch: &str) -> String {
+        let args = json!({"pipeline": "two", "ticket": "INTH-7", "summary": "Export drops rows"});
+        assert!(!call(reg, orch, "run_start", args).1);
+        let (_, _, event) = call(
+            reg,
+            orch,
+            "stage_start",
+            json!({"run": "INTH-7-1", "stage": "a"}),
+        );
+        open_stage(reg, event)
+    }
+
+    #[test]
+    fn a_run_goes_through_two_stages_over_json_rpc() {
+        use crate::runs::Decided;
+        let (home, reg, orch) = with_pipeline();
+        let args = json!({"pipeline": "two", "ticket": "INTH-7", "summary": "Export drops rows"});
+        let (text, err, event) = call(&reg, &orch, "run_start", args);
+        assert!(!err, "{text}");
+        let started: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            (started["run"].as_str(), started["first"].as_str()),
+            (Some("INTH-7-1"), Some("a"))
+        );
+        assert_eq!(started["stages"][0]["skill"], "QA-Skills");
+        assert_eq!(started["stages"][1]["bar"], 90);
+        assert!(
+            matches!(&event, Some(McpEvent::RunChanged(c)) if c[0].what == Decided::RunStarted)
+        );
+        let args = json!({"run": "INTH-7-1", "stage": "a", "brief": "Start with the CSV."});
+        let (text, err, event) = call(&reg, &orch, "stage_start", args);
+        assert!(!err, "{text}");
+        assert!(text.contains("s-01"), "{text}");
+        assert!(
+            matches!(&event, Some(McpEvent::StageStart(s)) if s.prompt.contains("Start with the CSV."))
+        );
+        let (text, err, again) = call(
+            &reg,
+            &orch,
+            "stage_start",
+            json!({"run": "INTH-7-1", "stage": "a"}),
+        );
+        assert!(err && text.contains("running"), "{text}");
+        assert_eq!(again, None);
+        let stage = open_stage(&reg, event);
+        let (text, err, _) = call(&reg, &stage, "stage_brief", json!({}));
+        assert!(!err, "{text}");
+        let brief: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            (
+                brief["ticket"].as_str(),
+                brief["attempt"].as_str(),
+                brief["stage"]["bar"].as_u64()
+            ),
+            (Some("INTH-7"), Some("s-01"), Some(80))
+        );
+        assert!(call(&reg, &orch, "stage_brief", json!({})).1, "not a stage");
+        assert!(
+            call(&reg, &orch, "stage_report", report(95)).1,
+            "not a stage"
+        );
+        let args = json!({"run": "INTH-7-1", "stage": "b"});
+        assert!(
+            call(&reg, &stage, "stage_start", args).1,
+            "a stage can't orchestrate"
+        );
+        assert!(
+            call(&reg, &stage, "run_status", json!({})).1,
+            "nor read the run"
+        );
+        let (text, err, event) = call(&reg, &stage, "stage_report", report(85));
+        assert!(!err && text.contains("passed"), "{text}");
+        assert!(
+            matches!(&event, Some(McpEvent::RunChanged(c)) if c.iter().any(|c| c.what == Decided::Passed))
+        );
+        let (text, err, _) = call(&reg, &orch, "run_status", json!({}));
+        assert!(!err, "{text}");
+        let st: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(st["stages"][0]["status"], "passed");
+        assert_eq!(st["stages"][0]["attempts"][0]["rating"]["score"], 85);
+        assert_eq!(
+            (
+                st["next"]["stage"].as_str(),
+                st["next"]["may_start"].as_bool()
+            ),
+            (Some("b"), Some(true))
+        );
+        let (_, _, event) = call(
+            &reg,
+            &orch,
+            "stage_start",
+            json!({"run": "INTH-7-1", "stage": "b"}),
+        );
+        let second = open_stage(&reg, event);
+        let brief: Value =
+            serde_json::from_str(&call(&reg, &second, "stage_brief", json!({})).0).unwrap();
+        assert_eq!(
+            (
+                brief["previous"]["summary"].as_str(),
+                brief["previous"]["handoff"].as_str()
+            ),
+            (Some("Done it."), Some("h"))
+        );
+        let (_, _, event) = call(&reg, &second, "stage_report", report(92));
+        assert!(
+            matches!(&event, Some(McpEvent::RunChanged(c)) if c.iter().any(|c| c.what == Decided::RunFinished))
+        );
+        let log =
+            std::fs::read_to_string(crate::run_log::file_for(home.path(), "INTH-7-1")).unwrap();
+        for event in ["run started", "stage started", "report", "run ended"] {
+            assert!(
+                log.contains(&format!("\"event\":\"{event}\"")),
+                "{event}: {log}"
+            );
+        }
+    }
+
+    #[test]
+    fn claudes_session_ids_go_to_the_run_log_once() {
+        let (home, reg, orch) = with_pipeline();
+        let stage = first_stage_open(&reg, &orch);
+        let status = |token: &str, session: &str| {
+            let body = json!({"jsonrpc": "2.0", "method": "hydraui/status",
+                              "params": {"state": "working", "session": session}})
+            .to_string();
+            let auth = format!("Bearer {token}");
+            handle(&reg, "POST", "/mcp", Some(&auth), None, &body)
+        };
+        status(&orch, "orch-1");
+        status(&orch, "orch-1");
+        status(&stage, "stage-1");
+        let log =
+            std::fs::read_to_string(crate::run_log::file_for(home.path(), "INTH-7-1")).unwrap();
+        let lines: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains("\"claude session\""))
+            .collect();
+        assert_eq!(lines.len(), 2, "{log}");
+        assert!(lines[0].contains("\"who\":\"orchestrator\"") && lines[0].contains("orch-1"));
+        assert!(lines[1].contains("\"who\":\"s-01\"") && lines[1].contains("stage-1"));
+    }
+
+    #[test]
+    fn a_run_id_already_in_the_logs_is_not_reused() {
+        let (home, reg, orch) = with_pipeline();
+        let old = crate::run_log::file_for(home.path(), "INTH-7-1");
+        crate::run_log::append(&old, "run started", json!({"ticket": "INTH-7"})).unwrap();
+        let args = json!({"pipeline": "two", "ticket": "INTH-7", "summary": "Again"});
+        let (text, err, _) = call(&reg, &orch, "run_start", args);
+        assert!(!err, "{text}");
+        let started: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(started["run"], "INTH-7-2");
+    }
+
+    #[test]
+    fn a_report_missing_reasons_is_refused_and_changes_nothing() {
+        let (_home, reg, orch) = with_pipeline();
+        let stage = first_stage_open(&reg, &orch);
+        let mut bad = report(95);
+        bad.as_object_mut().unwrap().remove("reasons");
+        let (text, err, event) = call(&reg, &stage, "stage_report", bad);
+        assert!(err && text.contains("reasons"), "{text}");
+        assert_eq!(event, None);
+        let st: Value =
+            serde_json::from_str(&call(&reg, &orch, "run_status", json!({})).0).unwrap();
+        assert_eq!(st["stages"][0]["status"], "running");
+        // Fixed, it counts.
+        assert!(!call(&reg, &stage, "stage_report", report(95)).1);
+    }
+
+    #[test]
+    fn a_bar_changed_in_the_file_applies_at_the_report() {
+        let (home, reg, orch) = with_pipeline();
+        let stage = first_stage_open(&reg, &orch);
+        write_two(home.path(), 99);
+        let (text, err, _) = call(&reg, &stage, "stage_report", report(95));
+        assert!(!err && text.contains("99"), "{text}");
+        let st: Value =
+            serde_json::from_str(&call(&reg, &orch, "run_status", json!({})).0).unwrap();
+        assert_eq!(
+            (st["stages"][0]["status"].as_str(), st["state"].as_str()),
+            (Some("stopped"), Some("needs_you"))
+        );
+        assert_eq!(st["stages"][0]["bar"], 99);
+    }
+
+    #[test]
+    fn usage_reports_feed_the_weekly_check() {
+        use crate::runs::Decided;
+        let (_home, reg, orch) = with_pipeline();
+        let stage = first_stage_open(&reg, &orch);
+        let usage = r#"{"jsonrpc":"2.0","method":"hydraui/usage","params":{"rate_limits":{"seven_day":{"used_percentage":75}}}}"#;
+        let auth = format!("Bearer {stage}");
+        assert_eq!(
+            handle(&reg, "POST", "/mcp", Some(&auth), None, usage)
+                .0
+                .status,
+            202
+        );
+        assert!(!call(&reg, &stage, "stage_report", report(95)).1);
+        let (text, err, event) = call(
+            &reg,
+            &orch,
+            "stage_start",
+            json!({"run": "INTH-7-1", "stage": "b"}),
+        );
+        assert!(err && text.contains("25%"), "{text}");
+        assert!(
+            matches!(&event, Some(McpEvent::RunChanged(c)) if c.iter().any(|c| matches!(c.what, Decided::RunNeedsYou(_))))
+        );
+    }
+
+    #[test]
+    fn closing_a_stage_terminal_fails_its_stage() {
+        use crate::runs::Decided;
+        let (_home, reg, orch) = with_pipeline();
+        let stage = first_stage_open(&reg, &orch);
+        let changes = reg.lock().unwrap().revoke(&stage);
+        assert!(changes.iter().any(|c| matches!(c.what, Decided::Failed(_))));
+        let st: Value =
+            serde_json::from_str(&call(&reg, &orch, "run_status", json!({})).0).unwrap();
+        assert_eq!(st["stages"][0]["status"], "failed");
+    }
+
+    #[test]
+    fn run_tools_need_a_hydra_home() {
+        let dir = repo();
+        let reg = Mutex::new(Registry::default());
+        let tok = reg.lock().unwrap().register("c", dir.path().to_path_buf());
+        let args = json!({"pipeline": "two", "ticket": "INTH-7", "summary": "x"});
+        let (text, err, _) = call(&reg, &tok, "run_start", args);
+        assert!(err && text.contains("hydra home"), "{text}");
+    }
+
+    #[test]
+    fn a_two_stage_run_over_http() {
+        use crate::runs::Decided;
+        let home = tempfile::tempdir().unwrap();
+        write_two(home.path(), 80);
+        let server = Server::start().unwrap();
+        server.set_hydra_root(home.path().to_path_buf());
+        let register = |label: &str| {
+            server
+                .registry()
+                .lock()
+                .unwrap()
+                .register(label, home.path().to_path_buf())
+        };
+        let orch = register("orchestrator");
+        let post = |token: &str, body: Value| -> (u16, Value) {
+            let resp = ureq::post(server.url())
+                .set("Authorization", &format!("Bearer {token}"))
+                .set("Content-Type", "application/json")
+                .send_string(&body.to_string())
+                .unwrap();
+            let status = resp.status();
+            let text = resp.into_string().unwrap();
+            (status, serde_json::from_str(&text).unwrap_or(Value::Null))
+        };
+        let tool = |token: &str, name: &str, args: Value| -> (String, bool) {
+            let (_, v) = post(
+                token,
+                json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                       "params": {"name": name, "arguments": args}}),
+            );
+            let r = &v["result"];
+            (
+                r["content"][0]["text"].as_str().unwrap().to_string(),
+                r["isError"].as_bool().unwrap(),
+            )
+        };
+        let mut events = server.subscribe();
+        let mut next = || events.try_recv().ok();
+        // What the workspace does on StageStart: a terminal for the stage, linked to the run.
+        let open = |event: Option<McpEvent>| -> String {
+            let Some(McpEvent::StageStart(s)) = event else {
+                panic!("a stage start: {event:?}");
+            };
+            let name = format!("{} · {}", s.label, s.title);
+            let tok = register(&name);
+            server
+                .registry()
+                .lock()
+                .unwrap()
+                .runs
+                .link(&s.run, s.stage, &tok, &name);
+            tok
+        };
+
+        let args = json!({"pipeline": "two", "ticket": "INTH-9", "summary": "Rows dropped"});
+        let (text, err) = tool(&orch, "run_start", args);
+        assert!(!err, "{text}");
+        assert!(
+            matches!(next(), Some(McpEvent::RunChanged(c)) if c[0].what == Decided::RunStarted)
+        );
+        assert!(
+            !tool(
+                &orch,
+                "stage_start",
+                json!({"run": "INTH-9-1", "stage": "a"})
+            )
+            .1
+        );
+        let a = open(next());
+        // Stage a's skill is reported over HTTP, as `hydra hook skill` does.
+        let (_, refused) = tool(&a, "stage_report", report(90));
+        assert!(refused, "no report before the stage's skill is used");
+        let skill = json!({"jsonrpc": "2.0", "method": "hydraui/skill",
+                           "params": {"skill": "QA-Skills"}});
+        assert_eq!(post(&a, skill).0, 202);
+        assert!(matches!(next(), Some(McpEvent::Skill(t, k)) if t == a && k == "QA-Skills"));
+        let usage = json!({"jsonrpc": "2.0", "method": "hydraui/usage",
+                           "params": {"rate_limits": {"seven_day": {"used_percentage": 40}}}});
+        assert_eq!(post(&a, usage).0, 202);
+        assert!(matches!(next(), Some(McpEvent::Usage(t, _)) if t == a));
+        let (text, err) = tool(&a, "stage_report", report(90));
+        assert!(!err && text.contains("passed"), "{text}");
+        assert!(
+            matches!(next(), Some(McpEvent::RunChanged(c)) if c.iter().any(|c| c.what == Decided::Passed))
+        );
+        assert!(
+            !tool(
+                &orch,
+                "stage_start",
+                json!({"run": "INTH-9-1", "stage": "b"})
+            )
+            .1
+        );
+        let b = open(next());
+        let (text, err) = tool(&b, "stage_report", report(95));
+        assert!(!err, "{text}");
+        assert!(
+            matches!(next(), Some(McpEvent::RunChanged(c)) if c.iter().any(|c| c.what == Decided::RunFinished))
+        );
+        let (text, _) = tool(&orch, "run_status", json!({}));
+        let st: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(st["state"], "finished");
+        assert_eq!(st["week_used"], 40.0);
+        // A closed stage terminal after the run ended changes nothing.
+        assert!(server.registry().lock().unwrap().revoke(&b).is_empty());
+    }
+
     #[test]
     fn speaks_json_rpc() {
         let dir = repo();
@@ -536,7 +1050,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 6);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 11);
         let bad: Value = serde_json::from_str(&rpc(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"tasks_delete","arguments":{}}}"#).body.unwrap()).unwrap();
         assert_eq!(bad["error"]["code"], -32602);
         let junk: Value = serde_json::from_str(&rpc("{not json").body.unwrap()).unwrap();

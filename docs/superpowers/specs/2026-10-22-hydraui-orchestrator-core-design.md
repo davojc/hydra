@@ -803,6 +803,8 @@ first, then each **Orchestrator N** (capitalised), then the terminal's Tasks.
   The sidebar rows under a pipeline (each orchestrator and session: the selected row and its
   dot) take its colour too, and its card stays grey: the colour is on the frame, pills and bars.
   `orchestrator_theme::blend` lays the colour over the dark surface for tints and edges.
+  A colour changed in Pipeline settings reaches a ticket already in progress at once
+  (`Runs::refresh_from_file`, with the product channel and style).
 - **History shows one pipeline.** The run log's `run started` names its pipeline
   (`run_history::Entry.pipeline`); an orchestrator's History lists only its own pipeline's runs.
 

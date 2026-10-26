@@ -806,6 +806,10 @@ impl Runs {
         {
             r.pipeline.name = now.name.clone();
             r.pipeline.bar = now.bar;
+            // How it looks and how it asks product follow Save at once too.
+            r.pipeline.color = now.color;
+            r.pipeline.product_channel = now.product_channel.clone();
+            r.pipeline.product_style = now.product_style.clone();
             // A stage's own settings reach it from its next start; only the list (adding,
             // removing, reordering) waits for the next ticket.
             for stage in &mut r.pipeline.stages {
@@ -2223,9 +2227,16 @@ mod tests {
         let mut now = pipeline(&["b", "a", "c"]);
         now.stages[1].bar = Some(95);
         now.name = "Renamed".into();
+        now.color = Some(0xd8c35a);
+        now.product_style = Some("Keep it short.".into());
         runs.refresh_from_file("t", &now);
-        // A new name shows at once (the design: the card follows Save).
+        // A new name and colour show at once (the design: the card follows Save).
         assert_eq!(runs.run(&id).unwrap().pipeline.name, "Renamed");
+        assert_eq!(runs.run(&id).unwrap().pipeline.color, Some(0xd8c35a));
+        assert_eq!(
+            runs.run(&id).unwrap().pipeline.product_style.as_deref(),
+            Some("Keep it short.")
+        );
         // A stage list change waits for the next run; the bar applies now.
         let r = runs.run(&id).unwrap();
         assert_eq!(r.pipeline.stages[0].id, "a");

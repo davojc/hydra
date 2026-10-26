@@ -584,3 +584,26 @@ for a stage. Every stage is now told so, and has a way to ask.
   it and types it to the session. A stage that reports or fails while asking drops the question.
 - **Logged and resumed**: `asked` (stage, question, link) and `answered` (answer) in the run's
   log; a restart brings a waiting question back.
+
+## 16. Must address (added 2026-10-26)
+
+A stage's reasons against are often the real problems (Jordan, 2026-10-26), yet a stage that
+clears its bar goes on regardless. A person can now hold a stage to them.
+
+- **Marking.** In a stage's report (the Pipeline tab's report panel, or the stopped banner), each
+  reason against has a **Must address** toggle. Only the stage's latest report can be marked,
+  in a run that's still open and not waiting on a product answer. The marks are kept on the
+  attempt (`Attempt.must`).
+- **Send back.** With at least one marked, **Send back to <stage> · fix N reasons** appears
+  under the reasons. The stage's session is told the marked reasons, to deal with each and to
+  say in its next report how each was dealt with (`runs::must_note`).
+  - A stage that waits for the person (stopped below its bar) re-runs with that note.
+  - An earlier stage that passed reopens its own session (§14), and the stages after it run
+    again.
+  - While another stage is at work, the send-back waits (`Run.fix_after`). Once that stage
+    reports or fails, the run goes back instead of going on or finishing. The report shows
+    **↩ Going back to <stage> once <stage at work> reports**, with **Cancel send back**.
+- **The orchestrator** is told the run went back, as with **Go back** (that message now wins
+  over a pass in the same wake-up).
+- **Logged and resumed** as `marked {stage, reason, on}`, `sent back {stage}` and `send-back
+  cancelled {stage}`. A restart replays them, a waiting send-back included.

@@ -144,6 +144,12 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
              reports.",
             stage(i)
         )
+    } else if let Some(i) = reopened {
+        format!(
+            "Run {id}: a person sent it back to stage {}; its own session is reopened beside them \
+             with their note. Wait: hydraui tells you when it reports, then start the next stage.",
+            stage(i)
+        )
     } else if let Some((i, why)) = failed {
         format!(
             "Run {id}: stage {} failed ({why}), attempt {} of {MAX_ATTEMPTS}. Call run_status, \
@@ -158,12 +164,6 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
              stage.",
             stage(i),
             run.pipeline.bar_for(i)
-        )
-    } else if let Some(i) = reopened {
-        format!(
-            "Run {id}: a person sent it back to stage {}; its own session is reopened beside them \
-             with their note. Wait: hydraui tells you when it reports, then start the next stage.",
-            stage(i)
         )
     } else if let Some(i) = retrying {
         format!(

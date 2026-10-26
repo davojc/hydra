@@ -144,6 +144,15 @@ fn read(hydra_root: &Path, file: &Path, alive: &impl Fn(u32) -> bool) -> Option<
     })
 }
 
+/// Where stage `stage` (its id) is in run `id`'s pipeline.
+fn stage_index(runs: &Runs, id: &str, stage: &str) -> Option<usize> {
+    runs.run(id)?
+        .pipeline
+        .stages
+        .iter()
+        .position(|s| s.id == stage)
+}
+
 /// Run `id` as `events` made it, through the calls that made it live, with `pipeline` as its
 /// file is now; `None` when the log and the rules disagree.
 fn replay(id: &str, pipeline: Pipeline, events: &[Value]) -> Option<Run> {
@@ -216,6 +225,20 @@ fn replay(id: &str, pipeline: Pipeline, events: &[Value]) -> Option<Run> {
             }
             "paused" => {
                 runs.pause(id, true).ok()?;
+            }
+            // A person marked a reason against Must address, and sent the stage back for it.
+            "marked" => {
+                let i = stage_index(&runs, id, text(e, "stage"))?;
+                let reason = e.get("reason").and_then(Value::as_u64)? as usize;
+                let on = e.get("on").and_then(Value::as_bool).unwrap_or(true);
+                runs.mark(id, i, reason, on).ok()?;
+            }
+            "sent back" => {
+                let i = stage_index(&runs, id, text(e, "stage"))?;
+                runs.send_back(id, i).ok()?;
+            }
+            "send-back cancelled" => {
+                runs.cancel_fix(id).ok()?;
             }
             // A stage asked a person (product) and the ticket waited.
             "asked" => {
@@ -414,6 +437,26 @@ mod tests {
             (None, None)
         );
         assert_eq!(logged_session(home.path(), "NOPE-1", "s-01"), (None, None));
+    }
+
+    #[test]
+    fn a_send_back_waiting_for_the_running_stage_replays() {
+        let against = RATING.replace(
+            r#"[{"side":"for","text":"r"}]"#,
+            r#"[{"side":"for","text":"r"},{"side":"against","text":"No mobile check."}]"#,
+        );
+        let mut log = mid_run();
+        log[7] = line(
+            "report",
+            &format!(r#","stage":"a","label":"s-01","rating":{against}"#),
+        );
+        log.push(line("marked", r#","stage":"a","reason":1,"on":true"#));
+        log.push(line("sent back", r#","stage":"a""#));
+        let r = &interrupted(home_with(&log).path(), |_| false)[0].run;
+        assert_eq!(r.stages[0].latest().unwrap().must, [1]);
+        let fix = r.fix_after.as_ref().expect("still queued");
+        assert_eq!(fix.stage, 0);
+        assert!(fix.note.contains("No mobile check."), "{}", fix.note);
     }
 
     #[test]

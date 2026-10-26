@@ -12,7 +12,7 @@ use gpui::{AnyElement, App, Context, Div, FontWeight, SharedString, Window, div,
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_component::notification::Notification;
-use gpui_component::{Sizable, WindowExt, h_flex, v_flex};
+use gpui_component::{Disableable, Sizable, WindowExt, h_flex, v_flex};
 use serde_json::json;
 
 use super::Workspace;
@@ -281,6 +281,81 @@ impl Workspace {
                 tell(changes);
             }
             Err(e) => window.push_notification(Notification::error(e).title("Pipeline"), cx),
+        }
+    }
+
+    /// **Must address** on reason `reason` of stage `stage`'s latest report, or off.
+    fn mark_reason(
+        &mut self,
+        run: &str,
+        stage: usize,
+        reason: usize,
+        on: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let done = run_choice(
+            run,
+            "marked",
+            |runs| {
+                runs.mark(run, stage, reason, on)
+                    .map(|()| (Vec::new(), json!({"reason": reason, "on": on})))
+            },
+            stage,
+        );
+        match done {
+            Ok(_) => cx.notify(),
+            Err(e) => window.push_notification(Notification::error(e).title("Must address"), cx),
+        }
+    }
+
+    /// **Send back**: the stage goes again to deal with what was marked **Must address**.
+    fn send_back(
+        &mut self,
+        orch: PaneId,
+        run: &str,
+        stage: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let done = run_choice(
+            run,
+            "sent back",
+            |runs| runs.send_back(run, stage).map(|c| (c, json!({}))),
+            stage,
+        );
+        match done {
+            Ok(changes) => {
+                crate::action_log::write(format!("run {run}: the user sent stage {stage} back"));
+                if !changes.is_empty() {
+                    self.pipeline_tab_update(orch, cx, |t| {
+                        t.selected = None;
+                        t.stepped_in = false;
+                    });
+                }
+                cx.notify();
+                tell(changes);
+            }
+            Err(e) => window.push_notification(Notification::error(e).title("Send back"), cx),
+        }
+    }
+
+    fn cancel_send_back(&mut self, run: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let stage = server::get()
+            .and_then(|sv| {
+                let reg = server::lock(sv.registry());
+                Some(reg.runs.run(run)?.fix_after.as_ref()?.stage)
+            })
+            .unwrap_or_default();
+        let done = run_choice(
+            run,
+            "send-back cancelled",
+            |runs| runs.cancel_fix(run).map(|()| (Vec::new(), json!({}))),
+            stage,
+        );
+        match done {
+            Ok(_) => cx.notify(),
+            Err(e) => window.push_notification(Notification::error(e).title("Send back"), cx),
         }
     }
 
@@ -970,6 +1045,7 @@ impl Workspace {
                 let spec = &run.pipeline.stages[si];
                 let a = &run.stages[si].attempts[ai];
                 let bar = run.pipeline.bar_for(si);
+                let term = terminal(si, ai);
                 let body = match &a.rating {
                     Some(r) => {
                         let passed = r.outcome == Outcome::Done && r.score >= bar;
@@ -983,7 +1059,7 @@ impl Workspace {
                         } else {
                             format!("Below the {bar}% bar")
                         };
-                        self.rating_report(r, passed, verdict, true)
+                        self.rating_report(r, passed, verdict, true, marking(orch, run, si, ai), cx)
                     }
                     None => v_flex()
                         .px(px(28.))
@@ -1004,7 +1080,7 @@ impl Workspace {
                     ))
                     .children(note_strip(a.note.as_deref()))
                     .child(body)
-                    .child(terminal(si, ai))
+                    .child(term)
                     .into_any_element()
             }
             Panel::Stopped(si, ai) if tab.stepped_in => {
@@ -1138,30 +1214,47 @@ impl Workspace {
 
     /// A rating as the design's report shows it: the score, the verdict, Reasons and Evidence.
     /// `summary` is false where the summary already shows (the stopped banner's headline).
+    /// With `marking`, each reason against can be marked **Must address** and the stage sent
+    /// back to deal with them.
     fn rating_report(
         &self,
         r: &Rating,
         passed: bool,
         verdict: String,
         summary: bool,
+        marking: Option<Marking>,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
-        let reasons = r.reasons.iter().map(|x| {
-            let (sign, hex) = match x.side {
-                Side::For => ("+", theme::GREEN),
-                Side::Against => ("−", theme::RED),
-            };
-            h_flex()
-                .items_start()
-                .gap_2()
-                .child(text(12.5, hex).flex_none().child(sign))
-                // A width it can't grow past, so a long reason wraps inside its column.
-                .child(
-                    text(12.5, theme::TEXT)
-                        .flex_1()
-                        .min_w_0()
-                        .child(x.text.clone()),
-                )
-        });
+        let reasons: Vec<Div> = r
+            .reasons
+            .iter()
+            .enumerate()
+            .map(|(i, x)| {
+                let (sign, hex) = match x.side {
+                    Side::For => ("+", theme::GREEN),
+                    Side::Against => ("−", theme::RED),
+                };
+                let row = h_flex()
+                    .items_start()
+                    .gap_2()
+                    .child(text(12.5, hex).flex_none().child(sign))
+                    // A width it can't grow past, so a long reason wraps inside its column.
+                    .child(
+                        text(12.5, theme::TEXT)
+                            .flex_1()
+                            .min_w_0()
+                            .child(x.text.clone()),
+                    );
+                match (&marking, x.side) {
+                    (Some(m), Side::Against) => row.child(must_toggle(m, i, cx)),
+                    _ => row,
+                }
+            })
+            .collect();
+        let send_back = marking
+            .as_ref()
+            .filter(|m| !m.must.is_empty())
+            .map(|m| send_back_row(m, cx));
         let evidence = r.evidence.iter().map(|e| {
             h_flex()
                 .px(px(12.))
@@ -1220,7 +1313,7 @@ impl Workspace {
                     .items_start()
                     .flex_wrap()
                     .gap_6()
-                    .child(column("Reasons").children(reasons))
+                    .child(column("Reasons").children(reasons).children(send_back))
                     .child(column("Evidence").children(evidence)),
             )
             .into_any_element()
@@ -1374,10 +1467,176 @@ impl Workspace {
                     .min_h_0()
                     .overflow_y_scroll()
                     .children(rating.map(|r| {
-                        self.rating_report(r, false, format!("Below the {bar}% bar"), false)
+                        let marking = ai.and_then(|ai| marking(orch, run, si, ai));
+                        self.rating_report(
+                            r,
+                            false,
+                            format!("Below the {bar}% bar"),
+                            false,
+                            marking,
+                            cx,
+                        )
                     })),
             )
             .child(actions)
             .into_any_element()
     }
+}
+
+/// Applies `act` to the runs and, when it works, logs `event` with stage `stage` and its fields
+/// to the run's log, for a restart to replay.
+fn run_choice(
+    run: &str,
+    event: &str,
+    act: impl FnOnce(
+        &mut crate::runs::Runs,
+    ) -> Result<(Vec<crate::runs::Change>, serde_json::Value), String>,
+    stage: usize,
+) -> Result<Vec<crate::runs::Change>, String> {
+    let sv = server::get().ok_or("hydraui's MCP server isn't running")?;
+    let mut reg = server::lock(sv.registry());
+    let (changes, mut fields) = act(&mut reg.runs)?;
+    let id = reg
+        .runs
+        .run(run)
+        .and_then(|r| r.pipeline.stages.get(stage))
+        .map(|s| s.id.clone());
+    if let (Some(root), Some(obj)) = (&reg.hydra_root, fields.as_object_mut()) {
+        obj.insert("stage".into(), json!(id));
+        let file = crate::run_log::file_for(root, run);
+        if let Err(e) = crate::run_log::append(&file, event, fields) {
+            crate::action_log::write(format!("run log {run}: {e}"));
+        }
+    }
+    Ok(changes)
+}
+
+/// What a report needs so a person can mark its reasons against **Must address** and send its
+/// stage back.
+struct Marking {
+    orch: PaneId,
+    run: String,
+    stage: usize,
+    title: String,
+    must: Vec<usize>,
+    /// This stage's send-back waits for the stage at work.
+    queued: bool,
+    /// The stage at work now, by title.
+    at_work: Option<String>,
+}
+
+/// Only the stage's latest report with a reason against, in a run still open and not waiting on
+/// a product answer, can be marked.
+fn marking(orch: PaneId, run: &Run, si: usize, ai: usize) -> Option<Marking> {
+    let s = run.stages.get(si)?;
+    let a = s.attempts.get(ai).filter(|_| ai + 1 == s.attempts.len())?;
+    let against = a
+        .rating
+        .as_ref()?
+        .reasons
+        .iter()
+        .any(|x| x.side == Side::Against);
+    if !against || !run.state.open() || run.asking.is_some() {
+        return None;
+    }
+    Some(Marking {
+        orch,
+        run: run.id.clone(),
+        stage: si,
+        title: run.pipeline.stages[si].title.clone(),
+        must: a.must.clone(),
+        queued: run.fix_after.as_ref().is_some_and(|f| f.stage == si),
+        at_work: run
+            .stages
+            .iter()
+            .position(|s| s.status.busy())
+            .map(|i| run.pipeline.stages[i].title.clone()),
+    })
+}
+
+/// A reason against's **Must address** toggle.
+fn must_toggle(m: &Marking, i: usize, cx: &mut Context<Workspace>) -> AnyElement {
+    let on = m.must.contains(&i);
+    let (run, stage) = (m.run.clone(), m.stage);
+    let b = Button::new(SharedString::from(format!("must-{}-{stage}-{i}", m.run)))
+        .label(if on {
+            "✓ Must address"
+        } else {
+            "Must address"
+        })
+        .xsmall()
+        .disabled(m.queued)
+        .tooltip("Mark it, then Send back: the stage goes again to deal with it")
+        .on_click(
+            cx.listener(move |ws, _, window, cx| ws.mark_reason(&run, stage, i, !on, window, cx)),
+        );
+    let b = if on { b.danger() } else { b.ghost() };
+    div().flex_none().child(b).into_any_element()
+}
+
+/// Under the reasons once one is marked: **Send back**, or the send-back waiting for the stage
+/// at work, with **Cancel**.
+fn send_back_row(m: &Marking, cx: &mut Context<Workspace>) -> AnyElement {
+    let n = m.must.len();
+    let what = if n == 1 {
+        "1 reason".to_string()
+    } else {
+        format!("{n} reasons")
+    };
+    let run = m.run.clone();
+    let row = v_flex()
+        .mt_2()
+        .p_2()
+        .gap_1()
+        .rounded(px(6.))
+        .bg(color(theme::RED_TINT));
+    if m.queued {
+        let at = m
+            .at_work
+            .clone()
+            .unwrap_or_else(|| "the stage at work".into());
+        return row
+            .child(text(12., theme::TEXT).child(format!(
+                "↩ Going back to {} to fix {what} once {at} reports.",
+                m.title
+            )))
+            .child(
+                div().child(
+                    Button::new(SharedString::from(format!("send-back-cancel-{run}")))
+                        .label("Cancel send back")
+                        .ghost()
+                        .xsmall()
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.cancel_send_back(&run, window, cx)
+                        })),
+                ),
+            )
+            .into_any_element();
+    }
+    let when = match &m.at_work {
+        Some(at) => format!(
+            "It goes once {at} reports: {}'s session works on them, then the stages after it \
+             run again.",
+            m.title
+        ),
+        None => format!(
+            "{}'s session goes again told to fix them and say how; the stages after it run \
+             again.",
+            m.title
+        ),
+    };
+    let (stage, orch) = (m.stage, m.orch);
+    row.child(
+        div().child(
+            Button::new(SharedString::from(format!("send-back-{run}-{stage}")))
+                .label(format!("Send back to {} · fix {what}", m.title))
+                .danger()
+                .small()
+                .on_click(cx.listener(move |ws, _, window, cx| {
+                    ws.send_back(orch, &run, stage, window, cx)
+                })),
+        ),
+    )
+    .child(text(11.5, theme::TEXT_SECONDARY).child(when))
+    .into_any_element()
 }

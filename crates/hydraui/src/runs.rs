@@ -66,6 +66,9 @@ pub struct Attempt {
     pub rating: Option<Rating>,
     /// The skills its session invoked (`hydra hook skill`), in order.
     pub skills: Vec<String>,
+    /// Its reasons against that a person marked **Must address**, by their place in
+    /// `rating.reasons`, in the order marked.
+    pub must: Vec<usize>,
 }
 
 /// One stage of a run.
@@ -115,6 +118,14 @@ impl RunState {
     }
 }
 
+/// A person's send-back waiting for the stage at work to report: the run then goes back to
+/// `stage` with `note` (the reasons against they marked **Must address**).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fix {
+    pub stage: usize,
+    pub note: String,
+}
+
 /// A stage's question for a person, a decision that isn't the stage's to make (product): its
 /// ticket waits for the answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +160,8 @@ pub struct Run {
     pub week_used: Option<f64>,
     /// A stage's question waiting for its answer.
     pub asking: Option<Ask>,
+    /// A send-back queued until the stage at work reports.
+    pub fix_after: Option<Fix>,
 }
 
 /// What a terminal is to the runs (§3.3).
@@ -359,6 +372,7 @@ impl Runs {
             worktree: None,
             week_used: None,
             asking: None,
+            fix_after: None,
         });
         Ok(self.runs.last().expect("just pushed"))
     }
@@ -497,6 +511,7 @@ impl Runs {
             note,
             rating: None,
             skills: Vec::new(),
+            must: Vec::new(),
         });
         let spec = &r.pipeline.stages[i];
         let feature_env = r.pipeline.feature_env_for(&r.ticket);
@@ -626,7 +641,9 @@ impl Runs {
             stage: Some(si),
             what: Decided::Failed(why.to_string()),
         }];
-        if attempts >= MAX_ATTEMPTS {
+        if let Some(fix) = self.runs[ri].fix_after.take() {
+            changes.extend(self.reopen(ri, fix.stage, &fix.note));
+        } else if attempts >= MAX_ATTEMPTS {
             changes
                 .extend(self.needs_you(ri, format!("stage {id} failed {attempts} times: {why}")));
         }
@@ -676,6 +693,25 @@ impl Runs {
             a.rating = Some(rating);
         }
         let run = r.id.clone();
+        // A person's send-back waited for this report: the run goes back whatever it says.
+        if let Some(fix) = r.fix_after.take() {
+            let mut changes = vec![Change {
+                run,
+                stage: Some(si),
+                what: if passed {
+                    Decided::Passed
+                } else {
+                    Decided::Stopped(why)
+                },
+            }];
+            s.status = if passed {
+                StageStatus::Passed
+            } else {
+                StageStatus::Stopped
+            };
+            changes.extend(self.reopen(ri, fix.stage, &fix.note));
+            return Ok(changes);
+        }
         if passed {
             s.status = StageStatus::Passed;
             let mut changes = vec![Change {
@@ -948,6 +984,13 @@ impl Runs {
                 "stage {stage} isn't an earlier stage that passed: re-run the waiting one instead"
             ));
         }
+        Ok(self.reopen(ri, t, note))
+    }
+
+    /// The run goes back to stage `t`, whose own session goes on as a new attempt with `note`
+    /// (`Starting` until its terminal links); the stages after it wait again, their earlier
+    /// tries no longer counted.
+    fn reopen(&mut self, ri: usize, t: usize, note: &str) -> Vec<Change> {
         let r = &mut self.runs[ri];
         r.sessions += 1;
         let label = format!("s-{:02}", r.sessions);
@@ -965,6 +1008,7 @@ impl Runs {
             note: Some(note.to_string()),
             rating: None,
             skills,
+            must: Vec::new(),
         });
         for later in &mut r.stages[t + 1..] {
             later.status = StageStatus::Waiting;
@@ -973,7 +1017,7 @@ impl Runs {
         }
         r.state = RunState::Running;
         let id = r.id.clone();
-        Ok(vec![
+        vec![
             Change {
                 run: id.clone(),
                 stage: Some(t),
@@ -984,7 +1028,115 @@ impl Runs {
                 stage: None,
                 what: Decided::RunResumed,
             },
-        ])
+        ]
+    }
+
+    /// A person marks (or unmarks) reason `reason` of stage `stage`'s latest report **Must
+    /// address**. Only a reason against, in an open run.
+    pub fn mark(&mut self, run: &str, stage: usize, reason: usize, on: bool) -> Result<(), String> {
+        let Some(ri) = self.index(run) else {
+            return Err(format!("no run {run}"));
+        };
+        let r = &mut self.runs[ri];
+        if !r.state.open() {
+            return Err(format!("run {run} has ended"));
+        }
+        if r.fix_after.as_ref().is_some_and(|f| f.stage == stage) {
+            return Err("this stage is already being sent back: cancel that first".into());
+        }
+        let Some(a) = r.stages.get_mut(stage).and_then(|s| s.attempts.last_mut()) else {
+            return Err("that stage hasn't run".into());
+        };
+        let against = a
+            .rating
+            .as_ref()
+            .and_then(|x| x.reasons.get(reason))
+            .is_some_and(|x| x.side == Side::Against);
+        if !against {
+            return Err("only a reason against can be marked".into());
+        }
+        a.must.retain(|&i| i != reason);
+        if on {
+            a.must.push(reason);
+        }
+        Ok(())
+    }
+
+    /// A person's **Send back**: stage `stage` goes again to deal with the reasons they marked
+    /// **Must address**. A stage that waits for them re-runs, an earlier one reopens; while a
+    /// later stage is at work, it happens once that stage reports (`fix_after`).
+    pub fn send_back(&mut self, run: &str, stage: usize) -> Result<Vec<Change>, String> {
+        let Some(ri) = self.index(run) else {
+            return Err(format!("no run {run}"));
+        };
+        let r = &self.runs[ri];
+        if !r.state.open() {
+            return Err(format!("run {run} has ended"));
+        }
+        if r.asking.is_some() {
+            return Err(format!(
+                "run {run} is waiting for the answer to its stage's question: answer it first"
+            ));
+        }
+        if r.fix_after.is_some() {
+            return Err(format!("run {run} is already being sent back"));
+        }
+        let note = r
+            .stages
+            .get(stage)
+            .and_then(StageRun::latest)
+            .and_then(must_note)
+            .ok_or("mark at least one reason against Must address first")?;
+        let waiting = r
+            .stages
+            .iter()
+            .position(|s| s.status != StageStatus::Passed)
+            .unwrap_or(r.stages.len());
+        if stage > waiting {
+            return Err("that stage hasn't run in this pass".into());
+        }
+        let r = &mut self.runs[ri];
+        if r.stages.iter().any(|s| s.status.busy()) {
+            r.fix_after = Some(Fix { stage, note });
+            return Ok(Vec::new());
+        }
+        if stage < waiting {
+            return Ok(self.reopen(ri, stage, &note));
+        }
+        // The stage that waits: its next attempt gets the note.
+        let id = r.id.clone();
+        let s = &mut r.stages[stage];
+        let mut changes = Vec::new();
+        if matches!(s.status, StageStatus::Stopped | StageStatus::Failed) {
+            s.status = StageStatus::Waiting;
+            changes.push(Change {
+                run: id.clone(),
+                stage: Some(stage),
+                what: Decided::Retrying,
+            });
+        }
+        s.note = Some(note);
+        if matches!(r.state, RunState::NeedsYou(_)) {
+            r.state = RunState::Running;
+            changes.push(Change {
+                run: id,
+                stage: None,
+                what: Decided::RunResumed,
+            });
+        }
+        Ok(changes)
+    }
+
+    /// Drops a send-back that waits for the stage at work.
+    pub fn cancel_fix(&mut self, run: &str) -> Result<(), String> {
+        let r = self
+            .index(run)
+            .map(|ri| &mut self.runs[ri])
+            .ok_or(format!("no run {run}"))?;
+        r.fix_after
+            .take()
+            .map(|_| ())
+            .ok_or(format!("run {run} isn't being sent back"))
     }
 
     /// What `run_status` returns: the run's state, each stage's status and attempts (session,
@@ -1120,6 +1272,29 @@ fn stage_note(run: &Run, i: usize) -> String {
         run.stages.len(),
         spec.title
     )
+}
+
+/// What a stage sent back is told: the reasons against a person marked **Must address** on
+/// attempt `a`; `None` when none are marked.
+pub fn must_note(a: &Attempt) -> Option<String> {
+    let rating = a.rating.as_ref()?;
+    let items: Vec<&str> = a
+        .must
+        .iter()
+        .filter_map(|&i| rating.reasons.get(i))
+        .map(|x| x.text.as_str())
+        .collect();
+    if items.is_empty() {
+        return None;
+    }
+    let mut note = format!(
+        "The user marked these reasons against your report ({}) Must address. Deal with each          one, then report again, saying in your reasons how each was dealt with:",
+        a.label
+    );
+    for item in items {
+        note.push_str(&format!("\n- {item}"));
+    }
+    Some(note)
 }
 
 /// What a re-run's session is told about the attempt before it (§5.3).
@@ -1335,6 +1510,95 @@ mod tests {
         runs.report("t3", rated(92)).unwrap();
         assert_eq!(status(&runs, &id, 0), StageStatus::Passed);
         assert!(runs.begin("orch", &id, "b", "", 30).is_ok());
+    }
+
+    #[test]
+    fn only_a_reason_against_is_marked_must_address() {
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        assert!(runs.mark(&id, 1, 0, true).is_err(), "reason 0 is for");
+        assert!(runs.mark(&id, 1, 5, true).is_err(), "no reason 5");
+        let err = runs.send_back(&id, 1).unwrap_err();
+        assert!(err.contains("Must address"), "{err}");
+        runs.mark(&id, 1, 1, true).unwrap();
+        runs.mark(&id, 1, 1, true).unwrap();
+        assert_eq!(runs.run(&id).unwrap().stages[1].latest().unwrap().must, [1]);
+        runs.mark(&id, 1, 1, false).unwrap();
+        assert!(
+            runs.run(&id).unwrap().stages[1]
+                .latest()
+                .unwrap()
+                .must
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_stopped_stage_sent_back_reruns_told_what_it_must_address() {
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        runs.mark(&id, 1, 1, true).unwrap();
+        let changes = runs.send_back(&id, 1).unwrap();
+        assert!(changes.iter().any(|c| c.what == Decided::Retrying));
+        let r = runs.run(&id).unwrap();
+        assert_eq!(r.state, RunState::Running);
+        assert_eq!(status(&runs, &id, 1), StageStatus::Waiting);
+        let note = r.stages[1].note.clone().unwrap();
+        assert!(
+            note.contains("Must address") && note.contains("\n- q"),
+            "{note}"
+        );
+        let s = runs.begin("orch", &id, "b", "", 30).unwrap();
+        assert!(s.prompt.contains("- q"), "{}", s.prompt);
+    }
+
+    #[test]
+    fn an_earlier_stage_sent_back_while_another_runs_goes_once_it_reports() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b"]);
+        started(&mut runs, &id, "a", "t1");
+        runs.report("t1", rated(90)).unwrap();
+        started(&mut runs, &id, "b", "t2");
+        runs.mark(&id, 0, 1, true).unwrap();
+        assert_eq!(runs.send_back(&id, 0).unwrap(), []);
+        assert!(runs.send_back(&id, 0).is_err(), "already queued");
+        assert!(runs.mark(&id, 0, 1, false).is_err(), "cancel first");
+        // b passes, but the run goes back to a rather than finishing.
+        let changes = runs.report("t2", rated(95)).unwrap();
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.what == Decided::Reopened && c.stage == Some(0))
+        );
+        assert!(!changes.iter().any(|c| c.what == Decided::RunFinished));
+        let r = runs.run(&id).unwrap();
+        assert_eq!(r.state, RunState::Running);
+        assert_eq!(r.fix_after, None);
+        assert_eq!(status(&runs, &id, 0), StageStatus::Starting);
+        assert_eq!(status(&runs, &id, 1), StageStatus::Waiting);
+        let note = r.stages[0].latest().unwrap().note.clone().unwrap();
+        assert!(note.contains("- q"), "{note}");
+    }
+
+    #[test]
+    fn a_queued_send_back_goes_when_the_running_stage_fails_or_is_cancelled() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b"]);
+        started(&mut runs, &id, "a", "t1");
+        runs.report("t1", rated(90)).unwrap();
+        started(&mut runs, &id, "b", "t2");
+        runs.mark(&id, 0, 1, true).unwrap();
+        runs.send_back(&id, 0).unwrap();
+        runs.cancel_fix(&id).unwrap();
+        assert!(runs.cancel_fix(&id).is_err());
+        runs.send_back(&id, 0).unwrap();
+        let changes = runs.session_gone("t2");
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.what == Decided::Reopened && c.stage == Some(0))
+        );
+        assert_eq!(status(&runs, &id, 0), StageStatus::Starting);
     }
 
     #[test]

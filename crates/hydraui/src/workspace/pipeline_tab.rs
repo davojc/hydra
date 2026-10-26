@@ -729,11 +729,7 @@ impl Workspace {
             return self.render_history(orch, cx);
         }
         let Some(run) = snap.run.as_ref() else {
-            return self.render_quiet(
-                "No ticket in progress",
-                "Give the orchestrator a ticket, or for a Linear pipeline use Pick next ticket \
-                 or Automatic under its card; its stages show here as they run.",
-            );
+            return self.render_waiting_for_work(orch, cx);
         };
         let panel = panel_for(Some(run), tab.selected.as_deref());
         let now = SystemTime::now();
@@ -748,6 +744,50 @@ impl Workspace {
                     .h_full()
                     .child(self.render_panel(orch, run, &snap, tab, panel, now, cx)),
             )
+            .into_any_element()
+    }
+
+    /// No ticket in progress: for a pipeline that finds its own work, what its trigger is doing
+    /// and the wait for its next look, counting down, as under its card.
+    fn render_waiting_for_work(&self, orch: PaneId, cx: &mut Context<Self>) -> AnyElement {
+        use super::linear::{Trigger, TriggerView, look_bar};
+        let t = match self.trigger_view(orch, cx) {
+            None => {
+                return self.render_quiet(
+                    "No ticket in progress",
+                    "Give the orchestrator a ticket; its stages show here as they run.",
+                );
+            }
+            Some(Trigger::Follower(text)) => {
+                return self.render_quiet("Nothing in progress", &text);
+            }
+            Some(Trigger::Lead(t)) => t,
+        };
+        let TriggerView {
+            line,
+            progress,
+            last,
+            source,
+            ..
+        } = t;
+        let accent = self.accent_of(orch, cx);
+        v_flex()
+            .size_full()
+            .bg(color(theme::PANEL))
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .child(text(16., theme::TEXT).child(format!("No {} in progress", source.noun)))
+            .child(text(12.5, theme::TEXT_SECONDARY).child(line))
+            .children(progress.map(|p| {
+                div().w(px(320.)).child(look_bar(
+                    SharedString::from(format!("look-bar-tab-{orch}")),
+                    p,
+                    last,
+                    source.every_minutes,
+                    accent,
+                ))
+            }))
             .into_any_element()
     }
 

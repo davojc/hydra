@@ -813,6 +813,9 @@ The once-a-second redraw made the next-look bar step and the working dot blink o
 
 - **Next look** counts down to the second (`next look in 3:59`), and its bar slides every frame
   from the clock (a repeating gpui animation, at most 30 frames a second).
+- **The Pipeline tab with no ticket** shows the same: **No ticket (PR) in progress**, what its
+  trigger is doing with the countdown, and the bar (`linear::look_bar`, shared with the card;
+  `Workspace::trigger_view` is the trigger's state for both).
 - **What's at work breathes** (`busy::pulse`: a 1.6 s pulse between 15% and full, in step
   everywhere, at most 30 frames a second): a working terminal's dot in the sidebar (a stage's
   session's for as long as its stage is in progress, even while it waits idle on a deploy) and the

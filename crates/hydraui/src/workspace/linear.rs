@@ -66,6 +66,75 @@ fn linear_job(
     }
 }
 
+/// Where a pipeline's work comes from, as its card and Pipeline tab say it: Linear or a Slack
+/// channel.
+pub(super) struct Source {
+    pub(super) looking: String,
+    pub(super) every_minutes: u32,
+    pub(super) noun: &'static str,
+    pub(super) waiting: usize,
+    pub(super) tooltip: String,
+    pub(super) pick: &'static str,
+    pub(super) pick_tooltip: String,
+    /// A Slack trigger offers Connect Slack while it's stopped (a missing or bad token).
+    pub(super) env: Option<String>,
+}
+
+/// A trigger's state for one orchestrator (`Workspace::trigger_view`).
+pub(super) enum Trigger {
+    /// The first orchestrator: its trigger.
+    Lead(TriggerView),
+    /// A later one of several at once: it takes work from the first; what to say.
+    Follower(String),
+}
+
+pub(super) struct TriggerView {
+    pub(super) mode: linear_watch::Mode,
+    /// What it's doing, e.g. `Nothing new · next look in 3:59`.
+    pub(super) line: String,
+    /// How far through the wait for its next look, while it waits to look.
+    pub(super) progress: Option<f32>,
+    pub(super) last: Option<SystemTime>,
+    pub(super) open_run: Option<String>,
+    pub(super) checking: bool,
+    pub(super) source: Source,
+}
+
+/// The wait for the next look as a bar that slides every frame (at most 30 a second) from the
+/// clock, rather than stepping once a second with the card.
+pub(super) fn look_bar(
+    key: SharedString,
+    p: f32,
+    last: Option<SystemTime>,
+    every: u32,
+    accent: u32,
+) -> AnyElement {
+    div()
+        .w_full()
+        .h(px(3.))
+        .rounded_full()
+        .bg(color(theme::RAISED))
+        .child(
+            div()
+                .h_full()
+                .rounded_full()
+                .w(relative(p))
+                .bg(color(accent).opacity(0.8))
+                .with_animation(
+                    key,
+                    Animation::new(Duration::from_secs(60))
+                        .repeat()
+                        .with_max_fps(30.),
+                    move |d, _| {
+                        let p = linear_watch::look_progress(last, SystemTime::now(), every)
+                            .unwrap_or(p);
+                        d.w(relative(p))
+                    },
+                ),
+        )
+        .into_any_element()
+}
+
 impl Workspace {
     /// `orch`'s pipeline with its `[linear]` table, and its environment; `None` without one.
     fn linear_of(
@@ -682,24 +751,9 @@ impl Workspace {
     /// The Linear lines under an orchestrator's card: the Automatic/Manual switch, its state,
     /// **Pick now**, and one line on what that means now; `None` when its pipeline has no
     /// `[linear]` table.
-    pub(super) fn render_linear_row(
-        &self,
-        orch: PaneId,
-        accent: u32,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        // What the card says about where work comes from: Linear or a Slack channel.
-        struct Source {
-            looking: String,
-            every_minutes: u32,
-            noun: &'static str,
-            waiting: usize,
-            tooltip: String,
-            pick: &'static str,
-            pick_tooltip: String,
-            /// A Slack trigger offers Connect Slack while it's stopped (a missing or bad token).
-            env: Option<String>,
-        }
+    /// What orchestrator `orch`'s trigger is doing now (Linear or Slack), or that it takes its
+    /// work from the first orchestrator's; `None` without a trigger.
+    pub(super) fn trigger_view(&self, orch: PaneId, cx: &mut Context<Self>) -> Option<Trigger> {
         let source = match (self.linear_of(orch, cx), self.slack_of(orch, cx)) {
             (Some((_, s, _)), _) => Source {
                 looking: format!("Looking in Linear for the next {} ticket…", s.team),
@@ -735,24 +789,15 @@ impl Workspace {
         let slots = self.slots(orch, cx);
         if slots[0] != orch {
             let n = slots.iter().position(|s| *s == orch).map_or(0, |i| i + 1);
-            return Some(
-                div()
-                    .ml(px(26.))
-                    .mr_1()
-                    .my_1()
-                    .text_xs()
-                    .text_color(color(theme::TEXT_MUTED))
-                    .child(format!(
-                        "Run {n} of {}: takes work from the first card's {}",
-                        slots.len(),
-                        if source.env.is_some() {
-                            "Slack"
-                        } else {
-                            "Linear"
-                        }
-                    ))
-                    .into_any_element(),
-            );
+            return Some(Trigger::Follower(format!(
+                "Run {n} of {}: takes work from the first card's {}",
+                slots.len(),
+                if source.env.is_some() {
+                    "Slack"
+                } else {
+                    "Linear"
+                }
+            )));
         }
         let w = self.linear_watch.get(&orch);
         // With several runs at once, the next waits only while every one is busy.
@@ -777,12 +822,6 @@ impl Workspace {
             noun: source.noun,
             waiting: source.waiting,
         });
-        let (fg, bg, dot) = match mode {
-            linear_watch::Mode::Automatic => (color(accent), color(accent).opacity(0.16), "●"),
-            linear_watch::Mode::Manual => (color(theme::TEXT_SECONDARY), color(theme::RAISED), "○"),
-            linear_watch::Mode::Stopped => (color(theme::RED), color(theme::RED_TINT), "■"),
-        };
-        let on = mode == linear_watch::Mode::Automatic;
         let checking = w.is_some_and(|w| w.checking);
         // How far through the wait for the next look, while it's waiting to look.
         let progress = (mode == linear_watch::Mode::Automatic && !checking && open_run.is_none())
@@ -794,8 +833,57 @@ impl Workspace {
                 )
             })
             .flatten();
+        Some(Trigger::Lead(TriggerView {
+            mode,
+            line,
+            progress,
+            last: w.and_then(|w| w.last),
+            open_run,
+            checking,
+            source,
+        }))
+    }
+
+    /// The trigger row under a pipeline's card: Automatic's switch and pill, what it's doing,
+    /// the wait for the next look, and Pick next / Connect Slack when they apply.
+    pub(super) fn render_linear_row(
+        &self,
+        orch: PaneId,
+        accent: u32,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let t = match self.trigger_view(orch, cx)? {
+            Trigger::Follower(text) => {
+                return Some(
+                    div()
+                        .ml(px(26.))
+                        .mr_1()
+                        .my_1()
+                        .text_xs()
+                        .text_color(color(theme::TEXT_MUTED))
+                        .child(text)
+                        .into_any_element(),
+                );
+            }
+            Trigger::Lead(t) => t,
+        };
+        let TriggerView {
+            mode,
+            line,
+            progress,
+            last,
+            open_run,
+            checking,
+            source,
+        } = t;
+        let (fg, bg, dot) = match mode {
+            linear_watch::Mode::Automatic => (color(accent), color(accent).opacity(0.16), "●"),
+            linear_watch::Mode::Manual => (color(theme::TEXT_SECONDARY), color(theme::RAISED), "○"),
+            linear_watch::Mode::Stopped => (color(theme::RED), color(theme::RED_TINT), "■"),
+        };
+        let on = mode == linear_watch::Mode::Automatic;
         let tooltip = source.tooltip;
-        let (last, every) = (w.and_then(|w| w.last), source.every_minutes);
+        let every = source.every_minutes;
         Some(
             v_flex()
                 .id(SharedString::from(format!("linear-row-{orch}")))
@@ -838,37 +926,13 @@ impl Workspace {
                         .child(line),
                 )
                 .when_some(progress, |d, p| {
-                    d.child(
-                        div()
-                            .w_full()
-                            .h(px(3.))
-                            .rounded_full()
-                            .bg(color(theme::RAISED))
-                            .child(
-                                // Slides every frame (at most 30 a second) from the clock,
-                                // rather than stepping once a second with the card.
-                                div()
-                                    .h_full()
-                                    .rounded_full()
-                                    .w(relative(p))
-                                    .bg(color(accent).opacity(0.8))
-                                    .with_animation(
-                                        SharedString::from(format!("look-bar-{orch}")),
-                                        Animation::new(Duration::from_secs(60))
-                                            .repeat()
-                                            .with_max_fps(30.),
-                                        move |d, _| {
-                                            let p = linear_watch::look_progress(
-                                                last,
-                                                SystemTime::now(),
-                                                every,
-                                            )
-                                            .unwrap_or(p);
-                                            d.w(relative(p))
-                                        },
-                                    ),
-                            ),
-                    )
+                    d.child(look_bar(
+                        SharedString::from(format!("look-bar-{orch}")),
+                        p,
+                        last,
+                        every,
+                        accent,
+                    ))
                 })
                 .when_some(
                     source

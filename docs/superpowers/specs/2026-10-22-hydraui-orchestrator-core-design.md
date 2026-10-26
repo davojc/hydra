@@ -744,3 +744,12 @@ The page is now four parts, with explanations moved from paragraphs to an ⓘ be
    paragraph are gone (the ⓘ names `{ticket}`, `{pr}`, `{handoff}`).
 4. **▸ Advanced**, folded by default: Runs at once, Pass mark (the default bar), Branch name,
    Product questions channel, and one line on retries and the Claude-week floor.
+
+## 22. A ticket put back is taken again (added 2026-10-26)
+
+Phase 2 skipped any ticket hydraui had a run log for, so a ticket could never loop. INTH-166 ran
+and finished on 24 Oct, was moved back to Ready for Investigation, and the watcher skipped it
+("run here before") while Jordan could see it waiting. hydraui never moves a ticket *into* the
+trigger state (it claims out of it, and moves a passed one on), so a ticket that's there again
+was put back by a person. The watcher now skips only tickets with a run still open here (running,
+or interrupted and waiting to be resumed); the card and notification say "still running here".

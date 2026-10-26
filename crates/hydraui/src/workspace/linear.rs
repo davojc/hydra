@@ -378,9 +378,12 @@ impl Workspace {
             let found = cx
                 .background_spawn(async move {
                     let key = hydra.linear_key(&env)?;
-                    // Every ticket a run log names: hydraui ran it before (§3).
+                    // Tickets with a run still open or waiting to be resumed. One hydraui ran and
+                    // finished is fair game again: hydraui never moves a ticket into the trigger
+                    // state, so if it's back there a person put it back (INTH-166, 2026-10-26).
                     let ran: Vec<String> = crate::run_history::read(hydra.paths.root(), &[])
                         .into_iter()
+                        .filter(|e| e.outcome == crate::run_history::Outcome::InProgress)
                         .map(|e| e.ticket)
                         .collect();
                     linear_watch::find_and_claim(&Http { key }, &s, &p, &ran)
@@ -419,7 +422,10 @@ impl Workspace {
             if check.skipped.is_empty() {
                 String::new()
             } else {
-                format!(" · skipped {} (run here before)", check.skipped.join(", "))
+                format!(
+                    " · skipped {} (still running here)",
+                    check.skipped.join(", ")
+                )
             }
         };
         match found {

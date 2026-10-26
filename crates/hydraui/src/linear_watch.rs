@@ -148,7 +148,7 @@ pub fn pick_result(s: &LinearSettings, found: &Result<Check, LinearError>) -> (b
             };
             let ran = match check.skipped.len() {
                 0 => String::new(),
-                n => format!(" ({n} more already run here)"),
+                n => format!(" ({n} more already running here)"),
             };
             (
                 true,
@@ -342,8 +342,8 @@ fn claim(
 
 /// One check (§3, §4): picks the next ticket for `pipeline` and claims it, or `None` when there
 /// is nothing to pick. A ticket someone took meanwhile is passed over for the next.
-/// What a check did: the ticket it claimed, and the ones it passed over because hydraui already
-/// has a run for them.
+/// What a check did: the ticket it claimed, and the ones it passed over because hydraui has a
+/// run of them still open.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Check {
     pub claimed: Option<Ticket>,
@@ -370,8 +370,9 @@ pub fn find_and_claim(
             .into_iter()
             .filter(|t| !passed_over.contains(&t.identifier))
             .collect();
-        // A ticket hydraui ran before (finished, stopped or interrupted) waits for a person,
-        // who can start it again by hand (§3).
+        // A ticket with a run still open here (running, or interrupted and waiting to be
+        // resumed) isn't taken twice. One that ended and is back in the trigger state was put
+        // back by a person, so it's taken again (the caller passes only open runs).
         let mut by_breach = tickets.clone();
         by_breach.sort_by(|a, b| a.sla_breaches_at.cmp(&b.sla_breaches_at));
         for t in by_breach.iter().filter(|t| ran(&t.identifier)) {
@@ -685,7 +686,7 @@ mod tests {
         assert_eq!(
             pick_result(&s, &none).1,
             "No INTH ticket to pick: none unassigned in Ready for Investigation with an SLA \
-             (2 more already run here)."
+             (2 more already running here)."
         );
         let failed = Err(LinearError::Failed("timed out".into()));
         let (ok, text) = pick_result(&s, &failed);

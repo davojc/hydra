@@ -4,7 +4,7 @@
 //! Linear trigger: a pipeline has one or the other. The decisions are `slack_watch`'s.
 
 use std::collections::VecDeque;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use gpui::prelude::*;
 use gpui::{Context, Window};
@@ -12,13 +12,11 @@ use gpui_component::WindowExt;
 use gpui_component::notification::Notification;
 
 use super::Workspace;
+use super::linear::START_WITHIN;
 use crate::envs::PaneId;
 use crate::linear::LinearError;
 use crate::pipeline::{Pipeline, SlackSettings};
 use crate::slack_watch::{self, Queued};
-
-/// How long the orchestrator has to start a pull request it was told to before it's given up.
-const START_WITHIN: Duration = Duration::from_secs(5 * 60);
 
 impl Workspace {
     /// `orch`'s pipeline with its `[slack]` table, and its environment; `None` without one.
@@ -65,20 +63,18 @@ impl Workspace {
         let Some((pipeline, settings, _)) = self.slack_of(orch, cx) else {
             return false;
         };
-        if self.has_open_run(orch, cx) {
-            // The pull request it was told to start is running.
-            if let Some(w) = self.linear_watch.get_mut(&orch) {
+        // A slot told to start a pull request that didn't within 5 minutes: skipped, said so.
+        for slot in self.slots(orch, cx) {
+            let stale = self
+                .linear_watch
+                .get(&slot)
+                .and_then(|w| w.starting.clone())
+                .filter(|(_, since)| since.elapsed().unwrap_or_default() >= START_WITHIN);
+            let Some((ticket, _)) = stale else {
+                continue;
+            };
+            if let Some(w) = self.linear_watch.get_mut(&slot) {
                 w.starting = None;
-            }
-            return false;
-        }
-        let starting = self
-            .linear_watch
-            .get(&orch)
-            .and_then(|w| w.starting.clone());
-        if let Some((ticket, since)) = starting {
-            if since.elapsed().unwrap_or_default() < START_WITHIN {
-                return false;
             }
             crate::action_log::write(format!(
                 "slack: {}: the orchestrator didn't start {ticket}; skipped",
@@ -92,21 +88,23 @@ impl Workspace {
                 .title(pipeline.name.clone()),
                 cx,
             );
-            if let Some(w) = self.linear_watch.get_mut(&orch) {
-                w.starting = None;
-            }
         }
+        let Some(slot) = self.free_slot(orch, cx) else {
+            return false;
+        };
         if self.slack_queue(&pipeline.file).is_empty() {
             return true;
         }
-        self.start_next_pr(orch, &pipeline, &settings, window, cx);
+        self.start_next_pr(orch, slot, &pipeline, &settings, window, cx);
         false
     }
 
-    /// Tells the orchestrator to start the next waiting pull request.
+    /// Tells orchestrator `slot` (one of `orch`'s runs at once) to start the next waiting pull
+    /// request.
     pub(super) fn start_next_pr(
         &mut self,
         orch: PaneId,
+        slot: PaneId,
         pipeline: &Pipeline,
         settings: &SlackSettings,
         window: &mut Window,
@@ -116,15 +114,15 @@ impl Workspace {
             return;
         };
         self.save_slack_queue(&pipeline.file);
-        let w = self.linear_watch.entry(orch).or_default();
-        w.starting = Some((pr.ticket.clone(), SystemTime::now()));
-        w.status = Some(format!("Started {}", pr.ticket));
+        self.linear_watch.entry(slot).or_default().starting =
+            Some((pr.ticket.clone(), SystemTime::now()));
+        self.linear_watch.entry(orch).or_default().status = Some(format!("Started {}", pr.ticket));
         crate::action_log::write(format!(
             "slack: {}: starting {} ({})",
             pipeline.file, pr.ticket, pr.url
         ));
         let prompt = slack_watch::start_prompt(pipeline, settings, &pr);
-        self.pending_wakes.insert(orch, (pr.ticket.clone(), prompt));
+        self.pending_wakes.insert(slot, (pr.ticket.clone(), prompt));
         self.send_wakes(window, cx);
         cx.notify();
     }
@@ -259,8 +257,8 @@ impl Workspace {
                 }
                 self.slack_queue(&pipeline.file).extend(prs);
                 self.save_slack_queue(&pipeline.file);
-                if !self.has_open_run(orch, cx) {
-                    self.start_next_pr(orch, pipeline, settings, window, cx);
+                if let Some(slot) = self.free_slot(orch, cx) {
+                    self.start_next_pr(orch, slot, pipeline, settings, window, cx);
                 }
             }
             Ok(_) => {

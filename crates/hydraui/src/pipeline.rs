@@ -31,6 +31,9 @@ pub struct Pipeline {
     /// The Slack channel a stage asks a product question in, rather than deciding it
     /// (`[product] channel`); `None`: it asks the user in hydraui.
     pub product_channel: Option<String>,
+    /// How many tickets it runs at once (`runs_at_once`, 1 to `MAX_RUNS_AT_ONCE`): each has
+    /// its own orchestrator and card, and the trigger hands work to whichever is free.
+    pub runs_at_once: u8,
     /// Its accent on the card and the frame round its sessions (`color = "#rrggbb"`), so
     /// pipelines are told apart at a glance; `None`: the default teal.
     pub color: Option<u32>,
@@ -185,7 +188,12 @@ struct File {
     product: Option<FileProduct>,
     slack: Option<FileSlack>,
     color: Option<String>,
+    runs_at_once: Option<u8>,
 }
+
+/// The most tickets one pipeline runs at once: each is a Claude orchestrator plus its stage's
+/// session, and they share the environment's Claude week.
+pub const MAX_RUNS_AT_ONCE: u8 = 6;
 
 /// The colours Pipeline settings offers, by name: distinct from each other and from the card's
 /// state colours' meanings, and readable on the dark sidebar.
@@ -440,6 +448,14 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
         },
         slack: file.slack.map(slack_settings).transpose()?,
         color: file.color.as_deref().map(parse_color).transpose()?,
+        runs_at_once: match file.runs_at_once.unwrap_or(1) {
+            n @ 1..=MAX_RUNS_AT_ONCE => n,
+            n => {
+                return Err(format!(
+                    "runs_at_once {n} must be between 1 and {MAX_RUNS_AT_ONCE}"
+                ));
+            }
+        },
     })
 }
 
@@ -461,6 +477,7 @@ pub struct Edit {
     pub product_channel: Option<String>,
     pub color: Option<u32>,
     pub slack: Option<SlackSettings>,
+    pub runs_at_once: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -501,6 +518,7 @@ impl From<&Pipeline> for Edit {
             product_channel: p.product_channel.clone(),
             color: p.color,
             slack: p.slack.clone(),
+            runs_at_once: p.runs_at_once,
         }
     }
 }
@@ -529,6 +547,9 @@ pub fn validate(edit: &Edit) -> Result<(), &'static str> {
         if l.every_minutes == 0 {
             return Err("Check Linear every minute or more");
         }
+    }
+    if !(1..=MAX_RUNS_AT_ONCE).contains(&edit.runs_at_once) {
+        return Err("Run 1 to 6 tickets at once");
     }
     if let Some(sl) = &edit.slack {
         if edit.linear.is_some() {
@@ -693,6 +714,11 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
         None => {
             doc.remove("slack");
         }
+    }
+    if edit.runs_at_once > 1 {
+        doc["runs_at_once"] = value(i64::from(edit.runs_at_once));
+    } else {
+        doc.remove("runs_at_once");
     }
     match edit.color {
         Some(c) => doc["color"] = value(color_text(c)),
@@ -954,6 +980,35 @@ What the previous stage handed over: {handoff}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn runs_at_once_is_one_unless_set_and_saved_only_above_one() {
+        let base = "name = \"PRs\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n";
+        assert_eq!(parse(base).unwrap().runs_at_once, 1);
+        assert_eq!(
+            parse(&format!("runs_at_once = 3\n{base}"))
+                .unwrap()
+                .runs_at_once,
+            3
+        );
+        for bad in ["0", "7"] {
+            let e = parse(&format!("runs_at_once = {bad}\n{base}")).unwrap_err();
+            assert!(e.contains("between 1 and 6"), "{e}");
+        }
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(folder(d.path()).join("prs.toml"), base).unwrap();
+        let mut edit = Edit::from(&load(d.path(), "prs").unwrap());
+        edit.runs_at_once = 3;
+        save(d.path(), "prs", &edit).unwrap();
+        assert_eq!(load(d.path(), "prs").unwrap().runs_at_once, 3);
+        edit.runs_at_once = 1;
+        save(d.path(), "prs", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("prs.toml")).unwrap();
+        assert!(!text.contains("runs_at_once"), "{text}");
+        edit.runs_at_once = 9;
+        assert!(validate(&edit).is_err());
+    }
+
     #[test]
     fn settings_save_a_slack_trigger_and_refuse_two() {
         let d = tempfile::tempdir().unwrap();

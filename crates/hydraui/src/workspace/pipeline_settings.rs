@@ -52,6 +52,8 @@ pub(super) struct SettingsDraft {
     product: Entity<InputState>,
     /// The card's accent; `None`: the default teal.
     color: Option<u32>,
+    /// Tickets run at once, each with its own orchestrator.
+    runs: u8,
     bar: Entity<SliderState>,
     stages: Vec<DraftStage>,
     skills: Vec<String>,
@@ -153,6 +155,7 @@ impl SettingsDraft {
             product_channel: Some(self.product.read(cx).value().trim().to_string())
                 .filter(|c| !c.is_empty()),
             color: self.color,
+            runs_at_once: self.runs,
             bar: slider_value(&self.bar, cx),
             stages: self
                 .stages
@@ -337,6 +340,7 @@ impl Workspace {
             branch,
             product,
             color: saved.color,
+            runs: saved.runs_at_once,
             bar,
             stages: Vec::new(),
             skills,
@@ -1046,6 +1050,19 @@ impl Workspace {
                             .child(
                                 v_flex()
                                     .gap_2()
+                                    .child(section("Runs at once"))
+                                    .child(runs_buttons(orch, draft.runs, cx))
+                                    .child(text(12., theme::TEXT_MUTED).child(
+                                        "How many tickets it works on together. Each gets its \
+                                         own orchestrator and card (· 1, · 2, …), and Linear or \
+                                         Slack hands the next one to whichever is free. More runs \
+                                         use the Claude week faster. Takes effect when the \
+                                         pipeline is next started.",
+                                    )),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_2()
                                     .child(section("Colour"))
                                     .child(color_swatches(orch, draft.color, cx))
                                     .child(text(12., theme::TEXT_MUTED).child(
@@ -1196,6 +1213,20 @@ fn color_swatches(
                     let pick = (hex != theme::TEAL).then_some(hex);
                     ws.with_draft(orch, cx, |d| d.color = pick)
                 }))
+        }))
+        .into_any_element()
+}
+
+/// The Runs at once row: 1 to `pipeline::MAX_RUNS_AT_ONCE`, the chosen one filled.
+fn runs_buttons(orch: PaneId, chosen: u8, cx: &mut Context<Workspace>) -> gpui::AnyElement {
+    h_flex()
+        .gap_1()
+        .children((1..=pipeline::MAX_RUNS_AT_ONCE).map(|n| {
+            let b = Button::new(SharedString::from(format!("pipeline-runs-{orch}-{n}")))
+                .label(n.to_string())
+                .small()
+                .on_click(cx.listener(move |ws, _, _, cx| ws.with_draft(orch, cx, |d| d.runs = n)));
+            if n == chosen { b.primary() } else { b.ghost() }
         }))
         .into_any_element()
 }

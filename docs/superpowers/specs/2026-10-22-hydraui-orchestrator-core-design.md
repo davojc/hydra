@@ -698,3 +698,21 @@ settings → **Colour** offers eight (`pipeline::COLORS`: Teal, Blue, Violet, Pi
 Green, Slate); choosing Teal removes the key. The card reads the file each time it's drawn, so a
 change shows at once, even mid-run. State colours (the pill: working, needs you, asked product,
 done) are unchanged.
+
+## 20. Runs at once (added 2026-10-26)
+
+A pipeline may work on several tickets together: `runs_at_once = N` (1 to 6; Pipeline settings →
+**Runs at once**). The one-ticket-at-a-time rule stays per orchestrator; a pipeline simply gets N
+of them (Jordan chose "one card per run"):
+
+- **Starting** a pipeline opens an orchestrator for each run not open yet, in its environment;
+  autostart does the same, after resuming a run hydraui closed on. Cards read `Review PR's · 1`,
+  `· 2`, …
+- **One trigger.** The first orchestrator (its *lead*) holds the Linear or Slack switch; the
+  others say "Run 2 of 3: takes work from the first card's Slack". A look happens while any run
+  is free, and what it finds goes to a free one (`free_slot`: no run open, nothing on its way to
+  it). A run told to start that doesn't within 5 minutes frees its slot again.
+- **The line** says "Next PR after all 2 running" only when every run is busy.
+- **Limits.** Each run is its own Claude orchestrator and stage session, so more runs use the
+  Claude week faster. Only the first run hydraui closed on is resumed at launch; any other shows
+  as Interrupted to resume by hand.

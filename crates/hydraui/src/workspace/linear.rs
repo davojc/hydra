@@ -21,6 +21,9 @@ use crate::orchestrator_theme::{self as theme, color};
 use crate::pipeline::{LinearSettings, Pipeline};
 use crate::runs::{Change, Decided};
 
+/// How long an orchestrator told to start a ticket has before its slot counts as free again.
+pub(super) const START_WITHIN: Duration = Duration::from_secs(5 * 60);
+
 /// One orchestrator's watcher.
 #[derive(Debug, Default)]
 pub(super) struct Watch {
@@ -74,6 +77,45 @@ impl Workspace {
         let pipeline = crate::pipeline::load(self.hydra.paths.root(), &file).ok()?;
         let settings = pipeline.linear.clone()?;
         Some((pipeline, settings, env))
+    }
+
+    /// The orchestrators running `orch`'s pipeline in its environment, oldest first: its runs at
+    /// once (`runs_at_once`). The first holds the pipeline's trigger.
+    pub(super) fn slots(&self, orch: PaneId, cx: &gpui::App) -> Vec<PaneId> {
+        let env_of = |id: &PaneId| self.panes.get(id).map(|v| v.read(cx).env().to_string());
+        let (Some(file), env) = (self.orchestrators.get(&orch), env_of(&orch)) else {
+            return vec![orch];
+        };
+        let mut ids: Vec<PaneId> = self
+            .orchestrators
+            .iter()
+            .filter(|(id, f)| *f == file && env_of(id) == env)
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_unstable();
+        if ids.is_empty() {
+            ids.push(orch);
+        }
+        ids
+    }
+
+    /// The orchestrator holding `orch`'s pipeline's trigger.
+    pub(super) fn lead_of(&self, orch: PaneId, cx: &gpui::App) -> PaneId {
+        self.slots(orch, cx)[0]
+    }
+
+    /// One of `orch`'s pipeline's orchestrators that can take a ticket now: no run open, no
+    /// ticket on its way to it.
+    pub(super) fn free_slot(&self, orch: PaneId, cx: &gpui::App) -> Option<PaneId> {
+        self.slots(orch, cx).into_iter().find(|s| {
+            !self.has_open_run(*s, cx)
+                && !self.pending_wakes.contains_key(s)
+                && self
+                    .linear_watch
+                    .get(s)
+                    .and_then(|w| w.starting.as_ref())
+                    .is_none_or(|(_, since)| since.elapsed().unwrap_or_default() >= START_WITHIN)
+        })
     }
 
     /// Whether `orch` has a run open (one ticket at a time).
@@ -192,14 +234,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.has_open_run(orch, cx) {
+        let Some(slot) = self.free_slot(orch, cx) else {
             window.push_notification(
-                Notification::info("A ticket is running: the next is picked when it ends.")
+                Notification::info("Every run is busy: the next is picked when one ends.")
                     .title("Check Linear"),
                 cx,
             );
             return;
-        }
+        };
         if self.linear_watch.get(&orch).is_some_and(|w| w.checking) {
             return;
         }
@@ -207,7 +249,7 @@ impl Workspace {
         if let Some((p, s, _)) = self.slack_of(orch, cx)
             && !self.slack_queue(&p.file).is_empty()
         {
-            return self.start_next_pr(orch, &p, &s, window, cx);
+            return self.start_next_pr(orch, slot, &p, &s, window, cx);
         }
         self.start_linear_check(orch, window, cx);
         if let Some(w) = self.linear_watch.get_mut(&orch) {
@@ -218,6 +260,18 @@ impl Workspace {
     /// Each second: a watcher whose check is due starts one (§3).
     pub(super) fn linear_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let now = SystemTime::now();
+        // A ticket an orchestrator was told to start has started: its slot is busy by its run.
+        let started: Vec<PaneId> = self
+            .linear_watch
+            .iter()
+            .filter(|(id, w)| w.starting.is_some() && self.has_open_run(**id, cx))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in started {
+            if let Some(w) = self.linear_watch.get_mut(&id) {
+                w.starting = None;
+            }
+        }
         // A Slack watcher starts what it took before it looks again.
         let slack: Vec<PaneId> = self
             .linear_watch
@@ -247,7 +301,7 @@ impl Workspace {
                 let w = &self.linear_watch[id];
                 linear_watch::due(
                     w.on,
-                    self.has_open_run(*id, cx),
+                    self.free_slot(*id, cx).is_none(),
                     w.last,
                     now,
                     Duration::from_secs(u64::from(every) * 60),
@@ -338,8 +392,12 @@ impl Workspace {
                     ticket.identifier, pipeline.file
                 ));
                 let prompt = linear_watch::start_prompt(pipeline, &ticket);
+                // To whichever of the pipeline's runs at once is free.
+                let slot = self.free_slot(orch, cx).unwrap_or(orch);
+                self.linear_watch.entry(slot).or_default().starting =
+                    Some((ticket.identifier.clone(), SystemTime::now()));
                 self.pending_wakes
-                    .insert(orch, (ticket.identifier.clone(), prompt));
+                    .insert(slot, (ticket.identifier.clone(), prompt));
                 self.send_wakes(window, cx);
             }
             Ok(check) => {
@@ -404,7 +462,8 @@ impl Workspace {
                     .iter()
                     .find(|(_, v)| v.read(cx).mcp_token() == Some(run.orchestrator.as_str()))
                     .map(|(id, _)| *id);
-                if let Some(w) = orch.and_then(|o| self.linear_watch.get_mut(&o)) {
+                let lead = orch.map(|o| self.lead_of(o, cx));
+                if let Some(w) = lead.and_then(|o| self.linear_watch.get_mut(&o)) {
                     w.last = None;
                 }
             }
@@ -617,8 +676,38 @@ impl Workspace {
             },
             (None, None) => return None,
         };
+        // A pipeline's later runs at once take their work from the first card's trigger.
+        let slots = self.slots(orch, cx);
+        if slots[0] != orch {
+            let n = slots.iter().position(|s| *s == orch).map_or(0, |i| i + 1);
+            return Some(
+                div()
+                    .ml(px(26.))
+                    .mr_1()
+                    .my_1()
+                    .text_xs()
+                    .text_color(color(theme::TEXT_MUTED))
+                    .child(format!(
+                        "Run {n} of {}: takes work from the first card's {}",
+                        slots.len(),
+                        if source.env.is_some() {
+                            "Slack"
+                        } else {
+                            "Linear"
+                        }
+                    ))
+                    .into_any_element(),
+            );
+        }
         let w = self.linear_watch.get(&orch);
-        let open_run = self.open_run_ticket(orch, cx);
+        // With several runs at once, the next waits only while every one is busy.
+        let open_run = if slots.len() == 1 {
+            self.open_run_ticket(orch, cx)
+        } else {
+            self.free_slot(orch, cx)
+                .is_none()
+                .then(|| format!("all {} running", slots.len()))
+        };
         let (mode, line) = linear_watch::trigger(&linear_watch::TriggerFacts {
             on: w.is_some_and(|w| w.on),
             checking: w.is_some_and(|w| w.checking),

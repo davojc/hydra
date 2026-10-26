@@ -978,11 +978,20 @@ impl Workspace {
         tokens
             .iter()
             .filter_map(|(id, token)| {
+                // With several runs at once, each card says which it is: `Review PR's · 2`.
+                let numbered = |mut c: Card| {
+                    let slots = self.slots(*id, cx);
+                    if slots.len() > 1 {
+                        let n = slots.iter().position(|s| s == id).map_or(1, |i| i + 1);
+                        c.name = format!("{} · {n}", c.name);
+                    }
+                    c
+                };
                 let Some(run) = reg.runs.current(token) else {
                     // Started from the launcher, no ticket yet: the card of its pipeline.
                     let file = self.orchestrators.get(id)?;
                     let pipeline = crate::pipeline::load(root, file).ok()?;
-                    return Some((*id, ready_card(&pipeline), vec![*id]));
+                    return Some((*id, numbered(ready_card(&pipeline)), vec![*id]));
                 };
                 let panes = card_tokens(run)
                     .iter()
@@ -993,7 +1002,7 @@ impl Workspace {
                 if let Ok(p) = crate::pipeline::load(root, &run.pipeline.file) {
                     c.accent = crate::pipeline_card::accent(&p);
                 }
-                Some((*id, c, panes))
+                Some((*id, numbered(c), panes))
             })
             .collect()
     }

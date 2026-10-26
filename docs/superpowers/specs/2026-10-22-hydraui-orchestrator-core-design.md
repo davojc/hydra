@@ -798,6 +798,8 @@ a run line) gives the others theirs too, behind it.
   links, and in the Pipeline tab the selected view, the running stage's ring, row and panel
   header, the passed connectors, **Go back here**, and History's chips and in-progress pill.
   Red, amber and grey keep their meaning; green stays for a pass or a reason for.
+  The sidebar rows under a pipeline (each orchestrator and session: the selected row and its
+  dot) take its colour too, and its card stays grey: the colour is on the frame, pills and bars.
   `orchestrator_theme::blend` lays the colour over the dark surface for tints and edges.
 - **History shows one pipeline.** The run log's `run started` names its pipeline
   (`run_history::Entry.pipeline`); an orchestrator's History lists only its own pipeline's runs.

@@ -179,7 +179,7 @@ impl Workspace {
             let slots = self.slots(*orch, cx);
             if slots.len() > 1 {
                 if slots[0] == *orch {
-                    list = list.child(self.render_pipeline_group(&slots, &cards, shown, tint, cx));
+                    list = list.child(self.render_pipeline_group(&slots, &cards, shown, cx));
                 }
                 continue;
             }
@@ -198,15 +198,21 @@ impl Workspace {
                 .children(self.render_question(*orch, cx))
                 .children(self.render_linear_row(*orch, card.accent, cx));
             let orch = *orch;
-            if let Some(row) =
-                self.terminal_row(orch, shown == Some(orch), tint, Nest::Orchestrator, cx)
-            {
+            if let Some(row) = self.terminal_row(
+                orch,
+                shown == Some(orch),
+                color(card.accent),
+                Nest::Orchestrator,
+                cx,
+            ) {
                 block = block.child(row);
             }
             let stage_rows: Vec<_> = panes
                 .iter()
                 .filter(|id| **id != orch)
-                .filter_map(|id| self.terminal_row(*id, shown == Some(*id), tint, Nest::Stage, cx))
+                .filter_map(|id| {
+                    self.terminal_row(*id, shown == Some(*id), color(card.accent), Nest::Stage, cx)
+                })
                 .collect();
             if !stage_rows.is_empty() {
                 // A guide line down from the orchestrator ties its sessions to it.
@@ -256,7 +262,6 @@ impl Workspace {
         slots: &[PaneId],
         cards: &[(PaneId, crate::pipeline_card::Card, Vec<PaneId>)],
         shown: Option<PaneId>,
-        tint: gpui::Hsla,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let members: Vec<&(PaneId, crate::pipeline_card::Card, Vec<PaneId>)> = slots
@@ -285,7 +290,7 @@ impl Workspace {
         for (orch, card, panes) in members {
             let orch = *orch;
             if let Some(row) =
-                self.terminal_row(orch, shown == Some(orch), tint, Nest::Orchestrator, cx)
+                self.terminal_row(orch, shown == Some(orch), accent, Nest::Orchestrator, cx)
             {
                 block = block.child(row);
             }
@@ -297,7 +302,9 @@ impl Workspace {
             let stage_rows: Vec<_> = panes
                 .iter()
                 .filter(|id| **id != orch)
-                .filter_map(|id| self.terminal_row(*id, shown == Some(*id), tint, Nest::Stage, cx))
+                .filter_map(|id| {
+                    self.terminal_row(*id, shown == Some(*id), accent, Nest::Stage, cx)
+                })
                 .collect();
             if !stage_rows.is_empty() {
                 block = block.child(

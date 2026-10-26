@@ -1216,11 +1216,8 @@ impl Workspace {
             .gap(px(6.))
             .rounded(px(8.))
             .border_1()
-            .bg(if active {
-                color(c.accent).opacity(0.13)
-            } else {
-                color(theme::SURFACE)
-            })
+            // Grey whatever its colour: the colour is on its frame, pills and bars.
+            .bg(color(theme::SURFACE))
             .border_color(if active {
                 color(c.accent).opacity(0.45)
             } else {

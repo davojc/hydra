@@ -53,6 +53,21 @@ pub(super) fn tooltip_text(a: PaneActivity) -> String {
 }
 
 impl Workspace {
+    /// Whether terminal `pane` is the session of a stage in progress (starting or running).
+    pub(super) fn stage_at_work(&self, pane: PaneId, cx: &gpui::App) -> bool {
+        let Some(token) = self
+            .panes
+            .get(&pane)
+            .and_then(|v| v.read(cx).mcp_token().map(str::to_string))
+        else {
+            return false;
+        };
+        crate::mcp::server::get().is_some_and(|sv| {
+            let reg = crate::mcp::server::lock(sv.registry());
+            matches!(reg.runs.role(&token), crate::runs::Role::Stage(r, si) if r.stages[si].status.busy())
+        })
+    }
+
     /// Recomputes every terminal's activity. Redraws when one changed, and while any is
     /// working (once a second, for the times beside them).
     pub(super) fn tick_activity(&mut self, cx: &mut Context<Self>) {
@@ -233,13 +248,14 @@ impl Workspace {
         &self,
         key: impl Into<ElementId>,
         a: Option<PaneActivity>,
+        at_work: bool,
         tint: Hsla,
         cx: &Context<Self>,
     ) -> AnyElement {
         let key = key.into();
         let state = a.map(|a| a.state).unwrap_or_default();
         let inner = div().size(px(8.)).rounded_full().bg(tint);
-        let inner = if state == Activity::Working {
+        let inner = if at_work || state == Activity::Working {
             inner
                 .with_animation(key, pulse(), |d, a| d.opacity(a))
                 .into_any_element()
@@ -265,7 +281,7 @@ impl Workspace {
 pub(super) fn pulse() -> Animation {
     Animation::new(Duration::from_millis(1600))
         .repeat_synced()
-        .with_easing(pulsating_between(0.3, 1.0))
+        .with_easing(pulsating_between(0.15, 1.0))
         .with_max_fps(30.)
 }
 

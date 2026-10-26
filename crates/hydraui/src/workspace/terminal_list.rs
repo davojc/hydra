@@ -337,9 +337,12 @@ impl Workspace {
         let v = view.read(cx);
         let (label, program) = (v.label(), v.program_title().map(str::to_string));
         let activity = self.activity.get(&id).copied();
+        // A stage in progress breathes even while its session waits (on a deploy, a monitor).
+        let at_work = nest == Nest::Stage && self.stage_at_work(id, cx);
         let dot = self.render_tab_dot(
             SharedString::from(format!("row-dot-{id}")),
             activity,
+            at_work,
             tint,
             cx,
         );

@@ -786,7 +786,8 @@ With two orchestrators under **Review PR's**, the row above the terminal showed 
 screen and its Pipeline tab (Jordan, 2026-10-26). Now, for an orchestrator whose pipeline runs
 tickets at once, the row has each orchestrator of that pipeline in turn, its terminal tab and its
 **Pipeline N** tab, and clicking one shows it. Opening one orchestrator's Pipeline tab (the card,
-a run line) gives the others theirs too, behind it.
+a run line) gives the others theirs too, behind it. The row starts with the pipeline's name (◆ in its
+colour), fixed and not a tab, so it's clear which pipeline these tabs are.
 
 ## 26. Sidebar actions, colour everywhere, one pipeline's history (added 2026-10-26)
 
@@ -811,8 +812,9 @@ The once-a-second redraw made the next-look bar step and the working dot blink o
 
 - **Next look** counts down to the second (`next look in 3:59`), and its bar slides every frame
   from the clock (a repeating gpui animation, at most 30 frames a second).
-- **What's at work breathes** (`busy::pulse`: a 1.6 s pulse between 30% and full, in step
-  everywhere, at most 30 frames a second): a working terminal's dot in the sidebar and the
+- **What's at work breathes** (`busy::pulse`: a 1.6 s pulse between 15% and full, in step
+  everywhere, at most 30 frames a second): a working terminal's dot in the sidebar (a stage's
+  session's for as long as its stage is in progress, even while it waits idle on a deploy) and the
   environment tab, the card's segment for the stage at work, and that stage's name in the
   Pipeline tab's timeline (its ring's dot stays steady).
 

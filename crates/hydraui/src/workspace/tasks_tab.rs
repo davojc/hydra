@@ -485,6 +485,27 @@ impl Workspace {
             .gap_1()
             .border_b_1()
             .border_color(border);
+        // First, fixed and not a button: the pipeline these tabs belong to.
+        if let Some((name, accent)) = self.pipeline_of(id, cx) {
+            strip = strip.child(
+                h_flex()
+                    .px_2()
+                    .gap_1p5()
+                    .h_full()
+                    .flex_none()
+                    .border_r_1()
+                    .border_color(border)
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(crate::orchestrator_theme::color(accent))
+                            .child("◆"),
+                    )
+                    .child(name),
+            );
+        }
         for (n, m) in members.into_iter().enumerate() {
             let here = m == id;
             let name = if here {

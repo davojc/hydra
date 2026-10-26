@@ -646,9 +646,9 @@ impl Workspace {
             .map_or(1, |p| usize::from(p.runs_at_once));
         // Several at once are numbered under the pipeline's card.
         let name = if want > 1 {
-            format!("orchestrator {}", open + 1)
+            format!("Orchestrator {}", open + 1)
         } else {
-            "orchestrator".to_string()
+            "Orchestrator".to_string()
         };
         let shell = self.shell();
         let cwd = super::orchestrator::orchestrator_folder(

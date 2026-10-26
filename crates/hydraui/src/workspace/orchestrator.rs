@@ -6,6 +6,7 @@ use gpui::prelude::*;
 use gpui::{AnimationExt, AnyElement, Context, SharedString, Window, div, px, relative};
 use gpui_component::WindowExt;
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::notification::Notification;
 use gpui_component::{Sizable, h_flex, v_flex};
 
@@ -402,9 +403,9 @@ impl Workspace {
             })
             .count();
         let name = if i.run.pipeline.runs_at_once > 1 {
-            format!("orchestrator {}", n + 1)
+            format!("Orchestrator {}", n + 1)
         } else {
-            "orchestrator".to_string()
+            "Orchestrator".to_string()
         };
         view.update(cx, |v, cx| v.set_name(Some(name), cx));
         self.orchestrators.insert(id, i.run.pipeline.file.clone());
@@ -1337,6 +1338,20 @@ impl Workspace {
             .on_click(
                 cx.listener(move |ws, _, window, cx| ws.open_pipeline(orchestrator, window, cx)),
             )
+            // Right-click: end it (also **End pipeline** on its Pipeline tab).
+            .context_menu({
+                let ws = cx.entity();
+                move |menu, _, _| {
+                    let ws = ws.clone();
+                    menu.item(
+                        PopupMenuItem::new("End pipeline…").on_click(move |_, window, cx| {
+                            ws.update(cx, |ws, cx| {
+                                ws.end_pipeline_dialog(orchestrator, window, cx)
+                            });
+                        }),
+                    )
+                }
+            })
             .child(
                 h_flex()
                     .gap_2()
@@ -1350,17 +1365,6 @@ impl Workspace {
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(color(theme::TEXT))
                             .child(c.name.clone()),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("end-pipeline-{orchestrator}")))
-                            .label("End")
-                            .ghost()
-                            .xsmall()
-                            .tooltip("End this pipeline: stop its tickets and close its sessions")
-                            .on_click(cx.listener(move |ws, _, window, cx| {
-                                cx.stop_propagation();
-                                ws.end_pipeline_dialog(orchestrator, window, cx);
-                            })),
                     ),
             )
             .child(

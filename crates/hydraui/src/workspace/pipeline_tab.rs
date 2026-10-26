@@ -698,6 +698,20 @@ impl Workspace {
             .child(item("ticket", "Ticket", TabView::Pipeline))
             .child(item("history", "History", TabView::History))
             .child(item("settings", "Settings", TabView::Settings))
+            .child(div().flex_1())
+            .child(
+                Button::new(SharedString::from(format!("end-pipeline-{orch}")))
+                    .label("■  End pipeline")
+                    .danger()
+                    .outline()
+                    .small()
+                    .tooltip(
+                        "Stop its tickets in progress and close its orchestrators and sessions",
+                    )
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.end_pipeline_dialog(orch, window, cx)
+                    })),
+            )
     }
 
     fn render_pipeline_view(

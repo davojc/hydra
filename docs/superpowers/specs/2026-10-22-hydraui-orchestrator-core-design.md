@@ -787,7 +787,8 @@ screen and its Pipeline tab (Jordan, 2026-10-26). Now, for an orchestrator whose
 tickets at once, the row has each orchestrator of that pipeline in turn, its terminal tab and its
 **Pipeline N** tab, and clicking one shows it. Opening one orchestrator's Pipeline tab (the card,
 a run line) gives the others theirs too, behind it. The row starts with the pipeline's name (◆ in its
-colour), fixed and not a tab, so it's clear which pipeline these tabs are.
+colour), fixed and not a tab, so it's clear which pipeline these tabs are. Then the Pipeline tab(s), always
+first, then each **Orchestrator N** (capitalised), then the terminal's Tasks.
 
 ## 26. Sidebar actions, colour everywhere, one pipeline's history (added 2026-10-26)
 
@@ -821,7 +822,9 @@ The once-a-second redraw made the next-look bar step and the working dot blink o
 ## 28. End a pipeline (added 2026-10-26)
 
 There was no way to end a pipeline short of closing its terminals one by one (Jordan,
-2026-10-26). Each pipeline's card now has **End** beside its name. It asks first, saying how many
+2026-10-26). The Pipeline tab's view bar has **■ End pipeline** at its right, red and outlined
+(a plain "End" on the card read as a label, not a button); the card's right-click menu has **End
+pipeline…** too. It asks first, saying how many
 tickets are in progress; **End pipeline** then stops each of its orchestrators' open tickets (as
 **Stop this ticket**: logged as stopped by you) and closes its orchestrators and every session
 under them, so its trigger stops looking. **Start pipeline** starts it again; one with

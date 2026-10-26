@@ -506,14 +506,42 @@ impl Workspace {
                     .child(name),
             );
         }
-        for (n, m) in members.into_iter().enumerate() {
+        // The pipeline's view first (one per orchestrator when it runs several), then each
+        // orchestrator's terminal, then this terminal's Tasks.
+        for (n, &m) in members.iter().enumerate() {
+            if !self.pipeline_tabs.contains_key(&m) {
+                continue;
+            }
+            let here = m == id;
+            strip = strip.child(
+                tab("pipeline-tab", m, here && pipeline_shown)
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        if !here {
+                            ws.show_terminal(m, window, cx);
+                        }
+                        ws.show_pipeline(m, true, window, cx)
+                    }))
+                    .child(if numbered {
+                        format!("Pipeline {}", n + 1)
+                    } else {
+                        "Pipeline".to_string()
+                    })
+                    .child(close("pipeline-close", m).on_click(cx.listener(
+                        move |ws, _, window, cx| {
+                            cx.stop_propagation();
+                            ws.close_pipeline(m, window, cx);
+                        },
+                    ))),
+            );
+        }
+        for (n, &m) in members.iter().enumerate() {
             let here = m == id;
             let name = if here {
                 label.clone()
             } else {
                 self.panes
                     .get(&m)
-                    .map_or_else(|| format!("orchestrator {}", n + 1), |v| v.read(cx).label())
+                    .map_or_else(|| format!("Orchestrator {}", n + 1), |v| v.read(cx).label())
             };
             strip = strip.child(
                 tab(
@@ -530,44 +558,21 @@ impl Workspace {
                 }))
                 .child(name),
             );
-            if here && tasks.is_some() {
-                strip =
-                    strip.child(
-                        tab("tasks-tab", m, tasks_shown)
-                            .on_click(cx.listener(move |ws, _, window, cx| {
-                                ws.show_tasks(m, true, window, cx)
-                            }))
-                            .child("Tasks")
-                            .child(close("tasks-close", m).on_click(cx.listener(
-                                move |ws, _, window, cx| {
-                                    cx.stop_propagation();
-                                    ws.close_tasks(m, window, cx);
-                                },
-                            ))),
-                    );
-            }
-            if self.pipeline_tabs.contains_key(&m) {
-                strip = strip.child(
-                    tab("pipeline-tab", m, here && pipeline_shown)
-                        .on_click(cx.listener(move |ws, _, window, cx| {
-                            if !here {
-                                ws.show_terminal(m, window, cx);
-                            }
-                            ws.show_pipeline(m, true, window, cx)
-                        }))
-                        .child(if numbered {
-                            format!("Pipeline {}", n + 1)
-                        } else {
-                            "Pipeline".to_string()
-                        })
-                        .child(close("pipeline-close", m).on_click(cx.listener(
-                            move |ws, _, window, cx| {
-                                cx.stop_propagation();
-                                ws.close_pipeline(m, window, cx);
-                            },
-                        ))),
-                );
-            }
+        }
+        if tasks.is_some() {
+            strip = strip.child(
+                tab("tasks-tab", id, tasks_shown)
+                    .on_click(
+                        cx.listener(move |ws, _, window, cx| ws.show_tasks(id, true, window, cx)),
+                    )
+                    .child("Tasks")
+                    .child(close("tasks-close", id).on_click(cx.listener(
+                        move |ws, _, window, cx| {
+                            cx.stop_propagation();
+                            ws.close_tasks(id, window, cx);
+                        },
+                    ))),
+            );
         }
         strip
     }

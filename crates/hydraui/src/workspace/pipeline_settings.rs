@@ -969,27 +969,11 @@ impl Workspace {
                             .py(px(28.))
                             .gap(px(28.))
                             .child(
-                                h_flex()
-                                    .justify_between()
-                                    .child(
-                                        text(20., theme::TEXT)
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .child("Pipeline settings"),
-                                    )
-                                    .child(
-                                        Button::new("settings-back")
-                                            .label("← Back to pipeline")
-                                            .ghost()
-                                            .small()
-                                            .on_click(cx.listener(move |ws, _, window, cx| {
-                                                ws.show_pipeline_view(
-                                                    orch,
-                                                    super::pipeline_tab::TabView::Pipeline,
-                                                    window,
-                                                    cx,
-                                                )
-                                            })),
-                                    ),
+                                h_flex().justify_between().child(
+                                    text(20., theme::TEXT)
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child("Pipeline settings"),
+                                ),
                             )
                             // 1. What it's called and how it looks in the sidebar.
                             .child(

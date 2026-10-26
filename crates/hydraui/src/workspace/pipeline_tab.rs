@@ -767,6 +767,7 @@ impl Workspace {
             line,
             progress,
             last,
+            checking,
             source,
             ..
         } = t;
@@ -785,9 +786,22 @@ impl Workspace {
                     p,
                     last,
                     source.every_minutes,
+                    checking,
                     accent,
                 ))
             }))
+            .child(
+                text(12., theme::TEXT_MUTED)
+                    .max_w(px(420.))
+                    .text_center()
+                    .child(if source.noun == "PR" {
+                        "To start one now, give the Orchestrator a pull request link in its tab. \
+                         Otherwise it keeps looking."
+                    } else {
+                        "To start one now, give the Orchestrator a ticket number or link in its \
+                         tab. Otherwise it keeps looking."
+                    }),
+            )
             .into_any_element()
     }
 

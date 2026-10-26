@@ -107,8 +107,28 @@ pub(super) fn look_bar(
     p: f32,
     last: Option<SystemTime>,
     every: u32,
+    checking: bool,
     accent: u32,
 ) -> AnyElement {
+    // While it looks: full, breathing, until the look ends and the wait starts again from empty.
+    if checking {
+        return div()
+            .w_full()
+            .h(px(3.))
+            .rounded_full()
+            .bg(color(theme::RAISED))
+            .child(
+                div()
+                    .h_full()
+                    .w_full()
+                    .rounded_full()
+                    .bg(color(accent))
+                    .with_animation(key, super::busy::pulse(), move |d, a| {
+                        d.bg(color(accent).opacity(a))
+                    }),
+            )
+            .into_any_element();
+    }
     div()
         .w_full()
         .h(px(3.))
@@ -824,15 +844,20 @@ impl Workspace {
         });
         let checking = w.is_some_and(|w| w.checking);
         // How far through the wait for the next look, while it's waiting to look.
-        let progress = (mode == linear_watch::Mode::Automatic && !checking && open_run.is_none())
-            .then(|| {
+        // Shown the whole time it waits for work, so the row never jumps: full while it looks,
+        // empty before its first look.
+        let progress = (mode == linear_watch::Mode::Automatic && open_run.is_none()).then(|| {
+            if checking {
+                1.0
+            } else {
                 linear_watch::look_progress(
                     w.and_then(|w| w.last),
                     SystemTime::now(),
                     source.every_minutes,
                 )
-            })
-            .flatten();
+                .unwrap_or(0.0)
+            }
+        });
         Some(Trigger::Lead(TriggerView {
             mode,
             line,
@@ -931,6 +956,7 @@ impl Workspace {
                         p,
                         last,
                         every,
+                        checking,
                         accent,
                     ))
                 })

@@ -648,7 +648,7 @@ impl Workspace {
         }
         crate::action_log::write(format!(
             "started an orchestrator for {pipeline} in {env}{}",
-            if watch { ", watching Linear" } else { "" }
+            if watch { ", in Automatic" } else { "" }
         ));
     }
 
@@ -704,7 +704,7 @@ impl Workspace {
             }
             crate::action_log::write(format!(
                 "autostart: {name} resumed the run hydraui closed on{}",
-                if watch { ", watching Linear" } else { "" }
+                if watch { ", in Automatic" } else { "" }
             ));
         }
     }

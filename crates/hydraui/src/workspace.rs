@@ -1624,7 +1624,13 @@ impl Workspace {
         muted: Hsla,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let tint = self.tint(&tab.env);
+        // A pipeline's terminal (its orchestrator or a stage's session) is framed in the
+        // pipeline's own colour, as its block on the left is.
+        let tint = tab
+            .shown
+            .filter(|_| !self.all_tasks.contains(&tab.env))
+            .and_then(|id| self.pipeline_tint(id, cx))
+            .unwrap_or_else(|| self.tint(&tab.env));
         let terminal = match tab.shown.and_then(|id| Some((id, self.panes.get(&id)?))) {
             _ if self.all_tasks.contains(&tab.env) => {
                 self.render_all_tasks(tint, muted, border, cx)

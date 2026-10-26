@@ -1037,6 +1037,15 @@ impl Workspace {
         self.send_wakes(window, cx);
     }
 
+    /// The colour of the pipeline terminal `pane` belongs to (its orchestrator or a stage's
+    /// session), when it belongs to one.
+    pub(super) fn pipeline_tint(&self, pane: PaneId, cx: &gpui::App) -> Option<gpui::Hsla> {
+        self.pipeline_cards(cx)
+            .into_iter()
+            .find(|(_, _, panes)| panes.contains(&pane))
+            .map(|(_, c, _)| color(c.accent))
+    }
+
     /// The selected environment's pipeline cards (§7.1): for each terminal that started a run,
     /// its card and the terminals under it (itself first, then the stages' sessions).
     pub(super) fn pipeline_cards(&self, cx: &gpui::App) -> Vec<(PaneId, Card, Vec<PaneId>)> {

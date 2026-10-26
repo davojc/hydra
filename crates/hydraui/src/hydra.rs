@@ -616,7 +616,7 @@ impl Hydra {
         let path = format!("{env}/slack");
         let missing = || {
             LinearError::Rejected(format!(
-                "no Slack token: store one as the secret {path} (launcher → Set secret: other…)"
+                "Slack isn't connected for {env}: press Connect Slack"
             ))
         };
         let r = SecretRef::parse_path(&path).map_err(|e| LinearError::Rejected(e.to_string()))?;

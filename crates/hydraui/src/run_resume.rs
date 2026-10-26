@@ -180,6 +180,7 @@ fn replay(id: &str, pipeline: Pipeline, events: &[Value]) -> Option<Run> {
                     |c| c != id,
                 )
                 .ok()?;
+                runs.set_link(id, text(e, "link"));
             }
             "stage started" => {
                 let s = runs.begin(REPLAYED, id, text(e, "stage"), "", 0).ok()?;

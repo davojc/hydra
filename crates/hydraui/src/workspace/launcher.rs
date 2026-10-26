@@ -629,7 +629,7 @@ impl Workspace {
                 super::orchestrator::orchestrator_prompt(
                     pipeline,
                     crate::pipeline::load(self.hydra.paths.root(), pipeline)
-                        .is_ok_and(|p| p.linear.is_some()),
+                        .is_ok_and(|p| p.has_trigger()),
                 ),
             ],
         ));
@@ -640,10 +640,8 @@ impl Workspace {
         // Its card shows at once, so its settings can be set before the first ticket.
         self.orchestrators.insert(id, pipeline.to_string());
         // A pipeline that asks for it watches Linear from the start (`[linear] watch`).
-        let watch = crate::pipeline::load(self.hydra.paths.root(), pipeline)
-            .ok()
-            .and_then(|p| p.linear)
-            .is_some_and(|l| l.watch);
+        let watch =
+            crate::pipeline::load(self.hydra.paths.root(), pipeline).is_ok_and(|p| p.watches());
         if watch {
             let w = self.linear_watch.entry(id).or_default();
             w.on = true;
@@ -694,10 +692,7 @@ impl Workspace {
                 continue;
             };
             self.resume_run(idx, window, cx);
-            let watch = crate::pipeline::load(&root, &name)
-                .ok()
-                .and_then(|p| p.linear)
-                .is_some_and(|l| l.watch);
+            let watch = crate::pipeline::load(&root, &name).is_ok_and(|p| p.watches());
             let orch = self
                 .orchestrators
                 .iter()

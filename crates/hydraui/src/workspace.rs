@@ -16,6 +16,7 @@ mod pipeline_settings;
 mod pipeline_tab;
 mod settings_tab;
 mod shortcuts;
+mod slack;
 mod start_page;
 mod tasks_tab;
 mod terminal_list;
@@ -235,6 +236,8 @@ pub struct Workspace {
     ask_checks: HashMap<String, std::time::SystemTime>,
     /// Each orchestrator's Linear watcher (orchestrator phase 2 §3).
     linear_watch: HashMap<PaneId, linear::Watch>,
+    /// Pull requests a `[slack]` pipeline took and hasn't started yet, by pipeline file.
+    slack_queues: HashMap<String, std::collections::VecDeque<crate::slack_watch::Queued>>,
     /// Runs' tickets as Linear last said, by identifier: the card's SLA and link (phase 2 §5).
     linear_tickets: HashMap<String, crate::linear::Ticket>,
     /// Cards being offered or just sent, so one card never goes to two sessions.
@@ -449,6 +452,7 @@ impl Workspace {
             pending_wakes: HashMap::new(),
             ask_checks: HashMap::new(),
             linear_watch: HashMap::new(),
+            slack_queues: HashMap::new(),
             linear_tickets: HashMap::new(),
             in_flight: Default::default(),
             _mcp_pump: mcp_pump,

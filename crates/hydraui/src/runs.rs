@@ -162,6 +162,8 @@ pub struct Run {
     pub asking: Option<Ask>,
     /// A send-back queued until the stage at work reports.
     pub fix_after: Option<Fix>,
+    /// What it's about, as a link: the pull request a Slack-triggered run reviews (`{pr}`).
+    pub link: Option<String>,
 }
 
 /// What a terminal is to the runs (§3.3).
@@ -375,6 +377,7 @@ impl Runs {
             week_used: None,
             asking: None,
             fix_after: None,
+            link: None,
         });
         Ok(self.runs.last().expect("just pushed"))
     }
@@ -523,6 +526,7 @@ impl Runs {
             stage: &spec.id,
             handoff: &handoff,
             feature_env: &feature_env,
+            link: r.link.as_deref().unwrap_or(""),
         };
         let name = session_name(i, &spec.title, r.stages[i].attempts.len() - 1);
         Ok(StartStage {
@@ -1128,6 +1132,14 @@ impl Runs {
             });
         }
         Ok(changes)
+    }
+
+    /// Sets what run `run` is about, as a link (`{pr}` in its prompts).
+    pub fn set_link(&mut self, run: &str, link: &str) {
+        let link = link.trim();
+        if let Some(r) = self.index(run).map(|ri| &mut self.runs[ri]) {
+            r.link = (!link.is_empty()).then(|| link.to_string());
+        }
     }
 
     /// Drops a send-back that waits for the stage at work.

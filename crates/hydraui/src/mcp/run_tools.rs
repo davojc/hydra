@@ -42,6 +42,8 @@ pub fn schemas() -> Vec<Value> {
                         without .toml (ticket is the example hydraui writes)."),
                     "ticket": string("The ticket, e.g. INTH-123."),
                     "summary": string("The ticket's title, in one line."),
+                    "link": string("What the run is about, as a link: the pull request a \
+                        Slack-picked run reviews (optional; stages get it as {pr})."),
                 },
                 "required": ["pipeline", "ticket", "summary"],
             },
@@ -195,6 +197,7 @@ pub fn call(
             &arg("pipeline"),
             &arg("ticket"),
             &arg("summary"),
+            &arg("link"),
         ),
         "stage_start" => stage_start(reg, &root, token, &arg("run"), &arg("stage"), &arg("brief")),
         "run_status" => (run_status(reg, token, &arg("run")), None),
@@ -223,6 +226,7 @@ fn run_start(
     pipeline_name: &str,
     ticket: &str,
     summary: &str,
+    link: &str,
 ) -> (Outcome, Option<McpEvent>) {
     if let Role::Stage(..) = reg.runs.role(token) {
         return (Outcome::err("a stage session can't start a run"), None);
@@ -266,11 +270,12 @@ fn run_start(
             (r.id.clone(), reply)
         }
     };
+    reg.runs.set_link(&id, link);
     log(
         root,
         &id,
         "run started",
-        json!({"ticket": ticket, "summary": summary, "pipeline": pipeline_name}),
+        json!({"ticket": ticket, "summary": summary, "pipeline": pipeline_name, "link": link}),
     );
     let started = Change {
         run: id,

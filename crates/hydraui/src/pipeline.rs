@@ -31,6 +31,27 @@ pub struct Pipeline {
     /// The Slack channel a stage asks a product question in, rather than deciding it
     /// (`[product] channel`); `None`: it asks the user in hydraui.
     pub product_channel: Option<String>,
+    /// Where its work comes from in Slack instead (`[slack]`): pull requests posted in a
+    /// channel. A pipeline has one trigger, this or `linear`.
+    pub slack: Option<SlackSettings>,
+}
+
+/// A pipeline's `[slack]` table: each message in `channel` with a GitHub pull request link and
+/// no `reaction` yet gets that reaction, and each of its pull requests is run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlackSettings {
+    /// The channel's id (`C0C217CER6G`), as Slack's API wants it.
+    pub channel: String,
+    /// How the channel shows on the card, e.g. `#pull-requests`.
+    pub label: String,
+    /// The reaction that marks a message taken, by name (`eyes` is 👀). A message that already
+    /// has it, from anyone, is someone else's.
+    pub reaction: String,
+    pub every_minutes: u32,
+    /// How far back a look goes, so switching on doesn't take the channel's whole history.
+    pub lookback_hours: u32,
+    /// Its orchestrator starts in Automatic.
+    pub watch: bool,
 }
 
 /// A pipeline's `[linear]` table (phase 2 spec §2): which tickets it takes, and the states it
@@ -94,6 +115,17 @@ pub const PRODUCT_TOOLS: &str =
     "mcp__claude_ai_Slack__slack_send_message,mcp__claude_ai_Slack__slack_read_thread";
 
 impl Pipeline {
+    /// Whether its orchestrator starts in Automatic (`watch` in `[linear]` or `[slack]`).
+    pub fn watches(&self) -> bool {
+        self.linear.as_ref().is_some_and(|l| l.watch)
+            || self.slack.as_ref().is_some_and(|s| s.watch)
+    }
+
+    /// Whether work reaches it by itself, from Linear or Slack.
+    pub fn has_trigger(&self) -> bool {
+        self.linear.is_some() || self.slack.is_some()
+    }
+
     /// How a stage's Claude starts, before its own arguments: with [`PRODUCT_TOOLS`] allowed
     /// when the pipeline asks product in a channel.
     pub fn stage_claude(&self) -> Vec<String> {
@@ -148,6 +180,61 @@ struct File {
     linear: Option<FileLinear>,
     autostart: Option<FileAutostart>,
     product: Option<FileProduct>,
+    slack: Option<FileSlack>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileSlack {
+    channel: String,
+    label: Option<String>,
+    reaction: Option<String>,
+    every_minutes: Option<u32>,
+    lookback_hours: Option<u32>,
+    watch: Option<bool>,
+}
+
+/// The `[slack]` defaults.
+pub const DEFAULT_REACTION: &str = "eyes";
+pub const DEFAULT_SLACK_EVERY_MINUTES: u32 = 2;
+pub const DEFAULT_LOOKBACK_HOURS: u32 = 24;
+
+/// The `[slack]` table, its defaults filled in.
+fn slack_settings(f: FileSlack) -> Result<SlackSettings, String> {
+    let channel = f.channel.trim().to_string();
+    // Names can be renamed and need another scope to look up: the id is what's stored.
+    let is_id = channel.len() >= 9
+        && channel.starts_with(['C', 'G'])
+        && channel
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+    if !is_id {
+        return Err(format!(
+            "[slack] channel {channel:?} must be the channel's id, e.g. \"C0C217CER6G\" (in \
+             Slack: the channel's name → About → Channel ID)"
+        ));
+    }
+    let every_minutes = f.every_minutes.unwrap_or(DEFAULT_SLACK_EVERY_MINUTES);
+    if every_minutes == 0 {
+        return Err("[slack] every_minutes must be at least 1".into());
+    }
+    let reaction = f
+        .reaction
+        .map(|r| r.trim().trim_matches(':').to_string())
+        .filter(|r| !r.is_empty())
+        .unwrap_or_else(|| DEFAULT_REACTION.to_string());
+    Ok(SlackSettings {
+        label: f
+            .label
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .unwrap_or_else(|| channel.clone()),
+        channel,
+        reaction,
+        every_minutes,
+        lookback_hours: f.lookback_hours.unwrap_or(DEFAULT_LOOKBACK_HOURS).max(1),
+        watch: f.watch.unwrap_or(false),
+    })
 }
 
 #[derive(Deserialize)]
@@ -251,6 +338,9 @@ fn check_bar(bar: Option<u8>, what: &str) -> Result<(), String> {
 pub fn parse(text: &str) -> Result<Pipeline, String> {
     let file: File = toml::from_str(text).map_err(|e| e.message().to_string())?;
     check_bar(file.bar, "the pipeline")?;
+    if file.linear.is_some() && file.slack.is_some() {
+        return Err("a pipeline has one trigger: [linear] or [slack], not both".into());
+    }
     if file.stages.is_empty() {
         return Err("the pipeline has no stages: add a [[stage]]".into());
     }
@@ -315,6 +405,7 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
             Some(p) => Some(p.channel.trim().to_string()),
             None => None,
         },
+        slack: file.slack.map(slack_settings).transpose()?,
     })
 }
 
@@ -683,8 +774,10 @@ pub fn create(hydra_root: &Path, title: &str, from: Option<&str>) -> Result<Stri
         .map_err(|e| format!("pipeline {from:?}: {e}"))?;
     doc["name"] = value(title);
     doc.remove("autostart");
-    if let Some(linear) = doc.get_mut("linear").and_then(Item::as_table_mut) {
-        linear["watch"] = value(false);
+    for trigger in ["linear", "slack"] {
+        if let Some(t) = doc.get_mut(trigger).and_then(Item::as_table_mut) {
+            t["watch"] = value(false);
+        }
     }
     let text = doc.to_string();
     parse(&text).map_err(|e| format!("the new pipeline: {e}"))?;
@@ -702,6 +795,9 @@ pub struct PromptVars<'a> {
     pub handoff: &'a str,
     /// The pipeline's `feature_env` for the ticket; empty without one.
     pub feature_env: &'a str,
+    /// What the run is about, as a link (a Slack-triggered run's pull request); `{pr}` and
+    /// `{link}` in a prompt. Empty without one.
+    pub link: &'a str,
 }
 
 /// The stage session's first prompt as the pipeline writes it: its placeholders filled, then
@@ -715,7 +811,9 @@ pub fn render(prompt: &str, vars: &PromptVars, brief: &str) -> String {
         .replace("{run}", vars.run)
         .replace("{stage}", vars.stage)
         .replace("{handoff}", vars.handoff)
-        .replace("{feature_env}", vars.feature_env);
+        .replace("{feature_env}", vars.feature_env)
+        .replace("{pr}", vars.link)
+        .replace("{link}", vars.link);
     let brief = brief.trim();
     if !brief.is_empty() {
         text.push_str("\n\n");
@@ -770,6 +868,34 @@ What the previous stage handed over: {handoff}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_slack_trigger_is_read_with_its_defaults() {
+        let base =
+            "name = \"PRs\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\nprompt = \"review {pr}\"\n";
+        let p = parse(&format!(
+            "{base}[slack]\nchannel = \"C0C217CER6G\"\nlabel = \"#pull-requests\"\n"
+        ))
+        .unwrap();
+        let s = p.slack.unwrap();
+        assert_eq!(
+            (s.channel.as_str(), s.label.as_str(), s.reaction.as_str()),
+            ("C0C217CER6G", "#pull-requests", "eyes")
+        );
+        assert_eq!((s.every_minutes, s.lookback_hours, s.watch), (2, 24, false));
+        let named = parse(&format!("{base}[slack]\nchannel = \"#pull-requests\"\n")).unwrap_err();
+        assert!(named.contains("channel's id"), "{named}");
+        let both = parse(&format!(
+            "{base}[slack]\nchannel = \"C0C217CER6G\"\n[linear]\nteam = \"INTH\"\n"
+        ))
+        .unwrap_err();
+        assert!(both.contains("one trigger"), "{both}");
+        let colons = parse(&format!(
+            "{base}[slack]\nchannel = \"C0C217CER6G\"\nreaction = \":eyes:\"\n"
+        ))
+        .unwrap();
+        assert_eq!(colons.slack.unwrap().reaction, "eyes");
+    }
+
     #[test]
     fn a_pipelines_file_name_comes_from_its_title() {
         assert_eq!(file_name_for("INTH SLA tickets"), "inth-sla-tickets");
@@ -876,6 +1002,7 @@ mod tests {
             stage: "replicate",
             handoff: "see log",
             feature_env: "",
+            link: "",
         };
         let text = render(&p.stages[0].prompt, &vars, "Focus on the API.");
         assert_eq!(
@@ -883,6 +1010,14 @@ mod tests {
             "Read INTH-1 (INTH-1-1, replicate). see log\n\nFocus on the API."
         );
         assert_eq!(render("Go.", &vars, "  "), "Go.");
+        let pr = PromptVars {
+            link: "https://github.com/iov42/svc-usage/pull/62",
+            ..vars
+        };
+        assert_eq!(
+            render("review {pr}", &pr, ""),
+            "review https://github.com/iov42/svc-usage/pull/62"
+        );
     }
 
     #[test]
@@ -904,6 +1039,7 @@ mod tests {
             stage: "verify",
             handoff: "",
             feature_env: &env,
+            link: "",
         };
         assert_eq!(
             render(&p.stages[0].prompt, &vars, ""),

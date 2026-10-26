@@ -36,6 +36,9 @@ pub(super) struct Watch {
     pub stopped: Option<String>,
     /// The check out was asked for with **Pick next ticket**, so its result is announced.
     pub by_hand: bool,
+    /// A `[slack]` pipeline's pull request the orchestrator was told to start, and when: none
+    /// other starts until its run opens.
+    pub starting: Option<(String, SystemTime)>,
 }
 
 /// The Linear side of a run that started (`start`) or ended, off the UI thread: what was
@@ -74,7 +77,7 @@ impl Workspace {
     }
 
     /// Whether `orch` has a run open (one ticket at a time).
-    fn has_open_run(&self, orch: PaneId, cx: &gpui::App) -> bool {
+    pub(super) fn has_open_run(&self, orch: PaneId, cx: &gpui::App) -> bool {
         let token = self
             .panes
             .get(&orch)
@@ -136,28 +139,38 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let Some((_, settings, _)) = self.linear_of(orch, cx) else {
+        // What it watches, a Linear team or a Slack channel, and who else watches the same.
+        let (watched, label) = if let Some((_, s, _)) = self.linear_of(orch, cx) {
+            (s.team.clone(), s.team)
+        } else if let Some((_, s, _)) = self.slack_of(orch, cx) {
+            (s.channel.clone(), s.label)
+        } else {
             return;
         };
-        let teams: Vec<(PaneId, String)> = self
+        let others: Vec<(PaneId, String)> = self
             .linear_watch
             .iter()
             .filter(|(id, w)| w.on && self.panes.contains_key(id))
-            .filter_map(|(id, _)| Some((*id, self.linear_of(*id, cx)?.1.team)))
+            .filter_map(|(id, _)| {
+                let what = match self.linear_of(*id, cx) {
+                    Some((_, s, _)) => s.team,
+                    None => self.slack_of(*id, cx)?.1.channel,
+                };
+                Some((*id, what))
+            })
             .collect();
         let other = linear_watch::watched_by(
-            &settings.team,
+            &watched,
             &orch,
-            teams.iter().map(|(id, t)| (id, t.as_str())),
+            others.iter().map(|(id, t)| (id, t.as_str())),
         );
         if other.is_some() {
             window.push_notification(
                 Notification::warning(format!(
-                    "Another orchestrator already watches {}: only one may, or they'd race for \
-                     tickets.",
-                    settings.team
+                    "Another orchestrator already watches {label}: only one may, or they'd race \
+                     for its work."
                 ))
-                .title("Automatic tickets"),
+                .title("Automatic"),
                 cx,
             );
             return;
@@ -190,6 +203,12 @@ impl Workspace {
         if self.linear_watch.get(&orch).is_some_and(|w| w.checking) {
             return;
         }
+        // Pull requests already taken go first.
+        if let Some((p, s, _)) = self.slack_of(orch, cx)
+            && !self.slack_queue(&p.file).is_empty()
+        {
+            return self.start_next_pr(orch, &p, &s, window, cx);
+        }
         self.start_linear_check(orch, window, cx);
         if let Some(w) = self.linear_watch.get_mut(&orch) {
             w.by_hand = true;
@@ -199,15 +218,32 @@ impl Workspace {
     /// Each second: a watcher whose check is due starts one (§3).
     pub(super) fn linear_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let now = SystemTime::now();
+        // A Slack watcher starts what it took before it looks again.
+        let slack: Vec<PaneId> = self
+            .linear_watch
+            .iter()
+            .filter(|(id, w)| w.on && !w.checking && self.panes.contains_key(id))
+            .map(|(id, _)| *id)
+            .collect();
+        let mut held: Vec<PaneId> = Vec::new();
+        for orch in slack {
+            if self.slack_of(orch, cx).is_some() && !self.slack_tick(orch, window, cx) {
+                held.push(orch);
+            }
+        }
         let due: Vec<PaneId> = self
             .linear_watch
             .iter()
             .filter(|(id, w)| w.on && !w.checking && self.panes.contains_key(id))
             .map(|(id, _)| *id)
+            .filter(|id| !held.contains(id))
             .filter(|id| {
-                let every = self
-                    .linear_of(*id, cx)
-                    .map_or(5, |(_, s, _)| s.every_minutes);
+                let every = match self.linear_of(*id, cx) {
+                    Some((_, s, _)) => s.every_minutes,
+                    None => self
+                        .slack_of(*id, cx)
+                        .map_or(5, |(_, s, _)| s.every_minutes),
+                };
                 let w = &self.linear_watch[id];
                 linear_watch::due(
                     w.on,
@@ -226,6 +262,9 @@ impl Workspace {
     /// A check, off the UI thread: the environment's key, then find and claim a ticket; the
     /// orchestrator is told to start it (§3, §4).
     fn start_linear_check(&mut self, orch: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.slack_of(orch, cx).is_some() {
+            return self.start_slack_check(orch, window, cx);
+        }
         let Some((pipeline, settings, env)) = self.linear_of(orch, cx) else {
             return;
         };
@@ -535,7 +574,45 @@ impl Workspace {
         orch: PaneId,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let (_, settings, _) = self.linear_of(orch, cx)?;
+        // What the card says about where work comes from: Linear or a Slack channel.
+        struct Source {
+            looking: String,
+            every_minutes: u32,
+            noun: &'static str,
+            waiting: usize,
+            tooltip: String,
+            pick: &'static str,
+            pick_tooltip: String,
+        }
+        let source = match (self.linear_of(orch, cx), self.slack_of(orch, cx)) {
+            (Some((_, s, _)), _) => Source {
+                looking: format!("Looking in Linear for the next {} ticket…", s.team),
+                every_minutes: s.every_minutes,
+                noun: "ticket",
+                waiting: 0,
+                tooltip: linear_watch::trigger_tooltip(&s),
+                pick: "Pick next ticket",
+                pick_tooltip: format!(
+                    "Start the {} ticket in {} whose SLA breaches first, now. Once: it doesn't \
+                     switch Automatic on or off.",
+                    s.team, s.pick
+                ),
+            },
+            (None, Some((p, s, _))) => Source {
+                looking: crate::slack_watch::looking(&s),
+                every_minutes: s.every_minutes,
+                noun: "PR",
+                waiting: self.slack_waiting(&p.file),
+                tooltip: crate::slack_watch::tooltip(&s),
+                pick: "Take next PR",
+                pick_tooltip: format!(
+                    "Start the next pull request: one already taken, else look in {} now. \
+                     Once: it doesn't switch Automatic on or off.",
+                    s.label
+                ),
+            },
+            (None, None) => return None,
+        };
         let w = self.linear_watch.get(&orch);
         let open_run = self.open_run_ticket(orch, cx);
         let (mode, line) = linear_watch::trigger(&linear_watch::TriggerFacts {
@@ -547,7 +624,10 @@ impl Workspace {
             found: w.and_then(|w| w.status.as_deref()),
             last: w.and_then(|w| w.last),
             now: SystemTime::now(),
-            settings: &settings,
+            looking: &source.looking,
+            every_minutes: source.every_minutes,
+            noun: source.noun,
+            waiting: source.waiting,
         });
         let (fg, bg, dot) = match mode {
             linear_watch::Mode::Automatic => (theme::GREEN, theme::GREEN_TINT, "●"),
@@ -556,7 +636,7 @@ impl Workspace {
         };
         let on = mode == linear_watch::Mode::Automatic;
         let checking = w.is_some_and(|w| w.checking);
-        let tooltip = linear_watch::trigger_tooltip(&settings);
+        let tooltip = source.tooltip;
         Some(
             v_flex()
                 .id(SharedString::from(format!("linear-row-{orch}")))
@@ -603,15 +683,11 @@ impl Workspace {
                     d.child(
                         h_flex().child(
                             Button::new(SharedString::from(format!("linear-now-{orch}")))
-                                .label("Pick next ticket")
+                                .label(source.pick)
                                 .outline()
                                 .xsmall()
                                 .loading(checking)
-                                .tooltip(format!(
-                                    "Start the {} ticket in {} whose SLA breaches first, now. \
-                                     Once: it doesn't switch Automatic on or off.",
-                                    settings.team, settings.pick
-                                ))
+                                .tooltip(source.pick_tooltip)
                                 .on_click(cx.listener(move |ws, _, window, cx| {
                                     ws.check_linear_now(orch, window, cx)
                                 })),

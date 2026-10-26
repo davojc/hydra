@@ -69,7 +69,13 @@ pub struct TriggerFacts<'a> {
     pub found: Option<&'a str>,
     pub last: Option<SystemTime>,
     pub now: SystemTime,
-    pub settings: &'a LinearSettings,
+    /// The line while a look is out, e.g. `Looking in Linear for the next INTH ticket…`.
+    pub looking: &'a str,
+    pub every_minutes: u32,
+    /// What it runs, `ticket` or `PR`.
+    pub noun: &'a str,
+    /// Picked already and waiting their turn (a Slack message can bring several).
+    pub waiting: usize,
 }
 
 /// The card's mode and one short line saying what it means right now; the card is narrow, so
@@ -82,10 +88,7 @@ pub fn trigger(f: &TriggerFacts) -> (Mode, String) {
     };
     // A look in progress, by the timer or Pick next ticket, says so in either mode.
     if f.checking && f.open_run.is_none() {
-        return (
-            mode,
-            format!("Looking in Linear for the next {} ticket…", f.settings.team),
-        );
+        return (mode, f.looking.to_string());
     }
     if let Some(why) = f.stopped.filter(|_| !f.on) {
         return (Mode::Stopped, format!("Stopped: {why}"));
@@ -96,9 +99,12 @@ pub fn trigger(f: &TriggerFacts) -> (Mode, String) {
     let line = if let (Some(ticket), true) = (f.open_run, f.asking) {
         format!("{ticket} is paused for a product answer")
     } else if let Some(ticket) = f.open_run {
-        format!("Next ticket after {ticket}")
+        match f.waiting {
+            0 => format!("Next {} after {ticket}", f.noun),
+            n => format!("Next {} after {ticket} · {n} waiting", f.noun),
+        }
     } else {
-        let every = Duration::from_secs(u64::from(f.settings.every_minutes) * 60);
+        let every = Duration::from_secs(u64::from(f.every_minutes) * 60);
         let left = f
             .last
             .and_then(|l| f.now.duration_since(l).ok())
@@ -561,7 +567,10 @@ mod tests {
             found: None,
             last: None,
             now: SystemTime::UNIX_EPOCH + Duration::from_secs(10_000),
-            settings,
+            looking: "Looking in Linear for the next INTH ticket…",
+            every_minutes: settings.every_minutes,
+            noun: "ticket",
+            waiting: 0,
         }
     }
 
@@ -581,6 +590,11 @@ mod tests {
         assert_eq!(trigger(&f).1, "Looking in Linear for the next INTH ticket…");
         f.open_run = Some("INTH-169");
         assert_eq!(trigger(&f).1, "Next ticket after INTH-169");
+        f.noun = "PR";
+        f.waiting = 2;
+        assert_eq!(trigger(&f).1, "Next PR after INTH-169 · 2 waiting");
+        f.noun = "ticket";
+        f.waiting = 0;
         f.asking = true;
         assert_eq!(trigger(&f).1, "INTH-169 is paused for a product answer");
     }

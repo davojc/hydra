@@ -633,3 +633,37 @@ meant copying a TOML file by hand.
   it can't race its original for the same tickets until you turn them on in its settings.
 - **Then** its orchestrator starts (in the environment already chosen, else one picked) and its
   Pipeline tab opens on **Settings**.
+
+## 18. Pull requests from Slack (added 2026-10-26)
+
+A pipeline's work can come from a Slack channel instead of Linear: Jordan's **Review PR's**
+pipeline reviews each pull request posted in #pull-requests.
+
+```toml
+[slack]
+channel = "C0C217CER6G"     # the channel's id (names can be renamed)
+label = "#pull-requests"    # how the card shows it
+reaction = "eyes"           # the mark that a message is taken (default)
+every_minutes = 2           # default
+lookback_hours = 24         # how far back a look goes (default)
+watch = true                # start in Automatic
+```
+
+- **One trigger.** A pipeline has `[linear]` or `[slack]`, not both. The card's Automatic switch,
+  its line and its failure handling are shared (`linear::Watch`, `linear_watch::trigger`).
+- **The token** is the secret `<env>/slack` (launcher → Set secret: other…), a Slack **user**
+  token (Jordan's choice, so the 👀 shows as them) with `channels:history`, `reactions:read` and
+  `reactions:write`. A missing, revoked or under-scoped token stops Automatic at once and says
+  why; other failures retry, three in a row stop it.
+- **A look** (`slack_watch::find_and_mark`) reads the channel's people-posted messages from the
+  last `lookback_hours`, oldest first. A message with the reaction already, from anyone, is
+  someone's (Jordan's choice); one without a GitHub pull request link isn't for it. Each message
+  it takes gets the reaction first, then each of its pull requests not run before is queued, so
+  a message with three stacked PRs brings three runs.
+- **One at a time.** The queue (kept in `<HYDRA_HOME>/hydraui/slack-queue/<pipeline>.json`, so a
+  restart loses nothing) starts its next pull request whenever no run is open; looks happen only
+  when the queue is empty. The orchestrator is told the ticket (`<repo>-<number>`, e.g.
+  `svc-usage-62`), a title (`svc-usage #62`) and the link, and passes the link to `run_start`
+  (`link`, new); stage prompts get it as `{pr}` (or `{link}`). One it hasn't started within 5
+  minutes is skipped with a notification.
+- **Take next PR** (Manual) starts the next waiting pull request, else looks now.

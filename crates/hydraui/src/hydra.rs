@@ -609,6 +609,24 @@ impl Hydra {
             .ok_or_else(missing)
     }
 
+    /// The Slack token a `[slack]` pipeline in `env` reads its channel and reacts with: the
+    /// secret `<env>/slack` (Set secret: other… in the launcher). A user token's reactions show
+    /// as that person. Reads the store, so call it off the UI thread.
+    pub fn slack_token(&self, env: &str) -> Result<String, LinearError> {
+        let path = format!("{env}/slack");
+        let missing = || {
+            LinearError::Rejected(format!(
+                "no Slack token: store one as the secret {path} (launcher → Set secret: other…)"
+            ))
+        };
+        let r = SecretRef::parse_path(&path).map_err(|e| LinearError::Rejected(e.to_string()))?;
+        self.store
+            .get(&r)
+            .map_err(|e| LinearError::Failed(e.to_string()))?
+            .filter(|t| !t.trim().is_empty())
+            .ok_or_else(missing)
+    }
+
     /// Stores a secret through hydra's store, which also keeps secrets.toml's index. The
     /// value is kept exactly as typed; an empty or blank one is refused.
     pub fn set_secret(&self, path: &str, value: &str) -> Result<(), String> {

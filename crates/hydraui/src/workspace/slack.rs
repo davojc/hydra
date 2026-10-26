@@ -1,0 +1,269 @@
+//! A `[slack]` pipeline's watcher in the app: the looks at its channel (marking each message it
+//! takes), the pull requests waiting their turn, and telling the orchestrator to start the next
+//! one when no run is open. It shares the card's Automatic switch and `linear::Watch` with the
+//! Linear trigger: a pipeline has one or the other. The decisions are `slack_watch`'s.
+
+use std::collections::VecDeque;
+use std::time::{Duration, SystemTime};
+
+use gpui::prelude::*;
+use gpui::{Context, Window};
+use gpui_component::WindowExt;
+use gpui_component::notification::Notification;
+
+use super::Workspace;
+use crate::envs::PaneId;
+use crate::linear::LinearError;
+use crate::pipeline::{Pipeline, SlackSettings};
+use crate::slack_watch::{self, Queued};
+
+/// How long the orchestrator has to start a pull request it was told to before it's given up.
+const START_WITHIN: Duration = Duration::from_secs(5 * 60);
+
+impl Workspace {
+    /// `orch`'s pipeline with its `[slack]` table, and its environment; `None` without one.
+    pub(super) fn slack_of(
+        &self,
+        orch: PaneId,
+        cx: &gpui::App,
+    ) -> Option<(Pipeline, SlackSettings, String)> {
+        let (file, env, _) = self.settings_target(orch, cx)?;
+        let pipeline = crate::pipeline::load(self.hydra.paths.root(), &file).ok()?;
+        let settings = pipeline.slack.clone()?;
+        Some((pipeline, settings, env))
+    }
+
+    /// Pipeline `file`'s waiting pull requests, read from its file the first time.
+    pub(super) fn slack_queue(&mut self, file: &str) -> &mut VecDeque<Queued> {
+        let root = self.hydra.paths.root().to_path_buf();
+        self.slack_queues
+            .entry(file.to_string())
+            .or_insert_with(|| slack_watch::load_queue(&slack_watch::queue_file(&root, file)))
+    }
+
+    fn save_slack_queue(&mut self, file: &str) {
+        let path = slack_watch::queue_file(self.hydra.paths.root(), file);
+        let queue = self.slack_queue(file).clone();
+        if let Err(e) = slack_watch::save_queue(&path, &queue) {
+            crate::action_log::write(format!("slack: {file}: can't keep its queue: {e}"));
+        }
+    }
+
+    /// How many pull requests wait for pipeline `file`, as last read.
+    pub(super) fn slack_waiting(&self, file: &str) -> usize {
+        self.slack_queues.get(file).map_or(0, VecDeque::len)
+    }
+
+    /// Each second, for a `[slack]` orchestrator with no run open: the next waiting pull
+    /// request is started; with none waiting, a look is due (`true`) by the usual timer.
+    pub(super) fn slack_tick(
+        &mut self,
+        orch: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((pipeline, settings, _)) = self.slack_of(orch, cx) else {
+            return false;
+        };
+        if self.has_open_run(orch, cx) {
+            // The pull request it was told to start is running.
+            if let Some(w) = self.linear_watch.get_mut(&orch) {
+                w.starting = None;
+            }
+            return false;
+        }
+        let starting = self
+            .linear_watch
+            .get(&orch)
+            .and_then(|w| w.starting.clone());
+        if let Some((ticket, since)) = starting {
+            if since.elapsed().unwrap_or_default() < START_WITHIN {
+                return false;
+            }
+            crate::action_log::write(format!(
+                "slack: {}: the orchestrator didn't start {ticket}; skipped",
+                pipeline.file
+            ));
+            window.push_notification(
+                Notification::warning(format!(
+                    "The orchestrator didn't start {ticket} within 5 minutes, so it was skipped. \
+                     Give it to the orchestrator yourself if it still needs a review."
+                ))
+                .title(pipeline.name.clone()),
+                cx,
+            );
+            if let Some(w) = self.linear_watch.get_mut(&orch) {
+                w.starting = None;
+            }
+        }
+        if self.slack_queue(&pipeline.file).is_empty() {
+            return true;
+        }
+        self.start_next_pr(orch, &pipeline, &settings, window, cx);
+        false
+    }
+
+    /// Tells the orchestrator to start the next waiting pull request.
+    pub(super) fn start_next_pr(
+        &mut self,
+        orch: PaneId,
+        pipeline: &Pipeline,
+        settings: &SlackSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pr) = self.slack_queue(&pipeline.file).pop_front() else {
+            return;
+        };
+        self.save_slack_queue(&pipeline.file);
+        let w = self.linear_watch.entry(orch).or_default();
+        w.starting = Some((pr.ticket.clone(), SystemTime::now()));
+        w.status = Some(format!("Started {}", pr.ticket));
+        crate::action_log::write(format!(
+            "slack: {}: starting {} ({})",
+            pipeline.file, pr.ticket, pr.url
+        ));
+        let prompt = slack_watch::start_prompt(pipeline, settings, &pr);
+        self.pending_wakes.insert(orch, (pr.ticket.clone(), prompt));
+        self.send_wakes(window, cx);
+        cx.notify();
+    }
+
+    /// A look at the channel, off the UI thread: new messages marked and their pull requests
+    /// queued; the first starts at the next tick.
+    pub(super) fn start_slack_check(
+        &mut self,
+        orch: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((pipeline, settings, env)) = self.slack_of(orch, cx) else {
+            return;
+        };
+        let queued: Vec<String> = self
+            .slack_queue(&pipeline.file)
+            .iter()
+            .map(|q| q.ticket.clone())
+            .collect();
+        let w = self.linear_watch.entry(orch).or_default();
+        w.checking = true;
+        w.last = Some(SystemTime::now());
+        crate::action_log::write(format!(
+            "slack: {}: looking in {}",
+            pipeline.file, settings.label
+        ));
+        let hydra = self.hydra.clone();
+        let s = settings.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let found = cx
+                .background_spawn(async move {
+                    let token = hydra.slack_token(&env)?;
+                    let ran: Vec<String> = crate::run_history::read(hydra.paths.root(), &[])
+                        .into_iter()
+                        .map(|e| e.ticket)
+                        .collect();
+                    slack_watch::find_and_mark(
+                        &crate::slack::Http { token },
+                        &s,
+                        SystemTime::now(),
+                        &ran,
+                        &queued,
+                    )
+                })
+                .await;
+            let _ = this.update_in(cx, |ws, window, cx| {
+                ws.slack_checked(orch, &pipeline, &settings, found, window, cx)
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn slack_checked(
+        &mut self,
+        orch: PaneId,
+        pipeline: &Pipeline,
+        settings: &SlackSettings,
+        found: Result<Vec<Queued>, LinearError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(w) = self.linear_watch.get_mut(&orch) else {
+            return;
+        };
+        w.checking = false;
+        let by_hand = std::mem::take(&mut w.by_hand);
+        match found {
+            Ok(prs) if !prs.is_empty() => {
+                w.failures.clear();
+                let names: Vec<&str> = prs.iter().map(|p| p.ticket.as_str()).collect();
+                crate::action_log::write(format!(
+                    "slack: {}: took {} from {}",
+                    pipeline.file,
+                    names.join(", "),
+                    settings.label
+                ));
+                if by_hand {
+                    window.push_notification(
+                        Notification::info(format!(
+                            "Took {} from {}. The orchestrator is starting the first.",
+                            names.join(", "),
+                            settings.label
+                        ))
+                        .title(pipeline.name.clone()),
+                        cx,
+                    );
+                }
+                self.slack_queue(&pipeline.file).extend(prs);
+                self.save_slack_queue(&pipeline.file);
+                if !self.has_open_run(orch, cx) {
+                    self.start_next_pr(orch, pipeline, settings, window, cx);
+                }
+            }
+            Ok(_) => {
+                w.failures.clear();
+                w.status = Some("Nothing new".to_string());
+                crate::action_log::write(format!("slack: {}: nothing new", pipeline.file));
+                if by_hand {
+                    window.push_notification(
+                        Notification::info(format!(
+                            "No new pull request in {}: every message with one has a :{}: \
+                             already.",
+                            settings.label, settings.reaction
+                        ))
+                        .title(pipeline.name.clone()),
+                        cx,
+                    );
+                }
+            }
+            Err(e) if !w.on || by_hand => {
+                crate::action_log::write(format!("slack: {e}"));
+                window.push_notification(
+                    Notification::error(format!("Couldn't look in {}: {e}", settings.label))
+                        .title(pipeline.name.clone()),
+                    cx,
+                );
+            }
+            Err(e) => {
+                crate::action_log::write(format!("slack: {e}"));
+                match w.failures.record(&e) {
+                    Some(reason) => {
+                        w.on = false;
+                        w.status = None;
+                        w.stopped = Some(reason.clone());
+                        window.push_notification(
+                            Notification::error(format!(
+                                "Stopped watching {}: {reason}",
+                                settings.label
+                            ))
+                            .title(pipeline.name.clone()),
+                            cx,
+                        );
+                    }
+                    None => w.status = Some("Last look failed".to_string()),
+                }
+            }
+        }
+        cx.notify();
+    }
+}

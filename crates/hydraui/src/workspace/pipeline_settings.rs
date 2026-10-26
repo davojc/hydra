@@ -20,7 +20,7 @@ use super::Workspace;
 use crate::envs::PaneId;
 use crate::mcp::server;
 use crate::orchestrator_theme::{self as theme, color};
-use crate::pipeline::{self, Assignee, Edit, EditStage, LinearSettings, validate};
+use crate::pipeline::{self, Assignee, Edit, EditStage, LinearSettings, SlackSettings, validate};
 use crate::runs::MAX_ATTEMPTS;
 
 /// The width of a stage row's up/down arrows, so the prompt can line up under the title.
@@ -57,7 +57,36 @@ pub(super) struct SettingsDraft {
     skills: Vec<String>,
     next_key: u64,
     linear: LinearDraft,
+    slack: SlackDraft,
     _subs: Vec<Subscription>,
+}
+
+/// The Slack section: off saves the pipeline without a `[slack]` table. Linear and Slack can't
+/// both be on.
+struct SlackDraft {
+    on: bool,
+    /// Kept as the file has it (`watch`).
+    watch: bool,
+    channel: Entity<InputState>,
+    label: Entity<InputState>,
+    every: Entity<InputState>,
+    lookback: Entity<InputState>,
+    reaction: Entity<InputState>,
+}
+
+impl SlackDraft {
+    fn edit(&self, cx: &App) -> Option<SlackSettings> {
+        let text = |i: &Entity<InputState>| i.read(cx).value().trim().to_string();
+        self.on.then(|| SlackSettings {
+            channel: text(&self.channel),
+            label: text(&self.label),
+            reaction: text(&self.reaction).trim_matches(':').to_string(),
+            // Not a number: 0, which validation names.
+            every_minutes: text(&self.every).parse().unwrap_or(0),
+            lookback_hours: text(&self.lookback).parse().unwrap_or(0),
+            watch: self.watch,
+        })
+    }
 }
 
 /// The Linear section (phase 2 spec §2, §5): off saves the pipeline without a `[linear]` table.
@@ -119,6 +148,7 @@ impl SettingsDraft {
             feature_env: self.saved.feature_env.clone(),
             branch: Some(self.branch.read(cx).value().trim().to_string()).filter(|b| !b.is_empty()),
             linear: self.linear.edit(cx),
+            slack: self.slack.edit(cx),
             autostart: self.saved.autostart.clone(),
             product_channel: Some(self.product.read(cx).value().trim().to_string())
                 .filter(|c| !c.is_empty()),
@@ -272,6 +302,34 @@ impl Workspace {
                 "5",
             ),
         };
+        let sl = saved.slack.clone();
+        let sfield = |f: fn(&SlackSettings) -> String, default: &str| {
+            sl.as_ref().map_or(default.to_string(), f)
+        };
+        let slack = SlackDraft {
+            on: sl.is_some(),
+            watch: sl.as_ref().is_some_and(|s| s.watch),
+            channel: input(sfield(|s| s.channel.clone(), ""), "C0C217CER6G"),
+            label: input(sfield(|s| s.label.clone(), ""), "#pull-requests"),
+            every: input(
+                sfield(
+                    |s| s.every_minutes.to_string(),
+                    &pipeline::DEFAULT_SLACK_EVERY_MINUTES.to_string(),
+                ),
+                "2",
+            ),
+            lookback: input(
+                sfield(
+                    |s| s.lookback_hours.to_string(),
+                    &pipeline::DEFAULT_LOOKBACK_HOURS.to_string(),
+                ),
+                "24",
+            ),
+            reaction: input(
+                sfield(|s| s.reaction.clone(), pipeline::DEFAULT_REACTION),
+                pipeline::DEFAULT_REACTION,
+            ),
+        };
         let mut draft = SettingsDraft {
             file,
             saved: saved.clone(),
@@ -284,6 +342,7 @@ impl Workspace {
             skills,
             next_key: 0,
             linear,
+            slack,
             _subs: Vec::new(),
         };
         for s in &saved.stages {
@@ -391,7 +450,13 @@ impl Workspace {
             .when(!l.on, |b| b.outline())
             .small()
             .on_click(cx.listener(move |ws, _, _, cx| {
-                ws.with_draft(orch, cx, |d| d.linear.on = !d.linear.on)
+                ws.with_draft(orch, cx, |d| {
+                    d.linear.on = !d.linear.on;
+                    // One trigger: Linear on takes Slack off.
+                    if d.linear.on {
+                        d.slack.on = false;
+                    }
+                })
             }));
         let mut body = v_flex()
             .gap_2()
@@ -435,6 +500,77 @@ impl Workspace {
                      trigger state whose SLA breaches soonest, claims it and starts it; off \
                      (Manual), nothing starts unless you ask. The environment needs Linear set \
                      up (Set up linear…).",
+                ));
+        }
+        body
+    }
+
+    /// The Slack section: pull requests posted in a channel, one at a time.
+    fn render_slack_settings(
+        &self,
+        orch: PaneId,
+        draft: &SettingsDraft,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let sl = &draft.slack;
+        let row = |label: &str, input: &Entity<InputState>, hint: &str| {
+            h_flex()
+                .gap_3()
+                .child(
+                    text(12.5, theme::TEXT_SECONDARY)
+                        .w(px(170.))
+                        .flex_none()
+                        .child(label.to_string()),
+                )
+                .child(div().w(px(300.)).child(Input::new(input).small()))
+                .child(text(12., theme::TEXT_MUTED).child(hint.to_string()))
+        };
+        let toggle = Button::new(SharedString::from(format!("slack-on-{orch}")))
+            .label(if sl.on {
+                "Taking pull requests from Slack"
+            } else {
+                "Take pull requests from Slack"
+            })
+            .when(sl.on, |b| b.primary())
+            .when(!sl.on, |b| b.outline())
+            .small()
+            .on_click(cx.listener(move |ws, _, _, cx| {
+                ws.with_draft(orch, cx, |d| {
+                    d.slack.on = !d.slack.on;
+                    // One trigger: Slack on takes Linear off.
+                    if d.slack.on {
+                        d.linear.on = false;
+                    }
+                })
+            }));
+        let mut body = v_flex()
+            .gap_2()
+            .child(text(11., theme::TEXT_MUTED).child("SLACK"))
+            .child(h_flex().child(toggle));
+        if sl.on {
+            body = body
+                .child(row(
+                    "Channel id",
+                    &sl.channel,
+                    "In Slack: the channel's name → About → Channel ID",
+                ))
+                .child(row("Shown as", &sl.label, "e.g. #pull-requests"))
+                .child(row("Check every (minutes)", &sl.every, ""))
+                .child(row(
+                    "Look back (hours)",
+                    &sl.lookback,
+                    "Older messages are left alone",
+                ))
+                .child(row(
+                    "Reaction",
+                    &sl.reaction,
+                    "Its name: eyes is 👀. Already there = someone's on it",
+                ))
+                .child(text(12., theme::TEXT_MUTED).child(
+                    "With the card's switch on (Automatic), each message with a GitHub pull \
+                     request link and no reaction gets yours, and its pull requests run one at \
+                     a time; {pr} in a stage's prompt is the link. Needs Connect Slack for the \
+                     environment.",
                 ));
         }
         body
@@ -950,6 +1086,7 @@ impl Workspace {
                                     ),
                             )
                             .child(self.render_linear_settings(orch, draft, cx))
+                            .child(self.render_slack_settings(orch, draft, cx))
                             .child(
                                 v_flex()
                                     .gap_2()

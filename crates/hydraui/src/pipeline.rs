@@ -229,16 +229,19 @@ pub const DEFAULT_REACTION: &str = "eyes";
 pub const DEFAULT_SLACK_EVERY_MINUTES: u32 = 2;
 pub const DEFAULT_LOOKBACK_HOURS: u32 = 24;
 
+/// A Slack channel id, e.g. `C0C217CER6G`.
+pub fn is_channel_id(s: &str) -> bool {
+    s.len() >= 9
+        && s.starts_with(['C', 'G'])
+        && s.chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+}
+
 /// The `[slack]` table, its defaults filled in.
 fn slack_settings(f: FileSlack) -> Result<SlackSettings, String> {
     let channel = f.channel.trim().to_string();
     // Names can be renamed and need another scope to look up: the id is what's stored.
-    let is_id = channel.len() >= 9
-        && channel.starts_with(['C', 'G'])
-        && channel
-            .chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
-    if !is_id {
+    if !is_channel_id(&channel) {
         return Err(format!(
             "[slack] channel {channel:?} must be the channel's id, e.g. \"C0C217CER6G\" (in \
              Slack: the channel's name → About → Channel ID)"
@@ -457,6 +460,7 @@ pub struct Edit {
     pub autostart: Option<String>,
     pub product_channel: Option<String>,
     pub color: Option<u32>,
+    pub slack: Option<SlackSettings>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -496,6 +500,7 @@ impl From<&Pipeline> for Edit {
             autostart: p.autostart.clone(),
             product_channel: p.product_channel.clone(),
             color: p.color,
+            slack: p.slack.clone(),
         }
     }
 }
@@ -523,6 +528,23 @@ pub fn validate(edit: &Edit) -> Result<(), &'static str> {
         }
         if l.every_minutes == 0 {
             return Err("Check Linear every minute or more");
+        }
+    }
+    if let Some(sl) = &edit.slack {
+        if edit.linear.is_some() {
+            return Err("Take work from Linear or Slack, not both");
+        }
+        if !is_channel_id(sl.channel.trim()) {
+            return Err("Give the Slack channel's id, e.g. C0C217CER6G");
+        }
+        if sl.every_minutes == 0 {
+            return Err("Check Slack every minute or more");
+        }
+        if sl.lookback_hours == 0 {
+            return Err("Look back at least an hour in Slack");
+        }
+        if sl.reaction.trim().trim_matches(':').is_empty() {
+            return Err("Name the reaction that marks a message taken, e.g. eyes");
         }
     }
     Ok(())
@@ -645,6 +667,31 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
         }
         None => {
             doc.remove("product");
+        }
+    }
+    match &edit.slack {
+        Some(sl) => {
+            // Into the table that's there, so its comments stay.
+            if !doc.get("slack").is_some_and(Item::is_table) {
+                doc["slack"] = Item::Table(Table::new());
+            }
+            let t = &mut doc["slack"];
+            t["channel"] = value(sl.channel.trim());
+            let label = sl.label.trim();
+            if label.is_empty() || label == sl.channel.trim() {
+                if let Some(t) = t.as_table_mut() {
+                    t.remove("label");
+                }
+            } else {
+                t["label"] = value(label);
+            }
+            t["reaction"] = value(sl.reaction.trim().trim_matches(':'));
+            t["every_minutes"] = value(i64::from(sl.every_minutes));
+            t["lookback_hours"] = value(i64::from(sl.lookback_hours));
+            t["watch"] = value(sl.watch);
+        }
+        None => {
+            doc.remove("slack");
         }
     }
     match edit.color {
@@ -907,6 +954,66 @@ What the previous stage handed over: {handoff}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn settings_save_a_slack_trigger_and_refuse_two() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(
+            folder(d.path()).join("prs.toml"),
+            "name = \"PRs\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n\
+             # where PRs come from\n[slack]\nchannel = \"C0C217CER6G\"\nlabel = \"#pull-requests\"\nwatch = true\n",
+        )
+        .unwrap();
+        let mut edit = Edit::from(&load(d.path(), "prs").unwrap());
+        let sl = edit.slack.as_mut().unwrap();
+        sl.every_minutes = 7;
+        sl.lookback_hours = 48;
+        sl.reaction = ":robot_face:".into();
+        assert_eq!(validate(&edit), Ok(()));
+        save(d.path(), "prs", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("prs.toml")).unwrap();
+        assert!(
+            text.contains("# where PRs come from"),
+            "comments kept: {text}"
+        );
+        let back = load(d.path(), "prs").unwrap().slack.unwrap();
+        assert_eq!(
+            (
+                back.every_minutes,
+                back.lookback_hours,
+                back.reaction.as_str(),
+                back.watch
+            ),
+            (7, 48, "robot_face", true)
+        );
+        assert_eq!(back.label, "#pull-requests");
+
+        let mut both = edit.clone();
+        both.linear = Some(LinearSettings {
+            team: "INTH".into(),
+            pick: DEFAULT_PICK.into(),
+            assignee: Assignee::Unassigned,
+            claim: DEFAULT_CLAIM.into(),
+            passed: DEFAULT_PASSED.into(),
+            every_minutes: 5,
+            watch: false,
+        });
+        assert_eq!(
+            validate(&both),
+            Err("Take work from Linear or Slack, not both")
+        );
+        let mut bad = edit.clone();
+        bad.slack.as_mut().unwrap().channel = "#pull-requests".into();
+        assert!(validate(&bad).unwrap_err().contains("channel's id"));
+        let mut zero = edit.clone();
+        zero.slack.as_mut().unwrap().every_minutes = 0;
+        assert!(validate(&zero).is_err());
+
+        edit.slack = None;
+        save(d.path(), "prs", &edit).unwrap();
+        assert_eq!(load(d.path(), "prs").unwrap().slack, None);
+    }
+
     #[test]
     fn a_pipeline_colour_is_read_saved_and_cleared() {
         let base = "name = \"PRs\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n";

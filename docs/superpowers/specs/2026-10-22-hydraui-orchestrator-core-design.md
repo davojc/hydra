@@ -667,6 +667,10 @@ watch = true                # start in Automatic
   (`link`, new); stage prompts get it as `{pr}` (or `{link}`). One it hasn't started within 5
   minutes is skipped with a notification.
 - **Take next PR** (Manual) starts the next waiting pull request, else looks now.
+- **In Pipeline settings** (added later the same day): a **Slack** section beside **Linear**, with
+  the channel id, how it's shown, how often to check, how far back to look and the reaction.
+  Turning one trigger on turns the other off, and saving refuses both at once. The table keeps
+  its comments, and `label` is dropped when it's empty or the channel id.
 - **Connect Slack** (Jordan, 2026-10-26: "if they all have to make a bot it's a bit crap"). One team
   Slack app; each person signs in to it, and nobody makes an app. Slack only hands a token to
   whoever holds the app's client secret, so the team's Canopy (`slack_connect_url` in

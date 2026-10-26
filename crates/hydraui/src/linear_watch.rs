@@ -63,6 +63,8 @@ pub struct TriggerFacts<'a> {
     pub stopped: Option<&'a str>,
     /// The ticket of the run in progress.
     pub open_run: Option<&'a str>,
+    /// That run waits for product's answer to a stage's question.
+    pub asking: bool,
     /// What the last look found (`nothing new`), shown before when the next one is.
     pub found: Option<&'a str>,
     pub last: Option<SystemTime>,
@@ -91,7 +93,9 @@ pub fn trigger(f: &TriggerFacts) -> (Mode, String) {
     if !f.on {
         return (Mode::Manual, "Only runs tickets you give it".to_string());
     }
-    let line = if let Some(ticket) = f.open_run {
+    let line = if let (Some(ticket), true) = (f.open_run, f.asking) {
+        format!("{ticket} is paused for a product answer")
+    } else if let Some(ticket) = f.open_run {
         format!("Next ticket after {ticket}")
     } else {
         let every = Duration::from_secs(u64::from(f.settings.every_minutes) * 60);
@@ -553,6 +557,7 @@ mod tests {
             checking: false,
             stopped: None,
             open_run: None,
+            asking: false,
             found: None,
             last: None,
             now: SystemTime::UNIX_EPOCH + Duration::from_secs(10_000),
@@ -576,6 +581,8 @@ mod tests {
         assert_eq!(trigger(&f).1, "Looking in Linear for the next INTH ticket…");
         f.open_run = Some("INTH-169");
         assert_eq!(trigger(&f).1, "Next ticket after INTH-169");
+        f.asking = true;
+        assert_eq!(trigger(&f).1, "INTH-169 is paused for a product answer");
     }
 
     #[test]

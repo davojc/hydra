@@ -88,9 +88,14 @@ pub fn card(run: &Run) -> Card {
             StageStatus::Waiting => Segment::Pending,
         })
         .collect();
+    let paused_for = if state == CardState::Asking {
+        " · paused for product"
+    } else {
+        ""
+    };
     Card {
         name: run.pipeline.name.clone(),
-        line: format!("{} · {stage}", run.ticket),
+        line: format!("{} · {stage}{paused_for}", run.ticket),
         state,
         segments,
     }
@@ -267,6 +272,7 @@ mod tests {
             (c.state, c.state.word()),
             (CardState::Asking, "Asked product")
         );
+        assert_eq!(c.line, "INTH-482 · Understand · paused for product");
         runs.answered(&id, "No").unwrap();
         assert_eq!(card(runs.run(&id).unwrap()).state, CardState::Working);
     }

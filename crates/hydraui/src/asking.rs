@@ -4,12 +4,20 @@
 use std::time::{Duration, SystemTime};
 
 /// How often a waiting session is asked to look in its Slack thread.
-pub const CHECK_EVERY: Duration = Duration::from_secs(15 * 60);
+pub const CHECK_EVERY: Duration = Duration::from_secs(5 * 60);
 
 /// Whether the session asked at `since`, last told to look at `last`, should look again.
 pub fn check_due(since: SystemTime, last: Option<SystemTime>, now: SystemTime) -> bool {
     now.duration_since(last.unwrap_or(since))
         .is_ok_and(|waited| waited >= CHECK_EVERY)
+}
+
+/// Whole minutes until the next look (rounded up), for the card: `0` when one is due.
+pub fn next_check_in(since: SystemTime, last: Option<SystemTime>, now: SystemTime) -> u64 {
+    let waited = now
+        .duration_since(last.unwrap_or(since))
+        .unwrap_or_default();
+    CHECK_EVERY.saturating_sub(waited).as_secs().div_ceil(60)
 }
 
 /// Typed to the waiting session to have it look for the answer.
@@ -34,13 +42,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_waiting_session_looks_every_fifteen_minutes() {
+    fn a_waiting_session_looks_every_five_minutes() {
         let asked = SystemTime::UNIX_EPOCH + Duration::from_secs(100_000);
         let min = |m: u64| Duration::from_secs(m * 60);
-        assert!(!check_due(asked, None, asked + min(14)));
-        assert!(check_due(asked, None, asked + min(15)));
-        assert!(!check_due(asked, Some(asked + min(15)), asked + min(29)));
-        assert!(check_due(asked, Some(asked + min(15)), asked + min(30)));
+        assert!(!check_due(asked, None, asked + min(4)));
+        assert!(check_due(asked, None, asked + min(5)));
+        assert!(!check_due(asked, Some(asked + min(5)), asked + min(9)));
+        assert!(check_due(asked, Some(asked + min(5)), asked + min(10)));
+        assert_eq!(
+            next_check_in(asked, None, asked + Duration::from_secs(61)),
+            4
+        );
+        assert_eq!(
+            next_check_in(asked, Some(asked + min(5)), asked + min(9)),
+            1
+        );
+        assert_eq!(next_check_in(asked, None, asked + min(7)), 0);
     }
 
     #[test]

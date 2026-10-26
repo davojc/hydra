@@ -88,6 +88,23 @@ impl Workspace {
         }
     }
 
+    /// Whether `orch`'s run waits for product's answer to a stage's question.
+    fn run_asking(&self, orch: PaneId, cx: &gpui::App) -> bool {
+        let Some(token) = self
+            .panes
+            .get(&orch)
+            .and_then(|v| v.read(cx).mcp_token().map(str::to_string))
+        else {
+            return false;
+        };
+        server::get().is_some_and(|sv| {
+            server::lock(sv.registry())
+                .runs
+                .current(&token)
+                .is_some_and(|r| r.asking.is_some())
+        })
+    }
+
     /// The ticket of `orch`'s run in progress.
     fn open_run_ticket(&self, orch: PaneId, cx: &gpui::App) -> Option<String> {
         let token = self.panes.get(&orch)?.read(cx).mcp_token()?.to_string();
@@ -526,6 +543,7 @@ impl Workspace {
             checking: w.is_some_and(|w| w.checking),
             stopped: w.and_then(|w| w.stopped.as_deref()),
             open_run: open_run.as_deref(),
+            asking: self.run_asking(orch, cx),
             found: w.and_then(|w| w.status.as_deref()),
             last: w.and_then(|w| w.last),
             now: SystemTime::now(),

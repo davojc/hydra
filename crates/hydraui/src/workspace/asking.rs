@@ -1,5 +1,5 @@
 //! A stage's question for product in the app: the card's **Asked product** block with the
-//! question, its Slack thread and **Answer…**; a notification when a stage asks; and every 15
+//! question, its Slack thread and **Answer…**; a notification when a stage asks; and every 5
 //! minutes, the waiting session is told to look in its thread (`crate::asking`).
 
 use std::time::SystemTime;
@@ -63,7 +63,7 @@ impl Workspace {
         }
     }
 
-    /// Each second: a session waiting on its Slack thread whose 15 minutes are up is told to
+    /// Each second: a session waiting on its Slack thread whose 5 minutes are up is told to
     /// look again.
     pub(super) fn asking_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(sv) = server::get() else {
@@ -104,6 +104,16 @@ impl Workspace {
             self.pending_wakes.insert(pane, (run, prompt));
         }
         self.send_wakes(window, cx);
+    }
+
+    /// **Check now**: the waiting session looks in its thread at once, then every 5 minutes
+    /// from there.
+    fn check_answer_now(&mut self, run: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let due = SystemTime::now()
+            .checked_sub(crate::asking::CHECK_EVERY)
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        self.ask_checks.insert(run.to_string(), due);
+        self.asking_tick(window, cx);
     }
 
     /// **Answer…**: the user's answer to `run`'s question, recorded and typed to the stage.
@@ -211,13 +221,25 @@ impl Workspace {
             let ask = r.asking.clone()?;
             (r.id.clone(), ask, r.pipeline.product_channel.clone())
         };
-        let waited = SystemTime::now()
+        let now = SystemTime::now();
+        let waited = now
             .duration_since(ask.since)
             .map_or(0, |d| d.as_secs() / 60);
-        let head = match channel {
-            Some(ch) => format!("Asked product in {ch} · {waited} min ago"),
-            None => format!("Asks you · {waited} min ago"),
+        let asked = match channel {
+            Some(ch) => format!("Asked in {ch} {waited} min ago"),
+            None => format!("Asked you {waited} min ago"),
         };
+        // Only a question with a Slack thread is looked for; one asked of the user waits for
+        // Answer….
+        let meta = if ask.link.is_some() {
+            match crate::asking::next_check_in(ask.since, self.ask_checks.get(&run).copied(), now) {
+                0 => format!("{asked} · checking Slack for a reply"),
+                m => format!("{asked} · next check for a reply in {m} min"),
+            }
+        } else {
+            asked
+        };
+        let has_thread = ask.link.is_some();
         Some(
             v_flex()
                 .id(SharedString::from(format!("question-{orch}")))
@@ -228,13 +250,25 @@ impl Workspace {
                 .gap_1()
                 .rounded(px(6.))
                 .bg(color(theme::AMBER_TINT))
-                .child(div().text_xs().text_color(color(theme::AMBER)).child(head))
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(color(theme::AMBER))
+                        .child("⏸ Paused: waiting for product's answer"),
+                )
                 .child(
                     div()
                         .text_xs()
                         .text_color(color(theme::TEXT))
                         .line_clamp(4)
                         .child(ask.question.clone()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(color(theme::TEXT_SECONDARY))
+                        .child(meta),
                 )
                 .child(
                     h_flex()
@@ -250,6 +284,18 @@ impl Workspace {
                                 .child("Open thread ↗")
                                 .on_click(move |_, _, cx| cx.open_url(&url))
                         }))
+                        .when(has_thread, |d| {
+                            let run = run.clone();
+                            d.child(
+                                Button::new(SharedString::from(format!("question-check-{orch}")))
+                                    .label("Check now")
+                                    .ghost()
+                                    .xsmall()
+                                    .on_click(cx.listener(move |ws, _, window, cx| {
+                                        ws.check_answer_now(&run, window, cx)
+                                    })),
+                            )
+                        })
                         .child(
                             Button::new(SharedString::from(format!("question-answer-{orch}")))
                                 .label("Answer…")

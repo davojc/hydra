@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, SharedString, Window, div, px};
 use gpui_component::WindowExt;
-use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::button::Button;
 use gpui_component::notification::Notification;
 use gpui_component::switch::Switch;
 use gpui_component::{Sizable, h_flex, v_flex};
@@ -34,6 +34,8 @@ pub(super) struct Watch {
     pub status: Option<String>,
     /// Why it switched itself off, until a person switches it again.
     pub stopped: Option<String>,
+    /// The check out was asked for with **Pick next ticket**, so its result is announced.
+    pub by_hand: bool,
 }
 
 /// The Linear side of a run that started (`start`) or ended, off the UI thread: what was
@@ -172,6 +174,9 @@ impl Workspace {
             return;
         }
         self.start_linear_check(orch, window, cx);
+        if let Some(w) = self.linear_watch.get_mut(&orch) {
+            w.by_hand = true;
+        }
     }
 
     /// Each second: a watcher whose check is due starts one (§3).
@@ -248,6 +253,15 @@ impl Workspace {
             return;
         };
         w.checking = false;
+        if let (true, Some(settings)) = (std::mem::take(&mut w.by_hand), &pipeline.linear) {
+            let (ok, text) = linear_watch::pick_result(settings, &found);
+            let note = if ok {
+                Notification::info(text)
+            } else {
+                Notification::error(text)
+            };
+            window.push_notification(note.title(pipeline.name.clone()), cx);
+        }
         let skipped = |check: &linear_watch::Check| {
             if check.skipped.is_empty() {
                 String::new()
@@ -281,6 +295,8 @@ impl Workspace {
                     skipped(&check)
                 ));
             }
+            // A pick by hand that failed says so itself and doesn't count against Automatic.
+            Err(e) if !w.on => crate::action_log::write(format!("linear: {e}")),
             Err(e) => {
                 crate::action_log::write(format!("linear: {e}"));
                 match w.failures.record(&e) {
@@ -486,6 +502,7 @@ impl Workspace {
             linear_watch::Mode::Stopped => (theme::RED, theme::RED_TINT, "■"),
         };
         let on = mode == linear_watch::Mode::Automatic;
+        let checking = w.is_some_and(|w| w.checking);
         let tooltip = linear_watch::trigger_tooltip(&settings);
         Some(
             v_flex()
@@ -516,33 +533,37 @@ impl Workspace {
                                 .bg(color(bg))
                                 .text_color(color(fg))
                                 .child(format!("{dot} {}", mode.label())),
-                        )
-                        .when(open_run.is_none(), |d| {
-                            d.child(
-                                Button::new(SharedString::from(format!("linear-now-{orch}")))
-                                    .label("Pick now")
-                                    .ghost()
-                                    .xsmall()
-                                    .tooltip(format!(
-                                        "Pick the {} ticket in {} whose SLA breaches first, once",
-                                        settings.team, settings.pick
-                                    ))
-                                    .on_click(cx.listener(move |ws, _, window, cx| {
-                                        ws.check_linear_now(orch, window, cx)
-                                    })),
-                            )
-                        }),
+                        ),
                 )
                 .child(
                     div()
                         .text_xs()
-                        .text_color(color(if mode == linear_watch::Mode::Stopped {
+                        .text_color(color(if mode == linear_watch::Mode::Stopped && !checking {
                             theme::RED
                         } else {
                             theme::TEXT_SECONDARY
                         }))
                         .child(line),
                 )
+                .when(open_run.is_none(), |d| {
+                    d.child(
+                        h_flex().child(
+                            Button::new(SharedString::from(format!("linear-now-{orch}")))
+                                .label("Pick next ticket")
+                                .outline()
+                                .xsmall()
+                                .loading(checking)
+                                .tooltip(format!(
+                                    "Start the {} ticket in {} whose SLA breaches first, now. \
+                                     Once: it doesn't switch Automatic on or off.",
+                                    settings.team, settings.pick
+                                ))
+                                .on_click(cx.listener(move |ws, _, window, cx| {
+                                    ws.check_linear_now(orch, window, cx)
+                                })),
+                        ),
+                    )
+                })
                 .into_any_element(),
         )
     }

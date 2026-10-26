@@ -186,8 +186,10 @@ the orchestrator asking "which ticket?" while its log said it was watching. The 
 mode:
 
 - **A switch and a pill**: **● Automatic** (hydraui picks), **○ Manual** (only what you give it)
-  or **■ Stopped** (it switched itself off; the line says why). **Pick now** picks once in
-  either mode, and is hidden while a ticket runs.
+  or **■ Stopped** (it switched itself off; the line says why). **Pick next ticket** picks
+  once in either mode (a spinner while it looks, then a notification saying what it picked or
+  why nothing), and is hidden while a ticket runs. A failed pick by hand doesn't count
+  against Automatic.
 - **One line** on what happens next: `Nothing new · next look in 4 min`, `Looking in Linear…`,
   `Next ticket after INTH-169`, `Only runs tickets you give it`. What Automatic picks is the
   switch's tooltip; the full check results stay in `hydraui.log`, with every switch logged.
@@ -196,4 +198,5 @@ mode:
   hydraui or from them". Switching mode needs no new prompt.
 - **A secret store that can't be read just now** (a keychain that can't show its prompt) counts
   as a failed check, not a rejected key: only a missing key stops Automatic at once.
-- The list is 240 px wide by default (was 200).
+- The list is 240 px wide by default (was 200), and **Ticket history** and **Pipeline
+  settings** left it: the Pipeline tab has a bar, **Ticket · History · Settings**.

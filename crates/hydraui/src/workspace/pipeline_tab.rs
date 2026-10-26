@@ -496,21 +496,81 @@ impl Workspace {
         self.send_wakes(window, cx);
     }
 
-    /// The Pipeline tab's content for orchestrator `orch`.
+    /// The Pipeline tab for orchestrator `orch`: its views' bar over the one shown.
     pub(super) fn render_pipeline(&self, orch: PaneId, cx: &mut Context<Self>) -> AnyElement {
-        let snap = self.pipeline_snapshot(orch, cx);
         let tab = self.pipeline_tabs.get(&orch).cloned().unwrap_or_default();
-        if tab.view == TabView::Settings && self.pipeline_settings.contains_key(&orch) {
+        let view = match tab.view {
+            TabView::Settings if !self.pipeline_settings.contains_key(&orch) => TabView::Pipeline,
+            v => v,
+        };
+        v_flex()
+            .size_full()
+            .bg(color(theme::PANEL))
+            .child(self.render_view_bar(orch, view, cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.render_pipeline_view(orch, &tab, view, cx)),
+            )
+            .into_any_element()
+    }
+
+    /// **Ticket · History · Settings**: the pipeline's views, kept here rather than as links
+    /// under its card.
+    fn render_view_bar(&self, orch: PaneId, current: TabView, cx: &mut Context<Self>) -> Div {
+        let item = |id: &str, label: &'static str, view: TabView| {
+            let on = view == current;
+            div()
+                .id(SharedString::from(format!("pipeline-view-{id}-{orch}")))
+                .px_2()
+                .py(px(3.))
+                .rounded(px(5.))
+                .text_size(px(12.5))
+                .cursor_pointer()
+                .when(on, |d| {
+                    d.bg(color(theme::TEAL_TINT)).text_color(color(theme::TEXT))
+                })
+                .when(!on, |d| {
+                    d.text_color(color(theme::TEXT_SECONDARY))
+                        .hover(|d| d.bg(color(theme::RAISED)))
+                })
+                .child(label)
+                .on_click(cx.listener(move |ws, _, window, cx| match view {
+                    TabView::Settings => ws.open_pipeline_settings(orch, window, cx),
+                    v => ws.show_pipeline_view(orch, v, window, cx),
+                }))
+        };
+        h_flex()
+            .px_3()
+            .py_1p5()
+            .gap_1()
+            .border_b_1()
+            .border_color(color(theme::BORDER_SUBTLE))
+            .child(item("ticket", "Ticket", TabView::Pipeline))
+            .child(item("history", "History", TabView::History))
+            .child(item("settings", "Settings", TabView::Settings))
+    }
+
+    fn render_pipeline_view(
+        &self,
+        orch: PaneId,
+        tab: &PipelineTab,
+        view: TabView,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let snap = self.pipeline_snapshot(orch, cx);
+        if view == TabView::Settings {
             return self.render_pipeline_settings(orch, cx);
         }
-        if tab.view == TabView::History {
+        if view == TabView::History {
             return self.render_history(orch, cx);
         }
         let Some(run) = snap.run.as_ref() else {
             return self.render_quiet(
                 "No ticket in progress",
-                "Start one by asking the \
-                orchestrator for a ticket; its stages show here as they run.",
+                "Give the orchestrator a ticket, or for a Linear pipeline use Pick next ticket \
+                 or Automatic under its card; its stages show here as they run.",
             );
         };
         let panel = panel_for(Some(run), tab.selected.as_deref());
@@ -524,7 +584,7 @@ impl Workspace {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .child(self.render_panel(orch, run, &snap, &tab, panel, now, cx)),
+                    .child(self.render_panel(orch, run, &snap, tab, panel, now, cx)),
             )
             .into_any_element()
     }

@@ -156,53 +156,6 @@ impl Workspace {
                 .child(self.render_pipeline_card(*orch, card, active, cx))
                 .children(self.render_linear_row(*orch, cx));
             let orch = *orch;
-            let history_shown = self.pipeline_shown(orch)
-                && self.pipeline_tabs.get(&orch).map(|t| t.view)
-                    == Some(super::pipeline_tab::TabView::History);
-            block = block.child(
-                div()
-                    .id(SharedString::from(format!("pipeline-history-link-{orch}")))
-                    .ml(px(26.))
-                    .mr_1()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .text_size(px(12.5))
-                    .text_color(cx.theme().muted_foreground)
-                    .when(history_shown, |d| d.bg(tint.opacity(0.2)))
-                    .hover(|d| d.bg(tint.opacity(0.12)))
-                    .cursor_pointer()
-                    .child("Ticket history")
-                    .on_click(cx.listener(move |ws, _, window, cx| {
-                        ws.show_pipeline_view(
-                            orch,
-                            super::pipeline_tab::TabView::History,
-                            window,
-                            cx,
-                        )
-                    })),
-            );
-            let settings_shown = self.pipeline_shown(orch)
-                && self.pipeline_tabs.get(&orch).map(|t| t.view)
-                    == Some(super::pipeline_tab::TabView::Settings);
-            block = block.child(
-                div()
-                    .id(SharedString::from(format!("pipeline-settings-link-{orch}")))
-                    .ml(px(26.))
-                    .mr_1()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .text_size(px(12.5))
-                    .text_color(cx.theme().muted_foreground)
-                    .when(settings_shown, |d| d.bg(tint.opacity(0.2)))
-                    .hover(|d| d.bg(tint.opacity(0.12)))
-                    .cursor_pointer()
-                    .child("Pipeline settings")
-                    .on_click(cx.listener(move |ws, _, window, cx| {
-                        ws.open_pipeline_settings(orch, window, cx)
-                    })),
-            );
             if let Some(row) =
                 self.terminal_row(orch, shown == Some(orch), tint, Nest::Orchestrator, cx)
             {

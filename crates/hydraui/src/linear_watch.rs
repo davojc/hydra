@@ -73,6 +73,18 @@ pub struct TriggerFacts<'a> {
 /// The card's mode and one short line saying what it means right now; the card is narrow, so
 /// what the mode watches is in the switch's tooltip ([`trigger_tooltip`]).
 pub fn trigger(f: &TriggerFacts) -> (Mode, String) {
+    let mode = match (f.on, f.stopped) {
+        (true, _) => Mode::Automatic,
+        (false, Some(_)) => Mode::Stopped,
+        (false, None) => Mode::Manual,
+    };
+    // A look in progress, by the timer or Pick next ticket, says so in either mode.
+    if f.checking && f.open_run.is_none() {
+        return (
+            mode,
+            format!("Looking in Linear for the next {} ticket…", f.settings.team),
+        );
+    }
     if let Some(why) = f.stopped.filter(|_| !f.on) {
         return (Mode::Stopped, format!("Stopped: {why}"));
     }
@@ -81,8 +93,6 @@ pub fn trigger(f: &TriggerFacts) -> (Mode, String) {
     }
     let line = if let Some(ticket) = f.open_run {
         format!("Next ticket after {ticket}")
-    } else if f.checking {
-        "Looking in Linear…".to_string()
     } else {
         let every = Duration::from_secs(u64::from(f.settings.every_minutes) * 60);
         let left = f
@@ -101,6 +111,39 @@ pub fn trigger(f: &TriggerFacts) -> (Mode, String) {
     (Mode::Automatic, line)
 }
 
+/// What a **Pick next ticket** found, for the notification it ends with.
+pub fn pick_result(s: &LinearSettings, found: &Result<Check, LinearError>) -> (bool, String) {
+    match found {
+        Ok(Check {
+            claimed: Some(t), ..
+        }) => (
+            true,
+            format!(
+                "Picked {}: {}. The orchestrator is starting it.",
+                t.identifier, t.title
+            ),
+        ),
+        Ok(check) => {
+            let who = match s.assignee {
+                Assignee::Unassigned => "unassigned ",
+                Assignee::Any => "",
+            };
+            let ran = match check.skipped.len() {
+                0 => String::new(),
+                n => format!(" ({n} more already run here)"),
+            };
+            (
+                true,
+                format!(
+                    "No {} ticket to pick: none {who}in {} with an SLA{ran}.",
+                    s.team, s.pick
+                ),
+            )
+        }
+        Err(e) => (false, format!("Couldn't look in Linear: {e}")),
+    }
+}
+
 /// The switch's tooltip: what automatic picks, and that off means nothing starts by itself.
 pub fn trigger_tooltip(s: &LinearSettings) -> String {
     let who = match s.assignee {
@@ -110,7 +153,7 @@ pub fn trigger_tooltip(s: &LinearSettings) -> String {
     format!(
         "On: every {} min, picks the {who}{} ticket in {} whose SLA breaches first, one at a \
          time. Off: nothing starts unless you give the orchestrator a ticket or press Pick \
-         now.",
+         next ticket.",
         s.every_minutes, s.team, s.pick
     )
 }
@@ -519,7 +562,7 @@ mod tests {
         f.last = Some(f.now - Duration::from_secs(400));
         assert_eq!(trigger(&f).1, "Nothing new · next look now");
         f.checking = true;
-        assert_eq!(trigger(&f).1, "Looking in Linear…");
+        assert_eq!(trigger(&f).1, "Looking in Linear for the next INTH ticket…");
         f.open_run = Some("INTH-169");
         assert_eq!(trigger(&f).1, "Next ticket after INTH-169");
     }
@@ -544,6 +587,50 @@ mod tests {
         // Back on, an old stop no longer counts.
         f.on = true;
         assert_eq!(trigger(&f).0, Mode::Automatic);
+    }
+
+    #[test]
+    fn a_pick_by_hand_says_it_is_looking_in_manual_too() {
+        let s = inth();
+        let mut f = facts(&s);
+        f.on = false;
+        f.checking = true;
+        assert_eq!(
+            trigger(&f),
+            (
+                Mode::Manual,
+                "Looking in Linear for the next INTH ticket…".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn a_pick_by_hand_ends_saying_what_it_found() {
+        let s = inth();
+        let picked = Ok(Check {
+            claimed: Some(t("INTH-170", "2026-11-04T14:00:00.000Z", None)),
+            skipped: vec![],
+        });
+        assert_eq!(
+            pick_result(&s, &picked),
+            (
+                true,
+                "Picked INTH-170: Title of INTH-170. The orchestrator is starting it.".to_string()
+            )
+        );
+        let none = Ok(Check {
+            claimed: None,
+            skipped: vec!["INTH-165".into(), "INTH-166".into()],
+        });
+        assert_eq!(
+            pick_result(&s, &none).1,
+            "No INTH ticket to pick: none unassigned in Ready for Investigation with an SLA \
+             (2 more already run here)."
+        );
+        let failed = Err(LinearError::Failed("timed out".into()));
+        let (ok, text) = pick_result(&s, &failed);
+        assert!(!ok);
+        assert!(text.starts_with("Couldn't look in Linear: "), "{text}");
     }
 
     #[test]

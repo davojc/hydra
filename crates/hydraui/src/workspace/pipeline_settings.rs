@@ -13,6 +13,7 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandItem, CommandState};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::notification::Notification;
+use gpui_component::select::{Select, SelectEvent, SelectState};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::{Disableable, Sizable, WindowExt, h_flex, v_flex};
 
@@ -60,8 +61,13 @@ pub(super) struct SettingsDraft {
     next_key: u64,
     linear: LinearDraft,
     slack: SlackDraft,
+    /// The Trigger dropdown: None, Linear or Slack.
+    trigger: Entity<SelectState<Vec<&'static str>>>,
     _subs: Vec<Subscription>,
 }
+
+/// The Trigger dropdown's choices, in order.
+const TRIGGERS: [&str; 3] = ["None", "Linear", "Slack"];
 
 /// The Slack section: off saves the pipeline without a `[slack]` table. Linear and Slack can't
 /// both be on.
@@ -333,6 +339,36 @@ impl Workspace {
                 pipeline::DEFAULT_REACTION,
             ),
         };
+        let chosen = if saved.slack.is_some() {
+            2
+        } else if saved.linear.is_some() {
+            1
+        } else {
+            0
+        };
+        let trigger = cx.new(|cx| {
+            SelectState::new(
+                TRIGGERS.to_vec(),
+                Some(gpui_component::IndexPath::new(chosen)),
+                window,
+                cx,
+            )
+        });
+        subs.push(cx.subscribe_in(
+            &trigger,
+            window,
+            move |ws, _, e: &SelectEvent<Vec<&'static str>>, _, cx| {
+                let SelectEvent::Confirm(Some(choice)) = e else {
+                    return;
+                };
+                let choice = *choice;
+                // One trigger: choosing one turns the other off.
+                ws.with_draft(orch, cx, |d| {
+                    d.linear.on = choice == "Linear";
+                    d.slack.on = choice == "Slack";
+                })
+            },
+        ));
         let mut draft = SettingsDraft {
             file,
             saved: saved.clone(),
@@ -347,6 +383,7 @@ impl Workspace {
             next_key: 0,
             linear,
             slack,
+            trigger,
             _subs: Vec::new(),
         };
         for s in &saved.stages {
@@ -444,28 +481,7 @@ impl Workspace {
                 )
                 .child(div().w(px(300.)).child(Input::new(input).small()))
         };
-        let toggle = Button::new(SharedString::from(format!("linear-on-{orch}")))
-            .label(if l.on {
-                "Pulling tickets from Linear"
-            } else {
-                "Pull tickets from Linear"
-            })
-            .when(l.on, |b| b.primary())
-            .when(!l.on, |b| b.outline())
-            .small()
-            .on_click(cx.listener(move |ws, _, _, cx| {
-                ws.with_draft(orch, cx, |d| {
-                    d.linear.on = !d.linear.on;
-                    // One trigger: Linear on takes Slack off.
-                    if d.linear.on {
-                        d.slack.on = false;
-                    }
-                })
-            }));
-        let mut body = v_flex()
-            .gap_2()
-            .child(text(11., theme::TEXT_MUTED).child("LINEAR"))
-            .child(h_flex().child(toggle));
+        let mut body = v_flex().gap_2();
         if l.on {
             let who = |any: bool, label: &'static str| {
                 Button::new(SharedString::from(format!("linear-any-{any}-{orch}")))
@@ -509,13 +525,8 @@ impl Workspace {
         body
     }
 
-    /// The Slack section: pull requests posted in a channel, one at a time.
-    fn render_slack_settings(
-        &self,
-        orch: PaneId,
-        draft: &SettingsDraft,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
+    /// The Slack trigger's options: pull requests posted in a channel.
+    fn render_slack_settings(&self, draft: &SettingsDraft) -> impl IntoElement + use<> {
         let sl = &draft.slack;
         let row = |label: &str, input: &Entity<InputState>, hint: &str| {
             h_flex()
@@ -529,28 +540,7 @@ impl Workspace {
                 .child(div().w(px(300.)).child(Input::new(input).small()))
                 .child(text(12., theme::TEXT_MUTED).child(hint.to_string()))
         };
-        let toggle = Button::new(SharedString::from(format!("slack-on-{orch}")))
-            .label(if sl.on {
-                "Taking pull requests from Slack"
-            } else {
-                "Take pull requests from Slack"
-            })
-            .when(sl.on, |b| b.primary())
-            .when(!sl.on, |b| b.outline())
-            .small()
-            .on_click(cx.listener(move |ws, _, _, cx| {
-                ws.with_draft(orch, cx, |d| {
-                    d.slack.on = !d.slack.on;
-                    // One trigger: Slack on takes Linear off.
-                    if d.slack.on {
-                        d.linear.on = false;
-                    }
-                })
-            }));
-        let mut body = v_flex()
-            .gap_2()
-            .child(text(11., theme::TEXT_MUTED).child("SLACK"))
-            .child(h_flex().child(toggle));
+        let mut body = v_flex().gap_2();
         if sl.on {
             body = body
                 .child(row(
@@ -1102,8 +1092,24 @@ impl Workspace {
                                             ),
                                     ),
                             )
-                            .child(self.render_linear_settings(orch, draft, cx))
-                            .child(self.render_slack_settings(orch, draft, cx))
+                            .child(
+                                v_flex()
+                                    .gap_2()
+                                    .child(section("Trigger"))
+                                    .child(div().w(px(220.)).child(
+                                        Select::new(&draft.trigger).small().menu_width(px(220.)),
+                                    ))
+                                    .child(text(12., theme::TEXT_MUTED).child(if draft.slack.on {
+                                        "Pull requests posted in a Slack channel."
+                                    } else if draft.linear.on {
+                                        "Tickets from a Linear team, soonest SLA first."
+                                    } else {
+                                        "None: it runs only the tickets you give its \
+                                             orchestrator."
+                                    }))
+                                    .child(self.render_linear_settings(orch, draft, cx))
+                                    .child(self.render_slack_settings(draft)),
+                            )
                             .child(
                                 v_flex()
                                     .gap_2()

@@ -673,7 +673,7 @@ watch = true                # start in Automatic
   candidate. Yours aren't queued, and a message carrying only yours gets no reaction, so someone
   else can take it. Passed-over PRs are remembered while hydraui runs, so GitHub isn't asked
   again. A failed lookup fails the look, like any other.
-- **In Pipeline settings** (added later the same day): a **Slack** section beside **Linear**, with
+- **In Pipeline settings** (added later the same day; since folded into one **Trigger** section, Jordan: a heading, a dropdown of None, Linear or Slack, then that trigger's options): a **Slack** section beside **Linear**, with
   the channel id, how it's shown, how often to check, how far back to look and the reaction.
   Turning one trigger on turns the other off, and saving refuses both at once. The table keeps
   its comments, and `label` is dropped when it's empty or the channel id.

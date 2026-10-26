@@ -616,3 +616,19 @@ clears its bar goes on regardless. A person can now hold a stage to them.
   over a pass in the same wake-up).
 - **Logged and resumed** as `marked {stage, reason, on}`, `sent back {stage}` and `send-back
   cancelled {stage}`. A restart replays them, a waiting send-back included.
+
+## 17. New pipeline (added 2026-10-26)
+
+Until now a pipeline could be edited in **Pipeline settings** but not made in the app: another
+meant copying a TOML file by hand.
+
+- **Where.** **New pipeline…** in the launcher, and as the last entry of **Start orchestrator…**'s
+  pipeline list (which now always shows, even with one pipeline).
+- **Start from.** **Blank** (one stage, `first`, to rename and fill in) or **Copy of <pipeline>**:
+  its stages, bars, prompts, branch and product channel, comments kept.
+- **Name.** The name the views show; its file is `<name>` in lowercase with words joined by `-`
+  (`pipeline::file_name_for`). An existing file is never overwritten.
+- **A copy takes no tickets yet.** Its `[linear] watch` is set false and `[autostart]` dropped, so
+  it can't race its original for the same tickets until you turn them on in its settings.
+- **Then** its orchestrator starts (in the environment already chosen, else one picked) and its
+  Pipeline tab opens on **Settings**.

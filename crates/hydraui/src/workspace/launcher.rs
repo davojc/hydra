@@ -108,6 +108,7 @@ impl Workspace {
                 let _ = crate::window_layout::spawn_hydraui(None);
             }
             Action::StartOrchestrator => self.start_orchestrator(window, cx),
+            Action::NewPipeline => self.new_pipeline(None, window, cx),
             Action::EditPipelines => {
                 let root = self.hydra.paths.root().to_path_buf();
                 if let Err(e) = crate::pipeline::ensure_example(&root) {
@@ -418,18 +419,10 @@ impl Workspace {
             crate::action_log::write(format!("example pipeline: {e}"));
         }
         let names = crate::pipeline::names(&root);
-        if let [only] = names.as_slice() {
-            let only = only.clone();
-            return self.open_orchestrator(&env, &only, window, cx);
-        }
-        // Each file by its name and the name the views show, so they're told apart.
-        let labels: Vec<String> = names
-            .iter()
-            .map(|n| match crate::pipeline::load(&root, n) {
-                Ok(p) if p.name != *n => format!("{n} · {}", p.name),
-                _ => n.clone(),
-            })
-            .collect();
+        // Each file by its name and the name the views show, so they're told apart; then a
+        // new one.
+        let mut labels = pipeline_labels(&root, &names);
+        labels.push("New pipeline…".into());
         let state = cx.new(|cx| CommandState::new(window, cx));
         let workspace = cx.entity();
         let first = Cell::new(true);
@@ -443,14 +436,162 @@ impl Workspace {
                     .items(labels.iter().map(|l| CommandItem::new().label(l.clone())))
                     .placeholder("Pipeline")
                     .on_confirm(move |ix, window, cx| {
-                        if let Some(name) = choices.get(ix.row).cloned() {
-                            window.close_dialog(cx);
-                            workspace
-                                .update(cx, |ws, cx| ws.open_orchestrator(&env, &name, window, cx));
+                        window.close_dialog(cx);
+                        let env = env.clone();
+                        match choices.get(ix.row).cloned() {
+                            Some(name) => workspace
+                                .update(cx, |ws, cx| ws.open_orchestrator(&env, &name, window, cx)),
+                            None => workspace
+                                .update(cx, |ws, cx| ws.new_pipeline(Some(env), window, cx)),
                         }
                     }),
             )
         });
+    }
+
+    /// **New pipeline…**: start blank or from a copy of a pipeline, name it, then its
+    /// orchestrator starts (in `env`, else one picked) with its settings open to fill in.
+    fn new_pipeline(&mut self, env: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.hydra.paths.root().to_path_buf();
+        let names = crate::pipeline::names(&root);
+        let mut labels = vec!["Blank: one stage to fill in".to_string()];
+        labels.extend(
+            pipeline_labels(&root, &names)
+                .into_iter()
+                .map(|l| format!("Copy of {l}")),
+        );
+        let state = cx.new(|cx| CommandState::new(window, cx));
+        let workspace = cx.entity();
+        let first = Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first.replace(false) {
+                state.update(cx, |s, cx| s.focus(window, cx));
+            }
+            let (names, workspace, env) = (names.clone(), workspace.clone(), env.clone());
+            dialog.title("New pipeline: start from").child(
+                Command::new(&state)
+                    .items(labels.iter().map(|l| CommandItem::new().label(l.clone())))
+                    .placeholder("Blank, or a pipeline to copy")
+                    .on_confirm(move |ix, window, cx| {
+                        window.close_dialog(cx);
+                        let from = ix.row.checked_sub(1).and_then(|i| names.get(i).cloned());
+                        let env = env.clone();
+                        workspace.update(cx, |ws, cx| ws.name_pipeline(from, env, window, cx));
+                    }),
+            )
+        });
+    }
+
+    /// Names the new pipeline (copied from `from`, else blank) and writes its file.
+    fn name_pipeline(
+        &mut self,
+        from: Option<String>,
+        env: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("e.g. PRE bugs, or Release notes"));
+        let ws = cx.entity();
+        let first = Cell::new(true);
+        let hint = match &from {
+            Some(f) => format!(
+                "A copy of {f}: its stages, bars and prompts. It won't watch Linear or start at \
+                 launch until you turn those on in its settings."
+            ),
+            None => "One stage to rename and fill in; add more in its settings.".to_string(),
+        };
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first.replace(false) {
+                input.update(cx, |s, cx| s.focus(window, cx));
+            }
+            let submit = {
+                let (ws, input, from, env) = (ws.clone(), input.clone(), from.clone(), env.clone());
+                move |window: &mut Window, cx: &mut gpui::App| {
+                    let title = input.read(cx).value().trim().to_string();
+                    let root = ws.read(cx).hydra.paths.root().to_path_buf();
+                    match crate::pipeline::create(&root, &title, from.as_deref()) {
+                        Ok(name) => {
+                            window.close_dialog(cx);
+                            crate::action_log::write(format!(
+                                "new pipeline {name} ({})",
+                                from.as_deref()
+                                    .map_or("blank".into(), |f| format!("from {f}"))
+                            ));
+                            let env = env.clone();
+                            ws.update(cx, |ws, cx| ws.start_new_pipeline(name, env, window, cx));
+                        }
+                        Err(e) => window
+                            .push_notification(Notification::warning(e).title("New pipeline"), cx),
+                    }
+                }
+            };
+            let on_ok = submit.clone();
+            dialog
+                .title("Name the pipeline")
+                .on_ok(move |_, window, cx| {
+                    on_ok(window, cx);
+                    false
+                })
+                .child(
+                    v_flex().gap_2().child(Input::new(&input)).child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(hint.clone()),
+                    ),
+                )
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("new-pipeline-cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("new-pipeline-go")
+                                .label("Create and edit")
+                                .primary()
+                                .on_click(move |_, window, cx| submit(window, cx)),
+                        ),
+                )
+        });
+    }
+
+    /// The new pipeline's orchestrator, in `env` or one picked, with its settings open.
+    fn start_new_pipeline(
+        &mut self,
+        name: String,
+        env: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let open =
+            move |ws: &mut Self, env: String, window: &mut Window, cx: &mut Context<Self>| {
+                ws.open_orchestrator(&env, &name, window, cx);
+                let orch = ws
+                    .orchestrators
+                    .iter()
+                    .find(|(_, f)| **f == name)
+                    .map(|(id, _)| *id);
+                if let Some(orch) = orch {
+                    ws.open_pipeline_settings(orch, window, cx);
+                }
+            };
+        match env {
+            Some(env) => open(self, env, window, cx),
+            None => {
+                let envs: Vec<String> = self
+                    .hydra
+                    .env_names()
+                    .into_iter()
+                    .filter(|e| self.hydra.sign_ins(e).iter().any(|t| t == "claude"))
+                    .collect();
+                self.choose_env_from(envs, "Start its orchestrator in", window, cx, open);
+            }
+        }
     }
 
     fn open_orchestrator(
@@ -828,4 +969,15 @@ impl Workspace {
         }
         cx.notify();
     }
+}
+
+/// Each pipeline file by its name and, when it differs, the name the views show.
+fn pipeline_labels(root: &std::path::Path, names: &[String]) -> Vec<String> {
+    names
+        .iter()
+        .map(|n| match crate::pipeline::load(root, n) {
+            Ok(p) if p.name != *n => format!("{n} · {}", p.name),
+            _ => n.clone(),
+        })
+        .collect()
 }

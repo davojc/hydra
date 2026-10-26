@@ -630,6 +630,69 @@ pub fn ensure_example(hydra_root: &Path) -> std::io::Result<()> {
     std::fs::write(dir.join("ticket.toml"), EXAMPLE)
 }
 
+/// The file name for a pipeline called `title`: lowercase letters and digits, words joined by
+/// `-` (`INTH SLA tickets` → `inth-sla-tickets`); empty when nothing is left.
+pub fn file_name_for(title: &str) -> String {
+    let mut out = String::new();
+    for c in title.trim().chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_end_matches('-').to_string()
+}
+
+/// A new pipeline's file when it starts blank: one stage to rename and fill in.
+const BLANK: &str = r#"bar = 80
+
+[[stage]]
+id = "first"
+title = "First stage"
+prompt = "Work on ticket {ticket}."
+"#;
+
+/// **New pipeline…**: writes a pipeline called `title`, blank or a copy of pipeline `from`,
+/// and returns its file name. A copy doesn't watch Linear or start at launch until those are
+/// turned on in its settings, so it never takes tickets its original takes.
+pub fn create(hydra_root: &Path, title: &str, from: Option<&str>) -> Result<String, String> {
+    use toml_edit::{DocumentMut, Item, value};
+    let title = title.trim();
+    let name = file_name_for(title);
+    if name.is_empty() {
+        return Err("give the pipeline a name with a letter or digit in it".into());
+    }
+    let dir = folder(hydra_root);
+    let file = dir.join(format!("{name}.toml"));
+    if file.exists() {
+        return Err(format!("there's already a pipeline file {name}.toml"));
+    }
+    let text = match from {
+        None => BLANK.to_string(),
+        Some(src) => {
+            if !plain_name(src) {
+                return Err(format!("{src:?} isn't a pipeline name"));
+            }
+            let path = dir.join(format!("{src}.toml"));
+            std::fs::read_to_string(&path).map_err(|e| format!("can't read pipeline {src}: {e}"))?
+        }
+    };
+    let mut doc: DocumentMut = text
+        .parse()
+        .map_err(|e| format!("pipeline {from:?}: {e}"))?;
+    doc["name"] = value(title);
+    doc.remove("autostart");
+    if let Some(linear) = doc.get_mut("linear").and_then(Item::as_table_mut) {
+        linear["watch"] = value(false);
+    }
+    let text = doc.to_string();
+    parse(&text).map_err(|e| format!("the new pipeline: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(&file, text).map_err(|e| format!("can't write {}: {e}", file.display()))?;
+    Ok(name)
+}
+
 /// Values a stage prompt's placeholders are filled with.
 pub struct PromptVars<'a> {
     pub ticket: &'a str,
@@ -707,6 +770,57 @@ What the previous stage handed over: {handoff}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_pipelines_file_name_comes_from_its_title() {
+        assert_eq!(file_name_for("INTH SLA tickets"), "inth-sla-tickets");
+        assert_eq!(
+            file_name_for("  Release notes — weekly! "),
+            "release-notes-weekly"
+        );
+        assert_eq!(file_name_for("PRE/1"), "pre-1");
+        assert_eq!(file_name_for("—!"), "");
+    }
+
+    #[test]
+    fn a_new_pipeline_starts_blank_with_one_stage() {
+        let d = tempfile::tempdir().unwrap();
+        let name = create(d.path(), "Release \"notes\"", None).unwrap();
+        assert_eq!(name, "release-notes");
+        let p = load(d.path(), &name).unwrap();
+        assert_eq!(p.name, "Release \"notes\"");
+        assert_eq!(p.stages.len(), 1);
+        assert_eq!(p.linear, None);
+        let again = create(d.path(), "release notes", None).unwrap_err();
+        assert!(again.contains("already"), "{again}");
+        assert!(create(d.path(), "!!", None).is_err());
+    }
+
+    #[test]
+    fn a_copy_keeps_its_stages_but_takes_no_tickets_until_turned_on() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(
+            folder(d.path()).join("inth.toml"),
+            "# INTH tickets\nname = \"INTH\"\nbar = 85\n[linear]\nteam = \"INTH\"\nwatch = true\n\
+             [autostart]\nenv = \"iov42\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\nprompt = \"do {ticket}\"\n\
+             [[stage]]\nid = \"b\"\ntitle = \"B\"\nprompt = \"check\"\n",
+        )
+        .unwrap();
+        let name = create(d.path(), "PRE bugs", Some("inth")).unwrap();
+        let p = load(d.path(), &name).unwrap();
+        assert_eq!((p.name.as_str(), p.bar), ("PRE bugs", 85));
+        assert_eq!(p.stages.len(), 2);
+        assert_eq!(p.autostart, None);
+        assert!(!p.linear.unwrap().watch);
+        let text = std::fs::read_to_string(folder(d.path()).join("pre-bugs.toml")).unwrap();
+        assert!(text.starts_with("# INTH tickets"), "comments kept: {text}");
+        assert!(
+            load(d.path(), "inth").unwrap().linear.unwrap().watch,
+            "the original unchanged"
+        );
+        assert!(create(d.path(), "x", Some("nope")).is_err());
+    }
+
     use super::*;
 
     const TWO: &str = "name = \"t\"\n[[stage]]\nid = \"replicate\"\ntitle = \"Replicate\"\nprompt = \"Read {ticket} ({run}, {stage}). {handoff}\"\n[[stage]]\nid = \"develop\"\ntitle = \"Develop\"\nbar = 85\nworktree = true\nprompt = \"Fix it.\"\n";

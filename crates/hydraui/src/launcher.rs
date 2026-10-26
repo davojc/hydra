@@ -52,6 +52,8 @@ pub enum Action {
     /// A Claude terminal that orchestrates a pipeline (orchestrator spec §3.0): an environment
     /// with Claude and a pipeline, picked in the dialogs.
     StartOrchestrator,
+    /// A pipeline of its own, blank or copied from another, then its orchestrator and settings.
+    NewPipeline,
     /// The pipelines folder, opened by the system (the example written first if it is empty).
     EditPipelines,
 }
@@ -107,6 +109,7 @@ pub fn entries(
     add("Check for updates".into(), Action::CheckForUpdates);
     add("Tasks: all projects".into(), Action::AllBoards);
     add("Start orchestrator…".into(), Action::StartOrchestrator);
+    add("New pipeline…".into(), Action::NewPipeline);
     add("Edit pipelines".into(), Action::EditPipelines);
     add("Keyboard shortcuts".into(), Action::Shortcuts);
     add("Settings".into(), Action::Settings);
@@ -153,6 +156,7 @@ mod tests {
                 "Check for updates",
                 "Tasks: all projects",
                 "Start orchestrator…",
+                "New pipeline…",
                 "Edit pipelines",
                 "Keyboard shortcuts",
                 "Settings",
@@ -187,6 +191,7 @@ mod tests {
             Some(&Action::StartOrchestrator)
         );
         assert_eq!(action("Edit pipelines"), Some(&Action::EditPipelines));
+        assert_eq!(action("New pipeline…"), Some(&Action::NewPipeline));
     }
 
     #[test]
@@ -211,6 +216,7 @@ mod tests {
                 "Check for updates",
                 "Tasks: all projects",
                 "Start orchestrator…",
+                "New pipeline…",
                 "Edit pipelines",
                 "Keyboard shortcuts",
                 "Settings",
@@ -222,8 +228,9 @@ mod tests {
         assert_eq!(got[12].action, Action::CheckForUpdates);
         assert_eq!(got[13].action, Action::AllBoards);
         assert_eq!(got[14].action, Action::StartOrchestrator);
-        assert_eq!(got[15].action, Action::EditPipelines);
-        assert_eq!(got[16].action, Action::Shortcuts);
+        assert_eq!(got[15].action, Action::NewPipeline);
+        assert_eq!(got[16].action, Action::EditPipelines);
+        assert_eq!(got[17].action, Action::Shortcuts);
         assert_eq!(got[0].action, Action::OpenFile);
         assert_eq!(got[1].action, Action::SearchFiles);
         assert_eq!(got[4].action, Action::StartPage);

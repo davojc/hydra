@@ -799,17 +799,10 @@ impl Workspace {
                         .bg(color(theme::GREEN_TINT))
                         .text_color(color(theme::GREEN))
                         .child("✓"),
-                    st if st.busy() => d.border_2().border_color(color(accent)).child(
-                        div()
-                            .size(px(7.))
-                            .rounded_full()
-                            .bg(color(accent))
-                            .with_animation(
-                                SharedString::from(format!("stage-dot-{orch}-{i}")),
-                                super::busy::pulse(),
-                                |d, a| d.opacity(a),
-                            ),
-                    ),
+                    st if st.busy() => d
+                        .border_2()
+                        .border_color(color(accent))
+                        .child(div().size(px(7.)).rounded_full().bg(color(accent))),
                     StageStatus::Stopped | StageStatus::Failed => d
                         .bg(color(theme::RED_TINT))
                         .text_color(color(theme::RED))
@@ -938,13 +931,29 @@ impl Workspace {
                                 h_flex()
                                     .justify_between()
                                     .gap_2()
-                                    .child(
-                                        text(13.5, title_hex)
+                                    .child({
+                                        let title = text(13.5, title_hex)
                                             .when(title_hex != theme::TEXT, |d| {
                                                 d.font_weight(FontWeight::MEDIUM)
                                             })
-                                            .child(spec.title.clone()),
-                                    )
+                                            .child(spec.title.clone());
+                                        // The stage at work breathes in the pipeline's colour.
+                                        if s.status.busy() {
+                                            title
+                                                .with_animation(
+                                                    SharedString::from(format!(
+                                                        "stage-title-{orch}-{i}"
+                                                    )),
+                                                    super::busy::pulse(),
+                                                    move |d, a| {
+                                                        d.text_color(color(accent).opacity(a))
+                                                    },
+                                                )
+                                                .into_any_element()
+                                        } else {
+                                            title.into_any_element()
+                                        }
+                                    })
                                     .child(text(11.5, badge_hex).flex_none().child(badge)),
                             )
                             .children(

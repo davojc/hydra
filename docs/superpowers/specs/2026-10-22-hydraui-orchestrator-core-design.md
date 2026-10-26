@@ -813,6 +813,6 @@ The once-a-second redraw made the next-look bar step and the working dot blink o
   from the clock (a repeating gpui animation, at most 30 frames a second).
 - **What's at work breathes** (`busy::pulse`: a 1.6 s pulse between 30% and full, in step
   everywhere, at most 30 frames a second): a working terminal's dot in the sidebar and the
-  environment tab, the card's segment for the stage at work, and that stage's ring in the
-  Pipeline tab.
+  environment tab, the card's segment for the stage at work, and that stage's name in the
+  Pipeline tab's timeline (its ring's dot stays steady).
 

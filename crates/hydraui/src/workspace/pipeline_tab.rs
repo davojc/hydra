@@ -127,6 +127,12 @@ impl Workspace {
         if let Some(tasks) = self.tasks_tabs.get_mut(&orch) {
             *tasks = false;
         }
+        // The other orchestrators of its pipeline get theirs too, behind it.
+        if self.orchestrators.contains_key(&orch) {
+            for other in self.slots(orch, cx) {
+                self.pipeline_tabs.entry(other).or_default();
+            }
+        }
         self.sync_boards(window, cx);
         self.focus_active(window, cx);
         cx.notify();

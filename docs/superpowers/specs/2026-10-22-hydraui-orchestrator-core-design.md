@@ -780,3 +780,11 @@ casual and about the purpose; another wants them technical and data-driven.
   ready-made styles from `pipeline::PRODUCT_STYLES` (**Short and plain**, **Technical, with
   data**; the chosen one is filled), a box for the person's own words, and the channel.
 
+## 25. Every orchestrator of a pipeline in one tab row (added 2026-10-26)
+
+With two orchestrators under **Review PR's**, the row above the terminal showed only the one on
+screen and its Pipeline tab (Jordan, 2026-10-26). Now, for an orchestrator whose pipeline runs
+tickets at once, the row has each orchestrator of that pipeline in turn, its terminal tab and its
+**Pipeline N** tab, and clicking one shows it. Opening one orchestrator's Pipeline tab (the card,
+a run line) gives the others theirs too, behind it.
+

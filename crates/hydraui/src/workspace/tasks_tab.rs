@@ -447,13 +447,20 @@ impl Workspace {
         border: Hsla,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let pipeline = self.pipeline_tabs.get(&id).map(|t| t.shown);
+        // An orchestrator in a pipeline that runs tickets at once sits with the others: each
+        // one's terminal and Pipeline tab, numbered, so any of them is a click away.
+        let members = if self.orchestrators.contains_key(&id) {
+            self.slots(id, cx)
+        } else {
+            vec![id]
+        };
+        let numbered = members.len() > 1;
         let tasks = self.tasks_tabs.get(&id).copied();
-        let pipeline_shown = pipeline == Some(true);
+        let pipeline_shown = self.pipeline_tabs.get(&id).is_some_and(|t| t.shown);
         let tasks_shown = tasks == Some(true) && !pipeline_shown;
-        let tab = |key: &str, selected: bool| {
+        let tab = |key: &str, of: PaneId, selected: bool| {
             h_flex()
-                .id(SharedString::from(format!("{key}-{id}")))
+                .id(SharedString::from(format!("{key}-{of}")))
                 .px_2()
                 .gap_2()
                 .h_full()
@@ -462,62 +469,86 @@ impl Workspace {
                 .when(selected, |d| d.bg(tint.opacity(0.25)))
                 .hover(|d| d.bg(tint.opacity(0.15)))
         };
-        let close = |key: &str| {
+        let close = |key: &str, of: PaneId| {
             div()
-                .id(SharedString::from(format!("{key}-{id}")))
+                .id(SharedString::from(format!("{key}-{of}")))
                 .px_1()
                 .text_color(muted)
                 .hover(|d| d.text_color(tint))
                 .child("✕")
         };
-        h_flex()
+        let mut strip = h_flex()
             .h(px(28.))
             .flex_none()
             .px_1()
             .py_0p5()
             .gap_1()
             .border_b_1()
-            .border_color(border)
-            .child(
-                tab("tasks-terminal-tab", !tasks_shown && !pipeline_shown)
-                    .on_click(cx.listener(move |ws, _, window, cx| {
-                        ws.show_pipeline(id, false, window, cx);
-                        ws.show_tasks(id, false, window, cx);
-                    }))
-                    .child(label),
-            )
-            .when(tasks.is_some(), |strip| {
-                strip.child(
-                    tab("tasks-tab", tasks_shown)
-                        .on_click(
-                            cx.listener(move |ws, _, window, cx| {
-                                ws.show_tasks(id, true, window, cx)
-                            }),
-                        )
-                        .child("Tasks")
-                        .child(close("tasks-close").on_click(cx.listener(
-                            move |ws, _, window, cx| {
-                                cx.stop_propagation();
-                                ws.close_tasks(id, window, cx);
-                            },
-                        ))),
+            .border_color(border);
+        for (n, m) in members.into_iter().enumerate() {
+            let here = m == id;
+            let name = if here {
+                label.clone()
+            } else {
+                self.panes
+                    .get(&m)
+                    .map_or_else(|| format!("orchestrator {}", n + 1), |v| v.read(cx).label())
+            };
+            strip = strip.child(
+                tab(
+                    "tasks-terminal-tab",
+                    m,
+                    here && !tasks_shown && !pipeline_shown,
                 )
-            })
-            .when(pipeline.is_some(), |strip| {
-                strip.child(
-                    tab("pipeline-tab", pipeline_shown)
+                .on_click(cx.listener(move |ws, _, window, cx| {
+                    if !here {
+                        ws.show_terminal(m, window, cx);
+                    }
+                    ws.show_pipeline(m, false, window, cx);
+                    ws.show_tasks(m, false, window, cx);
+                }))
+                .child(name),
+            );
+            if here && tasks.is_some() {
+                strip =
+                    strip.child(
+                        tab("tasks-tab", m, tasks_shown)
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                ws.show_tasks(m, true, window, cx)
+                            }))
+                            .child("Tasks")
+                            .child(close("tasks-close", m).on_click(cx.listener(
+                                move |ws, _, window, cx| {
+                                    cx.stop_propagation();
+                                    ws.close_tasks(m, window, cx);
+                                },
+                            ))),
+                    );
+            }
+            if self.pipeline_tabs.contains_key(&m) {
+                strip = strip.child(
+                    tab("pipeline-tab", m, here && pipeline_shown)
                         .on_click(cx.listener(move |ws, _, window, cx| {
-                            ws.show_pipeline(id, true, window, cx)
+                            if !here {
+                                ws.show_terminal(m, window, cx);
+                            }
+                            ws.show_pipeline(m, true, window, cx)
                         }))
-                        .child("Pipeline")
-                        .child(close("pipeline-close").on_click(cx.listener(
+                        .child(if numbered {
+                            format!("Pipeline {}", n + 1)
+                        } else {
+                            "Pipeline".to_string()
+                        })
+                        .child(close("pipeline-close", m).on_click(cx.listener(
                             move |ws, _, window, cx| {
                                 cx.stop_propagation();
-                                ws.close_pipeline(id, window, cx);
+                                ws.close_pipeline(m, window, cx);
                             },
                         ))),
-                )
-            })
+                );
+            }
+        }
+        strip
     }
 }
 

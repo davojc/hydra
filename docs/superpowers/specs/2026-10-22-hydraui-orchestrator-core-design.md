@@ -940,3 +940,9 @@ the "isn't taking messages" toast never came because only one try was made.
 - A wake-up that has waited 3 minutes while its session sits idle without taking it (a draft,
   or a Claude Code question) tells the person once, with a toast naming the session that
   stays until closed; clicking it shows that terminal.
+
+Once INTH-170's session read its thread again, it found no decision, rightly: product's reply
+was a question back ("where does this solution apply if we're allowing larger ruleset
+saves?"). The check told it only to look for an answer, so nobody would ever have replied.
+The 5-minute check now also has the stage reply in the thread to a question or request to
+explain that nobody has answered yet, then wait for the decision as before.

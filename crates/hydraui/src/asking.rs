@@ -24,8 +24,11 @@ pub fn next_check_in(since: SystemTime, last: Option<SystemTime>, now: SystemTim
 pub fn check_prompt(question: &str, link: &str) -> String {
     format!(
         "Look in the Slack thread {link} for an answer to your question: {question} If it's \
-         answered, call stage_answer with the answer and who gave it, then carry on. If not, \
-         say so in one line and stop: you'll be asked again."
+         answered, call stage_answer with the answer and who gave it, then carry on. If someone \
+         replied with a question of their own or wants something explained, and nobody has \
+         answered them yet, reply to them in that thread (plainly, the way the question was \
+         written), then stop: the decision is still theirs. Otherwise say in one line that \
+         there's no answer yet, and stop: you'll be asked again."
     )
 }
 
@@ -67,6 +70,7 @@ mod tests {
             check.contains("https://s/t/1") && check.contains("stage_answer"),
             "{check}"
         );
+        assert!(check.contains("reply to them in that thread"), "{check}");
         let answer = answer_prompt("Keep it");
         assert!(answer.contains("Keep it") && answer.contains("don't call stage_answer"));
     }

@@ -164,6 +164,17 @@ pub fn is_markdown(path: &Path) -> bool {
     matches!(ext(path).as_deref(), Some("md" | "markdown"))
 }
 
+/// An HTML page: Rendered shows its text, headings, lists, tables, links and local images
+/// with hydraui's own renderer (no browser), so no script runs and no CSS layout applies.
+pub fn is_html(path: &Path) -> bool {
+    matches!(ext(path).as_deref(), Some("html" | "htm" | "xhtml"))
+}
+
+/// Whether the file has a Rendered view of its text (Markdown or HTML).
+pub fn has_rendered(path: &Path) -> bool {
+    is_markdown(path) || is_html(path)
+}
+
 fn ext(path: &Path) -> Option<String> {
     path.extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
@@ -192,7 +203,7 @@ pub fn language(path: &Path) -> &'static str {
         Some("sh" | "bash") => "bash",
         Some("yml" | "yaml") => "yaml",
         Some("css" | "scss") => "css",
-        Some("html" | "htm") => "html",
+        Some("html" | "htm" | "xhtml") => "html",
         Some("go") => "go",
         Some("c" | "h") => "c",
         Some("cpp" | "cc" | "cxx" | "hpp" | "hh") => "cpp",
@@ -476,6 +487,18 @@ mod tests {
         #[allow(clippy::permissions_set_readonly_false)]
         perms.set_readonly(false);
         std::fs::set_permissions(&p, perms).unwrap();
+    }
+
+    #[test]
+    fn html_pages_come_from_the_extension() {
+        assert!(is_html(Path::new("index.html")));
+        assert!(is_html(Path::new("old/PAGE.HTM")));
+        assert!(is_html(Path::new("a.xhtml")));
+        assert!(!is_html(Path::new("README.md")));
+        assert!(!is_html(Path::new("html")));
+        assert!(has_rendered(Path::new("index.html")));
+        assert!(has_rendered(Path::new("README.md")));
+        assert!(!has_rendered(Path::new("main.rs")));
     }
 
     #[test]

@@ -219,7 +219,13 @@ impl Workspace {
                     let _ = wake.send(());
                 }
                 ws.swarms_start(window, cx);
-                window.push_notification(Notification::success("Saved.").title("Swarms"), cx);
+                // The window running the swarms reads the names when it starts them.
+                let saved = if ws.swarms_elsewhere {
+                    "Saved. The hydraui window running your swarms picks this up when it restarts."
+                } else {
+                    "Saved."
+                };
+                window.push_notification(Notification::success(saved).title("Swarms"), cx);
             },
             window,
             cx,
@@ -642,20 +648,42 @@ impl Workspace {
         );
     }
 
-    /// Runs a button under Needs attention.
-    fn attention_fix(&mut self, swarm: &SwarmView, item: &Attention, fix: Fix, cx: &mut App) {
+    /// Runs a button under Needs attention, asking first when it would throw a version away.
+    fn attention_fix(
+        &mut self,
+        swarm: &SwarmView,
+        item: &Attention,
+        fix: Fix,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if fix == Fix::Compare {
+            // Shown, not opened: a file from a teammate could be a script.
             if let Attention::Conflict { path, copy } = item {
-                cx.open_with_system(&in_folder(&swarm.folder, path.as_str()));
-                cx.open_with_system(&in_folder(&swarm.folder, copy.as_str()));
+                for p in [path, copy] {
+                    if let Err(e) =
+                        crate::file_ops::reveal_in_explorer(&in_folder(&swarm.folder, p.as_str()))
+                    {
+                        window.push_notification(Notification::error(e).title("Swarms"), cx);
+                        break;
+                    }
+                }
             }
             return;
         }
-        if let Some(action) = resolution(fix, item) {
-            self.swarms_command(Command::Resolve {
-                swarm: swarm.id.clone(),
-                action,
-            });
+        let Some(action) = resolution(fix, item) else {
+            return;
+        };
+        let id = swarm.id.clone();
+        let send = move |ws: &mut Self, _: &mut Window, _: &mut Context<Self>| {
+            ws.swarms_command(Command::Resolve {
+                swarm: id.clone(),
+                action: action.clone(),
+            })
+        };
+        match fix_warning(fix, item) {
+            Some((title, body, ok)) => self.swarms_confirm(title, body, ok, true, send, window, cx),
+            None => send(self, window, cx),
         }
     }
 
@@ -847,21 +875,20 @@ impl Workspace {
         let (muted, warning) = (theme.muted_foreground, theme.warning);
         let rows = swarm.attention.iter().enumerate().map(|(i, item)| {
             let (title, path, note) = attention_text(item);
-            let buttons =
-                h_flex().gap_2().flex_none().children(
-                    fixes(item, swarm.my_role)
-                        .into_iter()
-                        .filter(|_| !swarm.removed)
-                        .map(|fix| {
-                            let (s, item) = (swarm.clone(), item.clone());
-                            Button::new(SharedString::from(format!("attention-{i}-{fix:?}")))
-                                .label(fix.label())
-                                .small()
-                                .on_click(cx.listener(move |ws, _, _, cx| {
-                                    ws.attention_fix(&s, &item, fix, cx)
-                                }))
-                        }),
-                );
+            let buttons = h_flex().gap_2().flex_none().children(
+                fixes(item, swarm.my_role)
+                    .into_iter()
+                    .filter(|_| !swarm.removed)
+                    .map(|fix| {
+                        let (s, item) = (swarm.clone(), item.clone());
+                        Button::new(SharedString::from(format!("attention-{i}-{fix:?}")))
+                            .label(fix.label())
+                            .small()
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                ws.attention_fix(&s, &item, fix, window, cx)
+                            }))
+                    }),
+            );
             h_flex()
                 .gap_3()
                 .px_4()
@@ -1314,7 +1341,7 @@ fn fixes(item: &Attention, role: Role) -> Vec<Fix> {
     }
 }
 
-/// What a button sends; nothing for Compare, which only opens files.
+/// What a button sends; nothing for Compare, which only shows the files.
 fn resolution(fix: Fix, item: &Attention) -> Option<Resolution> {
     let pair = |path: &hydra_swarms::paths::RelPath, copy: &hydra_swarms::paths::RelPath| {
         (path.as_str().to_string(), copy.as_str().to_string())
@@ -1337,6 +1364,40 @@ fn resolution(fix: Fix, item: &Attention) -> Option<Resolution> {
         (Fix::UseSwarmVersion, Attention::ReaderEdit { path }) => {
             Some(Resolution::UseSwarmVersion(path.as_str().into()))
         }
+        _ => None,
+    }
+}
+
+/// The confirmation a button asks for when it throws a version away: its title, body and button.
+fn fix_warning(fix: Fix, item: &Attention) -> Option<(String, String, &'static str)> {
+    match (fix, item) {
+        (Fix::KeepTheirs, Attention::Conflict { path, copy }) => Some((
+            format!("Keep {} as it is?", path.as_str()),
+            format!(
+                "The other version, {}, is deleted on every machine in the swarm.",
+                file_name(copy.as_str())
+            ),
+            "Keep this version",
+        )),
+        (Fix::KeepMine, Attention::Conflict { path, copy }) => Some((
+            format!("Use {} for {}?", file_name(copy.as_str()), path.as_str()),
+            format!(
+                "The version in {} now is replaced, and {} is deleted, on every machine in the swarm.",
+                file_name(path.as_str()),
+                file_name(copy.as_str())
+            ),
+            "Use that version",
+        )),
+        (Fix::DeleteIt, Attention::EditedAfterDelete { path }) => Some((
+            format!("Delete {}?", path.as_str()),
+            "Your edit is the only copy and can't be recovered.".into(),
+            "Delete",
+        )),
+        (Fix::UseSwarmVersion, Attention::ReaderEdit { path }) => Some((
+            format!("Replace your {}?", path.as_str()),
+            "Your change is on this machine only and can't be recovered.".into(),
+            "Use the swarm's version",
+        )),
         _ => None,
     }
 }
@@ -1678,7 +1739,35 @@ mod tests {
     }
 
     #[test]
-    fn compare_opens_files_under_the_folder() {
+    fn buttons_that_throw_a_version_away_ask_first() {
+        let conflict = Attention::Conflict {
+            path: rel("skills/SKILL.md"),
+            copy: rel("skills/SKILL (conflict, Bob's PC, 27 Oct 13.05).md"),
+        };
+        let deleted = Attention::EditedAfterDelete {
+            path: rel("notes/old.md"),
+        };
+        let held = Attention::ReaderEdit { path: rel("a.md") };
+        let (title, body, ok) = fix_warning(Fix::DeleteIt, &deleted).unwrap();
+        assert_eq!(title, "Delete notes/old.md?");
+        assert_eq!(body, "Your edit is the only copy and can't be recovered.");
+        assert_eq!(ok, "Delete");
+        let (title, body, _) = fix_warning(Fix::KeepTheirs, &conflict).unwrap();
+        assert_eq!(title, "Keep skills/SKILL.md as it is?");
+        assert!(body.contains("SKILL (conflict, Bob's PC, 27 Oct 13.05).md, is deleted"));
+        let (title, _, _) = fix_warning(Fix::KeepMine, &conflict).unwrap();
+        assert_eq!(
+            title,
+            "Use SKILL (conflict, Bob's PC, 27 Oct 13.05).md for skills/SKILL.md?"
+        );
+        assert!(fix_warning(Fix::UseSwarmVersion, &held).is_some());
+        // Nothing is lost by these.
+        assert!(fix_warning(Fix::Compare, &conflict).is_none());
+        assert!(fix_warning(Fix::ShareAgain, &deleted).is_none());
+    }
+
+    #[test]
+    fn compare_shows_files_under_the_folder() {
         let folder = Path::new("root");
         assert_eq!(
             in_folder(folder, "skills/review/SKILL.md"),

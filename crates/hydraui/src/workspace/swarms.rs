@@ -241,7 +241,10 @@ impl Workspace {
     }
 
     /// Stops the swarms here (or the wait for them), letting another window take them.
-    #[expect(dead_code, reason = "Settings › Swarms calls it")]
+    #[expect(
+        dead_code,
+        reason = "nothing turns the swarms off yet: closing the window drops SwarmsRun, which stops them"
+    )]
     pub(super) fn swarms_stop(&mut self) {
         self.swarms_seek += 1;
         self.swarms_seeking = false;

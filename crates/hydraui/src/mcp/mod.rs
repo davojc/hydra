@@ -1,6 +1,7 @@
 //! hydraui's MCP server (spec: docs/superpowers/specs/2026-10-20-hydraui-mcp-server-design.md):
 //! the token registry and the task-board tools.
 pub mod registry;
+pub mod run_tools;
 pub mod server;
 pub mod tools;
 
@@ -23,6 +24,15 @@ pub enum SessionState {
 }
 
 impl SessionState {
+    pub fn word(self) -> &'static str {
+        match self {
+            SessionState::Working => "working",
+            SessionState::Waiting => "waiting",
+            SessionState::Idle => "idle",
+            SessionState::Ended => "ended",
+        }
+    }
+
     pub fn parse(s: &str) -> Option<SessionState> {
         match s {
             "working" => Some(SessionState::Working),
@@ -167,7 +177,17 @@ impl McpTerminal {
 
 impl Drop for McpTerminal {
     fn drop(&mut self) {
-        server::lock(self.server.registry()).revoke(&self.token);
+        let changes = {
+            let mut reg = server::lock(self.server.registry());
+            let changes = reg.revoke(&self.token);
+            if let Some(root) = &reg.hydra_root {
+                crate::run_log::record(root, &reg.runs, &changes);
+            }
+            changes
+        };
+        if !changes.is_empty() {
+            self.server.broadcast(server::McpEvent::RunChanged(changes));
+        }
     }
 }
 
@@ -241,6 +261,35 @@ mod tests {
         assert_eq!(t.name, "api");
         drop(term);
         assert!(server.registry().lock().unwrap().get(&token).is_none());
+    }
+
+    #[test]
+    fn closing_a_stage_terminal_tells_the_app() {
+        let server = server::Server::start().unwrap();
+        let mut events = server.subscribe();
+        let stage = McpTerminal::register_on(server.clone(), PathBuf::from("C:/w/web"), None);
+        {
+            let mut reg = server::lock(server.registry());
+            let p = crate::pipeline::parse("name = \"t\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n")
+                .unwrap();
+            let run = reg
+                .runs
+                .start_run("orch", p, "INTH-9", "x")
+                .unwrap()
+                .id
+                .clone();
+            let s = reg.runs.begin("orch", &run, "a", "", 30).unwrap();
+            reg.runs.link(&run, s.stage, stage.token(), "s-01 · A");
+        }
+        drop(stage);
+        let Ok(server::McpEvent::RunChanged(changes)) = events.try_recv() else {
+            panic!("a run change");
+        };
+        assert!(
+            changes
+                .iter()
+                .any(|c| matches!(c.what, crate::runs::Decided::Failed(_)))
+        );
     }
 
     #[test]

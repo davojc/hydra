@@ -29,6 +29,15 @@ fn by_project<P: PartialEq + Clone>(terminals: &[(PaneId, P)]) -> Vec<(P, Vec<Pa
     groups
 }
 
+/// Where a row sits in the list: on its own, as a pipeline's orchestrator, or as one of the
+/// sessions that orchestrator started.
+#[derive(Clone, Copy, PartialEq)]
+enum Nest {
+    Plain,
+    Orchestrator,
+    Stage,
+}
+
 /// The terminal `by` steps from `shown` in `order`, wrapping; the first when `shown` isn't in it.
 fn step(order: &[PaneId], shown: Option<PaneId>, by: isize) -> Option<PaneId> {
     let at = shown
@@ -72,17 +81,17 @@ impl Workspace {
     /// The selected environment's terminals, the shown one highlighted in the environment's
     /// colour; a row's tooltip is the title its program set, when it set one.
     pub(super) fn render_terminal_list(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let muted = cx.theme().muted_foreground;
+        // The terminals scroll; the allowance meter stays at the panel's foot.
+        let panel = v_flex().w(px(self.list_width)).h_full().flex_none();
         let mut list = v_flex()
             .id("terminal-list")
-            .w(px(self.list_width))
-            .h_full()
-            .flex_none()
+            .flex_1()
+            .min_h_0()
             .overflow_y_scroll()
             .p_1()
             .gap_0p5();
         let Some(tab) = self.envs.active() else {
-            return list;
+            return panel.child(list);
         };
         let (env, tint) = (tab.env.clone(), self.tint(&tab.env));
         // Pinned above the terminals: the environment's projects' boards (task board §10).
@@ -112,7 +121,113 @@ impl Workspace {
                     .map(move |(i, id)| (g > 0 && i == 0, id))
             })
             .collect();
-        for (divided, id) in rows {
+        // A run's orchestrator and stage terminals sit under its pipeline card, not in the
+        // project groups (orchestrator spec §7.1).
+        let cards = self.pipeline_cards(cx);
+        let carded: std::collections::HashSet<PaneId> = cards
+            .iter()
+            .flat_map(|(_, _, panes)| panes.iter().copied())
+            .collect();
+        let shown = tab.shown.filter(|_| !all_tasks);
+        // Runs an earlier hydraui closed on, in this environment, to pick back up (§13).
+        let interrupted: Vec<usize> = self
+            .interrupted
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| i.env == tab.env)
+            .map(|(idx, _)| idx)
+            .collect();
+        for idx in interrupted {
+            list = list.child(self.render_interrupted_card(idx, cx));
+        }
+        // Each orchestrator is one framed block: its card, links, its own row, then the sessions
+        // it started nested under it, so several pipelines' sessions never mix.
+        for (orch, card, panes) in &cards {
+            let active = panes.iter().any(|p| Some(*p) == shown);
+            let mut block = v_flex()
+                .id(SharedString::from(format!("pipeline-block-{orch}")))
+                .mx_1()
+                .my_1()
+                .pb_1()
+                .gap_0p5()
+                .rounded(px(10.))
+                .border_1()
+                .border_color(tint.opacity(if active { 0.45 } else { 0.2 }))
+                .child(self.render_pipeline_card(*orch, card, active, cx));
+            let orch = *orch;
+            let history_shown = self.pipeline_shown(orch)
+                && self.pipeline_tabs.get(&orch).map(|t| t.view)
+                    == Some(super::pipeline_tab::TabView::History);
+            block = block.child(
+                div()
+                    .id(SharedString::from(format!("pipeline-history-link-{orch}")))
+                    .ml(px(26.))
+                    .mr_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_size(px(12.5))
+                    .text_color(cx.theme().muted_foreground)
+                    .when(history_shown, |d| d.bg(tint.opacity(0.2)))
+                    .hover(|d| d.bg(tint.opacity(0.12)))
+                    .cursor_pointer()
+                    .child("Ticket history")
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.show_pipeline_view(
+                            orch,
+                            super::pipeline_tab::TabView::History,
+                            window,
+                            cx,
+                        )
+                    })),
+            );
+            let settings_shown = self.pipeline_shown(orch)
+                && self.pipeline_tabs.get(&orch).map(|t| t.view)
+                    == Some(super::pipeline_tab::TabView::Settings);
+            block = block.child(
+                div()
+                    .id(SharedString::from(format!("pipeline-settings-link-{orch}")))
+                    .ml(px(26.))
+                    .mr_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_size(px(12.5))
+                    .text_color(cx.theme().muted_foreground)
+                    .when(settings_shown, |d| d.bg(tint.opacity(0.2)))
+                    .hover(|d| d.bg(tint.opacity(0.12)))
+                    .cursor_pointer()
+                    .child("Pipeline settings")
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.open_pipeline_settings(orch, window, cx)
+                    })),
+            );
+            if let Some(row) =
+                self.terminal_row(orch, shown == Some(orch), tint, Nest::Orchestrator, cx)
+            {
+                block = block.child(row);
+            }
+            let stage_rows: Vec<_> = panes
+                .iter()
+                .filter(|id| **id != orch)
+                .filter_map(|id| self.terminal_row(*id, shown == Some(*id), tint, Nest::Stage, cx))
+                .collect();
+            if !stage_rows.is_empty() {
+                // A guide line down from the orchestrator ties its sessions to it.
+                block = block.child(
+                    v_flex()
+                        .ml(px(18.))
+                        .mr_1()
+                        .pl(px(6.))
+                        .gap_0p5()
+                        .border_l_2()
+                        .border_color(tint.opacity(0.35))
+                        .children(stage_rows),
+                );
+            }
+            list = list.child(block);
+        }
+        for (divided, id) in rows.into_iter().filter(|(_, id)| !carded.contains(id)) {
             if divided {
                 list = list.child(
                     div()
@@ -123,105 +238,147 @@ impl Workspace {
                         .bg(tint.opacity(0.6)),
                 );
             }
-            let Some(view) = self.panes.get(&id) else {
-                continue;
-            };
-            let v = view.read(cx);
-            let (label, program) = (v.label(), v.program_title().map(str::to_string));
-            let activity = self.activity.get(&id).copied();
-            let dot = self.render_tab_dot(activity, tint, cx);
-            // What a Claude session here says it is doing (its hooks), beside its name.
-            let claude = activity.filter(|a| a.claude).map(|a| match a.state {
-                Activity::Working => ("working", muted),
-                Activity::Waiting => ("needs you", cx.theme().warning),
-                Activity::Idle => ("idle", muted),
-            });
-            // Keyed by the terminal, so element state stays with it when another closes.
-            let group = SharedString::from(format!("terminal-row-{id}"));
-            list = list.child(
-                h_flex()
-                    .id(SharedString::from(format!("terminal-{id}")))
-                    .group(group.clone())
-                    .px_2()
-                    .py_1()
-                    .gap_2()
-                    .rounded_md()
-                    .when(tab.shown == Some(id) && !all_tasks, |d| {
-                        d.bg(tint.opacity(0.25))
-                    })
-                    .hover(|d| d.bg(tint.opacity(0.15)))
-                    .on_click(
-                        cx.listener(move |ws, _, window, cx| ws.show_terminal(id, window, cx)),
-                    )
-                    .when_some(program, |d, title| {
-                        d.tooltip(move |window, cx| {
-                            gpui_component::tooltip::Tooltip::new(title.clone()).build(window, cx)
-                        })
-                    })
-                    .context_menu({
-                        let ws = cx.entity();
-                        move |menu, _, _| {
-                            let (tasks_ws, rename_ws, restart_ws, close_ws) =
-                                (ws.clone(), ws.clone(), ws.clone(), ws.clone());
-                            // Its project's board as a Tasks tab beside it (task-board §4).
-                            menu.item(PopupMenuItem::new("Tasks").on_click(move |_, window, cx| {
-                                tasks_ws.update(cx, |ws, cx| {
-                                    if ws.envs.active().and_then(|t| t.shown) != Some(id) {
-                                        ws.show_terminal(id, window, cx);
-                                    }
-                                    ws.open_tasks(id, window, cx);
-                                });
-                            }))
-                            .item(
-                                PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
-                                    rename_ws.update(cx, |ws, cx| ws.rename_dialog(id, window, cx));
-                                }),
-                            )
-                            .item(
-                                PopupMenuItem::new("Restart").on_click(move |_, window, cx| {
-                                    restart_ws
-                                        .update(cx, |ws, cx| ws.restart_terminal(id, window, cx));
-                                }),
-                            )
-                            .item(
-                                PopupMenuItem::new("Close").on_click(move |_, window, cx| {
-                                    close_ws.update(cx, |ws, cx| ws.close_terminal(id, window, cx));
-                                }),
-                            )
-                        }
-                    })
-                    .child(dot)
-                    .child(div().flex_1().min_w_0().text_sm().truncate().child(label))
-                    .children(claude.map(|(text, color)| {
-                        div().flex_none().text_xs().text_color(color).child(text)
-                    }))
-                    // Out of sight when its Claude session finished or asked for you.
-                    .when(self.attention.contains(&id), |d| {
-                        d.child(
-                            div()
-                                .flex_none()
-                                .size(px(7.))
-                                .rounded_full()
-                                .bg(cx.theme().warning),
-                        )
-                    })
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("terminal-close-{id}")))
-                            .px_1()
-                            .text_color(muted)
-                            .invisible()
-                            .group_hover(group, |d| d.visible())
-                            .hover(|d| d.text_color(tint))
-                            .child("×")
-                            .on_click(cx.listener(move |ws, _, window, cx| {
-                                cx.stop_propagation();
-                                ws.close_terminal(id, window, cx);
-                            })),
-                    ),
-            );
+            if let Some(row) = self.terminal_row(id, shown == Some(id), tint, Nest::Plain, cx) {
+                list = list.child(row);
+            }
         }
-        list
+        let meter = if cards.is_empty() {
+            None
+        } else {
+            self.render_allowance_meter(&tab.env)
+        };
+        panel
+            .child(list)
+            .children(meter.map(|m| div().flex_none().p_1().pb_3().child(m)))
+    }
+
+    /// Terminal `id`'s row: its activity dot, name, Claude's state and × on hover;
+    /// `highlighted` when it is the one shown; `nest` sets how it sits in a pipeline's block.
+    fn terminal_row(
+        &self,
+        id: PaneId,
+        highlighted: bool,
+        tint: gpui::Hsla,
+        nest: Nest,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let muted = cx.theme().muted_foreground;
+        let view = self.panes.get(&id)?;
+        let v = view.read(cx);
+        let (label, program) = (v.label(), v.program_title().map(str::to_string));
+        let activity = self.activity.get(&id).copied();
+        let dot = self.render_tab_dot(activity, tint, cx);
+        // What a Claude session here says it is doing (its hooks), beside its name.
+        let claude = activity.filter(|a| a.claude).map(|a| match a.state {
+            Activity::Working => ("working", muted),
+            Activity::Waiting => ("needs you", cx.theme().warning),
+            Activity::Idle => ("idle", muted),
+        });
+        // Keyed by the terminal, so element state stays with it when another closes.
+        let group = SharedString::from(format!("terminal-row-{id}"));
+        Some(
+            h_flex()
+                .id(SharedString::from(format!("terminal-{id}")))
+                .group(group.clone())
+                .pl(px(8.))
+                .when(nest == Nest::Orchestrator, |d| d.mx_1())
+                .pr_2()
+                .py_1()
+                .gap_2()
+                .rounded_md()
+                .when(highlighted, |d| d.bg(tint.opacity(0.25)))
+                .hover(|d| d.bg(tint.opacity(0.15)))
+                .on_click(cx.listener(move |ws, _, window, cx| {
+                    ws.show_terminal(id, window, cx);
+                    // A row is the terminal itself: an orchestrator's Pipeline tab is the
+                    // card's (orchestrator spec §7.1).
+                    if ws.pipeline_shown(id) {
+                        ws.show_pipeline(id, false, window, cx);
+                    }
+                }))
+                .when_some(program, |d, title| {
+                    d.tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(title.clone()).build(window, cx)
+                    })
+                })
+                .context_menu({
+                    let ws = cx.entity();
+                    move |menu, _, _| {
+                        let (tasks_ws, rename_ws, restart_ws, close_ws) =
+                            (ws.clone(), ws.clone(), ws.clone(), ws.clone());
+                        // Its project's board as a Tasks tab beside it (task-board §4).
+                        menu.item(PopupMenuItem::new("Tasks").on_click(move |_, window, cx| {
+                            tasks_ws.update(cx, |ws, cx| {
+                                if ws.envs.active().and_then(|t| t.shown) != Some(id) {
+                                    ws.show_terminal(id, window, cx);
+                                }
+                                ws.open_tasks(id, window, cx);
+                            });
+                        }))
+                        .item(
+                            PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
+                                rename_ws.update(cx, |ws, cx| ws.rename_dialog(id, window, cx));
+                            }),
+                        )
+                        .item(
+                            PopupMenuItem::new("Restart").on_click(move |_, window, cx| {
+                                restart_ws.update(cx, |ws, cx| ws.restart_terminal(id, window, cx));
+                            }),
+                        )
+                        .item(PopupMenuItem::new("Close").on_click(move |_, window, cx| {
+                            close_ws.update(cx, |ws, cx| ws.close_terminal(id, window, cx));
+                        }))
+                    }
+                })
+                .child(dot)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .map(|d| match nest {
+                            // The orchestrator leads its block; its sessions read as under it.
+                            Nest::Orchestrator => {
+                                d.text_sm().font_weight(gpui::FontWeight::SEMIBOLD)
+                            }
+                            Nest::Stage => d
+                                .text_size(px(13.))
+                                .when(!highlighted, |d| d.text_color(muted)),
+                            Nest::Plain => d.text_sm(),
+                        })
+                        .child(label),
+                )
+                .children(
+                    claude.map(|(text, color)| {
+                        div().flex_none().text_xs().text_color(color).child(text)
+                    }),
+                )
+                // Out of sight when its Claude session finished or asked for you.
+                .when(self.attention.contains(&id), |d| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .size(px(7.))
+                            .rounded_full()
+                            .bg(cx.theme().warning),
+                    )
+                })
+                .child(
+                    div()
+                        .id(SharedString::from(format!("terminal-close-{id}")))
+                        .px_1()
+                        .text_color(muted)
+                        .invisible()
+                        .group_hover(group, |d| d.visible())
+                        .hover(|d| d.text_color(tint))
+                        .child("×")
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            cx.stop_propagation();
+                            ws.close_terminal(id, window, cx);
+                        })),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Asks for terminal `id`'s name (env-tabs design §2.2); Enter confirms, and an empty name

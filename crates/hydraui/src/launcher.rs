@@ -49,6 +49,11 @@ pub enum Action {
     RemoveJevKey,
     /// jev.toml, the questions auto-pickup asks Jev, in the file pane (written first if new).
     EditJevQuestions,
+    /// A Claude terminal that orchestrates a pipeline (orchestrator spec §3.0): an environment
+    /// with Claude and a pipeline, picked in the dialogs.
+    StartOrchestrator,
+    /// The pipelines folder, opened by the system (the example written first if it is empty).
+    EditPipelines,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +106,8 @@ pub fn entries(
     add("Reload config".into(), Action::ReloadConfig);
     add("Check for updates".into(), Action::CheckForUpdates);
     add("Tasks: all projects".into(), Action::AllBoards);
+    add("Start orchestrator…".into(), Action::StartOrchestrator);
+    add("Edit pipelines".into(), Action::EditPipelines);
     add("Keyboard shortcuts".into(), Action::Shortcuts);
     add("Settings".into(), Action::Settings);
     add("Set Jev API key…".into(), Action::SetJevKey);
@@ -145,6 +152,8 @@ mod tests {
                 "Reload config",
                 "Check for updates",
                 "Tasks: all projects",
+                "Start orchestrator…",
+                "Edit pipelines",
                 "Keyboard shortcuts",
                 "Settings",
                 "Set Jev API key…",
@@ -172,6 +181,12 @@ mod tests {
         assert_eq!(got[10].action, Action::SetEnvHome);
         assert_eq!(got[11].action, Action::NewEnv);
         assert_eq!(got[12].action, Action::NewSecret);
+        let action = |label: &str| got.iter().find(|e| e.label == label).map(|e| &e.action);
+        assert_eq!(
+            action("Start orchestrator…"),
+            Some(&Action::StartOrchestrator)
+        );
+        assert_eq!(action("Edit pipelines"), Some(&Action::EditPipelines));
     }
 
     #[test]
@@ -195,6 +210,8 @@ mod tests {
                 "Reload config",
                 "Check for updates",
                 "Tasks: all projects",
+                "Start orchestrator…",
+                "Edit pipelines",
                 "Keyboard shortcuts",
                 "Settings",
                 "Set Jev API key…",
@@ -204,7 +221,9 @@ mod tests {
         assert_eq!(got[10].action, Action::OpenLog);
         assert_eq!(got[12].action, Action::CheckForUpdates);
         assert_eq!(got[13].action, Action::AllBoards);
-        assert_eq!(got[14].action, Action::Shortcuts);
+        assert_eq!(got[14].action, Action::StartOrchestrator);
+        assert_eq!(got[15].action, Action::EditPipelines);
+        assert_eq!(got[16].action, Action::Shortcuts);
         assert_eq!(got[0].action, Action::OpenFile);
         assert_eq!(got[1].action, Action::SearchFiles);
         assert_eq!(got[4].action, Action::StartPage);

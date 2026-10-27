@@ -66,6 +66,13 @@ pub fn idle_in_project(sessions: &[Session], project: &Path) -> Vec<PaneId> {
         .collect()
 }
 
+/// Whether a prompt may be typed into `s` now: its Claude is idle, nothing was just sent to it
+/// and its input holds no draft (§5.1 checks 3 and 6). The orchestrator's wake-up uses it
+/// (orchestrator spec §6); being in front of the user doesn't matter there.
+pub fn ready_for_prompt(s: &Session) -> bool {
+    s.claude == Some(SessionState::Idle) && !s.reserved && !s.draft
+}
+
 /// The sessions that pass every fact of §5.1: idle in the project, not in front of the user,
 /// not reserved and with no draft.
 pub fn candidates(sessions: &[Session], project: &Path) -> Vec<PaneId> {
@@ -190,6 +197,20 @@ pub fn focused_pane(
         .flatten()
 }
 
+/// `focused_pane`, unless the user is `away` (a card the phone put into Pickup): then no
+/// terminal counts as in front of them, whatever the window shows.
+pub fn focused_for(
+    away: bool,
+    window_active: bool,
+    shown: Option<PaneId>,
+    board_shown: impl Fn(PaneId) -> bool,
+) -> Option<PaneId> {
+    if away {
+        return None;
+    }
+    focused_pane(window_active, shown, board_shown)
+}
+
 /// Cards on their way to a session, by project and text, so one card never goes to two
 /// sessions (§2 anti-goals): an offer is running for it, or it was sent moments ago.
 #[derive(Debug, Default)]
@@ -269,6 +290,26 @@ mod tests {
             draft: false,
             finished: true,
         }
+    }
+
+    #[test]
+    fn ready_for_prompt_needs_idle_no_draft_not_reserved() {
+        assert!(ready_for_prompt(&free(1)));
+        let mut s = free(1);
+        s.claude = Some(SessionState::Working);
+        assert!(!ready_for_prompt(&s));
+        s.claude = None;
+        assert!(!ready_for_prompt(&s));
+        let mut s = free(1);
+        s.draft = true;
+        assert!(!ready_for_prompt(&s));
+        let mut s = free(1);
+        s.reserved = true;
+        assert!(!ready_for_prompt(&s));
+        // In front of the user is fine: they started the orchestrator to watch it.
+        let mut s = free(1);
+        s.focused = true;
+        assert!(ready_for_prompt(&s));
     }
 
     #[test]
@@ -504,6 +545,23 @@ mod tests {
         assert_eq!(focused_pane(true, Some(1), |p| p == 1), None);
         assert_eq!(focused_pane(false, Some(1), |_| false), None);
         assert_eq!(focused_pane(true, None, |_| false), None);
+    }
+
+    #[test]
+    fn away_means_no_session_is_focused() {
+        // The shown terminal is free and idle, the window active and the terminal on screen.
+        let session = |away: bool| Session {
+            focused: focused_for(away, true, Some(1), |_| false) == Some(1),
+            ..free(1)
+        };
+        assert_eq!(candidates(&[session(true)], &project()), vec![1]);
+        assert!(candidates(&[session(false)], &project()).is_empty());
+        // Away, nothing is asked about what's shown.
+        assert_eq!(
+            focused_for(true, true, Some(1), |_| panic!("not consulted")),
+            None
+        );
+        assert_eq!(focused_for(false, true, Some(1), |p| p == 1), None);
     }
 
     #[test]

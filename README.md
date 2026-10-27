@@ -67,11 +67,21 @@ hydraui runs the same environments as the CLI, in one window. Start it from the 
 - **Files.** `Ctrl+B` shows a file tree with git status marks; `Show changes` opens a side-by-side diff. Files open in a file pane beside the terminal: an editor, rendered Markdown, OpenAPI specs as API docs, PNG, JPEG, GIF, ICO and SVG images, or PDF pages. `Ctrl+Shift+O` opens a file by name, `Ctrl+Shift+F` searches in files, and `Ctrl+click` opens a path printed in the terminal.
 - **Task board.** Right-click a terminal and choose **Tasks** for its project's board: Backlog, Pickup, InProgress, Verify and Done. Cards live in `.hydra/tasks.md` in the project, as plain Markdown. Claude sessions in hydraui terminals see the board through a local tool server hydra sets up for them: they take cards from Pickup, work on them, commit, and move them to Verify with the commit, for you to check and move to Done. **Take in new worktree** gives a card its own branch, worktree and Claude terminal.
 - **Auto-pickup.** Moving a card into Pickup types it into a free Claude session of that project. A session is free when it is new or has just moved a card to Verify; with a Jev API key (TypeSafe's decision model, set from the launcher), Jev also judges whether a session that finished other work is ready for a new task. That sends the session's last 60 terminal lines to TypeSafe's API. A Pickup card's right-click menu also has **Send to a free session** and **Send to ▸**. The launcher's **Open hydraui log** shows why a card went where it did. If hydraui ever closes by itself, the same log has the error that closed it.
+- **Orchestrator.** **Start orchestrator…** in the launcher opens a Claude session that takes one ticket at a time through a pipeline of stages, each a fresh Claude session that ends with a confidence rating (a score, evidence and reasons). The next stage starts only when the rating clears its bar; below it, the run stops and asks you to step in, re-run the stage with a note, or stop the ticket. The run's card in the terminal list opens its timeline, its live sessions and their ratings; pipelines live in `~/.hydra/hydraui/pipelines/`, editable from **Pipeline settings**.
 - **Layouts.** Save a window as a layout file: its environments, terminals, folders and open files come back when you open it, and Claude restarts where it was running.
 - **Launcher and keys.** `Ctrl+Shift+P` opens the launcher: environments, sign-ins, secrets, settings, layouts and more. The help icon in the title bar lists every key; change them under `[keys]` in `~/.hydra/hydraui/config.toml`. On macOS the keys use Cmd (`Cmd+Shift+P`, `Cmd+B`, `Cmd+click`, …), as Terminal does, and Ctrl stays with the shell.
 - **Updates.** The title bar shows **Update hydra <version>** when a release is out, and updates hydraui and `hydra.exe` together.
 
 hydraui terminals skip the CLI's folder guard; a terminal whose folder is bound to another environment shows a warning badge instead.
+
+### Phone access
+
+hydraui can serve one phone: its sessions and their alerts, and the task boards, where the phone can add cards and move them, including into Pickup. The phone talks straight to hydraui over an encrypted peer-to-peer link (iroh), with no server of ours in the middle. The Android app is coming (plan 2); this release has hydraui's side.
+
+- **Off until you turn it on.** In **Settings › Phone**, turn on **Let my phone connect**. While it's off, hydraui listens for nothing.
+- **Pair by QR code.** **Pair a phone** shows a QR code that works for two minutes. Scan it with the app, and check both screens show the same two words. Only the paired phone can connect, and only one phone is paired at a time: pairing another replaces it. **Unpair** forgets it.
+- **One window holds the link.** With several hydraui windows open, the phone connects to one of them and sees its terminals and boards; when that window closes, another takes over.
+- **Remote Control.** Each environment's page in Settings has **Claude sessions start with Remote Control**, so a stuck session is already reachable from the Claude app. From the phone, a session can also have it turned on when it is idle with nothing typed.
 
 ## Quick start: two GitHub and Claude accounts
 
@@ -269,7 +279,7 @@ Each environment's Claude folder (`~/.hydra/state/<env>/claude`) is rebuilt from
 - **Sign-in settings are never shared.** `apiKeyHelper` and API-key variables in `~/.claude/settings.json` are left out of every environment, with a warning, so environments can't end up on the same account.
 - **Plain `claude` is unchanged.** Running `claude` outside hydra keeps using `~/.claude` as before.
 - **Folder guard hook.** Each environment's `settings.json` also gets a `PreToolUse` hook that blocks `git commit`, `git push` and `gh` write commands in folders bound to another environment (see [Folders and guards](#folders-and-guards)). It is added after any hooks of your own.
-- **hydraui's hooks.** `settings.json` also gets status hooks and a status line (`hydra hook`, `hydra statusline`) that tell hydraui what each session is doing and how much of its limits it has used, and the `hydraui` task board tools are pre-approved. Outside hydraui they do nothing. A status line of your own still runs.
+- **hydraui's hooks.** `settings.json` also gets status hooks and a status line (`hydra hook`, `hydra statusline`) that tell hydraui what each session is doing and how much of its limits it has used, and the `hydraui` tools (the task board's and the orchestrator's) are pre-approved. Outside hydraui they do nothing. A status line of your own still runs.
 
 ## Commands
 
@@ -301,7 +311,8 @@ Output is coloured in terminals; set NO_COLOR=1 to turn it off.
   state/<env>/         hydra's: each tool's folder, sign-ins, generated config
   state/<env>/git/hooks/  hydra's git hook wrappers (the guard)
   secrets.toml         names (never values) of stored secrets
-  hydraui/             hydraui's: config.toml, layouts/, jev.toml, hydraui.log
+  hydraui/             hydraui's: config.toml, layouts/, jev.toml, hydraui.log,
+                       pipelines/ (the orchestrator's), runs/ (each run's log)
 ```
 
 A project's task board is `.hydra/tasks.md` in the project itself.
@@ -340,4 +351,4 @@ A project's task board is `.hydra/tasks.md` in the project itself.
 - **`hydra doctor`.**
 - **Linux,** and on macOS a signed and notarised app (`.app` bundle, Homebrew).
 
-The CLI's design is in [`docs/superpowers/specs/2026-10-03-hydra-design.md`](docs/superpowers/specs/2026-10-03-hydra-design.md) and its roadmap in [`docs/superpowers/plans/2026-10-03-hydra-roadmap.md`](docs/superpowers/plans/2026-10-03-hydra-roadmap.md). hydraui's designs are in [`docs/superpowers/specs/`](docs/superpowers/specs/): the app, environment tabs, the task board, its MCP server and auto-pickup.
+The CLI's design is in [`docs/superpowers/specs/2026-10-03-hydra-design.md`](docs/superpowers/specs/2026-10-03-hydra-design.md) and its roadmap in [`docs/superpowers/plans/2026-10-03-hydra-roadmap.md`](docs/superpowers/plans/2026-10-03-hydra-roadmap.md). hydraui's designs are in [`docs/superpowers/specs/`](docs/superpowers/specs/): the app, environment tabs, the task board, its MCP server, auto-pickup and the orchestrator.

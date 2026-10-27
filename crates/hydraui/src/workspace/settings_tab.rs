@@ -21,6 +21,7 @@ use crate::settings::{ENV_COLOURS, SHELLS};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Section {
     General,
+    Phone,
     Env(String),
     Credentials,
 }
@@ -207,6 +208,7 @@ impl Workspace {
         let (border, muted) = (theme.border, theme.muted_foreground);
         let page = match &tab.section {
             Section::General => self.general_page(cx),
+            Section::Phone => self.phone_page(cx),
             Section::Env(env) => self.env_page(env, cx),
             Section::Credentials => self.credentials_page(cx),
         };
@@ -315,6 +317,12 @@ impl Workspace {
                 "General".into(),
                 None,
                 Section::General,
+            ))
+            .child(item(
+                "settings-phone".into(),
+                "Phone".into(),
+                None,
+                Section::Phone,
             ))
             .child(heading("ENVIRONMENTS"))
             .children(envs)
@@ -699,6 +707,17 @@ impl Workspace {
                 let e = e.clone();
                 move |ws, w, cx| ws.set_env_home(e.clone(), w, cx)
             }));
+        let remote_row = {
+            let e = e.clone();
+            Switch::new(SharedString::from(format!("env-remote-control-{env}")))
+                .checked(self.hydra.env_remote_control(env))
+                .small()
+                .label("Claude sessions start with Remote Control")
+                .on_click(cx.listener(move |ws, on: &bool, window, cx| {
+                    let r = ws.hydra.set_env_remote_control(&e, *on);
+                    ws.env_edited(&e, r, window, cx)
+                }))
+        };
         let vars = self.hydra.env_variables(env);
         let var_rows: Vec<AnyElement> = if vars.is_empty() {
             vec![
@@ -775,6 +794,7 @@ impl Workspace {
                     setting("Label", label_row.into_any_element(), cx),
                     setting("Colour", swatches.into_any_element(), cx),
                     setting("Home", home_row.into_any_element(), cx),
+                    setting("Remote Control", remote_row.into_any_element(), cx),
                 ],
                 cx,
             ))
@@ -1036,7 +1056,12 @@ fn action_button(
 }
 
 /// A page's heading: its title and a line under it, with buttons on the right.
-fn page_title(title: &str, sub: String, buttons: impl IntoElement, cx: &App) -> AnyElement {
+pub(super) fn page_title(
+    title: &str,
+    sub: String,
+    buttons: impl IntoElement,
+    cx: &App,
+) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     h_flex()
         .justify_between()
@@ -1059,7 +1084,12 @@ fn page_title(title: &str, sub: String, buttons: impl IntoElement, cx: &App) -> 
 }
 
 /// A bordered group of rows under a heading, with something on the heading's right.
-fn group(title: &str, right: Option<AnyElement>, rows: Vec<AnyElement>, cx: &App) -> AnyElement {
+pub(super) fn group(
+    title: &str,
+    right: Option<AnyElement>,
+    rows: Vec<AnyElement>,
+    cx: &App,
+) -> AnyElement {
     group_inner(div().child(title.to_string()), right, rows, cx)
 }
 

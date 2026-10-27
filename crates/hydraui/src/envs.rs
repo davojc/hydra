@@ -110,6 +110,18 @@ impl EnvTabs {
         true
     }
 
+    /// Appends `id` to `env`'s terminals without changing what is shown or which env is
+    /// active (a stage terminal opens beside the user, orchestrator spec §3.2); a tab showing
+    /// nothing shows it. False without that env.
+    pub fn add_terminal_quietly(&mut self, env: &str, id: PaneId) -> bool {
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.env == env) else {
+            return false;
+        };
+        tab.terminals.push(id);
+        tab.shown.get_or_insert(id);
+        true
+    }
+
     /// Activates `id`'s env and shows it (`files_focused = false`).
     pub fn show(&mut self, id: PaneId) -> bool {
         let Some(i) = self.tabs.iter().position(|t| t.terminals.contains(&id)) else {
@@ -242,6 +254,18 @@ mod tests {
         assert_eq!(tab.terminals, vec![1, 2]);
         assert_eq!(tab.shown, Some(2));
         assert!(!t.add_terminal("nope", 3));
+    }
+
+    #[test]
+    fn adding_quietly_keeps_what_is_shown() {
+        let mut t = tabs_with(&["a", "b"]);
+        t.add_terminal("a", 1);
+        t.add_terminal("b", 2);
+        assert!(t.add_terminal_quietly("a", 3));
+        assert_eq!(t.active().unwrap().env, "b");
+        let tab = t.get("a").unwrap();
+        assert_eq!((tab.terminals.clone(), tab.shown), (vec![1, 3], Some(1)));
+        assert!(!t.add_terminal_quietly("nope", 4));
     }
 
     #[test]

@@ -63,6 +63,13 @@ pub struct UiConfig {
     pub colors: ColorsConfig,
     /// Command name → keys, e.g. `new_terminal = "ctrl-alt-d"`; `""` unbinds.
     pub keys: BTreeMap<String, String>,
+    /// The phone link is on.
+    pub phone_access: bool,
+    /// The paired phone's endpoint id.
+    pub phone: Option<String>,
+    /// The share of the seven-day Claude limit, in percent, a pipeline stage needs left
+    /// (orchestrator spec §5.1).
+    pub min_week_left: u8,
 }
 
 impl Default for UiConfig {
@@ -76,6 +83,9 @@ impl Default for UiConfig {
             editor: None,
             colors: ColorsConfig::default(),
             keys: BTreeMap::new(),
+            phone_access: false,
+            phone: None,
+            min_week_left: crate::runs::MIN_WEEK_LEFT,
         }
     }
 }
@@ -126,6 +136,16 @@ pub fn parse(text: &str) -> (UiConfig, Vec<String>) {
             }),
             "editor" => get(value).map(|e| cfg.editor = Some(e)),
             "keys" => get(value).map(|k| cfg.keys = k),
+            "phone_access" => get(value).map(|b| cfg.phone_access = b),
+            "phone" => get(value).map(|p| cfg.phone = Some(p)),
+            "min_week_left" => get::<i64>(value).and_then(|n| {
+                let n = u8::try_from(n)
+                    .ok()
+                    .filter(|n| *n <= 100)
+                    .ok_or(format!("{n} must be between 0 and 100"))?;
+                cfg.min_week_left = n;
+                Ok(())
+            }),
             "colors" => match value {
                 toml::Value::Table(colors) => {
                     parse_colors(colors, &mut cfg.colors, &mut problems);
@@ -227,7 +247,15 @@ pub fn set(paths: &HydraPaths, key: &str, value: Option<toml_edit::Value>) -> Re
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    std::fs::write(&path, out).map_err(|e| format!("can't write {}: {e}", path.display()))
+    // Written beside it, then moved over it: another window reading the settings (the phone
+    // link reads them each time it tries to start) never sees a half-written file.
+    let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
+    let written = std::fs::write(&tmp, &out).and_then(|()| std::fs::rename(&tmp, &path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        std::fs::write(&path, out).map_err(|e| format!("can't write {}: {e}", path.display()))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -253,6 +281,21 @@ mod tests {
         let (cfg, problems) = parse(text);
         assert!(problems.is_empty(), "{problems:?}");
         cfg
+    }
+
+    #[test]
+    fn config_reads_phone_settings() {
+        let cfg = clean(
+            "phone_access = true
+phone = \"abc\"",
+        );
+        assert!(cfg.phone_access);
+        assert_eq!(cfg.phone.as_deref(), Some("abc"));
+        let cfg = clean("");
+        assert!(!cfg.phone_access);
+        assert_eq!(cfg.phone, None);
+        let (_, problems) = parse("phone_access = \"yes\"");
+        assert!(problems.iter().any(|p| p.starts_with("phone_access:")));
     }
 
     #[test]
@@ -302,6 +345,7 @@ theme = "light"
 default_env = "work"
 default_shell = "bash"
 editor = "code"
+min_week_left = 25
 
 [colors]
 background = "#101010"
@@ -317,6 +361,7 @@ new_terminal = "ctrl-alt-d"
         assert_eq!(cfg.default_env.as_deref(), Some("work"));
         assert_eq!(cfg.default_shell.as_deref(), Some("bash"));
         assert_eq!(cfg.editor.as_deref(), Some("code"));
+        assert_eq!(cfg.min_week_left, 25);
         assert_eq!(cfg.colors.background.as_deref(), Some("#101010"));
         assert_eq!(cfg.colors.palette.as_ref().map(Vec::len), Some(2));
         assert_eq!(cfg.keys["new_terminal"], "ctrl-alt-d");
@@ -331,7 +376,7 @@ new_terminal = "ctrl-alt-d"
     fn one_bad_setting_keeps_the_rest() {
         let (cfg, problems) = parse(
             "font = \"Fira Code\"\nfontsize = 12\nfont_size = 200\ntheme = \"blue\"\n\
-             default_shell = \"fish\"\ndefault_env = \"work\"\n\
+             default_shell = \"fish\"\ndefault_env = \"work\"\nmin_week_left = 101\n\
              [colors]\nforground = \"#000000\"\nbackground = \"#101010\"\n",
         );
         assert_eq!(cfg.font, "Fira Code");
@@ -340,8 +385,16 @@ new_terminal = "ctrl-alt-d"
         assert_eq!(cfg.font_size, 14.0);
         assert_eq!(cfg.theme, ThemeChoice::Dark);
         assert_eq!(cfg.default_shell, None);
-        assert_eq!(problems.len(), 5, "{problems:?}");
-        for word in ["fontsize", "between 6 and 72", "theme", "fish", "forground"] {
+        assert_eq!(cfg.min_week_left, crate::runs::MIN_WEEK_LEFT);
+        assert_eq!(problems.len(), 6, "{problems:?}");
+        for word in [
+            "fontsize",
+            "between 6 and 72",
+            "theme",
+            "fish",
+            "forground",
+            "between 0 and 100",
+        ] {
             assert!(
                 problems.iter().any(|p| p.contains(word)),
                 "{word}: {problems:?}"

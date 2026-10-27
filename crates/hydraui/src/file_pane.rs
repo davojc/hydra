@@ -1,4 +1,4 @@
-//! The file pane (spec §7.8): file tabs, Raw (an editor; Ctrl+S saves) and Rendered (Markdown),
+//! The file pane (spec §7.8): file tabs, Raw (an editor; Ctrl+S saves) and Rendered (Markdown, HTML),
 //! Open in editor, the unsaved-edits prompt, and changes on disk.
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -287,7 +287,7 @@ impl FilePane {
             _ => (None, None),
         };
         let svg = file_doc::is_svg(path).then(|| svg_image(&doc.text));
-        let view = if file_doc::is_markdown(path) || api.is_some() || svg.is_some() {
+        let view = if file_doc::has_rendered(path) || api.is_some() || svg.is_some() {
             View::Rendered
         } else {
             View::Raw
@@ -885,7 +885,7 @@ impl Render for FilePane {
             header = header.child(div().text_sm().text_color(muted).child("SVG image"));
         }
         if let Body::Text { view, api, svg, .. } = &t.body
-            && (file_doc::is_markdown(&t.path) || api.is_some() || svg.is_some())
+            && (file_doc::has_rendered(&t.path) || api.is_some() || svg.is_some())
         {
             let other = if *view == View::Raw {
                 "Rendered"
@@ -999,33 +999,41 @@ impl Render for FilePane {
                 view: View::Rendered,
                 ..
             } => {
-                let md = editor.read(cx).value();
+                let text = editor.read(cx).value();
                 let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+                // HTML through the same renderer as Markdown: no browser, no script, no CSS.
+                let view = if file_doc::is_html(&path) {
+                    gpui_base::TextView::html(
+                        SharedString::from(format!("html-{}", path.display())),
+                        text,
+                    )
+                } else {
+                    gpui_base::TextView::markdown(
+                        SharedString::from(format!("md-{}", path.display())),
+                        text,
+                    )
+                };
                 div()
                     .size_full()
                     .p_3()
                     .child(
-                        gpui_base::TextView::markdown(
-                            SharedString::from(format!("md-{}", path.display())),
-                            md,
-                        )
-                        .selectable(true)
-                        .scrollable(true)
-                        // Local images only; nothing is fetched (spec §7.8).
-                        .image_source(move |uri| match file_doc::image_use(uri, &dir) {
-                            ImageUse::Local(p) => {
-                                gpui::ImageSource::Resource(gpui::Resource::Path(Arc::from(p)))
-                            }
-                            ImageUse::Blocked => {
-                                gpui::ImageSource::Resource(gpui::Resource::Embedded("".into()))
-                            }
-                        })
-                        // Web and mail links open in the browser; nothing else runs.
-                        .on_link_click(|url, _, _, cx| {
-                            if file_doc::link_opens(url) {
-                                cx.open_url(url);
-                            }
-                        }),
+                        view.selectable(true)
+                            .scrollable(true)
+                            // Local images only; nothing is fetched (spec §7.8).
+                            .image_source(move |uri| match file_doc::image_use(uri, &dir) {
+                                ImageUse::Local(p) => {
+                                    gpui::ImageSource::Resource(gpui::Resource::Path(Arc::from(p)))
+                                }
+                                ImageUse::Blocked => {
+                                    gpui::ImageSource::Resource(gpui::Resource::Embedded("".into()))
+                                }
+                            })
+                            // Web and mail links open in the browser; nothing else runs.
+                            .on_link_click(|url, _, _, cx| {
+                                if file_doc::link_opens(url) {
+                                    cx.open_url(url);
+                                }
+                            }),
                     )
                     .into_any_element()
             }

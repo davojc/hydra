@@ -7,7 +7,13 @@ mod busy;
 mod finder;
 mod launcher;
 mod layout_file;
+mod orchestrator;
+mod phone;
+mod phone_page;
 mod pickup;
+mod pipeline_history;
+mod pipeline_settings;
+mod pipeline_tab;
 mod settings_tab;
 mod shortcuts;
 mod start_page;
@@ -196,6 +202,15 @@ pub struct Workspace {
     /// Terminals with a Tasks tab, and whether it's the one shown (`true`) or the terminal
     /// (task-board design §4).
     tasks_tabs: HashMap<PaneId, bool>,
+    /// Orchestrators' Pipeline tabs (orchestrator spec §7.2).
+    pipeline_tabs: HashMap<PaneId, pipeline_tab::PipelineTab>,
+    /// Orchestrators started from the launcher, with the pipeline file each runs: their cards
+    /// show before they have a ticket.
+    orchestrators: HashMap<PaneId, String>,
+    /// Runs open when an earlier hydraui closed, offered back as cards (orchestrator §13).
+    interrupted: Vec<crate::run_resume::Interrupted>,
+    /// Pipeline settings being edited, per orchestrator (orchestrator spec §7.4).
+    pipeline_settings: HashMap<PaneId, pipeline_settings::SettingsDraft>,
     /// One board per project, shared by every Tasks tab on it; dropped when no tab uses it.
     boards: HashMap<PathBuf, (Entity<TaskBoard>, Subscription)>,
     /// One view per terminal's Tasks tab.
@@ -213,10 +228,29 @@ pub struct Workspace {
     /// Terminals a card was just sent to, and when: not candidates for another until their
     /// next hook state, or 30 s (auto-pickup design §6).
     reserved: HashMap<PaneId, Instant>,
+    /// Each orchestrator's wake-up waiting to be typed, with its run (orchestrator spec §6): the
+    /// newest only.
+    pending_wakes: HashMap<PaneId, (String, String)>,
     /// Cards being offered or just sent, so one card never goes to two sessions.
     in_flight: crate::pickup::InFlight,
     /// Listens for board files the MCP server's sessions create.
     _mcp_pump: Option<gpui::Task<()>>,
+    /// The phone link, while this window holds it (phone spec §4).
+    phone: Option<phone::PhoneLink>,
+    /// This window is waiting to take the phone link (another window holds it).
+    phone_seeking: bool,
+    /// Counts `phone_stop`s, so a wait for the link started before one ends.
+    phone_seek: u64,
+    /// Terminals the phone shows as Finished: a turn ended and the phone hasn't seen it.
+    phone_finished: HashSet<PaneId>,
+    /// Cards the phone put into Pickup, by project and text, while they are offered.
+    phone_cards: HashSet<(PathBuf, String)>,
+    /// The word pair both screens showed at the last pairing, for the Phone page.
+    phone_word: Option<String>,
+    /// The pairing code the Phone page shows, until it expires or a phone pairs.
+    phone_offer: Option<phone_page::ShownOffer>,
+    /// The paired phone is connected now.
+    phone_connected: bool,
     /// Coming back to the window clears the alert of the terminal it shows.
     _activation: Subscription,
 }
@@ -272,7 +306,20 @@ impl Workspace {
                     .timer(std::time::Duration::from_secs(1))
                     .await;
                 if this
-                    .update_in(cx, |ws, window, cx| ws.sync_shown_lanes(window, cx))
+                    .update_in(cx, |ws, window, cx| {
+                        ws.sync_shown_lanes(window, cx);
+                        // A draft cleared without a hook: a waiting wake-up may go now.
+                        ws.send_wakes(window, cx);
+                        // The Pipeline tab's session times tick.
+                        if ws
+                            .envs
+                            .active()
+                            .and_then(|t| t.shown)
+                            .is_some_and(|id| ws.pipeline_shown(id))
+                        {
+                            cx.notify();
+                        }
+                    })
                     .is_err()
                 {
                     break;
@@ -308,6 +355,10 @@ impl Workspace {
                 cx.notify();
             }
         });
+        if let Some(server) = crate::mcp::server::get() {
+            // The weekly share a stage needs (orchestrator spec §5.1), from config.toml.
+            crate::mcp::server::lock(server.registry()).min_week_left = ui.min_week_left;
+        }
         let mcp_pump = crate::mcp::server::get().map(|server| {
             let mut rx = server.subscribe();
             cx.spawn_in(window, async move |this, cx| {
@@ -320,9 +371,13 @@ impl Workspace {
                             token,
                             state,
                             resumed,
+                            ..
                         } => ws.session_state(&token, state, resumed, window, cx),
                         McpEvent::Usage(token, usage) => ws.usage_reported(&token, usage, cx),
                         McpEvent::Verified(token) => ws.session_verified(&token, cx),
+                        McpEvent::StageStart(s) => ws.start_stage(s, window, cx),
+                        McpEvent::RunChanged(changes) => ws.runs_changed(changes, window, cx),
+                        McpEvent::Skill(..) => cx.notify(),
                     });
                     if alive.is_err() {
                         break;
@@ -335,6 +390,7 @@ impl Workspace {
             let _ = this.update_in(cx, |ws, window, cx| ws.startup(problems, start, window, cx));
         })
         .detach();
+        let interrupted = crate::run_resume::interrupted(hydra.paths.root(), crate::claim::alive);
         Self {
             hydra,
             keymap: crate::keys::keymap(&ui.keys).0,
@@ -384,6 +440,10 @@ impl Workspace {
             start: None,
             settings: None,
             tasks_tabs: HashMap::new(),
+            pipeline_tabs: HashMap::new(),
+            pipeline_settings: HashMap::new(),
+            orchestrators: HashMap::new(),
+            interrupted,
             boards: HashMap::new(),
             board_views: HashMap::new(),
             all_tasks: HashSet::new(),
@@ -392,8 +452,17 @@ impl Workspace {
             board_focus: HashMap::new(),
             board_events: HashMap::new(),
             reserved: HashMap::new(),
+            pending_wakes: HashMap::new(),
             in_flight: Default::default(),
             _mcp_pump: mcp_pump,
+            phone: None,
+            phone_seeking: false,
+            phone_seek: 0,
+            phone_finished: HashSet::new(),
+            phone_cards: HashSet::new(),
+            phone_word: None,
+            phone_offer: None,
+            phone_connected: false,
             _activation: activation,
         }
     }
@@ -410,6 +479,17 @@ impl Workspace {
         for p in problems {
             window.push_notification(Notification::warning(p).title("hydraui settings"), cx);
         }
+        // A ticket left mid-run waits on its environment's card (orchestrator §13).
+        for i in &self.interrupted {
+            window.push_notification(
+                Notification::info(format!(
+                    "{} was running when hydraui closed. Open {} to resume it.",
+                    i.run.ticket, i.env
+                ))
+                .title(i.run.pipeline.name.clone()),
+                cx,
+            );
+        }
         // The page first: opening a file leaves it; a file that fails to open leaves the
         // page and its toast (§7.12 Command line); a file another window took meanwhile
         // closes this window, as a start page does.
@@ -417,6 +497,7 @@ impl Workspace {
         if let StartWith::File(path) = start {
             self.open_layout_path(path, window, cx);
         }
+        self.phone_start(window, cx);
         // Each pane's folder as it is when the window closes.
         let ws = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
@@ -426,6 +507,11 @@ impl Workspace {
                 // A board edit whose save failed stays open, and so does the window; its toast
                 // has said why (task board spec §1).
                 if !saved {
+                    return false;
+                }
+                // A ticket still running or waiting for a person ends with the window: ask.
+                if let Some(warning) = crate::pipeline_card::quit_warning(&ws.open_runs(cx)) {
+                    ws.confirm_close_runs(warning, window, cx);
                     return false;
                 }
                 // Unsaved edits: ask first, and close from the dialog (spec §7.8).
@@ -581,6 +667,23 @@ impl Workspace {
         id
     }
 
+    /// A terminal running `request` in `env`'s open tab, added without taking focus or changing
+    /// what is shown (orchestrator spec §3.2); `None` when `env` has no tab.
+    pub(super) fn open_terminal_beside(
+        &mut self,
+        env: &str,
+        request: PaneRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<PaneId> {
+        self.envs.get(env)?;
+        let id = self.new_pane(request, window, cx);
+        self.envs.add_terminal_quietly(env, id);
+        self.autosave(window, cx);
+        cx.notify();
+        Some(id)
+    }
+
     /// Shows terminal `id` in the middle, selecting its environment, and focuses it.
     pub(super) fn show_terminal(
         &mut self,
@@ -652,6 +755,12 @@ impl Workspace {
                     ws.show_file_at(path.clone(), *line, *column, window, cx);
                     return;
                 }
+                if *ev == PaneEvent::Exited
+                    && let Some(token) = view.read(cx).mcp_token().map(str::to_string)
+                {
+                    // The shell died: a stage it ran fails even with its terminal open.
+                    ws.stage_session_gone(&token);
+                }
                 if *ev == PaneEvent::Focused {
                     // A click in a terminal shows it and selects its environment.
                     let before = ws.shown_place();
@@ -678,6 +787,7 @@ impl Workspace {
         );
         self.subs.insert(id, sub);
         self.panes.insert(id, view);
+        self.phone_broadcast_session(id, cx);
     }
 
     /// The selected environment and its shown terminal: what the layout saves as selected.
@@ -695,6 +805,18 @@ impl Workspace {
     fn focus_pane(&self, id: PaneId, window: &mut Window, cx: &mut App) {
         if let Some(view) = self.files.get(&id) {
             view.update(cx, |f, cx| f.focus_content(window, cx));
+            return;
+        }
+        // A terminal showing its Pipeline tab: the session the user stepped into, else none of
+        // the hidden terminal.
+        if self.pipeline_shown(id) {
+            match self.pipeline_focus(id, cx).and_then(|p| self.panes.get(&p)) {
+                Some(view) => {
+                    let handle = view.read(cx).focus_handle(cx);
+                    window.focus(&handle, cx);
+                }
+                None => window.focus(&self.focus, cx),
+            }
             return;
         }
         // A terminal showing its Tasks tab: the board.
@@ -939,6 +1061,9 @@ impl Workspace {
     }
 
     fn drop_pane(&mut self, id: PaneId) {
+        self.pipeline_tabs.remove(&id);
+        self.pipeline_settings.remove(&id);
+        self.orchestrators.remove(&id);
         // Dropping the view drops its Pane: the job ends the shell's whole process tree.
         self.panes.remove(&id);
         self.subs.remove(&id);
@@ -946,6 +1071,7 @@ impl Workspace {
         self.file_subs.remove(&id);
         self.commands.remove(&id);
         self.attention.remove(&id);
+        self.phone_pane_gone(id);
     }
 
     /// Ctrl+W: the file pane when it has the focus, else the shown terminal's Tasks tab when
@@ -1487,9 +1613,12 @@ impl Workspace {
                 self.render_all_tasks(tint, muted, border, cx)
             }
             // With a Tasks tab: its strip above the terminal or its board (task-board §4).
-            Some((id, view)) if self.tasks_tabs.contains_key(&id) => {
+            Some((id, view))
+                if self.tasks_tabs.contains_key(&id) || self.pipeline_tabs.contains_key(&id) =>
+            {
                 let label = view.read(cx).label();
                 let content = match self.shown_board(id) {
+                    _ if self.pipeline_shown(id) => self.render_pipeline(id, cx),
                     Some(board) => board.clone().into_any_element(),
                     None => view.clone().into_any_element(),
                 };
@@ -1777,8 +1906,19 @@ impl Workspace {
                 }
                 _ => None,
             };
+            // The orchestrator's state (the design's status text), red when it needs you.
+            let orchestrator = self.shown_run(cx).map(|(_, run)| {
+                let (text, red) = crate::pipeline_card::status_text(&run);
+                div()
+                    .flex_none()
+                    .max_w(px(520.))
+                    .truncate()
+                    .when(red, |d| d.text_color(cx.theme().danger))
+                    .child(text)
+            });
             bar = bar
                 .child(env_name)
+                .children(orchestrator)
                 .child(div().flex_1().min_w_0().overflow_hidden().child(accounts))
                 .when_some(usage, |b, u| b.child(u))
                 .when_some(git, |b, line| b.child(line))

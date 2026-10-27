@@ -29,7 +29,7 @@ use crate::ids::{PersonId, PersonKey, to_hex};
 use crate::invites::{Invite, InviteCode, NOT_THEIR_MACHINE, Refused, redeem, redeem_at};
 use crate::node::{NodeConfig, NodeEvent, SwarmNode, now_micros};
 use crate::paths::{RelPath, safe_rel_path};
-use crate::roster::{Change, Machine, Member, Role, Roster, SignedChange};
+use crate::roster::{Change, Kept, Machine, Member, Role, Roster, SignedChange};
 
 /// How often every swarm reconciles its folder, and retries what it couldn't send.
 const PERIODIC: Duration = Duration::from_secs(60);
@@ -1410,13 +1410,20 @@ impl Worker {
             && r.members.iter().filter(|m| m.role == Role::Owner).count() == 1
     }
 
-    async fn write(&mut self, node: &SwarmNode, change: Change) -> Result<(), String> {
+    async fn write(&mut self, node: &SwarmNode, change: Change) -> Result<SignedChange, String> {
         let signed = SignedChange::sign(&self.ns, change, &self.person, now_micros());
         node.write_change(&signed)
             .await
             .map_err(|e| format!("{}: {e:#}", self.name))?;
         self.soon(Duration::ZERO);
-        Ok(())
+        Ok(signed)
+    }
+
+    /// What a change taking `person` out of a role keeps of their work.
+    async fn kept(&self, node: &SwarmNode, person: &PersonId) -> Result<Kept, String> {
+        node.kept(person)
+            .await
+            .map_err(|e| format!("{}: {e:#}", self.name))
     }
 
     async fn invite(&mut self, role: Role) -> Result<String, String> {
@@ -1463,8 +1470,17 @@ impl Worker {
         if m.role == role {
             return Ok(());
         }
-        self.write(&node, Change::SetRole { person: id, role })
-            .await?;
+        let kept = if role < m.role {
+            self.kept(&node, &id).await?
+        } else {
+            Kept::default()
+        };
+        let change = Change::SetRole {
+            person: id,
+            role,
+            kept,
+        };
+        self.write(&node, change).await?;
         // Ruling 8: a reader made a writer or owner is handed the write capability.
         if m.role == Role::Reader && role >= Role::Writer {
             for x in &m.machines {
@@ -1490,13 +1506,17 @@ impl Worker {
             drop(node);
             return self.leave().await;
         }
-        self.write(&node, Change::Remove { person: id }).await?;
+        let kept = self.kept(&node, &id).await?;
+        let removal = self
+            .write(&node, Change::Remove { person: id, kept })
+            .await?;
+        let removal = Arc::new(removal);
         self.shared.remember_peers(&node);
         for x in m.machines {
             if self.online.contains(&x.endpoint) {
-                let node = Arc::clone(&node);
+                let (node, removal) = (Arc::clone(&node), Arc::clone(&removal));
                 self.sends.spawn(async move {
-                    let _ = node.send_removed(&x.endpoint).await;
+                    let _ = node.send_removed(&x.endpoint, &removal).await;
                     Sent::Removed
                 });
             }
@@ -1507,7 +1527,7 @@ impl Worker {
     async fn owner_change(&mut self, change: Change, only: String) -> Result<(), String> {
         let node = self.live_node()?;
         self.as_owner(&node, only).await?;
-        self.write(&node, change).await
+        self.write(&node, change).await.map(drop)
     }
 
     /// Syncs into a new, empty folder from scratch; the old one is left as it is.
@@ -1554,9 +1574,10 @@ impl Worker {
         if Self::is_last_owner(&r, &me) {
             return Err(self.needs_an_owner());
         }
+        let kept = self.kept(&node, &me).await?;
         let signed = SignedChange::sign(
             &self.ns,
-            Change::Leave { person: me },
+            Change::Leave { person: me, kept },
             &self.person,
             now_micros(),
         );

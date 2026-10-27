@@ -324,7 +324,10 @@ mod tests {
         use crate::roster::Change;
         let key = PersonKey::generate();
         let make = |at: u64| SignedChange {
-            change: Change::Leave { person: key.id() },
+            change: Change::Leave {
+                person: key.id(),
+                kept: Default::default(),
+            },
             by: key.id(),
             at,
             sig: "0123456789abcdef0123".to_string(),

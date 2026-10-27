@@ -251,14 +251,15 @@ async fn a_reader_cannot_write() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn entries_from_an_author_who_is_not_a_writer_are_ignored() {
+async fn a_demoted_writers_entries_count_only_as_the_demotion_kept_them() {
     let o = create_owner().await;
     let cap = o.node.capability(Role::Writer).await.unwrap();
     let w = join(&o, "wren", Some(Role::Writer), cap).await;
     connect(&o.node, &w.node).await;
     roster_with(&w.node, 2).await;
 
-    w.node
+    let kept_hash = w
+        .node
         .put_file(&rel("x.md"), Bytes::from_static(b"hello"))
         .await
         .unwrap();
@@ -273,6 +274,7 @@ async fn entries_from_an_author_who_is_not_a_writer_are_ignored() {
         Change::SetRole {
             person: w.key.id(),
             role: Role::Reader,
+            kept: o.node.kept(&w.key.id()).await.unwrap(),
         },
         &o.key,
         now(),
@@ -280,7 +282,26 @@ async fn entries_from_an_author_who_is_not_a_writer_are_ignored() {
     o.node.write_change(&demote).await.unwrap();
     let r = o.node.roster().await.unwrap().unwrap();
     assert_eq!(r.role_of(&w.key.id()), Some(Role::Reader));
-    assert!(!o.node.files(&r).await.unwrap().contains_key(&rel("x.md")));
+    let x = o.node.files(&r).await.unwrap()[&rel("x.md")].clone();
+    assert_eq!(x.hash, Some(kept_hash));
+    assert_eq!(x.machine, "wren-pc");
+
+    // Still holding the write capability, the demoted writer's later entries stay out.
+    w.node
+        .put_file(&rel("x.md"), Bytes::from_static(b"later"))
+        .await
+        .unwrap();
+    w.node
+        .put_file(&rel("y.md"), Bytes::from_static(b"new"))
+        .await
+        .unwrap();
+    eventually("the later entries on the owner", || async {
+        (o.node.file_entries_for_tests().await.unwrap() == 2).then_some(())
+    })
+    .await;
+    let files = o.node.files(&r).await.unwrap();
+    assert_eq!(files[&rel("x.md")].hash, Some(kept_hash));
+    assert!(!files.contains_key(&rel("y.md")));
     o.node.shutdown().await;
     w.node.shutdown().await;
 }
@@ -437,7 +458,10 @@ async fn a_reopened_member_never_dials_a_removed_machine() {
 
     let remove = SignedChange::sign(
         &o.node.id(),
-        Change::Remove { person: x.key.id() },
+        Change::Remove {
+            person: x.key.id(),
+            kept: o.node.kept(&x.key.id()).await.unwrap(),
+        },
         &o.key,
         now(),
     );
@@ -676,6 +700,7 @@ async fn an_invite_from_someone_no_longer_an_owner_is_refused() {
         Change::SetRole {
             person: b.key.id(),
             role: Role::Writer,
+            kept: o.node.kept(&b.key.id()).await.unwrap(),
         },
         &o.key,
         now(),
@@ -737,10 +762,14 @@ async fn a_relay_for_someone_else_is_refused() {
             person: o.key.id(),
             name: "Mallory".into(),
         },
-        Change::Leave { person: o.key.id() },
+        Change::Leave {
+            person: o.key.id(),
+            kept: Default::default(),
+        },
         Change::SetRole {
             person: r.key.id(),
             role: Role::Owner,
+            kept: Default::default(),
         },
     ];
     for change in others {
@@ -766,6 +795,7 @@ async fn a_promoted_reader_can_write() {
         Change::SetRole {
             person: r.key.id(),
             role: Role::Writer,
+            kept: Default::default(),
         },
         &o.key,
         now(),
@@ -797,9 +827,40 @@ async fn only_an_owner_can_tell_a_machine_it_was_removed() {
     let r = invite_and_join(&o, "rae", Role::Reader).await;
     roster_with(&r.node, 2).await;
     let mut events = r.node.events();
-    assert!(r.node.send_removed(&o.node.endpoint_id()).await.is_err());
+    let ns = o.node.id();
+    let removal = SignedChange::sign(
+        &ns,
+        Change::Remove {
+            person: r.key.id(),
+            kept: o.node.kept(&r.key.id()).await.unwrap(),
+        },
+        &o.key,
+        now(),
+    );
+    assert!(
+        r.node
+            .send_removed(&o.node.endpoint_id(), &removal)
+            .await
+            .is_err()
+    );
+    // A notice whose change doesn't remove this machine's person is only a claim, and refused.
+    let rename = SignedChange::sign(
+        &ns,
+        Change::RenameSwarm {
+            name: "Elsewhere".into(),
+        },
+        &o.key,
+        now(),
+    );
+    assert!(
+        o.node
+            .send_removed(&r.node.endpoint_id(), &rename)
+            .await
+            .is_err()
+    );
+    // The removal itself is proof, even before it reaches this machine's log.
     o.node
-        .send_removed(&r.node.endpoint_id())
+        .send_removed(&r.node.endpoint_id(), &removal)
         .await
         .expect("told");
     let got = tokio::time::timeout(WAIT, async {
@@ -877,7 +938,25 @@ async fn a_join_with_an_overlong_name_leaves_the_invite_unspent() {
         .expect_err("refused");
     assert_eq!(
         err.to_string(),
-        "Your name or your machine's name is too long."
+        "Your name and your machine's name can't be blank or too long."
+    );
+    assert_eq!(o.node.pending_invites(), vec![invite]);
+    o.node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_join_reusing_a_members_author_leaves_the_invite_unspent() {
+    let o = create_owner().await;
+    let (invite, code) = o.node.invite(Role::Writer, &o.key).await.unwrap();
+    let key = PersonKey::generate();
+    let mut me = joining_member(&key, "mallory");
+    me.machines[0].author = o.node.author();
+    let err = redeem_at(&code, me, &key, random32(), o.node.addr_for_tests())
+        .await
+        .expect_err("refused");
+    assert_eq!(
+        err.to_string(),
+        "The joining machine's ids already belong to someone in this swarm."
     );
     assert_eq!(o.node.pending_invites(), vec![invite]);
     o.node.shutdown().await;

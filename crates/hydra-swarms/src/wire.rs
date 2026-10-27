@@ -9,12 +9,13 @@ use std::io;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::roster::{Member, SignedChange};
+use crate::roster::{MAX_CHANGE_BYTES, Member, SignedChange};
 
 pub const ALPN: &[u8] = b"hydra/swarm/1";
 
-/// The longest frame either side accepts.
-pub const MAX_FRAME: u32 = 1 << 20;
+/// The longest frame either side accepts: room for the longest change, which a leaving passed
+/// on or a removal notice carries.
+pub const MAX_FRAME: u32 = MAX_CHANGE_BYTES as u32 + (64 << 10);
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -28,8 +29,8 @@ pub enum Request {
     },
     /// A reader's own change, for an owner to write.
     Relay { change: SignedChange },
-    /// An owner telling this machine it was removed.
-    Removed,
+    /// An owner telling this machine it was removed, with the change that removed it.
+    Removed { change: SignedChange },
     /// An owner handing over the write capability (hex) after promoting this machine's person.
     Promoted { write_secret: String },
 }
@@ -80,8 +81,12 @@ pub async fn read_msg<R: AsyncRead + Unpin, T: DeserializeOwned>(
     if len > MAX_FRAME {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too long"));
     }
-    let mut body = vec![0u8; len as usize];
-    r.read_exact(&mut body).await?;
+    // Grown as bytes arrive, so a frame that only claims to be long costs nothing.
+    let mut body = Vec::new();
+    r.take(u64::from(len)).read_to_end(&mut body).await?;
+    if body.len() != len as usize {
+        return Err(io::ErrorKind::UnexpectedEof.into());
+    }
     serde_json::from_slice(&body)
         .map(Some)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
@@ -107,15 +112,21 @@ mod tests {
                 author: "au".into(),
             }],
         };
-        let change = SignedChange::sign("ns", Change::Leave { person: key.id() }, &key, 1);
+        let leave = Change::Leave {
+            person: key.id(),
+            kept: Default::default(),
+        };
+        let change = SignedChange::sign("ns", leave, &key, 1);
         vec![
             Request::Join {
                 token: "t".into(),
                 member,
                 proof: "p".into(),
             },
-            Request::Relay { change },
-            Request::Removed,
+            Request::Relay {
+                change: change.clone(),
+            },
+            Request::Removed { change },
             Request::Promoted {
                 write_secret: "s".into(),
             },
@@ -159,8 +170,8 @@ mod tests {
     #[test]
     fn json_shape_is_stable() {
         assert_eq!(
-            serde_json::to_value(Request::Removed).unwrap(),
-            json!({"type":"removed"})
+            serde_json::to_value(Reply::Ok).unwrap(),
+            json!({"type":"ok"})
         );
         assert_eq!(
             serde_json::to_value(Reply::Refused { reason: "x".into() }).unwrap(),

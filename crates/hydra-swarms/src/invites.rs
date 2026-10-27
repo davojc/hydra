@@ -18,7 +18,7 @@ use tokio::sync::broadcast::{self, error::RecvError};
 
 use crate::ids::{PersonId, PersonKey, from_hex, to_hex, verify};
 use crate::node::{Core, CoreSlot, NodeConfig, NodeEvent, SwarmNode, endpoint_builder, now_micros};
-use crate::roster::{Change, Machine, Member, Role, SignedChange};
+use crate::roster::{Change, Machine, Member, Role, SignedChange, name_fits};
 use crate::wire::{ALPN, Reply, Request, read_msg, write_msg};
 
 /// How long an invite can be used for, in seconds.
@@ -72,14 +72,6 @@ impl InviteCode {
         }
         Ok(addr)
     }
-}
-
-/// The longest person or machine name taken in, in characters, so a change naming one stays far
-/// under the size the roster reads.
-const MAX_NAME_CHARS: usize = 200;
-
-fn name_fits(name: &str) -> bool {
-    name.chars().count() <= MAX_NAME_CHARS
 }
 
 fn is_token(s: &str) -> bool {
@@ -461,9 +453,10 @@ impl SwarmNode {
         self.tell(owner, &Request::Relay { change }).await
     }
 
-    /// Tells the machine `endpoint` that its person was removed from the swarm.
-    pub async fn send_removed(&self, endpoint: &str) -> anyhow::Result<()> {
-        self.tell(endpoint, &Request::Removed).await
+    /// Tells the machine `endpoint` that its person was removed from the swarm by `change`.
+    pub async fn send_removed(&self, endpoint: &str, change: &SignedChange) -> anyhow::Result<()> {
+        let change = change.clone();
+        self.tell(endpoint, &Request::Removed { change }).await
     }
 
     /// Hands the write capability to the machine `endpoint`, whose person the roster now shows
@@ -556,7 +549,7 @@ impl Core {
                 proof,
             } => self.on_join(from, &token, member, &proof).await,
             Request::Relay { change } => self.on_relay(from, change).await,
-            Request::Removed => self.on_removed(from).await,
+            Request::Removed { change } => self.on_removed(from, &change).await,
             Request::Promoted { write_secret } => self.on_promoted(from, &write_secret).await,
         };
         answered.unwrap_or_else(|e| refused(&format!("Something went wrong here: {e:#}")))
@@ -590,24 +583,31 @@ impl Core {
         };
         // Checked before the token is spent: an entry the roster would skip mustn't use it up.
         if !name_fits(&member.name) || !name_fits(&machine.name) {
-            return Ok(refused("Your name or your machine's name is too long."));
+            return Ok(refused(
+                "Your name and your machine's name can't be blank or too long.",
+            ));
         }
         if machine.author.parse::<AuthorId>().is_err() {
             return Ok(refused("The joining machine's author isn't valid."));
         }
-        let role = match self.invites.spend(token, now_secs())? {
-            Ok(role) => role,
-            Err(reason) => return Ok(refused(reason)),
-        };
         let machine = Machine {
             endpoint: from.to_string(),
             ..machine.clone()
         };
         let member = Member {
-            role,
             machines: vec![machine],
             ..member
         };
+        if roster.taken(&member) {
+            return Ok(refused(
+                "The joining machine's ids already belong to someone in this swarm.",
+            ));
+        }
+        let role = match self.invites.spend(token, now_secs())? {
+            Ok(role) => role,
+            Err(reason) => return Ok(refused(reason)),
+        };
+        let member = Member { role, ..member };
         let add = SignedChange::sign(
             &self.id(),
             Change::AddMember { member },
@@ -648,7 +648,7 @@ impl Core {
         let own = match &change.change {
             Change::Rename { person, name } => *person == change.by && name_fits(name),
             Change::RenameMachine { person, name, .. } => *person == change.by && name_fits(name),
-            Change::Leave { person } => *person == change.by,
+            Change::Leave { person, .. } => *person == change.by,
             _ => false,
         };
         if !own {
@@ -660,9 +660,18 @@ impl Core {
         Ok(Reply::Ok)
     }
 
-    async fn on_removed(&self, from: EndpointId) -> anyhow::Result<Reply> {
+    /// Taken only as a hint: the roster, with the removal the owner sent, must show it.
+    async fn on_removed(&self, from: EndpointId, change: &SignedChange) -> anyhow::Result<Reply> {
         if !self.sent_by_owner(from).await? {
             return Ok(refused("Only an owner can say who was removed."));
+        }
+        let me = self.person.id();
+        let removed = self
+            .roster_with(Some(change))
+            .await?
+            .is_some_and(|r| r.removed.contains(&me) && r.role_of(&me).is_none());
+        if !removed {
+            return Ok(refused("This swarm's members don't show you were removed."));
         }
         // Nobody listening is fine.
         let _ = self.events.send(NodeEvent::Removed);

@@ -34,13 +34,14 @@ use crate::ids::{PersonId, PersonKey};
 use crate::invites::{Hydra, Invites};
 use crate::paths::{
     FILES_PREFIX, LOG_PREFIX, MAX_FILE_BYTES, PARENTS_PREFIX, RelPath, file_key, log_key,
-    parent_key, path_of_key, path_of_parent_key,
+    parent_key, path_of_key, path_of_parent_key, safe_rel_path,
 };
-use crate::roster::{Change, Machine, Member, Role, Roster, SignedChange};
+use crate::roster::{
+    Change, Kept, KeptAuthor, KeptEntry, MAX_CHANGE_BYTES, Machine, Member, Role, Roster,
+    SignedChange, Version,
+};
 use crate::wire::ALPN;
 
-/// A signed change is a few hundred bytes; anything far bigger in the log is not one.
-const MAX_CHANGE_BYTES: u64 = 64 * 1024;
 /// A parent record holds at most a few hundred hashes.
 const MAX_RECORD_BYTES: u64 = 64 * 1024;
 
@@ -56,7 +57,8 @@ pub struct ParentRecord {
     pub ancestors: Vec<Hash>,
 }
 
-/// Every current writer's entry for one path, and their parent records for it, by author.
+/// Every current writer's entry for one path, and every former writer's as the roster keeps it,
+/// and their parent records for it, by author.
 #[derive(Default, Debug, Clone)]
 pub struct FileHistory {
     pub entries: Vec<Remote>,
@@ -490,8 +492,8 @@ impl SwarmNode {
     }
 
     /// Per file key, the newest entry (tombstones included) whose author is one of `roster`'s
-    /// current writers or owners. Keys that aren't safe paths and entries over the size cap are
-    /// left out.
+    /// current writers or owners, or a former one's as the roster keeps it. Keys that aren't safe
+    /// paths and entries over the size cap are left out.
     pub async fn files(&self, roster: &Roster) -> anyhow::Result<BTreeMap<RelPath, Remote>> {
         let mut out: BTreeMap<RelPath, Remote> = BTreeMap::new();
         for (path, remote) in self.file_versions(roster).await? {
@@ -505,8 +507,9 @@ impl SwarmNode {
         Ok(out)
     }
 
-    /// Per file key, every entry from a current writer or owner (one per author, tombstones
-    /// included, oldest first), and those authors' parent records for it.
+    /// Per file key, every entry from a current writer or owner, or a former one's as the roster
+    /// keeps it (one per author, tombstones included, oldest first), and those authors' parent
+    /// records for it.
     pub async fn file_entries(
         &self,
         roster: &Roster,
@@ -528,23 +531,36 @@ impl SwarmNode {
                 continue;
             }
             let author = e.author().to_string();
-            if roster
-                .member_by_author(&author)
-                .is_none_or(|m| m.role < Role::Writer)
-            {
+            if !roster.writes(&author) {
                 continue;
             }
-            let Some(bytes) = self.read_blob(e.content_hash()).await? else {
-                continue;
-            };
-            if let Ok(record) = serde_json::from_slice::<ParentRecord>(&bytes) {
+            if let Some(record) = self.read_record(e.content_hash()).await? {
                 out.entry(path).or_default().records.push((author, record));
+            }
+        }
+        for (author, retired) in roster.retired.iter().filter(|(a, _)| !roster.writes(a)) {
+            for (path, v) in &retired.records {
+                let (Some(path), Some(hash)) = (safe_rel_path(path), v.hash) else {
+                    continue;
+                };
+                if let Some(record) = self.read_record(hash).await? {
+                    let records = &mut out.entry(path).or_default().records;
+                    records.push((author.clone(), record));
+                }
             }
         }
         Ok(out)
     }
 
-    /// Every file entry from a current writer or owner, with its path.
+    async fn read_record(&self, hash: Hash) -> anyhow::Result<Option<ParentRecord>> {
+        let Some(bytes) = self.read_blob(hash).await? else {
+            return Ok(None);
+        };
+        Ok(serde_json::from_slice(&bytes).ok())
+    }
+
+    /// Every file entry from a current writer or owner, and every former one's the roster
+    /// keeps, with its path.
     async fn file_versions(&self, roster: &Roster) -> anyhow::Result<Vec<(RelPath, Remote)>> {
         let query = Query::key_prefix(FILES_PREFIX).include_empty().build();
         let mut out = Vec::new();
@@ -556,12 +572,12 @@ impl SwarmNode {
                 continue;
             }
             let author = e.author().to_string();
-            let Some(member) = roster.member_by_author(&author) else {
+            let Some(member) = roster
+                .member_by_author(&author)
+                .filter(|m| m.role >= Role::Writer)
+            else {
                 continue;
             };
-            if member.role < Role::Writer {
-                continue;
-            }
             let machine = member
                 .machines
                 .iter()
@@ -579,7 +595,30 @@ impl SwarmNode {
                 },
             ));
         }
+        for (author, retired) in roster.retired.iter().filter(|(a, _)| !roster.writes(a)) {
+            for (path, v) in &retired.files {
+                let Some(path) = safe_rel_path(path) else {
+                    continue;
+                };
+                out.push((
+                    path,
+                    Remote {
+                        hash: v.hash.filter(|h| *h != Hash::EMPTY),
+                        at: v.at,
+                        author: author.clone(),
+                        machine: retired.machine.clone(),
+                    },
+                ));
+            }
+        }
         Ok(out)
+    }
+
+    /// What a change taking `person` out of a role keeps of their work, as this machine holds
+    /// it: their changes in the log and, while they are a writer, their machines' file entries
+    /// and parent records.
+    pub async fn kept(&self, person: &PersonId) -> anyhow::Result<Kept> {
+        self.core.kept(person).await
     }
 
     /// Records what this machine's next entry for `p` is made from. Written before the entry
@@ -703,6 +742,21 @@ impl Core {
     }
 
     pub(crate) async fn roster(&self) -> anyhow::Result<Option<Roster>> {
+        self.roster_with(None).await
+    }
+
+    /// The roster as it would be with `extra` in the log too.
+    pub(crate) async fn roster_with(
+        &self,
+        extra: Option<&SignedChange>,
+    ) -> anyhow::Result<Option<Roster>> {
+        let mut changes = self.changes().await?;
+        changes.extend(extra.cloned());
+        Ok(Roster::fold(&self.id(), &self.anchor, &changes))
+    }
+
+    /// Every change in the log whose content is here.
+    async fn changes(&self) -> anyhow::Result<Vec<SignedChange>> {
         let entries = self.entries(Query::key_prefix(LOG_PREFIX).build()).await?;
         let mut changes = Vec::new();
         for e in entries {
@@ -716,7 +770,70 @@ impl Core {
                 changes.push(c);
             }
         }
-        Ok(Roster::fold(&self.id(), &self.anchor, &changes))
+        Ok(changes)
+    }
+
+    pub(crate) async fn kept(&self, person: &PersonId) -> anyhow::Result<Kept> {
+        let ns = self.id();
+        let changes = self.changes().await?;
+        let mut kept = Kept {
+            changes: changes
+                .iter()
+                .filter(|c| c.by == *person && c.verify(&ns))
+                .map(|c| c.sig.clone())
+                .collect(),
+            authors: Vec::new(),
+        };
+        let roster = Roster::fold(&ns, &self.anchor, &changes);
+        let Some(member) = roster
+            .as_ref()
+            .and_then(|r| r.members.iter().find(|m| m.person == *person))
+            .filter(|m| m.role >= Role::Writer)
+        else {
+            return Ok(kept);
+        };
+        let mut authors: BTreeMap<String, KeptAuthor> = member
+            .machines
+            .iter()
+            .map(|m| {
+                let author = KeptAuthor {
+                    author: m.author.clone(),
+                    files: Vec::new(),
+                    records: Vec::new(),
+                };
+                (m.author.clone(), author)
+            })
+            .collect();
+        let files = Query::key_prefix(FILES_PREFIX).include_empty().build();
+        for e in self.entries(files).await? {
+            let (Some(path), Some(author)) = (
+                path_of_key(e.key()),
+                authors.get_mut(&e.author().to_string()),
+            ) else {
+                continue;
+            };
+            if e.content_len() <= MAX_FILE_BYTES {
+                let hash = (e.content_hash() != Hash::EMPTY).then(|| e.content_hash());
+                author.files.push(kept_entry(&path, e.timestamp(), hash));
+            }
+        }
+        for e in self
+            .entries(Query::key_prefix(PARENTS_PREFIX).build())
+            .await?
+        {
+            let (Some(path), Some(author)) = (
+                path_of_parent_key(e.key()),
+                authors.get_mut(&e.author().to_string()),
+            ) else {
+                continue;
+            };
+            if e.content_len() <= MAX_RECORD_BYTES {
+                let hash = Some(e.content_hash());
+                author.records.push(kept_entry(&path, e.timestamp(), hash));
+            }
+        }
+        kept.authors = authors.into_values().collect();
+        Ok(kept)
     }
 
     pub(crate) async fn write_change(&self, c: &SignedChange) -> anyhow::Result<()> {
@@ -773,6 +890,13 @@ impl Core {
 
     async fn entries(&self, query: Query) -> anyhow::Result<Vec<Entry>> {
         self.doc.get_many(query).await?.try_collect().await
+    }
+}
+
+fn kept_entry(path: &RelPath, at: u64, hash: Option<Hash>) -> KeptEntry {
+    KeptEntry {
+        path: path.as_str().to_string(),
+        version: Version { at, hash },
     }
 }
 

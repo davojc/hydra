@@ -939,6 +939,7 @@ async fn a_readers_held_edit_publishes_after_promotion() {
         Change::SetRole {
             person: r.key.id(),
             role: Role::Writer,
+            kept: Default::default(),
         },
         &o.key,
         now(),
@@ -1143,4 +1144,154 @@ async fn a_reader_cannot_resolve() {
     );
     o.shutdown().await;
     r.shutdown().await;
+}
+
+/// How a writer stops being one.
+#[derive(Clone, Copy)]
+enum Retire {
+    Leave,
+    Remove,
+    Demote,
+}
+
+/// The change that takes `w` off writing, signed by `w` for a leave and by `o` otherwise.
+async fn retirement(how: Retire, o: &Side, w: &Side) -> (SignedChange, &'static str) {
+    let ns = o.node.id();
+    let person = w.key.id();
+    let signer = match how {
+        Retire::Leave => w,
+        _ => o,
+    };
+    let kept = signer.node.kept(&person).await.unwrap();
+    let (change, what) = match how {
+        Retire::Leave => (Change::Leave { person, kept }, "leave"),
+        Retire::Remove => (Change::Remove { person, kept }, "remove"),
+        Retire::Demote => {
+            let role = Role::Reader;
+            (Change::SetRole { person, role, kept }, "demote")
+        }
+    };
+    (SignedChange::sign(&ns, change, &signer.key, now()), what)
+}
+
+/// `o`'s roster with `w` put back as a writer, to see what `w` has written since.
+async fn as_if_writer(o: &Side, w: &Side, mut member: Member) -> Roster {
+    let mut roster = o.roster().await;
+    member.role = Role::Writer;
+    roster.members.retain(|m| m.person != w.key.id());
+    roster.members.push(member);
+    roster
+}
+
+/// A writer edits x.md and deletes y.md, which reach both remaining members, and then stops
+/// being a writer. The remaining folders keep the edit and the delete, and nothing the writer
+/// writes afterwards gets in.
+async fn retiring_keeps_past_work(how: Retire) {
+    let mut o = owner().await;
+    let mut w = joiner(&o, "wren", Role::Writer).await;
+    let mut v = joiner(&o, "vic", Role::Writer).await;
+    o.write("x.md", "one");
+    o.write("y.md", "doomed");
+    o.reconcile().await;
+    for side in [&mut w, &mut v] {
+        side.settle("both files", |s| {
+            s.read("x.md").is_some() && s.read("y.md").is_some()
+        })
+        .await;
+    }
+    w.write("x.md", "two");
+    w.remove("y.md");
+    w.reconcile().await;
+    for side in [&mut o, &mut v] {
+        side.settle("the writer's edit and delete", |s| {
+            s.read("x.md").as_deref() == Some("two") && s.read("y.md").is_none()
+        })
+        .await;
+    }
+    let wren = o
+        .roster()
+        .await
+        .members
+        .into_iter()
+        .find(|m| m.person == w.key.id())
+        .unwrap();
+
+    let (change, what) = retirement(how, &o, &w).await;
+    match how {
+        Retire::Leave => w.node.write_change(&change).await.unwrap(),
+        _ => o.node.write_change(&change).await.unwrap(),
+    }
+    for side in [&o, &v] {
+        eventually(
+            &format!("the {what} on every remaining machine"),
+            || async {
+                let r = side.roster().await;
+                r.role_of(&w.key.id())
+                    .is_none_or(|r| r < Role::Writer)
+                    .then_some(())
+            },
+        )
+        .await;
+    }
+    for side in [&mut o, &mut v] {
+        for _ in 0..3 {
+            side.reconcile().await;
+        }
+        assert_eq!(
+            side.read("x.md").as_deref(),
+            Some("two"),
+            "after the {what}"
+        );
+        assert_eq!(side.read("y.md"), None, "after the {what}");
+    }
+
+    // The writer's machine still holds the write capability; what it writes now stays out.
+    w.node
+        .put_file(&rel("x.md"), Bytes::from_static(b"three"))
+        .await
+        .unwrap();
+    w.node
+        .put_file(&rel("z.md"), Bytes::from_static(b"new"))
+        .await
+        .unwrap();
+    for side in [&o, &v] {
+        eventually("the writer's later entries in the document", || async {
+            let roster = as_if_writer(side, &w, wren.clone()).await;
+            let files = side.node.files(&roster).await.unwrap();
+            let x = files.get(&rel("x.md"))?.hash;
+            let z = files.get(&rel("z.md"))?.hash;
+            (x == Some(hash("three")) && z == Some(hash("new"))).then_some(())
+        })
+        .await;
+    }
+    for side in [&mut o, &mut v] {
+        for _ in 0..3 {
+            side.reconcile().await;
+        }
+        assert_eq!(
+            side.read("x.md").as_deref(),
+            Some("two"),
+            "after the {what}"
+        );
+        assert_eq!(side.read("y.md"), None, "after the {what}");
+        assert_eq!(side.read("z.md"), None, "after the {what}");
+    }
+    for side in [o, w, v] {
+        side.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_writer_who_leaves_keeps_their_past_edits_and_deletes() {
+    retiring_keeps_past_work(Retire::Leave).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_removed_writers_past_edits_and_deletes_stay() {
+    retiring_keeps_past_work(Retire::Remove).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_demoted_writers_past_edits_and_deletes_stay() {
+    retiring_keeps_past_work(Retire::Demote).await;
 }

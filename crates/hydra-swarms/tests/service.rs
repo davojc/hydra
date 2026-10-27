@@ -280,6 +280,29 @@ async fn pair(role: Role) -> (Svc, Svc, String) {
     (olive, wren, notes.id)
 }
 
+/// Wren edits a.md and deletes b.md, and both reach olive.
+async fn wren_edits_and_deletes(olive: &Svc, wren: &Svc) {
+    std::fs::write(olive.folder("Notes").join("b.md"), "bravo").unwrap();
+    file_arrives(wren.folder("notes").join("b.md"), "bravo").await;
+    std::fs::write(wren.folder("notes").join("a.md"), "alpha 2").unwrap();
+    std::fs::remove_file(wren.folder("notes").join("b.md")).unwrap();
+    file_arrives(olive.folder("Notes").join("a.md"), "alpha 2").await;
+    let gone = olive.folder("Notes").join("b.md");
+    eventually("b.md deleted on olive", || {
+        let got = read(&gone);
+        async move { got.is_none() }
+    })
+    .await;
+}
+
+/// Once wren is no longer a writer, olive's folder still has wren's edit and delete.
+async fn wren_edits_and_deletes_stay(olive: &Svc) {
+    tokio::time::sleep(QUIET).await;
+    let notes = olive.folder("Notes");
+    assert_eq!(read(&notes.join("a.md")).as_deref(), Some("alpha 2"));
+    assert_eq!(read(&notes.join("b.md")), None);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn create_invite_join_and_a_file_syncs() {
     let (mut olive, mut wren, id) = pair(Role::Writer).await;
@@ -338,6 +361,7 @@ async fn the_service_reopens_its_swarms_after_a_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn removing_a_member_stops_their_sync_and_tells_them() {
     let (mut olive, mut wren, id) = pair(Role::Writer).await;
+    wren_edits_and_deletes(&olive, &wren).await;
     olive.send(Command::Remove {
         swarm: id.clone(),
         person: wren.person(),
@@ -348,6 +372,7 @@ async fn removing_a_member_stops_their_sync_and_tells_them() {
     olive
         .view("one member left", |v| v.id == id && v.members.len() == 1)
         .await;
+    wren_edits_and_deletes_stay(&olive).await;
 
     std::fs::write(olive.folder("Notes").join("f.md"), "foxtrot").unwrap();
     std::fs::write(wren.folder("notes").join("g.md"), "golf").unwrap();
@@ -357,7 +382,7 @@ async fn removing_a_member_stops_their_sync_and_tells_them() {
     // Their files are left as they are.
     assert_eq!(
         read(&wren.folder("notes").join("a.md")).as_deref(),
-        Some("alpha")
+        Some("alpha 2")
     );
     // Still removed after a restart.
     wren.stop().await;
@@ -373,6 +398,7 @@ async fn removing_a_member_stops_their_sync_and_tells_them() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn demoting_a_writer_ignores_their_later_changes() {
     let (mut olive, mut wren, id) = pair(Role::Writer).await;
+    wren_edits_and_deletes(&olive, &wren).await;
     olive.send(Command::SetRole {
         swarm: id.clone(),
         person: wren.person(),
@@ -394,7 +420,7 @@ async fn demoting_a_writer_ignores_their_later_changes() {
                 .any(|a| matches!(a, Attention::ReaderEdit { path } if path.as_str() == "h.md"))
     })
     .await;
-    tokio::time::sleep(QUIET).await;
+    wren_edits_and_deletes_stay(&olive).await;
     assert_eq!(read(&olive.folder("Notes").join("h.md")), None);
     // The owner's changes still reach the reader.
     std::fs::write(olive.folder("Notes").join("i.md"), "india").unwrap();
@@ -481,6 +507,7 @@ async fn a_name_change_reaches_every_swarm() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn leaving_keeps_the_files_and_stops_syncing() {
     let (mut olive, mut wren, id) = pair(Role::Writer).await;
+    wren_edits_and_deletes(&olive, &wren).await;
     wren.send(Command::Leave { swarm: id.clone() });
     wren.until("the swarm gone from the list", |s| {
         s.views.iter().all(|v| v.id != id).then_some(())
@@ -490,11 +517,11 @@ async fn leaving_keeps_the_files_and_stops_syncing() {
         .view("one member left", |v| v.id == id && v.members.len() == 1)
         .await;
     std::fs::write(olive.folder("Notes").join("j.md"), "juliet").unwrap();
-    tokio::time::sleep(QUIET).await;
+    wren_edits_and_deletes_stay(&olive).await;
     assert_eq!(read(&wren.folder("notes").join("j.md")), None);
     assert_eq!(
         read(&wren.folder("notes").join("a.md")).as_deref(),
-        Some("alpha")
+        Some("alpha 2")
     );
     // Gone for good: a restart doesn't bring it back.
     wren.stop().await;

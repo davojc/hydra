@@ -97,7 +97,8 @@ async fn create_owner() -> Owner {
 struct Joiner {
     node: SwarmNode,
     key: PersonKey,
-    _dir: tempfile::TempDir,
+    machine_key: [u8; 32],
+    dir: tempfile::TempDir,
 }
 
 /// A machine whose person the owner adds with `role` (when given) before it joins with `cap`.
@@ -138,7 +139,8 @@ async fn join(owner: &Owner, name: &str, role: Option<Role>, cap: Capability) ->
     Joiner {
         node,
         key,
-        _dir: dir,
+        machine_key,
+        dir,
     }
 }
 
@@ -378,4 +380,129 @@ async fn a_reopened_swarm_keeps_its_files_and_roster() {
     assert_eq!(files.get(&rel("x.md")).and_then(|f| f.hash), Some(hash));
     assert_eq!(&node.read_blob(hash).await.unwrap().unwrap()[..], b"kept");
     node.shutdown().await;
+}
+
+/// Puts `name` on `from`, then checks for 5 s that `to` never hears of it.
+async fn never_arrives(from: &SwarmNode, to: &SwarmNode, roster: &Roster, name: &str) {
+    from.put_file(&rel(name), Bytes::from_static(b"after"))
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        let files = to.files(roster).await.unwrap();
+        assert!(
+            !files.contains_key(&rel(name)),
+            "{name} reached a machine outside the gate"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_machine_dropped_from_the_gate_while_connected_gets_nothing_more() {
+    let o = create_owner().await;
+    let cap = o.node.capability(Role::Writer).await.unwrap();
+    let w = join(&o, "wren", Some(Role::Writer), cap).await;
+    connect(&o.node, &w.node).await;
+    let r = roster_with(&w.node, 2).await;
+    o.node
+        .put_file(&rel("x.md"), Bytes::from_static(b"before"))
+        .await
+        .unwrap();
+    eventually("x.md on the writer", || async {
+        w.node.files(&r).await.unwrap().get(&rel("x.md"))?.hash
+    })
+    .await;
+
+    // The writer stays connected and keeps the owner in its own gate; only the owner drops it.
+    o.node.set_gate(&[]);
+    never_arrives(&o.node, &w.node, &r, "y.md").await;
+    o.node.shutdown().await;
+    w.node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reopened_member_never_dials_a_removed_machine() {
+    let o = create_owner().await;
+    let cap = o.node.capability(Role::Writer).await.unwrap();
+    let w = join(&o, "wren", Some(Role::Writer), cap.clone()).await;
+    let x = join(&o, "xan", Some(Role::Writer), cap).await;
+    connect(&o.node, &w.node).await;
+    roster_with(&w.node, 3).await;
+    // The writer dials xan itself, so iroh-docs keeps xan as a peer of this document.
+    w.node.remember_addr(x.node.addr_for_tests());
+    x.node.remember_addr(w.node.addr_for_tests());
+    w.node
+        .set_gate(&[o.node.endpoint_id(), x.node.endpoint_id()]);
+    x.node.set_gate(&[w.node.endpoint_id()]);
+    w.node.sync_with(&[x.node.endpoint_id()]).await.unwrap();
+    let r = roster_with(&x.node, 3).await;
+
+    let remove = SignedChange::sign(
+        &o.node.id(),
+        Change::Remove { person: x.key.id() },
+        &o.key,
+        now(),
+    );
+    o.node.write_change(&remove).await.unwrap();
+    roster_with(&w.node, 2).await;
+    let ns = w.node.id();
+    let Joiner {
+        node,
+        key,
+        machine_key,
+        dir,
+    } = w;
+    node.shutdown().await;
+
+    let cfg = config(
+        dir.path(),
+        machine_key,
+        PersonKey::from_bytes(key.to_bytes()),
+        None,
+    );
+    let w = SwarmNode::open(cfg, ns.parse().unwrap())
+        .await
+        .expect("open");
+    // xan is still reachable and would still take the writer's entries.
+    w.remember_addr(o.node.addr_for_tests());
+    w.remember_addr(x.node.addr_for_tests());
+    x.node.remember_addr(w.addr_for_tests());
+    x.node.set_gate(&[w.endpoint_id()]);
+    w.put_file(&rel("z.md"), Bytes::from_static(b"after"))
+        .await
+        .unwrap();
+    // Syncing with the current members: iroh-docs adds the peers it synced with before.
+    w.sync_with(&[o.node.endpoint_id()]).await.unwrap();
+    never_arrives(&w, &x.node, &r, "z2.md").await;
+    assert!(!x.node.files(&r).await.unwrap().contains_key(&rel("z.md")));
+    o.node.shutdown().await;
+    w.shutdown().await;
+    x.node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_never_dials_a_machine_outside_its_gate() {
+    let o = create_owner().await;
+    let cap = o.node.capability(Role::Writer).await.unwrap();
+    let w = join(&o, "wren", Some(Role::Writer), cap.clone()).await;
+    connect(&o.node, &w.node).await;
+    let r = roster_with(&w.node, 2).await;
+    // Holds the write capability and would take the owner's entries, but isn't in its gate.
+    let stranger = join(&o, "sly", None, cap).await;
+    stranger.node.set_gate(&[o.node.endpoint_id()]);
+    o.node.remember_addr(stranger.node.addr_for_tests());
+    o.node
+        .put_file(&rel("x.md"), Bytes::from_static(b"hello"))
+        .await
+        .unwrap();
+    o.node
+        .sync_with(&[stranger.node.endpoint_id()])
+        .await
+        .unwrap();
+    never_arrives(&o.node, &stranger.node, &r, "y.md").await;
+    assert!(stranger.node.files(&r).await.unwrap().is_empty());
+    o.node.shutdown().await;
+    w.node.shutdown().await;
+    stranger.node.shutdown().await;
 }

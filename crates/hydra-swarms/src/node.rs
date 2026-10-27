@@ -1,17 +1,20 @@
 //! One swarm on the network: an iroh endpoint and router running iroh-docs, iroh-blobs and
 //! iroh-gossip, behind a gate that refuses machines outside the roster, and the swarm document's
 //! files and signed change log.
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, bail};
 use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt};
 use iroh::address_lookup::memory::MemoryLookup;
-use iroh::endpoint::{Accepting, Connection, PortmapperConfig, presets};
-use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+use iroh::endpoint::{
+    AfterHandshakeOutcome, BeforeConnectOutcome, Connection, EndpointHooks, PortmapperConfig,
+    WeakConnectionHandle, presets,
+};
+use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey};
 use iroh_blobs::store::fs::FsStore;
 use iroh_blobs::{BlobsProtocol, Hash};
@@ -57,46 +60,62 @@ pub enum NodeEvent {
     SyncFinished,
 }
 
-/// Endpoint ids allowed to connect on docs, blobs and gossip.
-type GateSet = Arc<RwLock<HashSet<EndpointId>>>;
+/// The ALPNs that carry the swarm document, its content and its gossip.
+const GATED_ALPNS: [&[u8]; 3] = [iroh_docs::ALPN, iroh_blobs::ALPN, iroh_gossip::ALPN];
 
-/// A protocol handler that refuses any connection from an endpoint outside the gate.
-#[derive(Debug, Clone)]
-struct Gated<P> {
-    inner: P,
-    gate: GateSet,
+fn is_gated(alpn: &[u8]) -> bool {
+    GATED_ALPNS.contains(&alpn)
 }
 
-impl<P: ProtocolHandler> ProtocolHandler for Gated<P> {
-    async fn on_accepting(&self, accepting: Accepting) -> Result<Connection, AcceptError> {
-        let conn = self.inner.on_accepting(accepting).await?;
-        let allowed = self
-            .gate
-            .read()
-            .expect("the gate lock is never poisoned")
-            .contains(&conn.remote_id());
-        if !allowed {
-            conn.close(1u32.into(), b"not a member of this swarm");
-            return Err(AcceptError::from_err(std::io::Error::other(
-                "not a member of this swarm",
-            )));
+/// Who may talk to this node on the gated ALPNs, and the open gated connections by peer, so that
+/// taking a peer out of the gate can close them.
+#[derive(Debug, Default)]
+struct GateState {
+    allowed: HashSet<EndpointId>,
+    open: HashMap<EndpointId, Vec<WeakConnectionHandle>>,
+}
+
+type Gate = Arc<Mutex<GateState>>;
+
+fn lock(gate: &Gate) -> std::sync::MutexGuard<'_, GateState> {
+    gate.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Endpoint hooks that keep machines outside the gate off docs, blobs and gossip in both
+/// directions: a dial to one is never started, and a connection with one, either way, is closed
+/// as soon as the handshake shows who it is. Other ALPNs (invites) pass.
+#[derive(Debug)]
+struct GateHooks(Gate);
+
+impl EndpointHooks for GateHooks {
+    async fn before_connect<'a>(
+        &'a self,
+        remote: &'a EndpointAddr,
+        alpn: &'a [u8],
+    ) -> BeforeConnectOutcome {
+        if is_gated(alpn) && !lock(&self.0).allowed.contains(&remote.id) {
+            BeforeConnectOutcome::Reject
+        } else {
+            BeforeConnectOutcome::Accept
         }
-        Ok(conn)
     }
 
-    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-        self.inner.accept(conn).await
-    }
-
-    async fn shutdown(&self) {
-        self.inner.shutdown().await
-    }
-}
-
-fn gated<P>(inner: P, gate: &GateSet) -> Gated<P> {
-    Gated {
-        inner,
-        gate: Arc::clone(gate),
+    async fn after_handshake<'a>(&'a self, conn: &'a Connection) -> AfterHandshakeOutcome {
+        if !is_gated(conn.alpn()) {
+            return AfterHandshakeOutcome::accept();
+        }
+        let peer = conn.remote_id();
+        let mut gate = lock(&self.0);
+        if !gate.allowed.contains(&peer) {
+            return AfterHandshakeOutcome::Reject {
+                error_code: 1u32.into(),
+                reason: b"not a member of this swarm".to_vec(),
+            };
+        }
+        let open = gate.open.entry(peer).or_default();
+        open.retain(|c| c.upgrade().is_some());
+        open.push(conn.weak_handle());
+        AfterHandshakeOutcome::accept()
     }
 }
 
@@ -109,7 +128,7 @@ pub struct SwarmNode {
     anchor: PersonId,
     person: PersonKey,
     writable: bool,
-    gate: GateSet,
+    gate: Gate,
     addrs: MemoryLookup,
     events: broadcast::Sender<NodeEvent>,
 }
@@ -131,7 +150,7 @@ struct Parts {
     router: Router,
     docs: Docs,
     blobs: FsStore,
-    gate: GateSet,
+    gate: Gate,
     addrs: MemoryLookup,
 }
 
@@ -141,22 +160,36 @@ async fn start(cfg: &NodeConfig) -> anyhow::Result<Parts> {
         .with_context(|| format!("creating {}", docs_dir.display()))?;
     let blobs = FsStore::load(cfg.dir.join("blobs")).await?;
     let addrs = MemoryLookup::new();
-    let endpoint = endpoint_builder(&cfg.machine_key, cfg.relays)
+    let gate: Gate = Arc::default();
+    let bound = endpoint_builder(&cfg.machine_key, cfg.relays)
         .address_lookup(addrs.clone())
+        .hooks(GateHooks(Arc::clone(&gate)))
         .bind()
-        .await?;
+        .await;
+    let endpoint = match bound {
+        Ok(ep) => ep,
+        Err(e) => {
+            let _ = blobs.shutdown().await;
+            return Err(e.into());
+        }
+    };
     let gossip = Gossip::builder().spawn(endpoint.clone());
-    let docs = Docs::persistent(docs_dir)
+    let spawned = Docs::persistent(docs_dir)
         .spawn(endpoint.clone(), (*blobs).clone(), gossip.clone())
-        .await?;
-    let gate: GateSet = Arc::default();
+        .await;
+    let docs = match spawned {
+        Ok(docs) => docs,
+        Err(e) => {
+            gossip.shutdown().await.ok();
+            endpoint.close().await;
+            let _ = blobs.shutdown().await;
+            return Err(e);
+        }
+    };
     let router = Router::builder(endpoint.clone())
-        .accept(
-            iroh_blobs::ALPN,
-            gated(BlobsProtocol::new(&blobs, None), &gate),
-        )
-        .accept(iroh_gossip::ALPN, gated(gossip, &gate))
-        .accept(iroh_docs::ALPN, gated(docs.clone(), &gate))
+        .accept(iroh_blobs::ALPN, BlobsProtocol::new(&blobs, None))
+        .accept(iroh_gossip::ALPN, gossip)
+        .accept(iroh_docs::ALPN, docs.clone())
         .spawn();
     Ok(Parts {
         endpoint,
@@ -255,9 +288,7 @@ impl SwarmNode {
                 return Err(e);
             }
         };
-        let node = SwarmNode::finish(cfg, parts, doc, author, saved_anchor).await?;
-        node.refresh_gate_from_roster().await?;
-        Ok(node)
+        SwarmNode::finish(cfg, parts, doc, author, saved_anchor).await
     }
 
     /// Joins with the capability an inviter handed over, writing as `author`, which the joiner
@@ -286,7 +317,9 @@ impl SwarmNode {
         SwarmNode::finish(cfg, parts, doc, id, given_anchor).await
     }
 
-    /// Settles the anchor, starts live sync on the document and forwards its events.
+    /// Settles the anchor, forwards the document's events, sets the gate from the roster and
+    /// only then starts live sync, so peers stored from earlier syncs who are no longer members
+    /// are never dialled.
     async fn finish(
         cfg: NodeConfig,
         parts: Parts,
@@ -305,7 +338,6 @@ impl SwarmNode {
                 .await?
                 .into_iter()
                 .any(|(id, kind)| id == doc.id() && matches!(kind, CapabilityKind::Write));
-            doc.start_sync(vec![]).await?;
             let stream = doc.subscribe().await?;
             anyhow::Ok((anchor, writable, stream))
         }
@@ -336,7 +368,7 @@ impl SwarmNode {
                 let _ = tx.send(ev);
             }
         });
-        Ok(SwarmNode {
+        let node = SwarmNode {
             endpoint: parts.endpoint,
             router: parts.router,
             blobs: parts.blobs,
@@ -348,7 +380,17 @@ impl SwarmNode {
             gate: parts.gate,
             addrs: parts.addrs,
             events,
-        })
+        };
+        let live = async {
+            node.refresh_gate_from_roster().await?;
+            node.doc.start_sync(vec![]).await
+        }
+        .await;
+        if let Err(e) = live {
+            node.shutdown().await;
+            return Err(e);
+        }
+        Ok(node)
     }
 
     /// The namespace id.
@@ -488,10 +530,32 @@ impl SwarmNode {
         Ok(Some(self.blobs.get_bytes(h).await?))
     }
 
-    /// Replaces who may connect on docs, blobs and gossip. Ids that don't parse are skipped.
+    /// Replaces who this node talks to on docs, blobs and gossip; ids that don't parse are
+    /// skipped. From the moment this returns, nobody outside `endpoints` is dialled or accepted
+    /// on them, and every open docs, blobs or gossip connection with someone no longer in the
+    /// gate is closed, so nothing more reaches them through this node.
     pub fn set_gate(&self, endpoints: &[String]) {
-        let set = endpoints.iter().filter_map(|e| e.parse().ok()).collect();
-        *self.gate.write().expect("the gate lock is never poisoned") = set;
+        let allowed: HashSet<EndpointId> =
+            endpoints.iter().filter_map(|e| e.parse().ok()).collect();
+        let dropped: Vec<WeakConnectionHandle> = {
+            let mut gate = lock(&self.gate);
+            gate.allowed = allowed;
+            let GateState { allowed, open } = &mut *gate;
+            let gone: Vec<EndpointId> = open
+                .keys()
+                .filter(|id| !allowed.contains(*id))
+                .copied()
+                .collect();
+            gone.iter()
+                .filter_map(|id| open.remove(id))
+                .flatten()
+                .collect()
+        };
+        for c in dropped {
+            if let Some(conn) = c.upgrade() {
+                conn.close(1u32.into(), b"not a member of this swarm");
+            }
+        }
     }
 
     /// Syncs the document with `endpoints`, and keeps them as live peers.

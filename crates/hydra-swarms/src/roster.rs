@@ -267,70 +267,75 @@ impl Roster {
     /// Folds every change, in (at, sig) order, from the genesis signed by `anchor`. Changes that
     /// break the rules (a bad signature, someone without the standing to make them) are skipped.
     ///
-    /// When a change takes someone out of a role, their changes since someone else last took
-    /// them out of one, dated before it and not listed in it, are dropped if, folded again
-    /// without them, it still takes them out; then the fold starts again. So nobody can backdate
-    /// a change to before they lost the standing to make it, and taking themselves out first
-    /// doesn't help: that is one more of their changes to drop. A drop stands only while the
-    /// change that made it does. Owners can only be taken out by owners senior to them (or
-    /// leave), so a junior's change never drops a senior's.
+    /// A change that takes someone out of a role voids their changes since someone else last
+    /// took them out of one, dated before it and not listed in it, as long as it is effective:
+    /// folded without those changes, its signer still has the standing to take them out. So
+    /// nobody can backdate a change to before they lost the standing to make it, and taking
+    /// themselves out first doesn't help: that is one more of their changes to void.
+    ///
+    /// Which changes are void is never remembered, only derived: each round folds without the
+    /// changes the last round found void and finds them again from the retirements effective in
+    /// that fold, until a round finds the same set. Owners are only taken out by owners senior
+    /// to them, and seniority comes from promotions signed by seniors, so whether a retirement
+    /// is effective depends only on what more senior people's retirements void. Each round
+    /// settles at least one more level of the promotion tree, so the rounds end.
     pub fn fold(swarm: &str, anchor: &PersonId, changes: &[SignedChange]) -> Option<Roster> {
         let mut ordered: Vec<&SignedChange> = changes.iter().filter(|c| c.verify(swarm)).collect();
         ordered.sort_by(|a, b| (a.at, &a.sig).cmp(&(b.at, &b.sig)));
         ordered.dedup_by(|a, b| a.sig == b.sig);
-        // (dropped by, dropped), as positions in `ordered`. Only grows, so the fold ends.
-        let mut drops: BTreeSet<(usize, usize)> = BTreeSet::new();
-        let mut dropped: HashSet<&str> = HashSet::new();
-        'again: loop {
-            let mut roster: Option<Roster> = None;
-            for (i, c) in ordered.iter().enumerate() {
-                if dropped.contains(c.sig.as_str()) {
-                    continue;
-                }
-                let Some(r) = &mut roster else {
-                    roster = Roster::genesis(anchor, c);
-                    continue;
-                };
-                if let Some(unlisted) = r.unlisted(&ordered[..i], c, &dropped) {
-                    let mut without = dropped.clone();
-                    without.extend(unlisted.iter().map(|j| ordered[*j].sig.as_str()));
-                    let before = Roster::fold_plain(anchor, &ordered[..i], &without);
-                    if before.is_some_and(|b| b.retires(c)) {
-                        drops.extend(unlisted.into_iter().map(|j| (i, j)));
-                        dropped = Roster::in_force(&drops)
-                            .into_iter()
-                            .map(|j| ordered[j].sig.as_str())
-                            .collect();
-                        continue 'again;
-                    }
-                }
-                r.apply(c);
+        let mut seen: Vec<BTreeSet<usize>> = Vec::new();
+        let mut void: BTreeSet<usize> = BTreeSet::new();
+        loop {
+            let (roster, found) = Roster::round(anchor, &ordered, &void);
+            if found == void {
+                return roster;
             }
-            return roster;
+            if let Some(k) = seen.iter().position(|v| *v == found) {
+                // Not expected (see above), but should rounds ever cycle, a change is void
+                // only if every set in the cycle voids it.
+                let mut cycle = seen.split_off(k);
+                cycle.push(void);
+                let first = cycle[0].clone();
+                let void = cycle.iter().fold(first, |a, v| &a & v);
+                return Roster::round(anchor, &ordered, &void).0;
+            }
+            seen.push(std::mem::replace(&mut void, found));
         }
     }
 
-    /// The changes `drops` leave out: a drop counts unless whatever made it was dropped too.
-    /// Whatever drops a change is later than it, so the latest decide first.
-    fn in_force(drops: &BTreeSet<(usize, usize)>) -> HashSet<usize> {
-        let mut out = HashSet::new();
-        for (by, j) in drops.iter().rev() {
-            if !out.contains(by) {
-                out.insert(*j);
+    /// Folds `ordered` without `void`, and gives the changes the retirements effective in that
+    /// fold void.
+    fn round(
+        anchor: &PersonId,
+        ordered: &[&SignedChange],
+        void: &BTreeSet<usize>,
+    ) -> (Option<Roster>, BTreeSet<usize>) {
+        let mut found = BTreeSet::new();
+        let mut roster: Option<Roster> = None;
+        for (i, c) in ordered.iter().enumerate() {
+            if void.contains(&i) {
+                continue;
             }
+            let Some(r) = &mut roster else {
+                roster = Roster::genesis(anchor, c);
+                continue;
+            };
+            if let Some(unlisted) = r.unlisted(&ordered[..i], c) {
+                let mut without = void.clone();
+                without.extend(unlisted.iter().copied());
+                let before = Roster::fold_plain(anchor, &ordered[..i], &without);
+                if before.is_some_and(|b| b.retires(c)) {
+                    found.extend(unlisted);
+                }
+            }
+            r.apply(c);
         }
-        out
+        (roster, found)
     }
 
     /// When `c` would take someone out of a role, the positions of their changes in `earlier`
-    /// since they were last taken out of one that `c` doesn't list and that aren't dropped
-    /// already, if any.
-    fn unlisted(
-        &self,
-        earlier: &[&SignedChange],
-        c: &SignedChange,
-        dropped: &HashSet<&str>,
-    ) -> Option<Vec<usize>> {
+    /// since they were last taken out of one that `c` doesn't list, if any.
+    fn unlisted(&self, earlier: &[&SignedChange], c: &SignedChange) -> Option<Vec<usize>> {
         let (person, kept) = c.change.retiring()?;
         let listed: HashSet<&str> = kept.changes.iter().map(String::as_str).collect();
         // Their changes before the latest time someone else took them out were settled then.
@@ -350,21 +355,24 @@ impl Roster {
                     && !matches!(d.change, Change::Genesis { .. })
                     && since.is_none_or(|(at, sig)| (d.at, &d.sig) > (at, sig))
                     && !listed.contains(d.sig.as_str())
-                    && !dropped.contains(d.sig.as_str())
             })
             .map(|(j, _)| j)
             .collect();
         (!unlisted.is_empty()).then_some(unlisted)
     }
 
-    /// `changes` folded in the order given, leaving out `dropped`.
+    /// `changes` folded in the order given, leaving out the positions in `void`.
     fn fold_plain(
         anchor: &PersonId,
         changes: &[&SignedChange],
-        dropped: &HashSet<&str>,
+        void: &BTreeSet<usize>,
     ) -> Option<Roster> {
         let mut roster: Option<Roster> = None;
-        for c in changes.iter().filter(|c| !dropped.contains(c.sig.as_str())) {
+        let kept = changes
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !void.contains(i));
+        for (_, c) in kept {
             match &mut roster {
                 None => roster = Roster::genesis(anchor, c),
                 Some(r) => r.apply(c),
@@ -1452,6 +1460,132 @@ mod tests {
         log.push(add(&p, 4, &c, "cro", Role::Owner));
         let r = fold_in_any_order(&o, &log);
         assert!(!r.outranks(&c.id(), &q.id()));
+    }
+
+    // The next three came from the third re-review's probes.
+
+    #[test]
+    fn a_drop_by_someone_who_lost_their_standing_does_not_stand() {
+        // Quin, removed at 100, backdates oz's promotion to 30, so oz outranks pat; oz backdates
+        // a removal of pat to 50 that doesn't list pat's add of wren. Olive's removal of quin
+        // drops oz's promotion, so oz's removal never happened and wren stays.
+        let o = PersonKey::generate();
+        let q = PersonKey::generate();
+        let p = PersonKey::generate();
+        let oz = PersonKey::generate();
+        let w = PersonKey::generate();
+        let mut log = vec![
+            genesis(&o),
+            add(&o, 10, &q, "quin", Role::Owner),
+            add(&o, 20, &p, "pat", Role::Owner),
+            add(&p, 40, &w, "wren", Role::Writer),
+        ];
+        let kept = changes_of(&log, &q);
+        log.push(sign(
+            &o,
+            100,
+            Change::Remove {
+                person: q.id(),
+                kept,
+            },
+        ));
+        log.push(add(&q, 30, &oz, "oz", Role::Owner));
+        let kept = Kept::default();
+        log.push(sign(
+            &oz,
+            50,
+            Change::Remove {
+                person: p.id(),
+                kept,
+            },
+        ));
+        let r = fold_in_any_order(&o, &log);
+        assert_eq!(r.role_of(&oz.id()), None);
+        assert_eq!(r.role_of(&p.id()), Some(Role::Owner));
+        assert_eq!(r.role_of(&w.id()), Some(Role::Writer));
+    }
+
+    #[test]
+    fn a_drop_by_someone_who_lost_their_standing_does_not_undo_a_leave() {
+        let o = PersonKey::generate();
+        let q = PersonKey::generate();
+        let p = PersonKey::generate();
+        let oz = PersonKey::generate();
+        let mut log = vec![
+            genesis(&o),
+            add(&o, 10, &q, "quin", Role::Owner),
+            add(&o, 20, &p, "pat", Role::Writer),
+            leave(&p, 40),
+        ];
+        let kept = changes_of(&log, &q);
+        log.push(sign(
+            &o,
+            100,
+            Change::Remove {
+                person: q.id(),
+                kept,
+            },
+        ));
+        log.push(add(&q, 30, &oz, "oz", Role::Owner));
+        let kept = Kept::default();
+        log.push(sign(
+            &oz,
+            50,
+            Change::Remove {
+                person: p.id(),
+                kept,
+            },
+        ));
+        let r = fold_in_any_order(&o, &log);
+        assert_eq!(r.role_of(&p.id()), None);
+        assert_eq!(r.removed, vec![p.id(), q.id()]);
+    }
+
+    #[test]
+    fn a_tangled_log_folds_to_one_roster_in_any_order() {
+        // Two removed owners backdate removals of each other and steps down, and a sock of one
+        // backdates more. It must end, and agree whatever the order.
+        let o = PersonKey::generate();
+        let q = PersonKey::generate();
+        let p = PersonKey::generate();
+        let oz = PersonKey::generate();
+        let w = PersonKey::generate();
+        let mut log = vec![
+            genesis(&o),
+            add(&o, 10, &q, "quin", Role::Owner),
+            add(&o, 20, &p, "pat", Role::Owner),
+            add(&p, 40, &w, "wren", Role::Writer),
+        ];
+        let (by_q, by_p) = (changes_of(&log, &q), changes_of(&log, &p));
+        log.push(sign(
+            &o,
+            100,
+            Change::Remove {
+                person: q.id(),
+                kept: by_q,
+            },
+        ));
+        log.push(sign(
+            &o,
+            101,
+            Change::Remove {
+                person: p.id(),
+                kept: by_p,
+            },
+        ));
+        log.push(remove(&q, 60, &p));
+        log.push(remove(&p, 61, &q));
+        log.push(step_down(&q, 62, Kept::default()));
+        log.push(leave(&p, 63));
+        log.push(add(&q, 30, &oz, "oz", Role::Owner));
+        log.push(remove(&oz, 35, &q));
+        log.push(set_role(&oz, 36, &p, Role::Owner));
+        let r = fold_in_any_order(&o, &log);
+        assert_eq!(r.role_of(&oz.id()), None);
+        assert_eq!(r.role_of(&q.id()), None);
+        assert_eq!(r.role_of(&p.id()), None);
+        assert_eq!(r.role_of(&w.id()), Some(Role::Writer));
+        assert_eq!(r.role_of(&o.id()), Some(Role::Owner));
     }
 
     #[test]

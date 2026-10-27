@@ -272,6 +272,11 @@ impl Folder {
                 modified: file.map_or(0, |f| f.modified),
             };
             let r = remote.get(&p);
+            // The swarm has a version of a path it had stopped having: it syncs again.
+            if entry.held == Some(Held::NoLongerShared) && r.is_some() {
+                entry.held = None;
+                self.entry(&p).held = None;
+            }
             // Ruling 20: a version taken in whose entry no longer counts (its author was taken
             // out without it being kept) is kept as a conflict copy before anything replaces it,
             // and when nothing replaces it, the file is flagged as on this machine only.

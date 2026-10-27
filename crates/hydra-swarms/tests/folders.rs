@@ -1415,14 +1415,17 @@ async fn an_unseen_members_edit_is_kept_as_a_flagged_copy() {
 async fn a_removed_writers_new_file_that_stops_counting_is_flagged_and_kept() {
     let mut o = owner().await;
     let mut w = joiner(&o, "wren", Role::Writer).await;
+    let mut v = joiner(&o, "vic", Role::Writer).await;
     // What the owner holds of wren's work before wren's new file reaches it.
     let kept = o.node.kept(&w.key.id()).await.unwrap();
     w.write("new.md", "fresh");
     w.reconcile().await;
-    o.settle("wren's new file", |s| {
-        s.read("new.md").as_deref() == Some("fresh")
-    })
-    .await;
+    for side in [&mut o, &mut v] {
+        side.settle("wren's new file", |s| {
+            s.read("new.md").as_deref() == Some("fresh")
+        })
+        .await;
+    }
     let remove = SignedChange::sign(
         &o.node.id(),
         Change::Remove {
@@ -1436,17 +1439,23 @@ async fn a_removed_writers_new_file_that_stops_counting_is_flagged_and_kept() {
     let flagged = Attention::NoLongerShared {
         path: rel("new.md"),
     };
-    let events = o
-        .settle("the file flagged", |s| {
-            s.folder.attention().contains(&flagged)
-        })
-        .await;
-    assert!(events.contains(&FolderEvent::Held(flagged.clone())));
-    assert_eq!(o.read("new.md").as_deref(), Some("fresh"));
-    // Shared again, it is the owner's now.
+    for side in [&mut o, &mut v] {
+        let events = side
+            .settle("the file flagged", |s| {
+                s.folder.attention().contains(&flagged)
+            })
+            .await;
+        assert!(events.contains(&FolderEvent::Held(flagged.clone())));
+        assert_eq!(side.read("new.md").as_deref(), Some("fresh"));
+    }
+    // Shared again, it is the owner's now, and vic's flag clears as the swarm has it again.
     o.folder.share_again(&o.node, &rel("new.md")).await.unwrap();
     assert!(o.folder.attention().is_empty());
     assert_eq!(o.remote_hash("new.md").await, Some(Some(hash("fresh"))));
-    o.shutdown().await;
-    w.shutdown().await;
+    v.settle("vic's flag cleared", |s| s.folder.attention().is_empty())
+        .await;
+    assert_eq!(v.read("new.md").as_deref(), Some("fresh"));
+    for side in [o, w, v] {
+        side.shutdown().await;
+    }
 }

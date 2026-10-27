@@ -207,6 +207,9 @@ pub enum Decided {
     Reopened,
     /// A person worked on this stopped stage in its own session and asked it to score again.
     Rescoring,
+    /// A stage asked a person to check something by hand, and they say it works: it passes,
+    /// with their note.
+    Checked(String),
     Paused,
     Resumed,
     /// A stage asked a person a question; the ticket waits.
@@ -233,7 +236,8 @@ pub struct Refusal {
     pub changes: Vec<Change>,
 }
 
-/// A person's choice for a run (§5.3). There is no choice that lets a stage through.
+/// A person's choice for a run (§5.3). Only `Checked` lets a stage through, and only one
+/// that asked a person to check something by hand.
 pub enum Choice {
     /// Re-run the stage that waits, with a note for its next session.
     Retry { note: String },
@@ -242,6 +246,9 @@ pub enum Choice {
     /// Go back to `stage`, an earlier stage that passed: its own session is reopened with the
     /// note, and the stages after it wait for it again with fresh tries.
     Back { stage: String, note: String },
+    /// The waiting stage asked for a check by hand (`Outcome::Check`) and the person did it:
+    /// it works. The stage passes and the run goes on; `note` (may be empty) says what they saw.
+    Checked { note: String },
 }
 
 /// Whether `used`, a skill a session invoked, is `wanted`: the same name, ignoring case, or a
@@ -690,6 +697,9 @@ impl Runs {
         let passed = passes(&rating, bar);
         let why = match rating.outcome {
             crate::rating::Outcome::Blocked => format!("stage {id} is blocked: {}", rating.summary),
+            crate::rating::Outcome::Check => {
+                format!("stage {id} needs a person to check: {}", rating.check)
+            }
             crate::rating::Outcome::Done => {
                 format!(
                     "stage {id}: {}, bar {bar}. {}",
@@ -941,6 +951,7 @@ impl Runs {
             }
             Choice::Retry { note } => note.trim().to_string(),
             Choice::Back { stage, note } => return self.go_back(ri, &stage, note.trim()),
+            Choice::Checked { note } => return self.checked(ri, note.trim()),
         };
         if !matches!(r.state, RunState::NeedsYou(_)) {
             return Err(format!("run {run} isn't waiting for you"));
@@ -970,6 +981,58 @@ impl Runs {
             stage: None,
             what: Decided::RunResumed,
         });
+        Ok(changes)
+    }
+
+    /// A person's **It works**: the stage stopped asking for a check by hand passes, and the
+    /// run finishes or goes on to the next stage.
+    fn checked(&mut self, ri: usize, note: &str) -> Result<Vec<Change>, String> {
+        let r = &mut self.runs[ri];
+        if !matches!(r.state, RunState::NeedsYou(_)) {
+            return Err(format!("run {} isn't waiting for you", r.id));
+        }
+        if r.fix_after.is_some() {
+            return Err(format!("run {} is being sent back", r.id));
+        }
+        let Some(si) = r
+            .stages
+            .iter()
+            .position(|s| s.status != StageStatus::Passed)
+        else {
+            return Err(format!("run {} has nothing left to do", r.id));
+        };
+        let s = &mut r.stages[si];
+        let asked = s.status == StageStatus::Stopped
+            && s.rating()
+                .is_some_and(|x| x.outcome == crate::rating::Outcome::Check);
+        if !asked {
+            return Err(
+                "only a stage that asked a person to check something by hand can pass this way"
+                    .into(),
+            );
+        }
+        s.status = StageStatus::Passed;
+        let id = r.id.clone();
+        let mut changes = vec![Change {
+            run: id.clone(),
+            stage: Some(si),
+            what: Decided::Checked(note.to_string()),
+        }];
+        if si + 1 == r.stages.len() {
+            r.state = RunState::Finished;
+            changes.push(Change {
+                run: id,
+                stage: None,
+                what: Decided::RunFinished,
+            });
+        } else {
+            r.state = RunState::Running;
+            changes.push(Change {
+                run: id,
+                stage: None,
+                what: Decided::RunResumed,
+            });
+        }
         Ok(changes)
     }
 
@@ -1618,6 +1681,70 @@ mod tests {
         );
         let s = runs.begin("orch", &id, "b", "", 30).unwrap();
         assert!(s.prompt.contains("- q"), "{}", s.prompt);
+    }
+
+    fn wants_check(score: u8) -> Rating {
+        let mut r = rated(score);
+        r.outcome = rating::Outcome::Check;
+        r.check = "Open it in real Chrome.".into();
+        r
+    }
+
+    fn checked(note: &str) -> Choice {
+        Choice::Checked {
+            note: note.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_stage_asking_for_a_check_by_hand_passes_when_a_person_says_it_works() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b", "c"]);
+        started(&mut runs, &id, "a", "t1");
+        runs.skill_used("t1", "qa");
+        runs.report("t1", rated(90)).unwrap();
+        started(&mut runs, &id, "b", "t2");
+        let changes = runs.report("t2", wants_check(95)).unwrap();
+        let RunState::NeedsYou(why) = &runs.run(&id).unwrap().state else {
+            panic!("waits for a person");
+        };
+        assert!(why.contains("needs a person to check: Open it"), "{why}");
+        assert!(
+            changes
+                .iter()
+                .any(|c| matches!(c.what, Decided::Stopped(_)))
+        );
+        let changes = runs.person(&id, checked(" Works in Chrome 155 ")).unwrap();
+        assert!(changes.iter().any(
+            |c| c.stage == Some(1) && c.what == Decided::Checked("Works in Chrome 155".into())
+        ));
+        assert_eq!(status(&runs, &id, 1), StageStatus::Passed);
+        assert_eq!(runs.run(&id).unwrap().state, RunState::Running);
+        assert!(
+            runs.begin("orch", &id, "c", "", 30).is_ok(),
+            "the next stage may start"
+        );
+    }
+
+    #[test]
+    fn the_last_stage_checked_by_hand_finishes_the_run() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a"]);
+        started(&mut runs, &id, "a", "t1");
+        runs.skill_used("t1", "qa");
+        runs.report("t1", wants_check(80)).unwrap();
+        let changes = runs.person(&id, checked("")).unwrap();
+        assert!(changes.iter().any(|c| c.what == Decided::RunFinished));
+        assert_eq!(runs.run(&id).unwrap().state, RunState::Finished);
+    }
+
+    #[test]
+    fn only_a_stage_that_asked_for_a_check_passes_by_a_persons_word() {
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        let e = runs.person(&id, checked("fine")).unwrap_err();
+        assert!(e.contains("asked a person to check"), "{e}");
+        assert_eq!(status(&runs, &id, 1), StageStatus::Stopped);
     }
 
     #[test]

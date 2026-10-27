@@ -216,6 +216,10 @@ fn replay(id: &str, pipeline: Pipeline, events: &[Value]) -> Option<Run> {
                         note: text(e, "note").to_string(),
                     },
                     "stop" => Choice::Stop,
+                    // A stage asked for a check by hand and the person said it works.
+                    "checked" => Choice::Checked {
+                        note: text(e, "note").to_string(),
+                    },
                     "back" => Choice::Back {
                         stage: text(e, "stage").to_string(),
                         note: text(e, "note").to_string(),
@@ -503,5 +507,32 @@ mod tests {
         assert_eq!(r.state, crate::runs::RunState::Running);
         assert_eq!(r.stages[1].status, StageStatus::Running);
         assert_eq!(r.stages[1].attempts.len(), 1);
+    }
+
+    #[test]
+    fn a_check_passed_by_a_person_replays_as_passed() {
+        let mut log = mid_run();
+        let check = RATING.replace(
+            r#""outcome":"done""#,
+            r#""outcome":"check","check":"Try it in Chrome.""#,
+        );
+        log.push(line(
+            "report",
+            &format!(r#","stage":"b","label":"s-02","rating":{check}"#),
+        ));
+        let waiting = interrupted(home_with(&log).path(), |_| false);
+        assert!(matches!(
+            waiting[0].run.state,
+            crate::runs::RunState::NeedsYou(_)
+        ));
+        log.push(line(
+            "person",
+            r#","choice":"checked","note":"works","stage":null"#,
+        ));
+        log.push(line("checked", r#","stage":"b","note":"works""#));
+        let found = interrupted(home_with(&log).path(), |_| false);
+        let r = &found[0].run;
+        assert_eq!(r.stages[1].status, StageStatus::Passed);
+        assert_eq!(r.state, crate::runs::RunState::Finished);
     }
 }

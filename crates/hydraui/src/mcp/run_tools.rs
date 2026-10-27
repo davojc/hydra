@@ -93,11 +93,15 @@ pub fn schemas() -> Vec<Value> {
                 next stage starts only if your score is at or above the stage's bar; below it, \
                 or blocked, a person is asked to step in. Be honest: give evidence and reasons \
                 for and against. Report blocked rather than guess when the stage can't be done \
-                (not enough information, no access, a service down).",
+                (not enough information, no access, a service down). Report check when the work \
+                is done as far as you can prove it but the last proof needs a person to try \
+                something by hand that no tool here can (a real browser feature automation \
+                can't drive, a device, a printout): say exactly what to try and what they \
+                should see in check. A person then passes the stage or sends it back.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "outcome": {"type": "string", "enum": ["done", "blocked"]},
+                    "outcome": {"type": "string", "enum": ["done", "blocked", "check"]},
                     "score": {
                         "type": "integer", "minimum": 0, "maximum": 100,
                         "description": "Your confidence that the stage is done well.",
@@ -130,6 +134,8 @@ pub fn schemas() -> Vec<Value> {
                     },
                     "handoff": string("What the next stage needs to know (may be empty for the \
                         last stage)."),
+                    "check": string("With outcome check: the steps a person should take by \
+                        hand and what they should see if it works."),
                 },
                 "required": ["outcome", "score", "summary", "evidence", "reasons"],
             },

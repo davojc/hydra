@@ -219,6 +219,7 @@ pub fn escalation(run: &Run) -> Option<Escalation> {
         .flatten();
     let body = match rating {
         Some(r) if r.outcome == Outcome::Blocked => format!("Blocked: {}", r.summary),
+        Some(r) if r.outcome == Outcome::Check => format!("Check it by hand: {}", r.check),
         Some(r) => format!("Rated {}%, bar is {}%.", r.score, run.pipeline.bar_for(i)),
         None => crate::pipeline_view::sentence(why),
     };

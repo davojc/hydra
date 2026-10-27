@@ -32,6 +32,9 @@ pub fn gate_badge(rating: Option<&Rating>, bar: u8, status: StageStatus) -> (Str
         (StageStatus::Stopped, Some(r)) if r.outcome == Outcome::Blocked => {
             ("blocked".into(), Tone::Stopped)
         }
+        (StageStatus::Stopped, Some(r)) if r.outcome == Outcome::Check => {
+            ("check by hand".into(), Tone::Stopped)
+        }
         (StageStatus::Stopped, Some(r)) => (format!("{}% · needs {bar}", r.score), Tone::Stopped),
         (StageStatus::Failed, _) => ("no report".into(), Tone::Stopped),
         _ => (format!("needs ≥{bar}%"), Tone::Muted),
@@ -205,6 +208,13 @@ mod tests {
         assert_eq!(
             gate_badge(Some(&rated(99, "blocked")), 85, StageStatus::Stopped),
             ("blocked".to_string(), Tone::Stopped)
+        );
+        let mut check = rated(95, "done");
+        check.outcome = Outcome::Check;
+        check.check = "Try it in Chrome.".into();
+        assert_eq!(
+            gate_badge(Some(&check), 85, StageStatus::Stopped).0,
+            "check by hand"
         );
         assert_eq!(
             gate_badge(None, 80, StageStatus::Waiting),

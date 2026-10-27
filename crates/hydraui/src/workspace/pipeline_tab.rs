@@ -261,6 +261,7 @@ impl Workspace {
         let (word, note, stage) = match &choice {
             Choice::Retry { note } => ("re-run", Some(note.trim().to_string()), None),
             Choice::Stop => ("stop", None, None),
+            Choice::Checked { note } => ("checked", Some(note.trim().to_string()), None),
             Choice::Back { stage, note } => {
                 ("back", Some(note.trim().to_string()), Some(stage.clone()))
             }
@@ -467,6 +468,67 @@ impl Workspace {
                         .child(
                             Button::new("rerun-go")
                                 .label(format!("Re-run {title}"))
+                                .primary()
+                                .on_click(move |_, window, cx| submit(window, cx)),
+                        ),
+                )
+        });
+    }
+
+    /// **I checked it, it works**: the stage asked a person to check something by hand. An
+    /// optional note says what they saw; the stage passes and the ticket goes on.
+    fn checked_dialog(
+        &mut self,
+        orch: PaneId,
+        run: String,
+        title: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("What did you see? (optional)"));
+        let ws = cx.entity();
+        let first = Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first.replace(false) {
+                input.update(cx, |s, cx| s.focus(window, cx));
+            }
+            let submit = {
+                let (ws, input, run) = (ws.clone(), input.clone(), run.clone());
+                move |window: &mut Window, cx: &mut App| {
+                    let note = input.read(cx).value().trim().to_string();
+                    window.close_dialog(cx);
+                    let run = run.clone();
+                    ws.update(cx, |ws, cx| {
+                        ws.person_choice(orch, &run, Choice::Checked { note }, window, cx)
+                    });
+                }
+            };
+            let on_ok = submit.clone();
+            dialog
+                .title(format!("{title} works?"))
+                .on_ok(move |_, window, cx| {
+                    on_ok(window, cx);
+                    false
+                })
+                .child(v_flex().gap_2().child(Input::new(&input)).child(
+                    text(12.5, theme::TEXT_SECONDARY).child(format!(
+                        "{title} passes on your word and the next stage starts. If it doesn't \
+                         work, cancel and re-run {title} with a note instead."
+                    )),
+                ))
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("checked-cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("checked-go")
+                                .label(format!("Pass {title}"))
                                 .primary()
                                 .on_click(move |_, window, cx| submit(window, cx)),
                         ),
@@ -1216,6 +1278,8 @@ impl Workspace {
                             }
                         } else if r.outcome == Outcome::Blocked {
                             "Blocked".to_string()
+                        } else if r.outcome == Outcome::Check {
+                            "Needs a person to check it by hand".to_string()
                         } else {
                             format!("Below the {bar}% bar")
                         };
@@ -1501,7 +1565,17 @@ impl Workspace {
             .and_then(|ai| s.attempts.get(ai))
             .and_then(|a| a.rating.as_ref())
             .filter(|_| s.status == StageStatus::Stopped);
+        let check = rating
+            .filter(|r| r.outcome == Outcome::Check)
+            .map(|r| r.check.clone());
         let (overline, headline) = match (ai, rating) {
+            (_, Some(r)) if r.outcome == Outcome::Check => (
+                format!(
+                    "{} needs you to check it by hand · {}%",
+                    spec.title, r.score
+                ),
+                r.summary.clone(),
+            ),
             (_, Some(r)) if r.outcome == Outcome::Blocked => (
                 format!("Blocked at the {} gate", spec.title),
                 r.summary.clone(),
@@ -1525,7 +1599,9 @@ impl Workspace {
         let label = ai.map(|ai| session_name(si, &spec.title, ai));
         let can_step_in = ai.is_some_and(|ai| self.pane_of_session(run, si, ai, cx).is_some());
         let (run_id, title) = (run.id.clone(), spec.title.clone());
-        let rerun_label = if ai.is_some() {
+        let rerun_label = if check.is_some() {
+            format!("Doesn't work: re-run {} with a note", spec.title)
+        } else if ai.is_some() {
             format!("Re-run {} with a note", spec.title)
         } else {
             format!("Resume at {} with a note", spec.title)
@@ -1562,11 +1638,23 @@ impl Workspace {
                         })),
                 );
         } else {
+            if check.is_some() {
+                let (ok_run, ok_title) = (run_id.clone(), title.clone());
+                actions = actions.child(
+                    Button::new("pipeline-checked")
+                        .label("✓  I checked it, it works")
+                        .primary()
+                        .tooltip(format!("{ok_title} passes and the ticket goes on"))
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.checked_dialog(orch, ok_run.clone(), ok_title.clone(), window, cx)
+                        })),
+                );
+            }
             if let (true, Some(label)) = (can_step_in, label.clone()) {
                 actions = actions.child(
                     Button::new("pipeline-step-in")
                         .label(format!("Step into {label}"))
-                        .primary()
+                        .when(check.is_none(), |b| b.primary())
                         .on_click(cx.listener(move |ws, _, window, cx| {
                             ws.pipeline_tab_update(orch, cx, |t| t.stepped_in = true);
                             ws.focus_active(window, cx);
@@ -1615,7 +1703,11 @@ impl Workspace {
                         })),
                 )
                 .child(div().flex_1())
-                .child(text(11.5, theme::TEXT_MUTED).child("Gates can't be skipped"));
+                .child(text(11.5, theme::TEXT_MUTED).child(if check.is_some() {
+                    "Only a person's check passes this gate"
+                } else {
+                    "Gates can't be skipped"
+                }));
         }
         v_flex()
             .size_full()
@@ -1625,12 +1717,35 @@ impl Workspace {
                     .px(px(28.))
                     .py(px(22.))
                     .gap_2()
-                    .child(text(12., theme::RED).child(overline.to_uppercase()))
+                    .child(
+                        text(
+                            12.,
+                            if check.is_some() {
+                                theme::AMBER
+                            } else {
+                                theme::RED
+                            },
+                        )
+                        .child(overline.to_uppercase()),
+                    )
                     .child(
                         text(20., theme::TEXT)
                             .font_weight(FontWeight::MEDIUM)
                             .child(headline),
                     )
+                    .when_some(check.clone(), |el, check| {
+                        el.child(
+                            v_flex()
+                                .mt_1()
+                                .gap_1()
+                                .px(px(14.))
+                                .py(px(10.))
+                                .rounded(px(6.))
+                                .bg(color(theme::AMBER_TINT))
+                                .child(text(11.5, theme::AMBER).child("WHAT TO CHECK"))
+                                .child(text(13.5, theme::TEXT).child(check)),
+                        )
+                    })
                     .child(text(12.5, theme::TEXT_SECONDARY).child(
                         "You were notified in hydraui. Nothing downstream starts until you act.",
                     )),

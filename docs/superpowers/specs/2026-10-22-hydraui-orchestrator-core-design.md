@@ -841,3 +841,16 @@ tickets are in progress; **End pipeline** then stops each of its orchestrators' 
 under them, so its trigger stops looking. **Start pipeline** starts it again; one with
 `[autostart]` also starts when hydraui does.
 
+
+## 29. A check by hand (added 2026-10-27)
+
+INTH-166's Verify stage stopped as **blocked** at 55%: everything it could run passed, but the
+last proof was real Chrome's own "Always translate", which automated Chrome can't drive. It
+wasn't blocked; it needed a person to try one thing (Jordan, 2026-10-27). `stage_report` now
+takes a third outcome, **check**, with a `check` field saying what to try and what to see.
+Like blocked it never passes by itself: the run needs you, the gate badge reads *check by
+hand*, and the stopped banner shows **What to check** in amber. Its choices add **✓ I checked
+it, it works**, which asks for an optional note and passes the stage (logged as `person`
+`checked`, then `checked`), so the next stage starts or the ticket finishes; re-run is labelled
+**Doesn't work: re-run … with a note**. This is the one choice that lets a stage through
+(§5.3), and only a stage that asked for a check.

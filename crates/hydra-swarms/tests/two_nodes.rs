@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use hydra_swarms::ids::{PersonId, PersonKey};
-use hydra_swarms::node::{NodeConfig, SwarmNode};
+use hydra_swarms::invites::{INVITE_LIFETIME, InviteCode, Invites, redeem_at};
+use hydra_swarms::node::{NodeConfig, NodeEvent, SwarmNode};
 use hydra_swarms::paths::{RelPath, safe_rel_path};
 use hydra_swarms::roster::{Change, Machine, Member, Role, Roster, SignedChange};
 use iroh_docs::{Author, Capability};
@@ -64,7 +65,7 @@ where
 struct Owner {
     node: SwarmNode,
     key: PersonKey,
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
 }
 
 async fn create_owner() -> Owner {
@@ -87,11 +88,7 @@ async fn create_owner() -> Owner {
         None,
     );
     let node = SwarmNode::create(cfg, "Notes", me).await.expect("create");
-    Owner {
-        node,
-        key,
-        _dir: dir,
-    }
+    Owner { node, key, dir }
 }
 
 struct Joiner {
@@ -505,4 +502,331 @@ async fn a_member_never_dials_a_machine_outside_its_gate() {
     o.node.shutdown().await;
     w.node.shutdown().await;
     stranger.node.shutdown().await;
+}
+
+/// The member a joiner sends: its role is the invite's, and its machine's endpoint and author are
+/// filled in on joining.
+fn joining_member(key: &PersonKey, name: &str) -> Member {
+    Member {
+        person: key.id(),
+        name: name.into(),
+        role: Role::Reader,
+        machines: vec![Machine {
+            endpoint: String::new(),
+            name: format!("{name}-pc"),
+            author: String::new(),
+        }],
+    }
+}
+
+/// A new person's machine joining through `code`, dialling `host` directly.
+async fn join_by_code(host: &SwarmNode, code: &InviteCode, name: &str) -> Joiner {
+    let dir = tempfile::tempdir().unwrap();
+    let key = PersonKey::generate();
+    let machine_key = random32();
+    let cfg = config(
+        dir.path(),
+        machine_key,
+        PersonKey::from_bytes(key.to_bytes()),
+        None,
+    );
+    let me = joining_member(&key, name);
+    let node = SwarmNode::join_with_invite_at(cfg, code, me, host.addr_for_tests())
+        .await
+        .expect("join with an invite");
+    host.remember_addr(node.addr_for_tests());
+    Joiner {
+        node,
+        key,
+        machine_key,
+        dir,
+    }
+}
+
+async fn invite_and_join(o: &Owner, name: &str, role: Role) -> Joiner {
+    let (_, code) = o.node.invite(role, &o.key).await.expect("invite");
+    join_by_code(&o.node, &code, name).await
+}
+
+/// Redeems `code` at `host` as a new person, and gives the refusal.
+async fn refusal(host: &SwarmNode, code: &InviteCode) -> String {
+    let key = PersonKey::generate();
+    let me = joining_member(&key, "sid");
+    let err = redeem_at(code, me, &key, random32(), host.addr_for_tests())
+        .await
+        .expect_err("refused");
+    err.to_string()
+}
+
+fn now_secs() -> u64 {
+    jiff::Timestamp::now().as_second() as u64
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_invite_lets_a_reader_join_with_read_only_access() {
+    let o = create_owner().await;
+    o.node
+        .put_file(&rel("x.md"), Bytes::from_static(b"hello"))
+        .await
+        .unwrap();
+    let r = invite_and_join(&o, "rae", Role::Reader).await;
+    assert!(!r.node.can_write());
+    let roster = roster_with(&r.node, 2).await;
+    assert_eq!(roster.role_of(&r.key.id()), Some(Role::Reader));
+    let m = roster.member_by_endpoint(&r.node.endpoint_id()).unwrap();
+    assert_eq!(m.machines[0].author, r.node.author());
+    assert_eq!(m.machines[0].name, "rae-pc");
+    let got = eventually("x.md on the reader", || async {
+        let files = r.node.files(&roster).await.unwrap();
+        r.node
+            .read_blob(files.get(&rel("x.md"))?.hash?)
+            .await
+            .unwrap()
+    })
+    .await;
+    assert_eq!(&got[..], b"hello");
+    o.node.shutdown().await;
+    r.node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_invite_lets_a_writer_join_and_write() {
+    let o = create_owner().await;
+    let w = invite_and_join(&o, "wren", Role::Writer).await;
+    assert!(w.node.can_write());
+    roster_with(&w.node, 2).await;
+    let hash = w
+        .node
+        .put_file(&rel("x.md"), Bytes::from_static(b"hello"))
+        .await
+        .unwrap();
+    let r = o.node.roster().await.unwrap().unwrap();
+    assert_eq!(r.role_of(&w.key.id()), Some(Role::Writer));
+    let got = eventually("x.md on the owner", || async {
+        o.node.files(&r).await.unwrap().get(&rel("x.md"))?.hash
+    })
+    .await;
+    assert_eq!(got, hash);
+    o.node.shutdown().await;
+    w.node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_invite_works_once() {
+    let o = create_owner().await;
+    let (invite, code) = o.node.invite(Role::Reader, &o.key).await.unwrap();
+    assert_eq!(o.node.pending_invites(), vec![invite]);
+    let r = join_by_code(&o.node, &code, "rae").await;
+    assert!(o.node.pending_invites().is_empty());
+    assert_eq!(
+        refusal(&o.node, &code).await,
+        "This invite has already been used."
+    );
+    assert_eq!(o.node.roster().await.unwrap().unwrap().members.len(), 2);
+    o.node.shutdown().await;
+    r.node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_expired_invite_is_refused() {
+    let o = create_owner().await;
+    let long_ago = now_secs() - INVITE_LIFETIME - 60;
+    let (_, token) = Invites::new(o.dir.path())
+        .create(Role::Reader, long_ago)
+        .unwrap();
+    let code = InviteCode {
+        host: o.node.endpoint_id(),
+        relay: None,
+        token,
+    };
+    assert_eq!(refusal(&o.node, &code).await, "This invite has expired.");
+    assert_eq!(o.node.roster().await.unwrap().unwrap().members.len(), 1);
+    o.node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancelled_invite_is_refused() {
+    let o = create_owner().await;
+    let (invite, code) = o.node.invite(Role::Writer, &o.key).await.unwrap();
+    o.node.cancel_invite(&invite.id).unwrap();
+    assert!(o.node.pending_invites().is_empty());
+    assert_eq!(refusal(&o.node, &code).await, "This invite was cancelled.");
+    o.node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_writer_cannot_make_invites() {
+    let o = create_owner().await;
+    let w = invite_and_join(&o, "wren", Role::Writer).await;
+    roster_with(&w.node, 2).await;
+    assert!(w.node.invite(Role::Reader, &w.key).await.is_err());
+    assert!(w.node.pending_invites().is_empty());
+    o.node.shutdown().await;
+    w.node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_invite_from_someone_no_longer_an_owner_is_refused() {
+    let o = create_owner().await;
+    let b = invite_and_join(&o, "bea", Role::Owner).await;
+    roster_with(&b.node, 2).await;
+    let (_, code) = b.node.invite(Role::Reader, &b.key).await.unwrap();
+    let demote = SignedChange::sign(
+        &o.node.id(),
+        Change::SetRole {
+            person: b.key.id(),
+            role: Role::Writer,
+        },
+        &o.key,
+        now(),
+    );
+    o.node.write_change(&demote).await.unwrap();
+    eventually("the demotion on bea's machine", || async {
+        let r = b.node.roster().await.unwrap()?;
+        (r.role_of(&b.key.id()) == Some(Role::Writer)).then_some(())
+    })
+    .await;
+    assert_eq!(
+        refusal(&b.node, &code).await,
+        "Whoever invited you is no longer an owner of this swarm."
+    );
+    o.node.shutdown().await;
+    b.node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_readers_rename_goes_through_an_owner() {
+    let o = create_owner().await;
+    let w = invite_and_join(&o, "wren", Role::Writer).await;
+    let r = invite_and_join(&o, "rae", Role::Reader).await;
+    roster_with(&r.node, 3).await;
+    let rename = SignedChange::sign(
+        &o.node.id(),
+        Change::Rename {
+            person: r.key.id(),
+            name: "Rae B".into(),
+        },
+        &r.key,
+        now(),
+    );
+    r.node
+        .relay(&o.node.endpoint_id(), rename)
+        .await
+        .expect("relayed");
+    for node in [&o.node, &w.node, &r.node] {
+        eventually("the new name everywhere", || async {
+            let roster = node.roster().await.unwrap()?;
+            let m = roster.members.iter().find(|m| m.person == r.key.id())?;
+            (m.name == "Rae B").then_some(())
+        })
+        .await;
+    }
+    o.node.shutdown().await;
+    w.node.shutdown().await;
+    r.node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relay_for_someone_else_is_refused() {
+    let o = create_owner().await;
+    let r = invite_and_join(&o, "rae", Role::Reader).await;
+    roster_with(&r.node, 2).await;
+    let ns = o.node.id();
+    let others = [
+        Change::Rename {
+            person: o.key.id(),
+            name: "Mallory".into(),
+        },
+        Change::Leave { person: o.key.id() },
+        Change::SetRole {
+            person: r.key.id(),
+            role: Role::Owner,
+        },
+    ];
+    for change in others {
+        let c = SignedChange::sign(&ns, change, &r.key, now());
+        assert!(r.node.relay(&o.node.endpoint_id(), c).await.is_err());
+    }
+    let roster = o.node.roster().await.unwrap().unwrap();
+    assert_eq!(roster.role_of(&r.key.id()), Some(Role::Reader));
+    assert_eq!(roster.role_of(&o.key.id()), Some(Role::Owner));
+    assert_eq!(roster.members[0].name, "olive");
+    o.node.shutdown().await;
+    r.node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_promoted_reader_can_write() {
+    let o = create_owner().await;
+    let r = invite_and_join(&o, "rae", Role::Reader).await;
+    roster_with(&r.node, 2).await;
+    assert!(!r.node.can_write());
+    let promote = SignedChange::sign(
+        &o.node.id(),
+        Change::SetRole {
+            person: r.key.id(),
+            role: Role::Writer,
+        },
+        &o.key,
+        now(),
+    );
+    o.node.write_change(&promote).await.unwrap();
+    o.node
+        .send_promoted(&r.node.endpoint_id())
+        .await
+        .expect("promoted");
+    assert!(r.node.can_write());
+    let hash = r
+        .node
+        .put_file(&rel("x.md"), Bytes::from_static(b"mine"))
+        .await
+        .unwrap();
+    let roster = o.node.roster().await.unwrap().unwrap();
+    let got = eventually("x.md on the owner", || async {
+        o.node.files(&roster).await.unwrap().get(&rel("x.md"))?.hash
+    })
+    .await;
+    assert_eq!(got, hash);
+    o.node.shutdown().await;
+    r.node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_an_owner_can_tell_a_machine_it_was_removed() {
+    let o = create_owner().await;
+    let r = invite_and_join(&o, "rae", Role::Reader).await;
+    roster_with(&r.node, 2).await;
+    let mut events = r.node.events();
+    assert!(r.node.send_removed(&o.node.endpoint_id()).await.is_err());
+    o.node
+        .send_removed(&r.node.endpoint_id())
+        .await
+        .expect("told");
+    let got = tokio::time::timeout(WAIT, async {
+        while events.recv().await.unwrap() != NodeEvent::Removed {}
+    })
+    .await;
+    assert!(got.is_ok(), "no removal event");
+    o.node.shutdown().await;
+    r.node.shutdown().await;
+}
+
+#[test]
+fn invite_codes_round_trip_and_tolerate_whitespace() {
+    let code = InviteCode {
+        host: iroh::SecretKey::from_bytes(&random32())
+            .public()
+            .to_string(),
+        relay: Some("https://relay.example/".into()),
+        token: "ab".repeat(32),
+    };
+    let text = code.encode();
+    assert!(text.starts_with("hydra-swarm:"));
+    assert_eq!(InviteCode::decode(&text), Some(code.clone()));
+    assert_eq!(
+        InviteCode::decode(&format!("  \n{text}\t \r\n")),
+        Some(code)
+    );
+    assert_eq!(InviteCode::decode("hydra-swarm:not base64!"), None);
+    assert_eq!(InviteCode::decode(""), None);
 }

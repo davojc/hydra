@@ -4,7 +4,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use anyhow::{Context, bail};
 use bytes::Bytes;
@@ -29,10 +30,12 @@ use tokio::sync::broadcast;
 
 use crate::decide::Remote;
 use crate::ids::{PersonId, PersonKey};
+use crate::invites::{Hydra, Invites};
 use crate::paths::{
     FILES_PREFIX, LOG_PREFIX, MAX_FILE_BYTES, RelPath, file_key, log_key, path_of_key,
 };
 use crate::roster::{Change, Machine, Member, Role, Roster, SignedChange};
+use crate::wire::ALPN;
 
 /// A signed change is a few hundred bytes; anything far bigger in the log is not one.
 const MAX_CHANGE_BYTES: u64 = 64 * 1024;
@@ -58,6 +61,8 @@ pub enum NodeEvent {
     PeerUp(String),
     PeerDown(String),
     SyncFinished,
+    /// An owner told this machine it was removed from the swarm.
+    Removed,
 }
 
 /// The ALPNs that carry the swarm document, its content and its gossip.
@@ -83,7 +88,7 @@ fn lock(gate: &Gate) -> std::sync::MutexGuard<'_, GateState> {
 
 /// Endpoint hooks that keep machines outside the gate off docs, blobs and gossip in both
 /// directions: a dial to one is never started, and a connection with one, either way, is closed
-/// as soon as the handshake shows who it is. Other ALPNs (invites) pass.
+/// as soon as the handshake shows who it is. Other ALPNs (the hydra protocol) pass.
 #[derive(Debug)]
 struct GateHooks(Gate);
 
@@ -120,20 +125,32 @@ impl EndpointHooks for GateHooks {
 }
 
 pub struct SwarmNode {
-    endpoint: Endpoint,
+    pub(crate) core: Arc<Core>,
     router: Router,
-    blobs: FsStore,
-    doc: Doc,
-    author: AuthorId,
-    anchor: PersonId,
-    person: PersonKey,
-    writable: bool,
-    gate: Gate,
-    addrs: MemoryLookup,
-    events: broadcast::Sender<NodeEvent>,
 }
 
-fn endpoint_builder(machine_key: &[u8; 32], relays: bool) -> iroh::endpoint::Builder {
+/// What a node's methods and its hydra protocol handler share.
+pub(crate) struct Core {
+    pub(crate) endpoint: Endpoint,
+    pub(crate) docs: Docs,
+    pub(crate) blobs: FsStore,
+    pub(crate) doc: Doc,
+    pub(crate) author: AuthorId,
+    pub(crate) anchor: PersonId,
+    pub(crate) person: PersonKey,
+    /// Set once this machine holds the write capability; a promotion can set it later.
+    pub(crate) writable: AtomicBool,
+    gate: Gate,
+    pub(crate) addrs: MemoryLookup,
+    pub(crate) events: broadcast::Sender<NodeEvent>,
+    pub(crate) invites: Invites,
+}
+
+/// Where the hydra protocol handler finds the node, once there is one: the router starts before
+/// the document is chosen.
+pub(crate) type CoreSlot = Arc<OnceLock<Weak<Core>>>;
+
+pub(crate) fn endpoint_builder(machine_key: &[u8; 32], relays: bool) -> iroh::endpoint::Builder {
     let builder = if relays {
         Endpoint::builder(presets::N0)
     } else {
@@ -152,6 +169,7 @@ struct Parts {
     blobs: FsStore,
     gate: Gate,
     addrs: MemoryLookup,
+    slot: CoreSlot,
 }
 
 async fn start(cfg: &NodeConfig) -> anyhow::Result<Parts> {
@@ -186,10 +204,14 @@ async fn start(cfg: &NodeConfig) -> anyhow::Result<Parts> {
             return Err(e);
         }
     };
+    let slot = CoreSlot::default();
+    // The hydra ALPN is outside the gate, since invitees aren't members yet; each request checks
+    // its own sender.
     let router = Router::builder(endpoint.clone())
         .accept(iroh_blobs::ALPN, BlobsProtocol::new(&blobs, None))
         .accept(iroh_gossip::ALPN, gossip)
         .accept(iroh_docs::ALPN, docs.clone())
+        .accept(ALPN, Hydra(Arc::clone(&slot)))
         .spawn();
     Ok(Parts {
         endpoint,
@@ -198,6 +220,7 @@ async fn start(cfg: &NodeConfig) -> anyhow::Result<Parts> {
         blobs,
         gate,
         addrs,
+        slot,
     })
 }
 
@@ -205,7 +228,7 @@ fn anchor_file(cfg: &NodeConfig) -> PathBuf {
     cfg.dir.join("anchor")
 }
 
-fn now_micros() -> u64 {
+pub(crate) fn now_micros() -> u64 {
     u64::try_from(jiff::Timestamp::now().as_microsecond()).unwrap_or(0)
 }
 
@@ -253,12 +276,12 @@ impl SwarmNode {
                 name: name.to_string(),
                 owner,
             },
-            &node.person,
+            &node.core.person,
             now_micros(),
         );
         let written = async {
             node.write_change(&genesis).await?;
-            node.refresh_gate_from_roster().await
+            node.core.refresh_gate_from_roster().await
         }
         .await;
         if let Err(e) = written {
@@ -293,6 +316,11 @@ impl SwarmNode {
 
     /// Joins with the capability an inviter handed over, writing as `author`, which the joiner
     /// made beforehand so the inviter could add it to the roster.
+    ///
+    /// The new node's gate is empty, since it has no roster yet, so it syncs with nobody until
+    /// the gate is opened to the inviter. Joining with an invite code should go through
+    /// [`SwarmNode::join_with_invite`], which does that and refreshes the gate from the roster
+    /// once it arrives.
     pub async fn join(
         cfg: NodeConfig,
         cap: Capability,
@@ -368,22 +396,28 @@ impl SwarmNode {
                 let _ = tx.send(ev);
             }
         });
-        let node = SwarmNode {
+        let core = Arc::new(Core {
             endpoint: parts.endpoint,
-            router: parts.router,
+            docs: parts.docs,
             blobs: parts.blobs,
             doc,
             author,
             anchor,
             person: cfg.person,
-            writable,
+            writable: AtomicBool::new(writable),
             gate: parts.gate,
             addrs: parts.addrs,
             events,
+            invites: Invites::new(&cfg.dir),
+        });
+        let _ = parts.slot.set(Arc::downgrade(&core));
+        let node = SwarmNode {
+            core,
+            router: parts.router,
         };
         let live = async {
-            node.refresh_gate_from_roster().await?;
-            node.doc.start_sync(vec![]).await
+            node.core.refresh_gate_from_roster().await?;
+            node.core.doc.start_sync(vec![]).await
         }
         .await;
         if let Err(e) = live {
@@ -395,67 +429,41 @@ impl SwarmNode {
 
     /// The namespace id.
     pub fn id(&self) -> String {
-        self.doc.id().to_string()
+        self.core.id()
     }
 
     pub fn endpoint_id(&self) -> String {
-        self.endpoint.id().to_string()
+        self.core.endpoint.id().to_string()
     }
 
     /// This machine's author id in the document.
     pub fn author(&self) -> String {
-        self.author.to_string()
+        self.core.author.to_string()
     }
 
-    /// Whether this machine holds the write capability.
+    /// Whether this machine holds the write capability now.
     pub fn can_write(&self) -> bool {
-        self.writable
+        self.core.can_write()
     }
 
     pub fn events(&self) -> broadcast::Receiver<NodeEvent> {
-        self.events.subscribe()
+        self.core.events.subscribe()
     }
 
     /// The capability to hand to someone joining with `role`: readers get only the read one.
     pub async fn capability(&self, role: Role) -> anyhow::Result<Capability> {
-        if role == Role::Reader {
-            return Ok(Capability::Read(self.doc.id()));
-        }
-        if !self.writable {
-            bail!("this machine can't hand out write access it doesn't have");
-        }
-        let ticket = self
-            .doc
-            .share(ShareMode::Write, AddrInfoOptions::Id)
-            .await?;
-        Ok(ticket.capability)
+        self.core.capability(role).await
     }
 
     /// The roster folded from every signed change whose content is here, or None until the
     /// anchor's genesis has arrived.
     pub async fn roster(&self) -> anyhow::Result<Option<Roster>> {
-        let entries = self.entries(Query::key_prefix(LOG_PREFIX).build()).await?;
-        let mut changes = Vec::new();
-        for e in entries {
-            if e.content_len() == 0 || e.content_len() > MAX_CHANGE_BYTES {
-                continue;
-            }
-            let Some(bytes) = self.read_blob(e.content_hash()).await? else {
-                continue;
-            };
-            if let Ok(c) = serde_json::from_slice::<SignedChange>(&bytes) {
-                changes.push(c);
-            }
-        }
-        Ok(Roster::fold(&self.id(), &self.anchor, &changes))
+        self.core.roster().await
     }
 
     /// Adds a signed change to the log.
     pub async fn write_change(&self, c: &SignedChange) -> anyhow::Result<()> {
-        self.ensure_writable()?;
-        let bytes = serde_json::to_vec(c)?;
-        self.doc.set_bytes(self.author, log_key(c), bytes).await?;
-        Ok(())
+        self.core.write_change(c).await
     }
 
     /// Per file key, the newest entry (tombstones included) whose author is one of `roster`'s
@@ -464,7 +472,7 @@ impl SwarmNode {
     pub async fn files(&self, roster: &Roster) -> anyhow::Result<BTreeMap<RelPath, Remote>> {
         let query = Query::key_prefix(FILES_PREFIX).include_empty().build();
         let mut out: BTreeMap<RelPath, Remote> = BTreeMap::new();
-        for e in self.entries(query).await? {
+        for e in self.core.entries(query).await? {
             let Some(path) = path_of_key(e.key()) else {
                 continue;
             };
@@ -506,28 +514,27 @@ impl SwarmNode {
 
     /// Stores `bytes` and points `p`'s key at them.
     pub async fn put_file(&self, p: &RelPath, bytes: Bytes) -> anyhow::Result<Hash> {
-        self.ensure_writable()?;
+        let core = &self.core;
+        core.ensure_writable()?;
         let size = bytes.len() as u64;
-        let tag = self.blobs.add_bytes(bytes).await?;
-        self.doc
-            .set_hash(self.author, file_key(p), tag.hash, size)
+        let tag = core.blobs.add_bytes(bytes).await?;
+        core.doc
+            .set_hash(core.author, file_key(p), tag.hash, size)
             .await?;
         Ok(tag.hash)
     }
 
     /// Writes a tombstone for `p`.
     pub async fn delete_file(&self, p: &RelPath) -> anyhow::Result<()> {
-        self.ensure_writable()?;
-        self.doc.del(self.author, file_key(p)).await?;
+        let core = &self.core;
+        core.ensure_writable()?;
+        core.doc.del(core.author, file_key(p)).await?;
         Ok(())
     }
 
     /// The content of `h`, if it is all here.
     pub async fn read_blob(&self, h: Hash) -> anyhow::Result<Option<Bytes>> {
-        if !self.blobs.has(h).await? {
-            return Ok(None);
-        }
-        Ok(Some(self.blobs.get_bytes(h).await?))
+        self.core.read_blob(h).await
     }
 
     /// Replaces who this node talks to on docs, blobs and gossip; ids that don't parse are
@@ -535,6 +542,103 @@ impl SwarmNode {
     /// on them, and every open docs, blobs or gossip connection with someone no longer in the
     /// gate is closed, so nothing more reaches them through this node.
     pub fn set_gate(&self, endpoints: &[String]) {
+        self.core.set_gate(endpoints);
+    }
+
+    /// Syncs the document with `endpoints`, and keeps them as live peers.
+    pub async fn sync_with(&self, endpoints: &[String]) -> anyhow::Result<()> {
+        let peers = endpoints
+            .iter()
+            .map(|e| e.parse::<EndpointId>().map(EndpointAddr::new))
+            .collect::<Result<Vec<_>, _>>()
+            .context("not an endpoint id")?;
+        self.core.doc.start_sync(peers).await?;
+        Ok(())
+    }
+
+    /// Where a peer can be reached when address lookup can't find it, as with relays off.
+    pub fn remember_addr(&self, addr: EndpointAddr) {
+        self.core.addrs.add_endpoint_info(addr);
+    }
+
+    /// This node's id with its bound sockets on loopback, for dialling it in tests.
+    pub fn addr_for_tests(&self) -> EndpointAddr {
+        let endpoint = &self.core.endpoint;
+        endpoint
+            .bound_sockets()
+            .into_iter()
+            .map(|s| {
+                let ip = if s.is_ipv4() {
+                    Ipv4Addr::LOCALHOST.into()
+                } else {
+                    Ipv6Addr::LOCALHOST.into()
+                };
+                SocketAddr::new(ip, s.port())
+            })
+            .fold(EndpointAddr::new(endpoint.id()), |a, s| a.with_ip_addr(s))
+    }
+
+    pub async fn shutdown(self) {
+        let _ = self.core.doc.close().await;
+        stop(self.router, self.core.blobs.clone()).await;
+    }
+}
+
+impl Core {
+    pub(crate) fn id(&self) -> String {
+        self.doc.id().to_string()
+    }
+
+    pub(crate) fn can_write(&self) -> bool {
+        self.writable.load(Ordering::Acquire)
+    }
+
+    pub(crate) async fn capability(&self, role: Role) -> anyhow::Result<Capability> {
+        if role == Role::Reader {
+            return Ok(Capability::Read(self.doc.id()));
+        }
+        if !self.can_write() {
+            bail!("this machine can't hand out write access it doesn't have");
+        }
+        let ticket = self
+            .doc
+            .share(ShareMode::Write, AddrInfoOptions::Id)
+            .await?;
+        Ok(ticket.capability)
+    }
+
+    pub(crate) async fn roster(&self) -> anyhow::Result<Option<Roster>> {
+        let entries = self.entries(Query::key_prefix(LOG_PREFIX).build()).await?;
+        let mut changes = Vec::new();
+        for e in entries {
+            if e.content_len() == 0 || e.content_len() > MAX_CHANGE_BYTES {
+                continue;
+            }
+            let Some(bytes) = self.read_blob(e.content_hash()).await? else {
+                continue;
+            };
+            if let Ok(c) = serde_json::from_slice::<SignedChange>(&bytes) {
+                changes.push(c);
+            }
+        }
+        Ok(Roster::fold(&self.id(), &self.anchor, &changes))
+    }
+
+    pub(crate) async fn write_change(&self, c: &SignedChange) -> anyhow::Result<()> {
+        self.ensure_writable()?;
+        let bytes = serde_json::to_vec(c)?;
+        self.doc.set_bytes(self.author, log_key(c), bytes).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn read_blob(&self, h: Hash) -> anyhow::Result<Option<Bytes>> {
+        if !self.blobs.has(h).await? {
+            return Ok(None);
+        }
+        Ok(Some(self.blobs.get_bytes(h).await?))
+    }
+
+    pub(crate) fn set_gate(&self, endpoints: &[String]) {
         let allowed: HashSet<EndpointId> =
             endpoints.iter().filter_map(|e| e.parse().ok()).collect();
         let dropped: Vec<WeakConnectionHandle> = {
@@ -558,46 +662,7 @@ impl SwarmNode {
         }
     }
 
-    /// Syncs the document with `endpoints`, and keeps them as live peers.
-    pub async fn sync_with(&self, endpoints: &[String]) -> anyhow::Result<()> {
-        let peers = endpoints
-            .iter()
-            .map(|e| e.parse::<EndpointId>().map(EndpointAddr::new))
-            .collect::<Result<Vec<_>, _>>()
-            .context("not an endpoint id")?;
-        self.doc.start_sync(peers).await?;
-        Ok(())
-    }
-
-    /// Where a peer can be reached when address lookup can't find it, as with relays off.
-    pub fn remember_addr(&self, addr: EndpointAddr) {
-        self.addrs.add_endpoint_info(addr);
-    }
-
-    /// This node's id with its bound sockets on loopback, for dialling it in tests.
-    pub fn addr_for_tests(&self) -> EndpointAddr {
-        self.endpoint
-            .bound_sockets()
-            .into_iter()
-            .map(|s| {
-                let ip = if s.is_ipv4() {
-                    Ipv4Addr::LOCALHOST.into()
-                } else {
-                    Ipv6Addr::LOCALHOST.into()
-                };
-                SocketAddr::new(ip, s.port())
-            })
-            .fold(EndpointAddr::new(self.endpoint.id()), |a, s| {
-                a.with_ip_addr(s)
-            })
-    }
-
-    pub async fn shutdown(self) {
-        let _ = self.doc.close().await;
-        stop(self.router, self.blobs).await;
-    }
-
-    async fn refresh_gate_from_roster(&self) -> anyhow::Result<()> {
+    pub(crate) async fn refresh_gate_from_roster(&self) -> anyhow::Result<()> {
         if let Some(r) = self.roster().await? {
             self.set_gate(&r.endpoints());
         }
@@ -605,7 +670,7 @@ impl SwarmNode {
     }
 
     fn ensure_writable(&self) -> anyhow::Result<()> {
-        if !self.writable {
+        if !self.can_write() {
             bail!("this machine can only read this swarm");
         }
         Ok(())

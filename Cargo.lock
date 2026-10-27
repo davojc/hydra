@@ -3564,6 +3564,7 @@ name = "hydra-swarms"
 version = "0.6.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "bytes",
  "futures",
  "getrandom 0.3.4",
@@ -3575,6 +3576,7 @@ dependencies = [
  "keyring",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
 ]

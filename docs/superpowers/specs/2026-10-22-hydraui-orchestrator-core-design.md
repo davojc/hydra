@@ -854,3 +854,14 @@ it, it works**, which asks for an optional note and passes the stage (logged as 
 `checked`, then `checked`), so the next stage starts or the ticket finishes; re-run is labelled
 **Doesn't work: re-run … with a note**. This is the one choice that lets a stage through
 (§5.3), and only a stage that asked for a check.
+
+## 30. A finished ticket closes its sessions; toasts name their pipeline (added 2026-10-27)
+
+A finished run's last stage session stayed open and idle, and a Slack pipeline that reviews one
+PR per run gathered one idle **1. Review PR** session per PR (Jordan, 2026-10-27). When a run
+finishes (every stage passed), hydraui now closes each of its stage sessions (every attempt's,
+logged as `run finished: closed …`); its orchestrator stays for the next ticket. A run that's
+stopped keeps its sessions, so a person can look at what went wrong. Toasts about a pipeline's
+terminals say which: **Claude finished** and **Claude needs you** are titled
+`<pipeline> · <ticket> · …`, the stopped-ticket toast's overline is `<PIPELINE> STOPPED · NEEDS
+YOU`, and the wake-up, Automatic and Check Linear toasts carry the pipeline's name too.

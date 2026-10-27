@@ -196,6 +196,8 @@ struct RunAlert;
 /// stopped · needs you", spec §5.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Escalation {
+    /// The pipeline's name, so the toast says which one stopped.
+    pub pipeline: String,
     /// `<ticket> stopped at <stage>`.
     pub title: String,
     /// The score against the bar, why it was blocked, or the failure or usage reason.
@@ -230,6 +232,7 @@ pub fn escalation(run: &Run) -> Option<Escalation> {
             .map(|x| x.text.clone())
     });
     Some(Escalation {
+        pipeline: run.pipeline.name.clone(),
         title: format!("{} stopped at {}", run.ticket, run.pipeline.stages[i].title),
         body,
         reason,
@@ -815,6 +818,32 @@ impl Workspace {
         for run in needs_you {
             self.escalate(run, window, cx);
         }
+        // A finished run's stage sessions have nothing left to do: they close.
+        let done: Vec<String> = server::get()
+            .map(|sv| {
+                let reg = server::lock(sv.registry());
+                changes
+                    .iter()
+                    .filter(|c| c.what == Decided::RunFinished)
+                    .filter_map(|c| reg.runs.run(&c.run))
+                    .flat_map(crate::pipeline_card::stage_tokens)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let closing: Vec<PaneId> = self
+            .panes
+            .iter()
+            .filter(|(_, v)| {
+                v.read(cx)
+                    .mcp_token()
+                    .is_some_and(|t| done.iter().any(|d| d == t))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for pane in closing {
+            crate::action_log::write(format!("run finished: closed {}", self.pane_name(pane, cx)));
+            self.close_terminal_now(pane, window, cx);
+        }
         // A run that ended lets its worktree go when nothing in it is uncommitted (spec §8).
         let ended: Vec<PathBuf> = server::get()
             .map(|sv| {
@@ -901,7 +930,7 @@ impl Workspace {
                         div()
                             .text_xs()
                             .text_color(color(theme::RED))
-                            .child("PIPELINE STOPPED · NEEDS YOU"),
+                            .child(format!("{} STOPPED · NEEDS YOU", e.pipeline.to_uppercase())),
                     )
                     .child(
                         div()
@@ -1015,6 +1044,7 @@ impl Workspace {
             }
             if tries >= 3 {
                 let name = self.pane_name(pane, cx);
+                let title = self.toast_title(pane, &run, cx);
                 crate::action_log::write(format!(
                     "run {run}: {name} didn't take a wake-up after 3 tries"
                 ));
@@ -1024,7 +1054,7 @@ impl Workspace {
                          Claude Code may be showing a question. Answer it, and hydraui carries \
                          on."
                     ))
-                    .title(run.clone()),
+                    .title(title),
                     cx,
                 );
                 continue;
@@ -1139,6 +1169,35 @@ impl Workspace {
     /// session), when it belongs to one.
     pub(super) fn pipeline_tint(&self, pane: PaneId, cx: &gpui::App) -> Option<gpui::Hsla> {
         self.pipeline_of(pane, cx).map(|(_, accent)| color(accent))
+    }
+
+    /// A toast's title for something about terminal `pane`: `<pipeline> · <what>`, with the
+    /// ticket when `pane` is in a run's, so it's clear which pipeline it's about.
+    pub(super) fn toast_title(&self, pane: PaneId, what: &str, cx: &gpui::App) -> String {
+        let token = self
+            .panes
+            .get(&pane)
+            .and_then(|v| v.read(cx).mcp_token().map(str::to_string));
+        let from_run = token.as_deref().zip(server::get()).and_then(|(t, sv)| {
+            let reg = server::lock(sv.registry());
+            let run = reg
+                .runs
+                .all()
+                .filter(|r| crate::pipeline_card::card_tokens(r).iter().any(|x| x == t))
+                .last()?;
+            Some(format!("{} · {}", run.pipeline.name, run.ticket))
+        });
+        let from_file = || {
+            let file = self.orchestrators.get(&pane)?;
+            crate::pipeline::load(self.hydra.paths.root(), file)
+                .ok()
+                .map(|p| p.name)
+        };
+        match from_run.or_else(from_file) {
+            Some(about) if about.contains(what) || what.is_empty() => about,
+            Some(about) => format!("{about} · {what}"),
+            None => what.to_string(),
+        }
     }
 
     /// The name and colour of the pipeline terminal `pane` belongs to, when it belongs to one.

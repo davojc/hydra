@@ -216,9 +216,11 @@ impl Workspace {
         let ws = cx.entity();
         let note = match alert {
             Alert::NeedsYou => Notification::warning(place)
-                .title("Claude needs you")
+                .title(self.toast_title(id, "Claude needs you", cx))
                 .autohide(false),
-            Alert::Finished => Notification::info(place).title("Claude finished"),
+            Alert::Finished => {
+                Notification::info(place).title(self.toast_title(id, "Claude finished", cx))
+            }
         };
         let note = note
             .id1::<ClaudeAlert>(SharedString::from(format!("claude-{id}")))

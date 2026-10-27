@@ -339,7 +339,7 @@ impl Workspace {
                     "Another orchestrator already watches {label}: only one may, or they'd race \
                      for its work."
                 ))
-                .title("Automatic"),
+                .title(self.toast_title(orch, "Automatic", cx)),
                 cx,
             );
             return;
@@ -364,7 +364,7 @@ impl Workspace {
         let Some(slot) = self.slot_for_work(orch, window, cx) else {
             window.push_notification(
                 Notification::info("Every run is busy: the next is picked when one ends.")
-                    .title("Check Linear"),
+                    .title(self.toast_title(orch, "Check Linear", cx)),
                 cx,
             );
             return;

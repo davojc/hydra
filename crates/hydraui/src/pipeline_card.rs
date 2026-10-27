@@ -177,6 +177,15 @@ pub fn card_tokens(run: &Run) -> Vec<String> {
         .collect()
 }
 
+/// The stage sessions a finished run leaves (every attempt's, not its orchestrator's): they
+/// close, since nothing more is asked of them.
+pub fn stage_tokens(run: &Run) -> Vec<String> {
+    card_tokens(run)
+        .into_iter()
+        .filter(|t| *t != run.orchestrator)
+        .collect()
+}
+
 /// What closing hydraui would end (the window asks first): each run still open, by its status
 /// line; `None` when nothing is running or waiting for a person.
 pub fn quit_warning(runs: &[Run]) -> Option<String> {
@@ -421,6 +430,7 @@ mod tests {
         // Not linked yet: no token to show.
         runs.begin("orch", &id, "develop", "", 30).unwrap();
         assert_eq!(card_tokens(runs.run(&id).unwrap()), ["orch", "t1", "t2"]);
+        assert_eq!(stage_tokens(runs.run(&id).unwrap()), ["t1", "t2"]);
     }
 
     #[test]

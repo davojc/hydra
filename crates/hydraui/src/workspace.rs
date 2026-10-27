@@ -266,6 +266,8 @@ pub struct Workspace {
     swarms_seek: u64,
     /// Swarms being made or joined, sent once the swarms start for them.
     swarms_pending: Vec<hydra_swarms::Command>,
+    /// Wakes the search while it waits to try again.
+    swarms_wake: Option<futures::channel::oneshot::Sender<()>>,
     /// Coming back to the window clears the alert of the terminal it shows.
     _activation: Subscription,
 }
@@ -485,6 +487,7 @@ impl Workspace {
             swarms_seeking: false,
             swarms_seek: 0,
             swarms_pending: Vec::new(),
+            swarms_wake: None,
             _activation: activation,
         }
     }

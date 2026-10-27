@@ -151,6 +151,22 @@ fn start(paths: &HydraPaths, name: String, machine: String) -> Opened {
     }
 }
 
+/// Whether the search goes on after `opened`: while another window runs the swarms, and while
+/// there is nothing to run, since another window may make the first swarm or set the name and
+/// then close.
+fn try_again(opened: &Opened) -> bool {
+    matches!(opened, Opened::Elsewhere | Opened::Off)
+}
+
+/// When the search next tries.
+enum Next {
+    Stop,
+    /// A swarm was queued to be made or joined after this try read the disk.
+    Now,
+    /// After `RETRY`, or sooner when a swarm is queued to be made or joined.
+    Later(futures::channel::oneshot::Receiver<()>),
+}
+
 /// Passes the service's events to the window until they end, which is once the service has
 /// closed every swarm, then lets the swarms go, so the next window to run them never opens a
 /// swarm this one still has open. Keeps going after the window has gone.
@@ -178,8 +194,9 @@ async fn release(
 
 impl Workspace {
     /// Runs every swarm in this window once your name is set and this machine is in a swarm,
-    /// unless another window runs them; while another does, tries again every 10 s, so this one
-    /// takes over when that one closes. Does nothing while they run here or are being sought.
+    /// unless another window runs them. Until then it tries again every 10 s, so this one takes
+    /// over when another closes, or once another has made the first swarm or set the name. Does
+    /// nothing while they run here or are being sought.
     pub(super) fn swarms_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.swarms_run.is_some() || self.swarms_seeking {
             return;
@@ -199,13 +216,25 @@ impl Workspace {
                 let (saved, opened) = cx
                     .background_spawn(async move { open(&paths, first) })
                     .await;
-                let again = this.update_in(cx, |ws, window, cx| {
-                    ws.swarms_opened(seek, saved, opened, window, cx)
+                let next = this.update_in(cx, |ws, window, cx| {
+                    if !ws.swarms_opened(seek, first, saved, opened, window, cx) {
+                        Next::Stop
+                    } else if !first && !ws.swarms_pending.is_empty() {
+                        Next::Now
+                    } else {
+                        let (wake, woken) = futures::channel::oneshot::channel();
+                        ws.swarms_wake = Some(wake);
+                        Next::Later(woken)
+                    }
                 });
-                if !matches!(again, Ok(true)) {
-                    return;
+                match next {
+                    Ok(Next::Now) => {}
+                    Ok(Next::Later(woken)) => {
+                        let timer = cx.background_executor().timer(RETRY);
+                        futures::future::select(timer, woken).await;
+                    }
+                    Ok(Next::Stop) | Err(_) => return,
                 }
-                cx.background_executor().timer(RETRY).await;
             }
         })
         .detach();
@@ -220,6 +249,8 @@ impl Workspace {
         self.swarms_elsewhere = false;
         self.swarms.clear();
         self.swarms_pending.clear();
+        // Wakes a waiting search, which then ends.
+        self.swarms_wake = None;
         if self.swarms_run.take().is_some() {
             action_log::write("swarms: this window let the swarms go");
         }
@@ -234,7 +265,7 @@ impl Workspace {
     }
 
     /// Makes or joins a swarm (`Command::Create` or `Command::Join`). The first one starts the
-    /// swarms, which don't run while this machine is in none.
+    /// swarms, which don't run while this machine is in none: the search tries again at once.
     #[expect(dead_code, reason = "Settings › Swarms calls it")]
     pub(super) fn swarms_create_or_join(
         &mut self,
@@ -247,9 +278,10 @@ impl Workspace {
             return;
         }
         self.swarms_pending.push(cmd);
-        // A search under way may have read the disk before there was anything to run.
-        self.swarms_seek += 1;
-        self.swarms_seeking = false;
+        // A waiting search tries now; one mid-try tries again as soon as it has finished.
+        if let Some(wake) = self.swarms_wake.take() {
+            let _ = wake.send(());
+        }
         self.swarms_start(window, cx);
     }
 
@@ -258,11 +290,12 @@ impl Workspace {
         self.swarms_seek == seek && self.swarms_run.is_none()
     }
 
-    /// Takes in what `open` found; true while another window runs the swarms and this one
-    /// should try again.
+    /// Takes in what `open` found, `first` when it was looking for swarms to make or join; true
+    /// while this window should try again.
     fn swarms_opened(
         &mut self,
         seek: u64,
+        first: bool,
         saved: Saved,
         opened: Opened,
         window: &mut Window,
@@ -275,12 +308,13 @@ impl Workspace {
             self.swarms_elsewhere = matches!(opened, Opened::Elsewhere);
             cx.notify();
         }
-        let again = matches!(opened, Opened::Elsewhere) && self.swarms_wanted(seek);
+        let again = try_again(&opened) && self.swarms_wanted(seek);
         if current && !again {
             self.swarms_seeking = false;
         }
-        // Swarms being made or joined, which can't be now.
-        let refused = current && !self.swarms_pending.is_empty();
+        // Swarms being made or joined, which can't be now. Ones queued after this try read the
+        // disk wait for the next.
+        let refused = current && first && !self.swarms_pending.is_empty();
         match opened {
             Opened::Running(lock, commands, events) => {
                 // Stopped meanwhile: let the swarms go, once the service has stopped.
@@ -316,7 +350,7 @@ impl Workspace {
                 cx.notify();
             }
             Opened::Failed(why) => {
-                if current {
+                if current && first {
                     self.swarms_pending.clear();
                 }
                 action_log::write(format!("swarms: {why}"));
@@ -420,6 +454,38 @@ mod tests {
                 machine: "Laptop".into()
             }
         );
+    }
+
+    #[test]
+    fn the_search_goes_on_while_another_window_runs_them_or_there_is_nothing_to_run() {
+        assert!(try_again(&Opened::Elsewhere));
+        // Another window may make the first swarm, or set the name, and then close.
+        assert!(try_again(&Opened::Off));
+        assert!(!try_again(&Opened::Failed("no keyring".into())));
+    }
+
+    #[test]
+    fn the_lock_is_held_until_the_service_has_stopped() {
+        use std::future::Future;
+        use std::task::{Context, Poll};
+        let d = tempfile::tempdir().unwrap();
+        let paths = HydraPaths::new(d.path());
+        let lock = owner::try_own_named(&paths, LOCK).unwrap();
+        let (service, events) = unbounded();
+        let (window, mut shown) = unbounded();
+        let mut fwd = Box::pin(forward(lock, events, window));
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(fwd.as_mut().poll(&mut cx).is_pending());
+        let event = ServiceEvent::Failed("x".into());
+        service.unbounded_send(event.clone()).unwrap();
+        assert!(fwd.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(shown.try_recv().ok(), Some(event));
+        assert!(owner::held_elsewhere_named(&paths, LOCK));
+        // The service's events end once it has closed every swarm.
+        drop(service);
+        assert_eq!(fwd.as_mut().poll(&mut cx), Poll::Ready(()));
+        assert!(!owner::held_elsewhere_named(&paths, LOCK));
     }
 
     #[test]

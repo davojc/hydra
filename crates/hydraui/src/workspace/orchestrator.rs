@@ -1036,6 +1036,7 @@ impl Workspace {
         for (pane, run, message) in pending {
             let Some(session) = sessions.iter().find(|s| s.pane == pane) else {
                 self.pending_wakes.remove(&pane);
+                self.wake_waiting.remove(&pane);
                 continue;
             };
             // Still on its first turn: what's typed now never reaches it.
@@ -1053,6 +1054,40 @@ impl Workspace {
                     .is_some_and(|r| r.paused)
             });
             if !wake_now(session, paused) {
+                // Idle but not taking it (a draft or a Claude Code question in the way) for
+                // three minutes: the person is told once, rather than the run waiting unseen.
+                let stuck = !paused
+                    && session.claude == Some(crate::mcp::SessionState::Idle)
+                    && self.wake_waiting.get(&pane).is_some_and(|(since, told)| {
+                        !told && since.elapsed() >= std::time::Duration::from_secs(180)
+                    });
+                if stuck {
+                    if let Some(w) = self.wake_waiting.get_mut(&pane) {
+                        w.1 = true;
+                    }
+                    let name = self.pane_name(pane, cx);
+                    crate::action_log::write(format!(
+                        "run {run}: {name} can't take hydraui's message; told the user"
+                    ));
+                    let title = self.toast_title(pane, &run, cx);
+                    let ws = cx.entity();
+                    window.push_notification(
+                        Notification::warning(format!(
+                            "{} has a message from hydraui it can't take: something is in its \
+                             input, or Claude Code is asking a question. Open it and clear or \
+                             answer it, and hydraui sends the message.",
+                            self.panes
+                                .get(&pane)
+                                .map_or("A session".into(), |v| v.read(cx).label())
+                        ))
+                        .title(title)
+                        .autohide(false)
+                        .on_click(move |_, window, cx| {
+                            ws.update(cx, |ws, cx| ws.show_terminal(pane, window, cx));
+                        }),
+                        cx,
+                    );
+                }
                 continue;
             }
             let typed = self
@@ -1064,6 +1099,7 @@ impl Workspace {
                 crate::action_log::write(format!("run {run}: woke a session: {message}"));
                 self.reserved.insert(pane, std::time::Instant::now());
                 self.pending_wakes.remove(&pane);
+                self.wake_waiting.remove(&pane);
                 let tries = self.wake_tries.remove(&pane).unwrap_or(0) + 1;
                 self.sent_wakes
                     .insert(pane, (run, message, std::time::Instant::now(), tries));
@@ -1112,6 +1148,9 @@ impl Workspace {
             crate::action_log::write(format!(
                 "run {run}: the wake-up didn't take; sending it again"
             ));
+            if let Some(v) = self.panes.get(&pane).cloned() {
+                v.update(cx, |v, _| v.prompt_not_taken());
+            }
             // Back out, with the tries already made counted.
             self.wake_tries.insert(pane, tries);
             self.queue_wake(pane, run, message);

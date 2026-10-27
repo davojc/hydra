@@ -237,6 +237,9 @@ pub struct Workspace {
     /// The terminal each resumed orchestrator conversation reopened in, by its Claude session,
     /// so its other tickets come back under it.
     resumed_orchestrators: HashMap<String, PaneId>,
+    /// Since when each waiting wake-up has waited, and whether the user was told it can't be
+    /// typed.
+    wake_waiting: HashMap<PaneId, (std::time::Instant, bool)>,
     /// Wake-ups typed but not yet seen to start the session working: (run, message, when,
     /// times sent). One that doesn't take (a Claude Code prompt was open) is sent again.
     sent_wakes: HashMap<PaneId, (String, String, Instant, u8)>,
@@ -477,6 +480,7 @@ impl Workspace {
             reserved: HashMap::new(),
             pending_wakes: HashMap::new(),
             resumed_orchestrators: HashMap::new(),
+            wake_waiting: HashMap::new(),
             sent_wakes: HashMap::new(),
             wake_tries: HashMap::new(),
             ask_checks: HashMap::new(),

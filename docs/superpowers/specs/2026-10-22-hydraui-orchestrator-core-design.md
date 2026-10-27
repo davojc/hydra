@@ -924,3 +924,19 @@ of ticket tabs (a dot in the ticket's state colour, then the ticket); clicking o
   the badge (`86% · check by hand`).
 - **Must address** reads as a button: outlined **+ Mark must address**, then red **✓ Marked:
   must address**.
+
+## 34. A message that didn't take doesn't silence a session (added 2026-10-27)
+
+INTH-170's Plan fix waited on product. hydraui asked it every 5 minutes to look in the Slack
+thread for the answer, but from 13:49 none of those messages reached it, and product's reply
+went unread (Jordan, 2026-10-27). The 13:49 message didn't start the session working (a Claude
+Code question was likely in the way). A prompt hydraui types counts as a draft until the
+session starts on it, so every later message waited for a draft that was never cleared, and
+the "isn't taking messages" toast never came because only one try was made.
+
+- A wake-up that didn't take (`recheck_wakes`) now lets the screen decide whether the input
+  still holds it (`Readiness::prompt_not_taken`): an empty input frees the session for the
+  next try.
+- A wake-up that has waited 3 minutes while its session sits idle without taking it (a draft,
+  or a Claude Code question) tells the person once, with a toast naming the session that
+  stays until closed; clicking it shows that terminal.

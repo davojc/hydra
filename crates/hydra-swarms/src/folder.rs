@@ -125,7 +125,7 @@ struct Pass<'a> {
     machine: &'a str,
 }
 
-type ApplyHook = Box<dyn FnMut(&RelPath) + Send>;
+type ApplyHook = Box<dyn FnMut(&RelPath) + Send + Sync>;
 
 pub struct Folder {
     root: PathBuf,
@@ -339,7 +339,7 @@ impl Folder {
     /// Runs `hook` just before each path's decision is carried out, for tests that change the
     /// folder mid-pass.
     #[doc(hidden)]
-    pub fn before_apply_for_tests(&mut self, hook: impl FnMut(&RelPath) + Send + 'static) {
+    pub fn before_apply_for_tests(&mut self, hook: impl FnMut(&RelPath) + Send + Sync + 'static) {
         self.before_apply = Some(Box::new(hook));
     }
 

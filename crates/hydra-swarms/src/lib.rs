@@ -8,4 +8,13 @@ pub mod invites;
 pub mod node;
 pub mod paths;
 pub mod roster;
+pub mod service;
 pub mod wire;
+
+pub use folder::Attention;
+pub use invites::Invite;
+pub use roster::Role;
+pub use service::{
+    Command, DirectPeers, Identity, MachineView, MemberView, Resolution, ServiceConfig,
+    ServiceEvent, SwarmView, SwarmsService,
+};

@@ -33,6 +33,9 @@ const USED: &str = "This invite has already been used.";
 const EXPIRED: &str = "This invite has expired.";
 const CANCELLED: &str = "This invite was cancelled.";
 const NOT_AN_OWNER: &str = "Whoever invited you is no longer an owner of this swarm.";
+/// An owner's refusal to pass on a change from a machine it doesn't count as the signer's,
+/// which, for a change the signer sends from their own machine, means they are out already.
+pub(crate) const NOT_THEIR_MACHINE: &str = "Only a member's own machine can pass their changes on.";
 
 /// What someone pastes to join: who to ask, and the secret that proves they were invited.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -625,9 +628,7 @@ impl Core {
         // Only a current member's own machine may ask, so strangers can't fill the log.
         let sender = roster.member_by_endpoint(&from.to_string());
         if sender.is_none_or(|m| m.person != change.by) {
-            return Ok(refused(
-                "Only a member's own machine can pass their changes on.",
-            ));
+            return Ok(refused(NOT_THEIR_MACHINE));
         }
         if !change.verify(&self.id()) {
             return Ok(refused("That change isn't signed properly."));

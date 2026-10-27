@@ -11,7 +11,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey};
-use iroh_docs::{Author, Capability, NamespaceId, NamespaceSecret};
+use iroh_docs::{Author, AuthorId, Capability, NamespaceId, NamespaceSecret};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast::{self, error::RecvError};
@@ -69,6 +69,14 @@ impl InviteCode {
         }
         Ok(addr)
     }
+}
+
+/// The longest person or machine name taken in, in characters, so a change naming one stays far
+/// under the size the roster reads.
+const MAX_NAME_CHARS: usize = 200;
+
+fn name_fits(name: &str) -> bool {
+    name.chars().count() <= MAX_NAME_CHARS
 }
 
 fn is_token(s: &str) -> bool {
@@ -532,7 +540,7 @@ impl Core {
                 member,
                 proof,
             } => self.on_join(from, &token, member, &proof).await,
-            Request::Relay { change } => self.on_relay(change).await,
+            Request::Relay { change } => self.on_relay(from, change).await,
             Request::Removed => self.on_removed(from).await,
             Request::Promoted { write_secret } => self.on_promoted(from, &write_secret).await,
         };
@@ -565,6 +573,13 @@ impl Core {
         let Some(machine) = member.machines.first() else {
             return Ok(refused("The joining machine didn't say what it is called."));
         };
+        // Checked before the token is spent: an entry the roster would skip mustn't use it up.
+        if !name_fits(&member.name) || !name_fits(&machine.name) {
+            return Ok(refused("Your name or your machine's name is too long."));
+        }
+        if machine.author.parse::<AuthorId>().is_err() {
+            return Ok(refused("The joining machine's author isn't valid."));
+        }
         let role = match self.invites.spend(token, now_secs())? {
             Ok(role) => role,
             Err(reason) => return Ok(refused(reason)),
@@ -599,21 +614,28 @@ impl Core {
         })
     }
 
-    async fn on_relay(&self, change: SignedChange) -> anyhow::Result<Reply> {
-        let is_owner = self
+    async fn on_relay(&self, from: EndpointId, change: SignedChange) -> anyhow::Result<Reply> {
+        let Some(roster) = self
             .roster()
             .await?
-            .is_some_and(|r| r.role_of(&self.person.id()) == Some(Role::Owner));
-        if !is_owner {
+            .filter(|r| r.role_of(&self.person.id()) == Some(Role::Owner))
+        else {
             return Ok(refused("Only an owner's machine can pass your changes on."));
+        };
+        // Only a current member's own machine may ask, so strangers can't fill the log.
+        let sender = roster.member_by_endpoint(&from.to_string());
+        if sender.is_none_or(|m| m.person != change.by) {
+            return Ok(refused(
+                "Only a member's own machine can pass their changes on.",
+            ));
         }
         if !change.verify(&self.id()) {
             return Ok(refused("That change isn't signed properly."));
         }
         let own = match &change.change {
-            Change::Rename { person, .. }
-            | Change::RenameMachine { person, .. }
-            | Change::Leave { person } => *person == change.by,
+            Change::Rename { person, name } => *person == change.by && name_fits(name),
+            Change::RenameMachine { person, name, .. } => *person == change.by && name_fits(name),
+            Change::Leave { person } => *person == change.by,
             _ => false,
         };
         if !own {

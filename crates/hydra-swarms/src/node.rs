@@ -578,6 +578,12 @@ impl SwarmNode {
             .fold(EndpointAddr::new(endpoint.id()), |a, s| a.with_ip_addr(s))
     }
 
+    /// How many entries the change log holds, for tests.
+    pub async fn log_len_for_tests(&self) -> anyhow::Result<usize> {
+        let query = Query::key_prefix(LOG_PREFIX).build();
+        Ok(self.core.entries(query).await?.len())
+    }
+
     pub async fn shutdown(self) {
         let _ = self.core.doc.close().await;
         stop(self.router, self.core.blobs.clone()).await;

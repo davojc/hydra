@@ -504,8 +504,8 @@ async fn a_member_never_dials_a_machine_outside_its_gate() {
     stranger.node.shutdown().await;
 }
 
-/// The member a joiner sends: its role is the invite's, and its machine's endpoint and author are
-/// filled in on joining.
+/// The member a joiner sends: its role is the invite's, and on joining through
+/// `join_with_invite` its machine's endpoint and author are filled in.
 fn joining_member(key: &PersonKey, name: &str) -> Member {
     Member {
         person: key.id(),
@@ -514,7 +514,7 @@ fn joining_member(key: &PersonKey, name: &str) -> Member {
         machines: vec![Machine {
             endpoint: String::new(),
             name: format!("{name}-pc"),
-            author: String::new(),
+            author: Author::from_bytes(&random32()).id().to_string(),
         }],
     }
 }
@@ -829,4 +829,56 @@ fn invite_codes_round_trip_and_tolerate_whitespace() {
     );
     assert_eq!(InviteCode::decode("hydra-swarm:not base64!"), None);
     assert_eq!(InviteCode::decode(""), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relay_from_outside_the_swarm_writes_nothing() {
+    let o = create_owner().await;
+    let r = invite_and_join(&o, "rae", Role::Reader).await;
+    roster_with(&r.node, 2).await;
+    let cap = o.node.capability(Role::Reader).await.unwrap();
+    let stranger = join(&o, "sly", None, cap).await;
+    stranger.node.remember_addr(o.node.addr_for_tests());
+    let ns = o.node.id();
+    let before = o.node.log_len_for_tests().await.unwrap();
+
+    // A stranger renaming itself, and a member's machine passing on someone else's own change.
+    let own = |key: &PersonKey| {
+        SignedChange::sign(
+            &ns,
+            Change::Rename {
+                person: key.id(),
+                name: "Sly".into(),
+            },
+            key,
+            now(),
+        )
+    };
+    for _ in 0..3 {
+        let c = own(&stranger.key);
+        assert!(stranger.node.relay(&o.node.endpoint_id(), c).await.is_err());
+    }
+    let c = own(&stranger.key);
+    assert!(r.node.relay(&o.node.endpoint_id(), c).await.is_err());
+    assert_eq!(o.node.log_len_for_tests().await.unwrap(), before);
+    o.node.shutdown().await;
+    r.node.shutdown().await;
+    stranger.node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_join_with_an_overlong_name_leaves_the_invite_unspent() {
+    let o = create_owner().await;
+    let (invite, code) = o.node.invite(Role::Reader, &o.key).await.unwrap();
+    let key = PersonKey::generate();
+    let me = joining_member(&key, &"n".repeat(201));
+    let err = redeem_at(&code, me, &key, random32(), o.node.addr_for_tests())
+        .await
+        .expect_err("refused");
+    assert_eq!(
+        err.to_string(),
+        "Your name or your machine's name is too long."
+    );
+    assert_eq!(o.node.pending_invites(), vec![invite]);
+    o.node.shutdown().await;
 }

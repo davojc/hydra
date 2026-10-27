@@ -11,6 +11,8 @@ iroh.workspace = true
 getrandom.workspace = true
 keyring.workspace = true
 jiff.workspace = true
+iroh-blobs.workspace = true
+tokio.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 keyring = { workspace = true, features = ["windows-native"] }

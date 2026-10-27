@@ -709,6 +709,11 @@ impl Workspace {
             .size_full()
             .bg(color(theme::PANEL))
             .child(self.render_view_bar(orch, view, self.accent_of(orch, cx), cx))
+            .children(
+                (view == TabView::Pipeline)
+                    .then(|| self.render_ticket_tabs(orch, &tab, cx))
+                    .flatten(),
+            )
             .child(
                 div()
                     .flex_1()
@@ -718,8 +723,102 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// **Ticket · History · Settings**: the pipeline's views, kept here rather than as links
-    /// under its card.
+    /// The tickets the pipeline holds, across its orchestrators: (orchestrator, run, ticket,
+    /// state), oldest orchestrator first.
+    fn pipeline_tickets(
+        &self,
+        orch: PaneId,
+        cx: &App,
+    ) -> Vec<(PaneId, String, String, crate::pipeline_card::CardState)> {
+        let members = if self.orchestrators.contains_key(&orch) {
+            self.slots(orch, cx)
+        } else {
+            vec![orch]
+        };
+        let mut out = Vec::new();
+        for m in members {
+            let lanes = self.lanes(m, cx);
+            if lanes.is_empty() {
+                let snap = self.pipeline_snapshot_latest(m, cx);
+                if let Some(r) = snap {
+                    let state = crate::pipeline_card::card(&r).state;
+                    out.push((m, r.id, r.ticket, state));
+                }
+            } else {
+                out.extend(
+                    lanes
+                        .into_iter()
+                        .map(|(r, c, _)| (m, r.id, r.ticket, c.state)),
+                );
+            }
+        }
+        out
+    }
+
+    /// Orchestrator `m`'s latest run.
+    fn pipeline_snapshot_latest(&self, m: PaneId, cx: &App) -> Option<Run> {
+        let token = self.panes.get(&m)?.read(cx).mcp_token()?.to_string();
+        let sv = server::get()?;
+        server::lock(sv.registry()).runs.current(&token).cloned()
+    }
+
+    /// Inside the Pipeline tab, when the pipeline holds more than one ticket: a tab for each,
+    /// by ticket, with its state; clicking one shows it here.
+    fn render_ticket_tabs(
+        &self,
+        orch: PaneId,
+        tab: &PipelineTab,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let tickets = self.pipeline_tickets(orch, cx);
+        if tickets.len() < 2 {
+            return None;
+        }
+        let accent = self.accent_of(orch, cx);
+        let shown = self
+            .pipeline_snapshot(orch, cx)
+            .run
+            .map(|r| r.id)
+            .or_else(|| tab.run.clone());
+        let mut row = h_flex()
+            .px_3()
+            .py_1()
+            .gap_1()
+            .border_b_1()
+            .border_color(color(theme::BORDER_SUBTLE));
+        for (m, run, ticket, state) in tickets {
+            let on = m == orch && shown.as_deref() == Some(run.as_str());
+            let (fg, _) = super::orchestrator::pill_colors(state, accent);
+            row = row.child(
+                h_flex()
+                    .id(SharedString::from(format!("ticket-tab-{run}")))
+                    .gap_1p5()
+                    .px_2()
+                    .py(px(3.))
+                    .rounded(px(5.))
+                    .text_size(px(12.5))
+                    .cursor_pointer()
+                    .when(on, |d| {
+                        d.bg(color(theme::tint_of(accent)))
+                            .text_color(color(theme::TEXT))
+                    })
+                    .when(!on, |d| {
+                        d.text_color(color(theme::TEXT_SECONDARY))
+                            .hover(|d| d.bg(color(theme::RAISED)))
+                    })
+                    .child(div().size(px(6.)).rounded_full().bg(fg))
+                    .child(ticket)
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        if m != orch {
+                            ws.show_terminal(m, window, cx);
+                        }
+                        ws.open_pipeline_run(m, run.clone(), window, cx)
+                    })),
+            );
+        }
+        Some(row)
+    }
+
     /// Orchestrator `orch`'s pipeline colour: its run's pipeline, or the one it was started on.
     pub(super) fn accent_of(&self, orch: PaneId, cx: &App) -> u32 {
         let token = self

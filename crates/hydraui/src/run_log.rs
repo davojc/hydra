@@ -84,6 +84,10 @@ pub fn record(hydra_root: &Path, runs: &Runs, changes: &[Change]) {
             Decided::Answered(answer) => ("answered", json!({"stage": stage, "answer": answer})),
             Decided::RunNeedsYou(why) => ("needs you", json!({"reason": why})),
             Decided::RunFinished => ("run ended", json!({"outcome": "done", "scores": scores()})),
+            Decided::RunSettled(why) => (
+                "run ended",
+                json!({"outcome": "done", "reason": why, "scores": scores()}),
+            ),
             Decided::RunStopped(why) => (
                 "run ended",
                 json!({"outcome": "stopped", "reason": why, "scores": scores()}),

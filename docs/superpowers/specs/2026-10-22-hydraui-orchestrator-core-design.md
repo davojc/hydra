@@ -889,3 +889,23 @@ Three things from using the Review PR's pipeline (Jordan, 2026-10-27):
   terminals) and Pipelines (Start pipeline, Create pipeline, interrupted runs and each
   pipeline's block). It opens on Pipelines when any run here, and switches to whichever holds
   a terminal shown from a toast or link.
+
+## 32. A merged PR ends its ticket; one Pipeline tab (added 2026-10-27)
+
+svc-usage #66's review approved the PR on GitHub, then reported 92 against its 95 bar, so the
+run stopped for a person; a re-run then reviewed it again after it had merged and posted five
+more comments (Jordan, 2026-10-27). The score is the stage's confidence; approving was a step
+it took before its gate. Two changes:
+
+- **Settled outside hydraui.** Every two minutes hydraui asks GitHub (as the run's
+  environment) for the state of each open run's pull request (its `link`). Merged or closed:
+  the run ends as done (`Runs::settle`, logged as `run ended` with the reason), whatever its
+  gates said; its sessions close and the orchestrator is told not to touch it again.
+- **No outward step below the bar.** Stage sessions are told (server instructions and
+  `stage_report`) not to approve or merge a pull request, or take any step outside hydraui
+  that can't be undone, unless they will report at or above their bar; below it they report
+  and leave that to the person.
+
+The tab row now has one **Pipeline** tab per pipeline, not one per orchestrator or ticket.
+When the pipeline holds more than one ticket, the Pipeline tab's Ticket view opens with a row
+of ticket tabs (a dot in the ticket's state colour, then the ticket); clicking one shows it.

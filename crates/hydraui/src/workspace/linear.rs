@@ -372,6 +372,7 @@ impl Workspace {
     /// Each second: a watcher whose check is due starts one (§3).
     pub(super) fn linear_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let now = SystemTime::now();
+        self.pr_tick(window, cx);
         // A ticket an orchestrator was told to start has started: its slot is busy by its run.
         let started: Vec<PaneId> = self
             .linear_watch
@@ -437,6 +438,80 @@ impl Workspace {
         for orch in due {
             self.start_linear_check(orch, window, cx);
         }
+    }
+
+    /// Every two minutes: each open run about a pull request is checked on GitHub, off the UI
+    /// thread, and one whose pull request was merged or closed ends as done (`Runs::settle`):
+    /// a ticket settled outside hydraui needs nothing more, whatever its gate said.
+    fn pr_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        const EVERY: Duration = Duration::from_secs(120);
+        if self.pr_checking || self.pr_checked.is_some_and(|t| t.elapsed() < EVERY) {
+            return;
+        }
+        let Some(sv) = server::get() else {
+            return;
+        };
+        let exe = server::lock(sv.registry()).hydra_exe.clone();
+        let Some(exe) = exe else {
+            return;
+        };
+        // (run, env, pull request) for each open run with a pull request link.
+        let jobs: Vec<(String, String, String)> = {
+            let reg = server::lock(sv.registry());
+            self.panes
+                .values()
+                .filter_map(|v| {
+                    let v = v.read(cx);
+                    Some((v.mcp_token()?.to_string(), v.env().to_string()))
+                })
+                .flat_map(|(token, env)| {
+                    reg.runs
+                        .open_of(&token)
+                        .into_iter()
+                        .filter_map(|r| {
+                            let link = r.link.clone().filter(|l| l.contains("/pull/"))?;
+                            Some((r.id.clone(), env.clone(), link))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        self.pr_checked = Some(std::time::Instant::now());
+        if jobs.is_empty() {
+            return;
+        }
+        self.pr_checking = true;
+        cx.spawn_in(window, async move |this, cx| {
+            let settled: Vec<(String, &'static str)> = cx
+                .background_spawn(async move {
+                    jobs.into_iter()
+                        .filter_map(|(run, env, url)| {
+                            let state = crate::branch_rule::gh_pr_state(&exe, &env, &url).ok()?;
+                            Some((run, crate::branch_rule::settled_by(&state)?))
+                        })
+                        .collect()
+                })
+                .await;
+            let _ = this.update(cx, |ws, cx| {
+                ws.pr_checking = false;
+                let Some(sv) = server::get() else {
+                    return;
+                };
+                let mut changes = Vec::new();
+                {
+                    let mut reg = server::lock(sv.registry());
+                    for (run, why) in settled {
+                        if let Ok(c) = reg.runs.settle(&run, why) {
+                            crate::action_log::write(format!("run {run}: {why}, so it's done"));
+                            changes.extend(c);
+                        }
+                    }
+                }
+                super::orchestrator::tell(changes);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// A check, off the UI thread: the environment's key, then find and claim a ticket; the
@@ -577,7 +652,9 @@ impl Workspace {
                 .filter_map(|c| {
                     let start = match c.what {
                         Decided::RunStarted => true,
-                        Decided::RunFinished | Decided::RunStopped(_) => false,
+                        Decided::RunFinished | Decided::RunSettled(_) | Decided::RunStopped(_) => {
+                            false
+                        }
                         _ => return None,
                     };
                     let run = reg.runs.run(&c.run)?;

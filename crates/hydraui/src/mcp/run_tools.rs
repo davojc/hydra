@@ -95,7 +95,9 @@ pub fn schemas() -> Vec<Value> {
             "description": "Stage session: end your stage with its confidence rating, once. The \
                 next stage starts only if your score is at or above the stage's bar; below it, \
                 or blocked, a person is asked to step in. Be honest: give evidence and reasons \
-                for and against. Report blocked rather than guess when the stage can't be done \
+                for and against. Don't approve or merge a pull request (or take any step outside \
+                hydraui that can't be undone) unless you report at or above the bar: the person \
+                decides below it. Report blocked rather than guess when the stage can't be done \
                 (not enough information, no access, a service down). Report check when the work \
                 is done as far as you can prove it but the last proof needs a person to try \
                 something by hand that no tool here can (a real browser feature automation \

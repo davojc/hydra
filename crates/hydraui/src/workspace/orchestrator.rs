@@ -100,12 +100,14 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
     let stage = |i: usize| run.pipeline.stages[i].id.as_str();
     let (mut finished, mut needs, mut ended, mut failed, mut passed) =
         (false, None, None, None, None);
+    let mut settled = None;
     let (mut retrying, mut run_resumed, mut resumed) = (None, false, false);
     let (mut reopened, mut rescoring) = (None, None);
     let (mut asked, mut answered) = (None, None);
     for c in changes.iter().filter(|c| &c.run == id) {
         match (&c.what, c.stage) {
             (Decided::RunFinished, _) => finished = true,
+            (Decided::RunSettled(why), _) => settled = Some(why),
             (Decided::RunNeedsYou(why), _) => needs = Some(why),
             (Decided::RunStopped(why), _) => ended = Some(why),
             (Decided::Failed(why), Some(i)) => failed = Some((i, why)),
@@ -120,7 +122,13 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
             _ => {}
         }
     }
-    Some(if finished {
+    Some(if let Some(why) = settled {
+        format!(
+            "Run {id} is over: {why}, so nothing more is needed on it, whatever its gate said. \
+             Don't review or post on it again. Tell the user, then carry on with any other \
+             tickets you hold."
+        )
+    } else if finished {
         format!(
             "Run {id} finished: every stage passed. Tell the user, then wait for the next \
              ticket, from hydraui or from them."
@@ -855,7 +863,7 @@ impl Workspace {
                 let reg = server::lock(sv.registry());
                 changes
                     .iter()
-                    .filter(|c| c.what == Decided::RunFinished)
+                    .filter(|c| matches!(c.what, Decided::RunFinished | Decided::RunSettled(_)))
                     .filter_map(|c| reg.runs.run(&c.run))
                     .flat_map(crate::pipeline_card::stage_tokens)
                     .collect()
@@ -881,7 +889,12 @@ impl Workspace {
                 let reg = server::lock(sv.registry());
                 changes
                     .iter()
-                    .filter(|c| matches!(c.what, Decided::RunFinished | Decided::RunStopped(_)))
+                    .filter(|c| {
+                        matches!(
+                            c.what,
+                            Decided::RunFinished | Decided::RunSettled(_) | Decided::RunStopped(_)
+                        )
+                    })
                     .filter_map(|c| reg.runs.run(&c.run)?.worktree.clone())
                     .collect()
             })
@@ -1739,7 +1752,7 @@ fn stage_failed(s: &StartStage, why: String) {
 /// A card state's pill: text and background colour.
 /// A card's state pill: in the pipeline's own colour while it works or when it's done; red,
 /// amber and grey keep their meaning whatever the colour.
-fn pill_colors(state: CardState, accent: u32) -> (gpui::Hsla, gpui::Hsla) {
+pub(super) fn pill_colors(state: CardState, accent: u32) -> (gpui::Hsla, gpui::Hsla) {
     let pair = |fg: u32, bg: u32| (color(fg), color(bg));
     match state {
         CardState::Working | CardState::Done => (color(accent), color(accent).opacity(0.16)),

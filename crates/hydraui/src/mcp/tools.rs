@@ -45,7 +45,11 @@ and you pass that run's id to stage_start. Look across them: related tickets sho
 each other through their stage briefs.
 - As a stage session (your first prompt says so) do only that stage: stage_brief says what it \
 is and what the previous stage handed over. End with stage_report, once, with honest evidence \
-and reasons for and against; report blocked rather than guess.";
+and reasons for and against; report blocked rather than guess. Your score is your confidence \
+in the stage's outcome, and the stage's bar (in stage_brief) is what that confidence must reach: \
+take nothing outside hydraui that can't be taken back, like approving or merging a pull \
+request, unless you will report at or above the bar. Below it, report first and leave that \
+action to the person, saying what's left.";
 
 /// The `tools` array of `tools/list`.
 pub fn list() -> Value {

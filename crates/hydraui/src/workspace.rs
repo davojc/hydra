@@ -244,6 +244,10 @@ pub struct Workspace {
     wake_tries: HashMap<PaneId, u8>,
     /// When each run waiting on product last had its stage look in the Slack thread.
     ask_checks: HashMap<String, std::time::SystemTime>,
+    /// When open runs about pull requests were last checked on GitHub, and whether a check is
+    /// out (a merged or closed one ends its run).
+    pr_checked: Option<std::time::Instant>,
+    pr_checking: bool,
     /// Each orchestrator's Linear watcher (orchestrator phase 2 §3).
     linear_watch: HashMap<PaneId, linear::Watch>,
     /// Pull requests a `[slack]` pipeline took and hasn't started yet, by pipeline file.
@@ -476,6 +480,8 @@ impl Workspace {
             sent_wakes: HashMap::new(),
             wake_tries: HashMap::new(),
             ask_checks: HashMap::new(),
+            pr_checked: None,
+            pr_checking: false,
             linear_watch: HashMap::new(),
             slack_queues: HashMap::new(),
             slack_mine: std::collections::HashSet::new(),

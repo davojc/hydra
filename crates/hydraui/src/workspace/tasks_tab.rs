@@ -454,7 +454,6 @@ impl Workspace {
         } else {
             vec![id]
         };
-        let numbered = members.len() > 1;
         let tasks = self.tasks_tabs.get(&id).copied();
         let pipeline_shown = self.pipeline_tabs.get(&id).is_some_and(|t| t.shown);
         let tasks_shown = tasks == Some(true) && !pipeline_shown;
@@ -506,52 +505,30 @@ impl Workspace {
                     .child(name),
             );
         }
-        // The pipeline's view first (one per orchestrator when it runs several), then each
-        // orchestrator's terminal, then this terminal's Tasks.
-        for (n, &m) in members.iter().enumerate() {
-            if !self.pipeline_tabs.contains_key(&m) {
-                continue;
-            }
-            let here = m == id;
-            // An orchestrator holding several tickets: a Pipeline tab for each, by ticket.
-            let lanes = self.lanes(m, cx);
-            if !lanes.is_empty() {
-                let chosen = self.pipeline_tabs.get(&m).and_then(|t| t.run.clone());
-                let first = lanes.last().map(|l| l.0.id.clone()).unwrap_or_default();
-                for (run, _, _) in lanes {
-                    let picked = chosen.as_deref().unwrap_or(first.as_str()) == run.id;
-                    let id_for = run.id.clone();
-                    strip = strip.child(
-                        tab(
-                            &format!("pipeline-run-{}", run.id),
-                            m,
-                            here && pipeline_shown && picked,
-                        )
-                        .on_click(cx.listener(move |ws, _, window, cx| {
-                            ws.open_pipeline_run(m, id_for.clone(), window, cx)
-                        }))
-                        .child(run.ticket.clone()),
-                    );
-                }
-                continue;
-            }
+        // One Pipeline tab for the pipeline, whichever of its orchestrators is shown: its
+        // tickets are tabs inside it. Then each orchestrator's terminal, then this one's Tasks.
+        let with_tab: Vec<PaneId> = members
+            .iter()
+            .copied()
+            .filter(|m| self.pipeline_tabs.contains_key(m))
+            .collect();
+        if let Some(&first) = with_tab.first() {
+            let target = if with_tab.contains(&id) { id } else { first };
             strip = strip.child(
-                tab("pipeline-tab", m, here && pipeline_shown)
+                tab("pipeline-tab", id, pipeline_shown)
                     .on_click(cx.listener(move |ws, _, window, cx| {
-                        if !here {
-                            ws.show_terminal(m, window, cx);
+                        if target != id {
+                            ws.show_terminal(target, window, cx);
                         }
-                        ws.show_pipeline(m, true, window, cx)
+                        ws.show_pipeline(target, true, window, cx)
                     }))
-                    .child(if numbered {
-                        format!("Pipeline {}", n + 1)
-                    } else {
-                        "Pipeline".to_string()
-                    })
-                    .child(close("pipeline-close", m).on_click(cx.listener(
+                    .child("Pipeline")
+                    .child(close("pipeline-close", id).on_click(cx.listener(
                         move |ws, _, window, cx| {
                             cx.stop_propagation();
-                            ws.close_pipeline(m, window, cx);
+                            for m in with_tab.clone() {
+                                ws.close_pipeline(m, window, cx);
+                            }
                         },
                     ))),
             );

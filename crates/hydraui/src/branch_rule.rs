@@ -177,10 +177,36 @@ pub fn gh_author_of(hydra: &Path, env: &str, url: &str) -> Result<String, String
     )
 }
 
+/// Pull request `url`'s state as GitHub has it: `OPEN`, `MERGED` or `CLOSED`.
+pub fn gh_pr_state(hydra: &Path, env: &str, url: &str) -> Result<String, String> {
+    gh(
+        hydra,
+        env,
+        &["pr", "view", url, "--json", "state", "-q", ".state"],
+    )
+}
+
+/// Why a run about a pull request in `state` is over, when it is: merged or closed.
+pub fn settled_by(state: &str) -> Option<&'static str> {
+    match state.trim() {
+        "MERGED" => Some("its pull request was merged"),
+        "CLOSED" => Some("its pull request was closed"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn only_a_merged_or_closed_pull_request_settles_its_run() {
+        assert_eq!(settled_by("MERGED\n"), Some("its pull request was merged"));
+        assert_eq!(settled_by("CLOSED"), Some("its pull request was closed"));
+        assert_eq!(settled_by("OPEN"), None);
+        assert_eq!(settled_by(""), None);
+    }
 
     #[test]
     fn pull_requests_are_found_once_each() {

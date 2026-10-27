@@ -218,6 +218,9 @@ pub enum Decided {
     Answered(String),
     RunResumed,
     RunFinished,
+    /// The ticket was settled outside hydraui (its pull request merged or closed): the run is
+    /// done, whatever its gates said.
+    RunSettled(String),
     RunNeedsYou(String),
     RunStopped(String),
 }
@@ -655,6 +658,26 @@ impl Runs {
             stage: None,
             what: Decided::RunNeedsYou(why),
         }]
+    }
+
+    /// Run `run`'s ticket was settled outside hydraui (`why`: its pull request merged or
+    /// closed): nothing it does now changes that, so it ends as done, waiting gates and all.
+    pub fn settle(&mut self, run: &str, why: &str) -> Result<Vec<Change>, String> {
+        let Some(ri) = self.index(run) else {
+            return Err(format!("no run {run}"));
+        };
+        let r = &mut self.runs[ri];
+        if !r.state.open() {
+            return Err(format!("run {run} has already ended"));
+        }
+        r.state = RunState::Finished;
+        r.asking = None;
+        r.fix_after = None;
+        Ok(vec![Change {
+            run: r.id.clone(),
+            stage: None,
+            what: Decided::RunSettled(why.to_string()),
+        }])
     }
 
     fn end(&mut self, ri: usize, why: String) -> Vec<Change> {
@@ -1769,6 +1792,20 @@ mod tests {
         let e = runs.person(&id, checked("fine")).unwrap_err();
         assert!(e.contains("asked a person to check"), "{e}");
         assert_eq!(status(&runs, &id, 1), StageStatus::Stopped);
+    }
+
+    #[test]
+    fn a_ticket_settled_outside_ends_its_run_as_done_whatever_its_gate_said() {
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        let changes = runs.settle(&id, "its pull request was merged").unwrap();
+        assert_eq!(
+            changes[0].what,
+            Decided::RunSettled("its pull request was merged".into())
+        );
+        assert_eq!(runs.run(&id).unwrap().state, RunState::Finished);
+        assert!(runs.settle(&id, "again").is_err(), "already ended");
+        assert!(runs.open_of("orch").is_empty());
     }
 
     #[test]

@@ -81,7 +81,8 @@ fn split_name(p: &str) -> (&str, &str, &str) {
         None => ("", p),
     };
     match name.rfind('.') {
-        Some(i) if i > 0 => (dir, &name[..i], &name[i..]),
+        // A ')' after the dot means the dot is inside a conflict marker, not before an extension.
+        Some(i) if i > 0 && !name[i..].contains(')') => (dir, &name[..i], &name[i..]),
         _ => (dir, name, ""),
     }
 }
@@ -95,13 +96,13 @@ pub fn allowed(p: &RelPath, size: u64, types: &[String]) -> bool {
     !ext.is_empty() && types.iter().any(|t| t.eq_ignore_ascii_case(ext))
 }
 
-/// The name a losing copy of `p` is kept under: `stem (conflict, machine, 27 Oct 13:05).ext`.
+/// The name a losing copy of `p` is kept under: `stem (conflict, machine, 27 Oct 13.05).ext`.
 pub fn conflict_name(p: &RelPath, machine: &str, at: Timestamp, tz: &TimeZone) -> RelPath {
     let machine: String = machine
         .chars()
         .map(|c| if forbidden_char(c) { '_' } else { c })
         .collect();
-    let when = at.to_zoned(tz.clone()).strftime("%-d %b %H:%M");
+    let when = at.to_zoned(tz.clone()).strftime("%-d %b %H.%M");
     let (dir, stem, ext) = split_name(&p.0);
     RelPath(format!("{dir}{stem} (conflict, {machine}, {when}){ext}"))
 }
@@ -141,7 +142,7 @@ pub fn is_conflict_copy(p: &RelPath) -> bool {
     is_conflict_time(when)
 }
 
-/// `d Mon HH:MM`.
+/// `d Mon HH.MM`.
 fn is_conflict_time(s: &str) -> bool {
     let digits = |t: &str, n: std::ops::RangeInclusive<usize>| {
         n.contains(&t.len()) && t.bytes().all(|b| b.is_ascii_digit())
@@ -152,7 +153,7 @@ fn is_conflict_time(s: &str) -> bool {
     else {
         return false;
     };
-    let Some((h, min)) = hm.split_once(':') else {
+    let Some((h, min)) = hm.split_once('.') else {
         return false;
     };
     digits(d, 1..=2) && MONTHS.contains(&m) && digits(h, 2..=2) && digits(min, 2..=2)
@@ -226,16 +227,16 @@ mod tests {
         let at = ts("2026-10-27T13:05:00Z");
         assert_eq!(
             conflict_name(&rel("skills/review/SKILL.md"), "Davo's desktop", at, &tz).as_str(),
-            "skills/review/SKILL (conflict, Davo's desktop, 27 Oct 13:05).md"
+            "skills/review/SKILL (conflict, Davo's desktop, 27 Oct 13.05).md"
         );
         assert_eq!(
             conflict_name(&rel("a.md"), "a/b", at, &tz).as_str(),
-            "a (conflict, a_b, 27 Oct 13:05).md"
+            "a (conflict, a_b, 27 Oct 13.05).md"
         );
         let early = ts("2026-11-03T09:07:00Z");
         assert_eq!(
             conflict_name(&rel("a"), "m", early, &tz).as_str(),
-            "a (conflict, m, 3 Nov 09:07)"
+            "a (conflict, m, 3 Nov 09.07)"
         );
     }
 
@@ -281,7 +282,21 @@ mod tests {
         assert!(!is_conflict_copy(&rel("a.md")));
         assert!(!is_conflict_copy(&rel("a (conflict, x).md")));
         // Not a `conflict_name` result: the marker is not just before the extension.
-        let trailing = RelPath("a (conflict, x, 27 Oct 13:05) b.md".to_string());
+        let trailing = RelPath("a (conflict, x, 27 Oct 13.05) b.md".to_string());
         assert!(!is_conflict_copy(&trailing));
+    }
+
+    #[test]
+    fn conflict_names_are_safe_paths_and_round_trip_as_keys() {
+        let tz = TimeZone::get("Europe/London").unwrap();
+        let at = ts("2026-10-27T13:05:00Z");
+        for p in ["a.md", "skills/review/SKILL.md", "noext"] {
+            for machine in ["Davo's desktop", "a/b:c*d", "x, y"] {
+                let c = conflict_name(&rel(p), machine, at, &tz);
+                let safe = safe_rel_path(c.as_str()).expect("conflict name must be a safe path");
+                assert_eq!(safe, c);
+                assert_eq!(path_of_key(&file_key(&c)).unwrap(), c);
+            }
+        }
     }
 }

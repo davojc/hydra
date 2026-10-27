@@ -17,6 +17,7 @@ mod pipeline_tab;
 mod settings_tab;
 mod shortcuts;
 mod start_page;
+mod swarms;
 mod tasks_tab;
 mod terminal_list;
 mod title_bar;
@@ -251,6 +252,20 @@ pub struct Workspace {
     phone_offer: Option<phone_page::ShownOffer>,
     /// The paired phone is connected now.
     phone_connected: bool,
+    /// Every swarm, as the service last showed them; empty while they don't run here.
+    swarms: Vec<hydra_swarms::SwarmView>,
+    /// This window runs the swarms.
+    swarms_here: bool,
+    /// Another window runs the swarms; this one tries again every 10 s.
+    swarms_elsewhere: bool,
+    /// The swarms service, while this window runs it.
+    swarms_run: Option<swarms::SwarmsRun>,
+    /// This window is seeking the swarms (another window may run them).
+    swarms_seeking: bool,
+    /// Counts `swarms_stop`s and restarts, so a search started before one ends.
+    swarms_seek: u64,
+    /// Swarms being made or joined, sent once the swarms start for them.
+    swarms_pending: Vec<hydra_swarms::Command>,
     /// Coming back to the window clears the alert of the terminal it shows.
     _activation: Subscription,
 }
@@ -463,6 +478,13 @@ impl Workspace {
             phone_word: None,
             phone_offer: None,
             phone_connected: false,
+            swarms: Vec::new(),
+            swarms_here: false,
+            swarms_elsewhere: false,
+            swarms_run: None,
+            swarms_seeking: false,
+            swarms_seek: 0,
+            swarms_pending: Vec::new(),
             _activation: activation,
         }
     }
@@ -498,6 +520,7 @@ impl Workspace {
             self.open_layout_path(path, window, cx);
         }
         self.phone_start(window, cx);
+        self.swarms_start(window, cx);
         // Each pane's folder as it is when the window closes.
         let ws = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {

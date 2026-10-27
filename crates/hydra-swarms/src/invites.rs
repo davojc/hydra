@@ -325,6 +325,18 @@ async fn ask(endpoint: &Endpoint, to: EndpointAddr, req: &Request) -> anyhow::Re
         .context("the other machine didn't answer in time")?
 }
 
+/// The other machine answered and said no, as opposed to not being reached. Shows as its reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused(pub String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
+
 fn refused(reason: &str) -> Reply {
     Reply::Refused {
         reason: reason.to_string(),
@@ -476,7 +488,7 @@ impl SwarmNode {
         let id: EndpointId = to.parse().context("not an endpoint id")?;
         match ask(&self.core.endpoint, EndpointAddr::new(id), req).await? {
             Reply::Ok => Ok(()),
-            Reply::Refused { reason } => Err(anyhow!(reason)),
+            Reply::Refused { reason } => Err(Refused(reason).into()),
             Reply::Joined { .. } => bail!("the other machine gave a reply that doesn't fit"),
         }
     }

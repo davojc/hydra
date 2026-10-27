@@ -18,6 +18,9 @@ use hydra_swarms::{
 const WAIT: Duration = Duration::from_secs(30);
 /// How long to watch for something that mustn't happen.
 const QUIET: Duration = Duration::from_secs(4);
+/// How long a test machine loses the owners' answers to its relays: long enough for the owner
+/// to gate it out and the connection to drop.
+const LOST_FOR: Duration = Duration::from_secs(8);
 
 type Keys = Arc<Mutex<HashMap<String, [u8; 32]>>>;
 
@@ -48,6 +51,7 @@ fn launch(
     identity: Identity,
     keys: &Keys,
     book: &DirectPeers,
+    lost_relays: Duration,
 ) -> (
     mpsc::UnboundedSender<Command>,
     mpsc::UnboundedReceiver<ServiceEvent>,
@@ -58,12 +62,18 @@ fn launch(
         Ok(*keys.entry(id.to_string()).or_insert_with(random32))
     });
     let cfg = ServiceConfig::new(root.to_path_buf(), identity, swarm_key, false)
-        .direct_peers_for_tests(book);
+        .direct_peers_for_tests(book)
+        .lose_relay_answers_for_tests(lost_relays);
     SwarmsService::start(cfg).expect("start")
 }
 
 impl Svc {
     fn new(name: &str, book: &DirectPeers) -> Svc {
+        Svc::losing_relays(name, book, Duration::ZERO)
+    }
+
+    /// A machine that loses the owners' answers to its relays for its first `lost`.
+    fn losing_relays(name: &str, book: &DirectPeers, lost: Duration) -> Svc {
         let state = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         let identity = Identity {
@@ -73,7 +83,7 @@ impl Svc {
         };
         let keys = Keys::default();
         let root = state.path().join("swarms");
-        let (tx, rx) = launch(&root, identity.clone(), &keys, book);
+        let (tx, rx) = launch(&root, identity.clone(), &keys, book, lost);
         Svc {
             tx,
             rx,
@@ -210,7 +220,13 @@ impl Svc {
 
     /// Starts the service again on the same root, keys and person.
     fn restart(&mut self) {
-        let (tx, rx) = launch(&self.root, self.identity.clone(), &self.keys, &self.book);
+        let (tx, rx) = launch(
+            &self.root,
+            self.identity.clone(),
+            &self.keys,
+            &self.book,
+            Duration::ZERO,
+        );
         self.tx = tx;
         self.rx = rx;
         self.views.clear();
@@ -534,6 +550,43 @@ async fn a_promoted_reader_is_handed_write_access() {
         !wren.toasts.iter().any(|t| t.contains("isn't shared")),
         "held as a reader edit: {:?}",
         wren.toasts
+    );
+    olive.stop().await;
+    wren.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_leave_whose_answer_is_lost_still_completes() {
+    let book = DirectPeers::new();
+    let mut olive = Svc::new("olive", &book);
+    // The owner writes wren's leaving, but wren doesn't hear so until the owner has gated wren
+    // out and wren no longer counts it as connected, so only a relay that doesn't wait for a
+    // connection can settle it.
+    let mut wren = Svc::losing_relays("wren", &book, LOST_FOR);
+    let notes = olive.create("Notes", &[("a.md", "alpha")]).await;
+    let code = olive.invite(&notes.id, Role::Writer).await;
+    wren.join(code, "notes").await;
+    file_arrives(wren.folder("notes").join("a.md"), "alpha").await;
+    let id = notes.id;
+
+    wren.send(Command::Leave { swarm: id.clone() });
+    olive
+        .view("one member left", |v| v.id == id && v.members.len() == 1)
+        .await;
+    // Forgotten: its state goes, and a restart doesn't bring it back.
+    let state = wren.root.join(&id);
+    eventually("the left swarm's state to go", || {
+        let gone = !state.exists();
+        async move { gone }
+    })
+    .await;
+    wren.stop().await;
+    wren.restart();
+    wren.drain_for(Duration::from_secs(2)).await;
+    assert!(wren.views.iter().all(|v| v.id != id));
+    assert_eq!(
+        read(&wren.folder("notes").join("a.md")).as_deref(),
+        Some("alpha")
     );
     olive.stop().await;
     wren.stop().await;

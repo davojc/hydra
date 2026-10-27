@@ -26,7 +26,7 @@ use tokio::time::Instant;
 
 use crate::folder::{Attention, Folder, FolderEvent};
 use crate::ids::{PersonId, PersonKey, to_hex};
-use crate::invites::{Invite, InviteCode, NOT_THEIR_MACHINE, redeem, redeem_at};
+use crate::invites::{Invite, InviteCode, NOT_THEIR_MACHINE, Refused, redeem, redeem_at};
 use crate::node::{NodeConfig, NodeEvent, SwarmNode, now_micros};
 use crate::paths::{RelPath, safe_rel_path};
 use crate::roster::{Change, Machine, Member, Role, Roster, SignedChange};
@@ -39,6 +39,8 @@ const SETTLE: Duration = Duration::from_millis(250);
 const VIEWS_EVERY: Duration = Duration::from_millis(250);
 /// How long after a member machine comes up or goes down it is synced with again.
 const RESYNC_AFTER: Duration = Duration::from_secs(1);
+/// How often a leaving machine asks the owners again until one confirms its leaving.
+const LEAVE_RETRY: Duration = Duration::from_secs(5);
 const REGISTRY_FILE: &str = "registry.json";
 const SEEN_FILE: &str = "seen.json";
 const OWED_FILE: &str = "owed.json";
@@ -66,6 +68,7 @@ pub struct ServiceConfig {
     pub swarm_key: SwarmKeyFn,
     pub relays: bool,
     direct_peers: Option<DirectPeers>,
+    lose_relays: Duration,
 }
 
 impl ServiceConfig {
@@ -76,11 +79,19 @@ impl ServiceConfig {
             swarm_key,
             relays,
             direct_peers: None,
+            lose_relays: Duration::ZERO,
         }
     }
 
     /// Finds peers through `book` rather than address lookup, for tests with relays off: every
     /// node the service opens is added to it, and dials go to the addresses in it.
+    /// Treats every owner's answer to a relay in the first `d` after starting as lost, though the
+    /// owner acted on the relay, for tests.
+    pub fn lose_relay_answers_for_tests(mut self, d: Duration) -> Self {
+        self.lose_relays = d;
+        self
+    }
+
     pub fn direct_peers_for_tests(mut self, book: &DirectPeers) -> Self {
         self.direct_peers = Some(book.clone());
         self
@@ -281,6 +292,7 @@ impl SwarmsService {
                     root: cfg.root,
                     relays: cfg.relays,
                     direct: cfg.direct_peers,
+                    lose_relays_until: Instant::now() + cfg.lose_relays,
                     events: ev_tx,
                     registry,
                     views: Mutex::default(),
@@ -422,6 +434,8 @@ struct Shared {
     root: PathBuf,
     relays: bool,
     direct: Option<DirectPeers>,
+    /// Until when owners' answers to relays are treated as lost (tests only).
+    lose_relays_until: Instant,
     events: fmpsc::UnboundedSender<ServiceEvent>,
     registry: Registry,
     views: Mutex<BTreeMap<String, SwarmView>>,
@@ -473,6 +487,11 @@ impl Shared {
         tokio::task::spawn_blocking(move || (lock(&shared.swarm_key))(&id))
             .await?
             .map_err(|e| anyhow::anyhow!("this machine's key for the swarm: {e}"))
+    }
+
+    /// Whether to treat an owner's answer to a relay as lost, for tests.
+    fn lose_relay(&self) -> bool {
+        Instant::now() < self.lose_relays_until
     }
 
     /// Lets `node` reach every machine in the test book; nothing without one.
@@ -894,6 +913,10 @@ struct SeenFile {
     machines: BTreeMap<String, u64>,
     #[serde(default)]
     last_change: Option<(String, u64)>,
+    /// Whether a roster has shown this machine, so a removal synced just before a restart is
+    /// still seen as one after it.
+    #[serde(default)]
+    me: bool,
 }
 
 /// A message to another machine finished.
@@ -945,6 +968,8 @@ struct Worker {
     /// Set by a handler; carried out once it returns, when no one holds the node.
     removed_now: bool,
     leave_done: bool,
+    /// When a leaving machine next asks every owner machine, connected or not.
+    leave_retry_at: Option<Instant>,
     finished: bool,
     /// Whether the names in the roster have been checked against this machine's, which may have
     /// changed while the service wasn't running.
@@ -961,8 +986,10 @@ impl Worker {
         let dir = shared.root.join(&entry.ns);
         let node = node.map(Arc::new);
         let my_endpoint = node.as_ref().map(|n| n.endpoint_id()).unwrap_or_default();
+        let seen: SeenFile = load_json(&dir.join(SEEN_FILE));
         Worker {
-            seen: load_json(&dir.join(SEEN_FILE)),
+            seen_me: seen.me,
+            seen,
             owed: load_json(&dir.join(OWED_FILE)),
             outbox: load_json(&dir.join(OUTBOX_FILE)),
             ns: entry.ns,
@@ -977,7 +1004,6 @@ impl Worker {
             my_endpoint,
             folder,
             roster: None,
-            seen_me: false,
             peers: HashSet::new(),
             online: HashSet::new(),
             resync: HashSet::new(),
@@ -990,6 +1016,7 @@ impl Worker {
             leaving: entry.leaving,
             removed_now: false,
             leave_done: false,
+            leave_retry_at: None,
             finished: false,
             names_checked: false,
             shared,
@@ -1011,6 +1038,10 @@ impl Worker {
                 Some(()) = next_signal(&mut self.watch) => self.soon(Duration::ZERO),
                 _ = tick.tick() => self.periodic().await,
                 () = sleep_until(self.pass_at) => self.pass().await,
+                () = sleep_until(self.leave_retry_at) => {
+                    self.leave_retry_at = None;
+                    self.deliver(true);
+                }
                 Some(done) = self.sends.join_next(), if !self.sends.is_empty() => {
                     if let Ok(sent) = done {
                         self.sent(sent);
@@ -1074,7 +1105,7 @@ impl Worker {
                 self.online.insert(e.clone());
                 self.resync.insert(e);
                 self.soon(RESYNC_AFTER);
-                self.deliver();
+                self.deliver(false);
             }
             Ok(NodeEvent::PeerDown(e)) => {
                 self.online.remove(&e);
@@ -1110,7 +1141,7 @@ impl Worker {
                 let _ = node.sync_with(&others).await;
             }
         }
-        self.deliver();
+        self.deliver(true);
     }
 
     /// Reads the roster, keeps the gate and peers in step with it, and reconciles the folder.
@@ -1164,7 +1195,11 @@ impl Worker {
         let me = self.person.id();
         let me_in = r.member_by_endpoint(&self.my_endpoint).is_some();
         if me_in {
-            self.seen_me = true;
+            if !self.seen_me {
+                self.seen_me = true;
+                self.seen.me = true;
+                self.save_seen();
+            }
             // A joiner keeps its inviter-only gate until the roster shows it.
             node.set_gate(&r.endpoints());
         } else if self.seen_me
@@ -1203,7 +1238,7 @@ impl Worker {
             self.save_owed();
         }
         self.roster = Some(r);
-        self.deliver();
+        self.deliver(false);
     }
 
     /// Syncs again with the member machines that just came up or went down.
@@ -1539,7 +1574,7 @@ impl Worker {
             self.report(format!("{}: {e:#}", self.name));
         }
         self.shared.drop_view(&self.ns);
-        self.deliver();
+        self.deliver(true);
         Ok(())
     }
 
@@ -1642,12 +1677,16 @@ impl Worker {
             }
         }
         self.save_outbox();
-        self.deliver();
+        self.deliver(false);
     }
 
     /// Sends what is owed to connected machines: the write capability to promoted ones, and this
     /// person's queued changes to an owner.
-    fn deliver(&mut self) {
+    ///
+    /// Relays go over the hydra protocol, which no gate closes, so with `all_owners` they also go
+    /// to owner machines that aren't connected: an owner that has this machine out (as once it
+    /// has its leaving) is never connected again, but still answers.
+    fn deliver(&mut self, all_owners: bool) {
         let Some(node) = self.node.clone() else {
             return;
         };
@@ -1674,7 +1713,7 @@ impl Worker {
             .iter()
             .filter(|m| m.role == Role::Owner)
             .flat_map(|m| m.machines.iter().map(|x| x.endpoint.clone()))
-            .filter(|e| *e != self.my_endpoint && self.online.contains(e))
+            .filter(|e| *e != self.my_endpoint && (all_owners || self.online.contains(e)))
             .collect();
         if owners.is_empty() {
             return;
@@ -1685,15 +1724,25 @@ impl Worker {
             }
             let node = Arc::clone(&node);
             let owners = owners.clone();
+            let shared = Arc::clone(&self.shared);
             self.sends.spawn(async move {
                 let sig = change.sig.clone();
                 let leave = matches!(change.change, Change::Leave { .. });
                 let mut ok = false;
                 for owner in owners {
-                    match node.relay(&owner, change.clone()).await {
+                    let answer = node.relay(&owner, change.clone()).await;
+                    if shared.lose_relay() {
+                        continue;
+                    }
+                    match answer {
                         Ok(()) => ok = true,
                         // The owner has this person out already, so there's nothing to pass on.
-                        Err(e) if e.to_string() == NOT_THEIR_MACHINE => ok = true,
+                        Err(e)
+                            if e.downcast_ref::<Refused>()
+                                .is_some_and(|r| r.0 == NOT_THEIR_MACHINE) =>
+                        {
+                            ok = true
+                        }
                         Err(_) => continue,
                     }
                     break;
@@ -1720,6 +1769,8 @@ impl Worker {
                     if leave {
                         self.leave_done = true;
                     }
+                } else if leave && self.leaving {
+                    self.leave_retry_at = Some(Instant::now() + LEAVE_RETRY);
                 }
             }
             Sent::Removed => {}

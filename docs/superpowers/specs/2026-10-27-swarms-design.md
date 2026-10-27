@@ -140,7 +140,7 @@ come and go.
     timestamp, which is the author's clock, with ties broken by author id. A machine with a fast
     clock wins the name, but it never makes an edit disappear, because the other side is always
     kept as a conflict copy or, for delete vs edit, as the edit. The other is saved beside it as
-    `<name> (conflict, <machine name>, <d Mon HH:MM>).<ext>`, and that copy syncs like any file.
+    `<name> (conflict, <machine name>, <d Mon HH.MM>).<ext>`, and that copy syncs like any file.
   - hydraui shows a notification and lists the conflict under the swarm's **Needs attention**.
     *My call:* **Compare**, **Keep theirs** and **Keep mine** resolve it and remove the
     conflict copy.

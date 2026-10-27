@@ -1030,6 +1030,7 @@ impl Workspace {
             let (badge, tone) = gate_badge(s.rating(), bar, s.status);
             let (title_hex, badge_hex) = match (s.status, tone) {
                 (st, _) if st.busy() => (accent, theme::TEXT_MUTED),
+                (_, Tone::Check) => (theme::AMBER, theme::AMBER),
                 (StageStatus::Stopped | StageStatus::Failed, _) => (theme::RED, theme::RED),
                 (StageStatus::Passed, _) => (theme::TEXT, theme::GREEN),
                 (_, Tone::Muted) => (theme::TEXT_SECONDARY, theme::TEXT_MUTED),
@@ -1052,6 +1053,10 @@ impl Workspace {
                         .border_2()
                         .border_color(color(accent))
                         .child(div().size(px(7.)).rounded_full().bg(color(accent))),
+                    _ if tone == Tone::Check => d
+                        .bg(color(theme::AMBER_TINT))
+                        .text_color(color(theme::AMBER))
+                        .child("?"),
                     StageStatus::Stopped | StageStatus::Failed => d
                         .bg(color(theme::RED_TINT))
                         .text_color(color(theme::RED))
@@ -1687,6 +1692,56 @@ impl Workspace {
         let check = rating
             .filter(|r| r.outcome == Outcome::Check)
             .map(|r| r.check.clone());
+        // What the stage captured for the person to look at, kept beside the run's log.
+        let shots: Vec<std::path::PathBuf> = rating
+            .map(|r| {
+                r.screenshots
+                    .iter()
+                    .map(std::path::PathBuf::from)
+                    .filter(|p| p.is_file())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let shot_row = (!shots.is_empty()).then(|| {
+            let mut row = h_flex().gap_2().flex_wrap().pt_1();
+            for (n, path) in shots.iter().enumerate() {
+                let open = path.clone();
+                row = row.child(
+                    div()
+                        .id(SharedString::from(format!("shot-{}-{n}", run.id)))
+                        .h(px(150.))
+                        .max_w(px(280.))
+                        .rounded(px(6.))
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(color(theme::BORDER_STRONG))
+                        .cursor_pointer()
+                        .hover(|d| d.border_color(color(theme::AMBER)))
+                        .child(
+                            gpui::img(path.clone())
+                                .h_full()
+                                .object_fit(gpui::ObjectFit::Contain),
+                        )
+                        .tooltip(|window, cx| {
+                            gpui_component::tooltip::Tooltip::new("Click to see it full size")
+                                .build(window, cx)
+                        })
+                        .on_click(cx.listener(move |_, _, window, cx| {
+                            let path = open.clone();
+                            window.open_dialog(cx, move |dialog, _, _| {
+                                dialog.w(px(1100.)).child(
+                                    div().h(px(700.)).child(
+                                        gpui::img(path.clone())
+                                            .size_full()
+                                            .object_fit(gpui::ObjectFit::Contain),
+                                    ),
+                                )
+                            });
+                        })),
+                );
+            }
+            row
+        });
         let (overline, headline) = match (ai, rating) {
             (_, Some(r)) if r.outcome == Outcome::Check => (
                 format!(
@@ -1862,7 +1917,8 @@ impl Workspace {
                                 .rounded(px(6.))
                                 .bg(color(theme::AMBER_TINT))
                                 .child(text(11.5, theme::AMBER).child("WHAT TO CHECK"))
-                                .child(text(13.5, theme::TEXT).child(check)),
+                                .child(text(13.5, theme::TEXT).child(check))
+                                .children(shot_row),
                         )
                     })
                     .child(text(12.5, theme::TEXT_SECONDARY).child(
@@ -1969,9 +2025,9 @@ fn must_toggle(m: &Marking, i: usize, cx: &mut Context<Workspace>) -> AnyElement
     let (run, stage) = (m.run.clone(), m.stage);
     let b = Button::new(SharedString::from(format!("must-{}-{stage}-{i}", m.run)))
         .label(if on {
-            "✓ Must address"
+            "✓ Marked: must address"
         } else {
-            "Must address"
+            "+ Mark must address"
         })
         .xsmall()
         .disabled(m.queued)
@@ -1979,7 +2035,8 @@ fn must_toggle(m: &Marking, i: usize, cx: &mut Context<Workspace>) -> AnyElement
         .on_click(
             cx.listener(move |ws, _, window, cx| ws.mark_reason(&run, stage, i, !on, window, cx)),
         );
-    let b = if on { b.danger() } else { b.ghost() };
+    // Outlined, so it reads as a button before it's pressed; red once marked.
+    let b = if on { b.danger() } else { b.outline() };
     div().flex_none().child(b).into_any_element()
 }
 

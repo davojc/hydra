@@ -639,6 +639,7 @@ impl Workspace {
                 Segment::Passed => color(theme::TEAL),
                 Segment::Running => color(theme::AMBER),
                 Segment::Stopped => color(theme::RED),
+                Segment::Checking => color(theme::AMBER),
                 Segment::Pending => color(theme::BORDER),
             };
             div().flex_1().h(px(3.)).rounded_full().bg(fill)
@@ -1505,6 +1506,7 @@ impl Workspace {
                     .into_any_element(),
                 Segment::Passed => bar.bg(color(accent)).into_any_element(),
                 Segment::Stopped => bar.bg(color(theme::RED)).into_any_element(),
+                Segment::Checking => bar.bg(color(theme::AMBER)).into_any_element(),
                 Segment::Pending => bar.bg(color(theme::BORDER)).into_any_element(),
             }
         });
@@ -1758,7 +1760,9 @@ pub(super) fn pill_colors(state: CardState, accent: u32) -> (gpui::Hsla, gpui::H
         CardState::Working | CardState::Done => (color(accent), color(accent).opacity(0.16)),
         CardState::Ready | CardState::Stopped => pair(theme::TEXT_SECONDARY, theme::RAISED),
         CardState::NeedsYou => pair(theme::RED, theme::RED_TINT),
-        CardState::Asking | CardState::Paused => pair(theme::AMBER, theme::AMBER_TINT),
+        CardState::Asking | CardState::Checking | CardState::Paused => {
+            pair(theme::AMBER, theme::AMBER_TINT)
+        }
     }
 }
 

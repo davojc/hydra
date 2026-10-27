@@ -22,6 +22,8 @@ pub fn sentence(text: &str) -> String {
 pub enum Tone {
     Passed,
     Stopped,
+    /// Waiting for a person's check by hand.
+    Check,
     Muted,
 }
 
@@ -33,7 +35,7 @@ pub fn gate_badge(rating: Option<&Rating>, bar: u8, status: StageStatus) -> (Str
             ("blocked".into(), Tone::Stopped)
         }
         (StageStatus::Stopped, Some(r)) if r.outcome == Outcome::Check => {
-            ("check by hand".into(), Tone::Stopped)
+            (format!("{}% · check by hand", r.score), Tone::Check)
         }
         (StageStatus::Stopped, Some(r)) => (format!("{}% · needs {bar}", r.score), Tone::Stopped),
         (StageStatus::Failed, _) => ("no report".into(), Tone::Stopped),
@@ -213,8 +215,8 @@ mod tests {
         check.outcome = Outcome::Check;
         check.check = "Try it in Chrome.".into();
         assert_eq!(
-            gate_badge(Some(&check), 85, StageStatus::Stopped).0,
-            "check by hand"
+            gate_badge(Some(&check), 85, StageStatus::Stopped),
+            ("95% · check by hand".to_string(), Tone::Check)
         );
         assert_eq!(
             gate_badge(None, 80, StageStatus::Waiting),

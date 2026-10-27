@@ -141,6 +141,15 @@ pub fn schemas() -> Vec<Value> {
                         last stage)."),
                     "check": string("With outcome check: the steps a person should take by \
                         hand and what they should see if it works."),
+                    "screenshots": {
+                        "type": "array", "maxItems": rating::MAX_SHOTS,
+                        "items": {"type": "string"},
+                        "description": "Absolute paths to screenshots (.png, .jpg, .gif, .webp) \
+                            of what the person should look at, when you can capture them (a \
+                            browser screenshot of the page, before and after). With check, \
+                            capture them whenever you can: the person sees them in hydraui \
+                            beside the button that passes the stage.",
+                    },
                 },
                 "required": ["outcome", "score", "summary", "evidence", "reasons"],
             },
@@ -458,6 +467,40 @@ fn stage_answer(
     )
 }
 
+/// Copies `rating`'s screenshots into `<run log>/../<run>/shots/<label>-<n>.<ext>` and points
+/// it at the copies; a missing file is named.
+fn keep_shots(
+    root: &Path,
+    run: &str,
+    label: &str,
+    rating: &mut rating::Rating,
+) -> Result<(), String> {
+    if rating.screenshots.is_empty() {
+        return Ok(());
+    }
+    let dir = run_log::file_for(root, run)
+        .with_extension("")
+        .join("shots");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("can't keep screenshots: {e}"))?;
+    let mut kept = Vec::new();
+    for (n, shot) in rating.screenshots.iter().enumerate() {
+        let from = Path::new(shot);
+        if !from.is_file() {
+            return Err(format!("screenshot {shot} doesn't exist"));
+        }
+        let ext = from
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("png")
+            .to_ascii_lowercase();
+        let to = dir.join(format!("{label}-{}.{ext}", n + 1));
+        std::fs::copy(from, &to).map_err(|e| format!("can't copy screenshot {shot}: {e}"))?;
+        kept.push(to.display().to_string());
+    }
+    rating.screenshots = kept;
+    Ok(())
+}
+
 fn stage_report(
     reg: &mut Registry,
     root: &Path,
@@ -476,7 +519,7 @@ fn stage_report(
         r.pipeline.stages[i].id.clone(),
     );
     let label = r.stages[i].latest().map(|a| a.label.clone());
-    let rating = match rating::from_args(args) {
+    let mut rating = match rating::from_args(args) {
         Ok(rating) => rating,
         Err(e) => {
             return (
@@ -485,6 +528,13 @@ fn stage_report(
             );
         }
     };
+    // Screenshots are copied beside the run's log, so they outlive the session's temp files.
+    if let Err(e) = keep_shots(root, &run, label.as_deref().unwrap_or("s"), &mut rating) {
+        return (
+            Outcome::err(format!("Not recorded: {e}. Fix it and report again.")),
+            None,
+        );
+    }
     // Bars follow the file to the gate (§5.1); one that no longer reads keeps the run's.
     if let Ok(now) = pipeline::load(root, &file) {
         reg.runs.refresh_from_file(&file, &now);
@@ -516,4 +566,34 @@ fn stage_report(
         )
     };
     (Outcome::ok(text), Some(McpEvent::RunChanged(changes)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn checked(shots: Vec<String>) -> rating::Rating {
+        let mut r = rating::from_args(&json!({"outcome": "done", "score": 90, "summary": "s",
+            "evidence": [{"kind": "note", "detail": "d"}],
+            "reasons": [{"side": "for", "text": "r"}]}))
+        .unwrap();
+        r.screenshots = shots;
+        r
+    }
+
+    #[test]
+    fn screenshots_are_kept_beside_the_run_log_and_a_missing_one_is_named() {
+        let home = tempfile::tempdir().unwrap();
+        let shot = home.path().join("from-session.PNG");
+        std::fs::write(&shot, b"png").unwrap();
+        let mut r = checked(vec![shot.display().to_string()]);
+        keep_shots(home.path(), "PRE-1-1", "s-03", &mut r).unwrap();
+        let kept = std::path::PathBuf::from(&r.screenshots[0]);
+        assert!(kept.ends_with("runs/PRE-1-1/shots/s-03-1.png"), "{kept:?}");
+        assert_eq!(std::fs::read(&kept).unwrap(), b"png");
+
+        let mut gone = checked(vec!["/nowhere/x.png".into()]);
+        let e = keep_shots(home.path(), "PRE-1-1", "s-03", &mut gone).unwrap_err();
+        assert!(e.contains("/nowhere/x.png"), "{e}");
+    }
 }

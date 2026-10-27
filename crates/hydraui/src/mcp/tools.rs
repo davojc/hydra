@@ -49,7 +49,9 @@ and reasons for and against; report blocked rather than guess. Your score is you
 in the stage's outcome, and the stage's bar (in stage_brief) is what that confidence must reach: \
 take nothing outside hydraui that can't be taken back, like approving or merging a pull \
 request, unless you will report at or above the bar. Below it, report first and leave that \
-action to the person, saying what's left.";
+action to the person, saying what's left. When the last proof needs a person's eyes, report \
+check with what to look at, and attach screenshots of it whenever you can capture them, so they \
+can decide in hydraui.";
 
 /// The `tools` array of `tools/list`.
 pub fn list() -> Value {

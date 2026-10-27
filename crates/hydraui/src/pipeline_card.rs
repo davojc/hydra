@@ -13,6 +13,8 @@ pub enum CardState {
     NeedsYou,
     /// A stage asked product a question; the ticket waits for the answer.
     Asking,
+    /// A stage asked a person to check something by hand; it didn't fail.
+    Checking,
     Paused,
     Done,
     Stopped,
@@ -25,6 +27,7 @@ impl CardState {
             CardState::Working => "Working",
             CardState::NeedsYou => "Needs you",
             CardState::Asking => "Asked product",
+            CardState::Checking => "Check it",
             CardState::Paused => "Paused",
             CardState::Done => "Done",
             CardState::Stopped => "Stopped",
@@ -38,6 +41,8 @@ pub enum Segment {
     Passed,
     Running,
     Stopped,
+    /// Waiting for a person's check by hand: not a failure.
+    Checking,
     Pending,
 }
 
@@ -58,12 +63,20 @@ pub fn accent(pipeline: &crate::pipeline::Pipeline) -> u32 {
     pipeline.color.unwrap_or(crate::orchestrator_theme::TEAL)
 }
 
+/// Whether stage `s` stopped asking a person to check something by hand.
+fn wants_check(s: &crate::runs::StageRun) -> bool {
+    s.status == StageStatus::Stopped
+        && s.rating()
+            .is_some_and(|r| r.outcome == crate::rating::Outcome::Check)
+}
+
 /// What the card says about `run`.
 pub fn card(run: &Run) -> Card {
     let state = match &run.state {
         RunState::Finished => CardState::Done,
         RunState::Stopped(_) => CardState::Stopped,
         RunState::NeedsYou(_) if run.asking.is_some() => CardState::Asking,
+        RunState::NeedsYou(_) if run.stages.iter().any(wants_check) => CardState::Checking,
         RunState::NeedsYou(_) => CardState::NeedsYou,
         RunState::Running if run.paused => CardState::Paused,
         RunState::Running => CardState::Working,
@@ -91,6 +104,7 @@ pub fn card(run: &Run) -> Card {
         .map(|s| match s.status {
             StageStatus::Passed => Segment::Passed,
             StageStatus::Starting | StageStatus::Running => Segment::Running,
+            _ if wants_check(s) => Segment::Checking,
             StageStatus::Stopped | StageStatus::Failed => Segment::Stopped,
             StageStatus::Waiting => Segment::Pending,
         })
@@ -127,7 +141,7 @@ pub fn ready_card(pipeline: &crate::pipeline::Pipeline) -> Card {
 pub fn group_card(runs: &[&Card]) -> Card {
     let rank = |s: CardState| match s {
         CardState::NeedsYou => 0,
-        CardState::Asking => 1,
+        CardState::Asking | CardState::Checking => 1,
         CardState::Working => 2,
         CardState::Paused => 3,
         CardState::Stopped => 4,
@@ -137,7 +151,11 @@ pub fn group_card(runs: &[&Card]) -> Card {
     let busy = |s: CardState| {
         matches!(
             s,
-            CardState::Working | CardState::NeedsYou | CardState::Asking | CardState::Paused
+            CardState::Working
+                | CardState::NeedsYou
+                | CardState::Asking
+                | CardState::Checking
+                | CardState::Paused
         )
     };
     let running = runs.iter().filter(|c| busy(c.state)).count();
@@ -353,6 +371,20 @@ mod tests {
         );
         runs.person(&id, crate::runs::Choice::Stop).unwrap();
         assert_eq!(card(runs.run(&id).unwrap()).state, CardState::Stopped);
+    }
+
+    #[test]
+    fn a_stage_asking_for_a_check_by_hand_reads_check_it_in_amber_not_failed() {
+        let (mut runs, id) = runs_of(&STAGES);
+        start(&mut runs, &id, "replicate", "t1");
+        let mut r = rated(86);
+        r.outcome = crate::rating::Outcome::Check;
+        r.check = "Try the + path.".into();
+        runs.report("t1", r).unwrap();
+        let c = card(runs.run(&id).unwrap());
+        assert_eq!(c.state, CardState::Checking);
+        assert_eq!(c.state.word(), "Check it");
+        assert_eq!(c.segments[0], Segment::Checking);
     }
 
     #[test]

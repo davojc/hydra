@@ -64,12 +64,27 @@ pub struct Rating {
     pub handoff: String,
     /// For `Check`: what a person should try and what they should see. Empty otherwise.
     pub check: String,
+    /// Pictures of what to look at (absolute paths to images the session captured), shown
+    /// where the person decides; hydraui keeps its own copies under the run's folder.
+    pub screenshots: Vec<String>,
 }
 
 /// Most evidence items (and reasons) in one report, and the longest detail or reason
 /// (characters).
 pub const MAX_EVIDENCE: usize = 20;
 pub const MAX_DETAIL: usize = 500;
+/// The most screenshots in one report.
+pub const MAX_SHOTS: usize = 6;
+
+/// Whether `path` names a picture hydraui shows: absolute, and PNG, JPEG, GIF or WebP.
+pub fn is_picture(path: &str) -> bool {
+    let p = std::path::Path::new(path);
+    p.is_absolute()
+        && p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+            ["png", "jpg", "jpeg", "gif", "webp"].contains(&e.to_ascii_lowercase().as_str())
+        })
+}
+
 /// The longest `check` (characters): room for a few steps.
 pub const MAX_CHECK: usize = 1500;
 
@@ -173,6 +188,29 @@ pub fn from_args(args: &Value) -> Result<Rating, String> {
     } else if check.chars().count() > MAX_CHECK {
         problems.push(format!("check is over {MAX_CHECK} characters"));
     }
+    let screenshots: Vec<String> = args
+        .get("screenshots")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(Value::as_str)
+        .map(|p| p.trim().to_string())
+        .collect();
+    if screenshots.len() > MAX_SHOTS {
+        problems.push(format!(
+            "screenshots has {}; at most {MAX_SHOTS}",
+            screenshots.len()
+        ));
+    }
+    for (i, shot) in screenshots.iter().enumerate() {
+        if !is_picture(shot) {
+            problems.push(format!(
+                "screenshot {}: {shot:?} must be an absolute path to a .png, .jpg, .gif or .webp",
+                i + 1
+            ));
+        }
+    }
     let items = args
         .get("evidence")
         .and_then(Value::as_array)
@@ -218,6 +256,7 @@ pub fn from_args(args: &Value) -> Result<Rating, String> {
             reasons,
             handoff: text(args, "handoff"),
             check,
+            screenshots,
         }),
         _ => Err(problems.join("; ")),
     }
@@ -271,6 +310,20 @@ mod tests {
         assert_eq!(r.outcome, Outcome::Check);
         assert!(r.check.starts_with("Open the nl page"));
         assert!(!passes(&r, 0));
+        a["screenshots"] = json!(["/tmp/nl.png", "/tmp/en.JPG"]);
+        assert_eq!(
+            from_args(&a).unwrap().screenshots,
+            ["/tmp/nl.png", "/tmp/en.JPG"]
+        );
+        a["screenshots"] = json!(["shot.png", "/tmp/notes.txt"]);
+        let e = from_args(&a).unwrap_err();
+        assert!(
+            e.contains("screenshot 1") && e.contains("screenshot 2"),
+            "{e}"
+        );
+        a["screenshots"] = json!(vec!["/tmp/a.png"; 7]);
+        assert!(from_args(&a).unwrap_err().contains("at most 6"));
+        a.as_object_mut().unwrap().remove("screenshots");
         a["check"] = json!("x".repeat(MAX_CHECK + 1));
         assert!(from_args(&a).unwrap_err().contains("check is over"));
     }

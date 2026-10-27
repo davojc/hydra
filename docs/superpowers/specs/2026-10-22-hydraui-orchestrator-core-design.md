@@ -909,3 +909,18 @@ it took before its gate. Two changes:
 The tab row now has one **Pipeline** tab per pipeline, not one per orchestrator or ticket.
 When the pipeline holds more than one ticket, the Pipeline tab's Ticket view opens with a row
 of ticket tabs (a dot in the ticket's state colour, then the ticket); clicking one shows it.
+
+## 33. Checks with screenshots; a check isn't a failure (added 2026-10-27)
+
+- **Screenshots.** `stage_report` takes `screenshots`: up to six absolute paths to .png, .jpg,
+  .gif or .webp images the session captured. hydraui copies them beside the run's log
+  (`runs/<run>/shots/<label>-<n>.<ext>`) and records the copies, so they outlive the session's
+  temp files; a missing file refuses the report, naming it. The stopped banner's **What to
+  check** box shows them as thumbnails (click: full size), beside **✓ I checked it, it works**.
+  Stages are told to attach them whenever a check needs a person's eyes.
+- **Amber, not red.** PRE-830's Test scored 86 against an 85 bar and asked for a check by
+  hand; it read as failed (Jordan, 2026-10-27). A stage waiting for a check is now amber
+  everywhere: the card's pill reads **Check it**, its segment, the timeline's mark (`?`) and
+  the badge (`86% · check by hand`).
+- **Must address** reads as a button: outlined **+ Mark must address**, then red **✓ Marked:
+  must address**.

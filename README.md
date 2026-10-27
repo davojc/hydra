@@ -92,7 +92,8 @@ A swarm keeps a folder in sync between hydra machines, say a folder of skills sh
 - **Conflicts.** Nothing is lost. When two machines change the same file, the newer change keeps the name and the other is kept beside it as `<name> (conflict, <machine>, <d Mon HH.MM>).<ext>` (a dot in the time, as Windows forbids a colon). hydraui flags it under **Needs attention**. When a delete meets an edit, the edit wins and the file survives.
 - **Only while hydraui runs.** Sync happens only while hydraui is running, and one hydraui window per machine does it.
 - **Invites.** An invite works once and expires after 7 days. The person who made it needs hydraui running when it is used.
-- **Removing someone.** Their machines stop syncing. They keep the files they already have. What they changed while they could write stays as it is for everyone else, whether they were removed, left or were made a reader.
+- **Removing someone.** Their machines stop syncing. They keep the files they already have. Their past edits stay, whether they were removed, left or were made a reader. An edit that stops counting because whoever took them out hadn't seen it yet is never replaced silently: the machines that had it keep it as a flagged conflict copy.
+- **Owners rank by seniority.** The swarm's creator ranks first, and each owner ranks below whoever made them one. An owner can demote or remove only owners junior to them.
 - **Clocks.** Machines' clocks must agree to within 10 minutes. iroh-docs drops changes dated more than 10 minutes ahead, so a machine whose clock is further out than that won't sync until its clock is corrected.
 
 Linking several of your own machines to you is not in this version; it is coming later.

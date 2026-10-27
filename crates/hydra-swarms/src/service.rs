@@ -145,6 +145,8 @@ pub struct MemberView {
     pub person: String,
     pub name: String,
     pub role: Role,
+    /// An owner junior to this machine's person, whom they may demote or remove.
+    pub junior: bool,
     pub machines: Vec<MachineView>,
 }
 
@@ -1401,6 +1403,20 @@ impl Worker {
             .ok_or_else(|| format!("{}'s members haven't arrived yet.", self.name))
     }
 
+    /// Whether this machine's person may demote or remove `p`: anyone but an owner who isn't
+    /// junior to them.
+    fn may_lower(&self, r: &Roster, p: &PersonId) -> bool {
+        let me = self.person.id();
+        r.role_of(p) != Some(Role::Owner) || *p == me || r.outranks(&me, p)
+    }
+
+    fn senior(&self, m: &Member) -> String {
+        format!(
+            "{} became an owner of {} before you, so only an owner senior to them can demote or remove them.",
+            m.name, self.name
+        )
+    }
+
     fn needs_an_owner(&self) -> String {
         format!("{} needs at least one owner.", self.name)
     }
@@ -1470,6 +1486,9 @@ impl Worker {
         if m.role == role {
             return Ok(());
         }
+        if role < m.role && !self.may_lower(&r, &id) {
+            return Err(self.senior(&m));
+        }
         let kept = if role < m.role {
             self.kept(&node, &id).await?
         } else {
@@ -1505,6 +1524,9 @@ impl Worker {
         if id == self.person.id() {
             drop(node);
             return self.leave().await;
+        }
+        if !self.may_lower(&r, &id) {
+            return Err(self.senior(&m));
         }
         let kept = self.kept(&node, &id).await?;
         let removal = self
@@ -1843,6 +1865,7 @@ impl Worker {
                         person: m.person.to_string(),
                         name: m.name.clone(),
                         role: m.role,
+                        junior: r.outranks(&me, &m.person),
                         machines: m.machines.iter().map(machine_view).collect(),
                     })
                     .collect()

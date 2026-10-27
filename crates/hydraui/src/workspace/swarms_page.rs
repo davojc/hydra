@@ -1446,7 +1446,9 @@ fn in_folder(folder: &Path, rel: &str) -> PathBuf {
 /// from; otherwise the two other roles and Remove.
 fn member_actions(swarm: &SwarmView, member: &MemberView) -> Vec<MemberAction> {
     let me = member.machines.iter().any(|m| m.this_machine);
-    if swarm.my_role != Role::Owner || swarm.removed || me {
+    // An owner who isn't junior to you can only be demoted or removed by someone senior.
+    let senior = member.role == Role::Owner && !member.junior;
+    if swarm.my_role != Role::Owner || swarm.removed || me || senior {
         return Vec::new();
     }
     [Role::Owner, Role::Writer, Role::Reader]
@@ -1624,6 +1626,7 @@ mod tests {
             person: format!("{name}-id"),
             name: name.into(),
             role,
+            junior: false,
             machines,
         }
     }
@@ -1807,7 +1810,10 @@ mod tests {
             ..s.clone()
         };
         assert!(member_actions(&removed, &alice).is_empty());
-        let bob = member("Bob", Role::Owner, vec![]);
+        let bob = MemberView {
+            junior: true,
+            ..member("Bob", Role::Owner, vec![])
+        };
         assert_eq!(
             member_actions(&s, &bob),
             vec![
@@ -1816,6 +1822,9 @@ mod tests {
                 MemberAction::Remove
             ]
         );
+        // An owner senior to you (or promoted alongside you, earlier) is beyond your reach.
+        let carol = member("Carol", Role::Owner, vec![]);
+        assert!(member_actions(&s, &carol).is_empty());
         assert_eq!(MemberAction::Remove.label(), "Remove…");
         assert_eq!(MemberAction::Make(Role::Owner).label(), "Make owner");
     }

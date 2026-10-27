@@ -199,9 +199,14 @@ async fn owner() -> Side {
 
 /// A new person with `role`, added by `owner`, joining into a new folder and syncing with it.
 async fn joiner(owner: &Side, name: &str, role: Role) -> Side {
+    joiner_of(owner, owner.key.id(), name, role).await
+}
+
+/// As `joiner`, in the swarm whose genesis `anchor` signed.
+async fn joiner_of(owner: &Side, anchor: PersonId, name: &str, role: Role) -> Side {
     let dir = tempfile::tempdir().unwrap();
     let key = PersonKey::generate();
-    let cfg = config(dir.path(), &key, Some(owner.key.id()));
+    let cfg = config(dir.path(), &key, Some(anchor));
     let endpoint = iroh::SecretKey::from_bytes(&cfg.machine_key)
         .public()
         .to_string();
@@ -1294,4 +1299,114 @@ async fn a_removed_writers_past_edits_and_deletes_stay() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_demoted_writers_past_edits_and_deletes_stay() {
     retiring_keeps_past_work(Retire::Demote).await;
+}
+
+/// The time of `who`'s entry for `p`, as `side` holds it.
+async fn entry_time(side: &Side, who: &Side, p: &str) -> Timestamp {
+    let roster = side.roster().await;
+    let author = who.node.author();
+    let at = side.node.file_entries(&roster).await.unwrap()[&rel(p)]
+        .entries
+        .iter()
+        .find(|e| e.author == author)
+        .expect("their entry")
+        .at;
+    Timestamp::from_microsecond(at as i64).unwrap()
+}
+
+/// Reconciles until the folder holds `p` as `now` and `copy` as `kept`, and checks the conflict
+/// is listed. Gives whether this machine raised it (rather than receiving the copy).
+async fn kept_as_copy(side: &mut Side, p: &str, now: &str, copy: &RelPath, kept: &str) -> bool {
+    let events = side
+        .settle("the version kept as a copy", |s| {
+            s.read(p).as_deref() == Some(now) && s.read(copy.as_str()).as_deref() == Some(kept)
+        })
+        .await;
+    assert!(side.folder.attention().contains(&Attention::Conflict {
+        path: rel(p),
+        copy: copy.clone()
+    }));
+    events.contains(&FolderEvent::NewConflict {
+        path: rel(p),
+        copy: copy.clone(),
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_edit_the_remover_had_not_received_is_kept_as_a_flagged_copy() {
+    let mut o = owner().await;
+    let mut w = joiner(&o, "wren", Role::Writer).await;
+    let mut v = joiner(&o, "vic", Role::Writer).await;
+    o.write("x.md", "one");
+    o.reconcile().await;
+    for side in [&mut w, &mut v] {
+        side.settle("x.md", |s| s.read("x.md").as_deref() == Some("one"))
+            .await;
+    }
+    // What the owner holds of wren's work before wren's edit reaches it.
+    let kept = o.node.kept(&w.key.id()).await.unwrap();
+    w.write("x.md", "two");
+    w.reconcile().await;
+    for side in [&mut o, &mut v] {
+        side.settle("wren's edit", |s| s.read("x.md").as_deref() == Some("two"))
+            .await;
+    }
+    let when = entry_time(&o, &w, "x.md").await;
+    let remove = SignedChange::sign(
+        &o.node.id(),
+        Change::Remove {
+            person: w.key.id(),
+            kept,
+        },
+        &o.key,
+        now(),
+    );
+    o.node.write_change(&remove).await.unwrap();
+    let copy = conflict_name(&rel("x.md"), "wren-pc", when, &TimeZone::system());
+    // The owner raises it; vic may raise it too or receive the owner's copy first.
+    assert!(kept_as_copy(&mut o, "x.md", "one", &copy, "two").await);
+    kept_as_copy(&mut v, "x.md", "one", &copy, "two").await;
+    assert_eq!(copies_of(&v, "x.md"), vec![copy.as_str().to_string()]);
+    for side in [o, w, v] {
+        side.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unseen_members_edit_is_kept_as_a_flagged_copy() {
+    let mut o = owner().await;
+    let mut p = joiner(&o, "pat", Role::Owner).await;
+    o.write("notes.md", "one");
+    o.reconcile().await;
+    p.settle("notes.md", |s| s.read("notes.md").as_deref() == Some("one"))
+        .await;
+    // Olive's view of pat before pat adds alice, as when olive removes pat without having
+    // heard of alice.
+    let kept = o.node.kept(&p.key.id()).await.unwrap();
+    let mut a = joiner_of(&p, o.key.id(), "alice", Role::Writer).await;
+    a.settle("notes.md", |s| s.read("notes.md").as_deref() == Some("one"))
+        .await;
+    a.write("notes.md", "alice's");
+    a.reconcile().await;
+    o.settle("alice's edit", |s| {
+        s.read("notes.md").as_deref() == Some("alice's")
+    })
+    .await;
+    let when = entry_time(&o, &a, "notes.md").await;
+    let remove = SignedChange::sign(
+        &o.node.id(),
+        Change::Remove {
+            person: p.key.id(),
+            kept,
+        },
+        &o.key,
+        now(),
+    );
+    o.node.write_change(&remove).await.unwrap();
+    assert_eq!(o.roster().await.role_of(&a.key.id()), None);
+    let copy = conflict_name(&rel("notes.md"), "alice-pc", when, &TimeZone::system());
+    assert!(kept_as_copy(&mut o, "notes.md", "one", &copy, "alice's").await);
+    for side in [o, p, a] {
+        side.shutdown().await;
+    }
 }

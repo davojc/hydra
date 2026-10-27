@@ -88,12 +88,34 @@ struct Seen {
     hash: Hash,
 }
 
+/// Whose entry a version taken in from the swarm was, and when it was made.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+struct Source {
+    author: String,
+    machine: String,
+    /// Unix microseconds.
+    at: u64,
+}
+
+impl Source {
+    fn of(r: &Remote) -> Source {
+        Source {
+            author: r.author.clone(),
+            machine: r.machine.clone(),
+            at: r.at,
+        }
+    }
+}
+
 /// What this machine knows of one path.
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 struct Entry {
     /// The version this folder and the swarm last agreed on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     base: Option<Hash>,
+    /// Whose entry `base` was, when it was taken in from the swarm rather than made here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    from: Option<Source>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     held: Option<Held>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -246,6 +268,35 @@ impl Folder {
                 modified: file.map_or(0, |f| f.modified),
             };
             let r = remote.get(&p);
+            // Ruling 20: a version taken in whose entry no longer counts (its author was taken
+            // out without it being kept) is kept as a conflict copy before anything replaces it.
+            if let (Some(base), Some(from)) = (entry.base, entry.from.as_ref())
+                && local.hash == Some(base)
+                && r.is_some_and(|r| r.hash != Some(base))
+                && !counts(roster, history.get(&p), &p, from, base)
+            {
+                let gone = Remote {
+                    hash: Some(base),
+                    at: from.at,
+                    author: from.author.clone(),
+                    machine: from.machine.clone(),
+                };
+                match self
+                    .capture(&pass, &p, &gone, &tz, &scan.files, writer)
+                    .await
+                {
+                    Ok(Some(copy)) => events.push(FolderEvent::NewConflict {
+                        path: p.clone(),
+                        copy,
+                    }),
+                    Ok(None) => {}
+                    Err(e) => {
+                        // Not replaced until it is safe in its copy.
+                        events.push(FolderEvent::Error(format!("{}: {e:#}", p.as_str())));
+                        continue;
+                    }
+                }
+            }
             let scanned = file.map(|f| f.hash.unwrap_or_else(|| Hash::new([])));
             let action = decide(
                 &p,
@@ -286,7 +337,7 @@ impl Folder {
                 .iter()
                 .filter_map(|(owner, key)| Some((owner, newest(&history[key].entries)?)));
             for (p, edit) in unseen.chain(cased).collect::<Vec<_>>() {
-                match self.capture(&pass, p, edit, &tz, &scan.files).await {
+                match self.capture(&pass, p, edit, &tz, &scan.files, true).await {
                     Ok(Some(copy)) => events.push(FolderEvent::NewConflict {
                         path: p.clone(),
                         copy,
@@ -453,6 +504,7 @@ impl Folder {
             .await?
             .context("This swarm's member list hasn't arrived yet.")?;
         let remote = node.files(&roster).await?.remove(path);
+        let from = remote.as_ref().map(Source::of);
         let base = match remote.and_then(|r| r.hash) {
             Some(hash) => {
                 let bytes = node
@@ -469,6 +521,7 @@ impl Folder {
         };
         let entry = self.entry(path);
         entry.base = base;
+        entry.from = from;
         entry.held = None;
         self.tidy(path);
         self.save()
@@ -510,7 +563,7 @@ impl Folder {
                 if let Some(r) = remote
                     && r.hash == local.hash
                 {
-                    self.entry(p).base = r.hash;
+                    self.took(p, r);
                 }
                 Ok(None)
             }
@@ -522,7 +575,7 @@ impl Folder {
                     return Ok(None);
                 }
                 self.write(p, &bytes)?;
-                self.entry(p).base = Some(hash);
+                self.took_hash(p, hash, remote);
                 Ok(theirs)
             }
             Action::RemoveFile => {
@@ -531,6 +584,7 @@ impl Folder {
                 }
                 self.remove(p)?;
                 self.entry(p).base = None;
+                self.entry(p).from = None;
                 Ok(theirs)
             }
             Action::Publish => {
@@ -577,7 +631,7 @@ impl Folder {
                     return Ok(None);
                 }
                 self.write(p, &theirs_bytes)?;
-                self.entry(p).base = Some(theirs_hash);
+                self.took_hash(p, theirs_hash, remote);
                 events.push(FolderEvent::NewConflict {
                     path: p.clone(),
                     copy,
@@ -621,7 +675,7 @@ impl Folder {
                     return Ok(None);
                 }
                 self.write(p, &bytes)?;
-                self.entry(p).base = Some(hash);
+                self.took_hash(p, hash, remote);
                 events.push(FolderEvent::Restored(p.clone()));
                 Ok(theirs)
             }
@@ -651,14 +705,35 @@ impl Folder {
             }
             None => node.delete_file(p).await?,
         }
-        self.entry(p).base = hash;
+        let entry = self.entry(p);
+        entry.base = hash;
+        entry.from = None;
         Ok(())
     }
 
+    /// Records `r`, the swarm's entry for `p`, as the version this folder now has.
+    fn took(&mut self, p: &RelPath, r: &Remote) {
+        let entry = self.entry(p);
+        entry.base = r.hash;
+        entry.from = Some(Source::of(r));
+    }
+
+    /// Records `hash` as the version this folder now has, taken from `r` when it is `r`'s.
+    fn took_hash(&mut self, p: &RelPath, hash: Hash, r: Option<&Remote>) {
+        match r.filter(|r| r.hash == Some(hash)) {
+            Some(r) => self.took(p, r),
+            None => {
+                let entry = self.entry(p);
+                entry.base = Some(hash);
+                entry.from = None;
+            }
+        }
+    }
+
     /// Writes out `edit`, another writer's version of `p` that the newest version wasn't made
-    /// on top of, as a conflict copy named for its machine and time, and publishes it, unless a
-    /// copy of `p` already holds or held that content. Every machine names it the same, so they
-    /// converge on one copy.
+    /// on top of, as a conflict copy named for its machine and time, and publishes it when
+    /// `share` (a reader's copy stays here), unless a copy of `p` already holds or held that
+    /// content. Every machine names it the same, so they converge on one copy.
     async fn capture(
         &mut self,
         pass: &Pass<'_>,
@@ -666,6 +741,7 @@ impl Folder {
         edit: &Remote,
         tz: &TimeZone,
         on_disk: &BTreeMap<RelPath, OnDisk>,
+        share: bool,
     ) -> anyhow::Result<Option<RelPath>> {
         let Some(hash) = edit.hash else {
             return Ok(None);
@@ -679,9 +755,11 @@ impl Folder {
         let name = conflict_name(p, &edit.machine, timestamp(edit.at), tz);
         let copy = self.free_copy_name(&name, hash, pass.remote)?;
         self.write(&copy, &bytes)?;
-        let copy_history = pass.history.get(&copy);
-        self.publish(pass.node, copy_history, &copy, Some((bytes, hash)), &[])
-            .await?;
+        if share {
+            let copy_history = pass.history.get(&copy);
+            self.publish(pass.node, copy_history, &copy, Some((bytes, hash)), &[])
+                .await?;
+        }
         Ok(Some(copy))
     }
 
@@ -949,6 +1027,30 @@ fn timestamp(micros: u64) -> Timestamp {
 }
 
 /// `heads` and every version before them that the parent records know of, nearest first.
+/// Whether `base`, the version of `p` this folder took in from `from`'s entry, still counts:
+/// that author is a writer, or the roster kept that version of theirs, or a version that counts
+/// was made on top of it.
+fn counts(
+    roster: &Roster,
+    history: Option<&FileHistory>,
+    p: &RelPath,
+    from: &Source,
+    base: Hash,
+) -> bool {
+    let kept = roster
+        .retired
+        .get(&from.author)
+        .and_then(|r| r.files.get(p.as_str()))
+        .is_some_and(|v| v.hash == Some(base));
+    let built_on = history.is_some_and(|h| {
+        h.entries.iter().any(|e| e.hash == Some(base))
+            || h.records
+                .iter()
+                .any(|(_, r)| r.hash == Some(base) || r.ancestors.contains(&base))
+    });
+    roster.writes(&from.author) || kept || built_on
+}
+
 fn lineage(heads: &[Hash], history: Option<&FileHistory>) -> Vec<Hash> {
     let mut known: HashMap<Hash, Vec<Hash>> = HashMap::new();
     for (_, r) in history.map_or(&[][..], |h| &h.records[..]) {

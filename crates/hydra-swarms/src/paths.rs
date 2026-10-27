@@ -96,14 +96,40 @@ pub fn allowed(p: &RelPath, size: u64, types: &[String]) -> bool {
     !ext.is_empty() && types.iter().any(|t| t.eq_ignore_ascii_case(ext))
 }
 
+/// Windows' limit on one file name, in UTF-16 units.
+const MAX_NAME_UNITS: usize = 255;
+
+fn units(s: &str) -> usize {
+    s.encode_utf16().count()
+}
+
+/// The longest start of `s` within `max` UTF-16 units.
+fn shorten(s: &str, max: usize) -> &str {
+    let mut n = 0;
+    for (i, c) in s.char_indices() {
+        n += c.len_utf16();
+        if n > max {
+            return &s[..i];
+        }
+    }
+    s
+}
+
 /// The name a losing copy of `p` is kept under: `stem (conflict, machine, 27 Oct 13.05).ext`.
+/// A machine name too long for the copy to be written is shortened, and failing that the stem.
 pub fn conflict_name(p: &RelPath, machine: &str, at: Timestamp, tz: &TimeZone) -> RelPath {
     let machine: String = machine
         .chars()
         .map(|c| if forbidden_char(c) { '_' } else { c })
         .collect();
-    let when = at.to_zoned(tz.clone()).strftime("%-d %b %H.%M");
+    let when = at.to_zoned(tz.clone()).strftime("%-d %b %H.%M").to_string();
     let (dir, stem, ext) = split_name(&p.0);
+    let marker = units(" (conflict, , )") + units(&when) + units(ext);
+    let machine = shorten(
+        &machine,
+        MAX_NAME_UNITS.saturating_sub(marker + units(stem)),
+    );
+    let stem = shorten(stem, MAX_NAME_UNITS.saturating_sub(marker + units(machine)));
     RelPath(format!("{dir}{stem} (conflict, {machine}, {when}){ext}"))
 }
 
@@ -127,19 +153,21 @@ pub fn log_key(c: &SignedChange) -> Vec<u8> {
     k
 }
 
+/// The path a conflict copy was made from, or None if `p` isn't named like one.
+pub fn conflict_original(p: &RelPath) -> Option<RelPath> {
+    let (dir, stem, ext) = split_name(&p.0);
+    let inner = stem.strip_suffix(')')?;
+    let i = inner.rfind(" (conflict, ")?;
+    let (_machine, when) = inner[i + " (conflict, ".len()..].rsplit_once(", ")?;
+    if !is_conflict_time(when) {
+        return None;
+    }
+    safe_rel_path(&format!("{dir}{}{ext}", &inner[..i]))
+}
+
 /// Whether `p` is named like a copy made by `conflict_name`.
 pub fn is_conflict_copy(p: &RelPath) -> bool {
-    let (_, stem, _) = split_name(&p.0);
-    let Some(inner) = stem.strip_suffix(')') else {
-        return false;
-    };
-    let Some(i) = inner.rfind(" (conflict, ") else {
-        return false;
-    };
-    let Some((_machine, when)) = inner[i + " (conflict, ".len()..].rsplit_once(", ") else {
-        return false;
-    };
-    is_conflict_time(when)
+    conflict_original(p).is_some()
 }
 
 /// `d Mon HH.MM`.
@@ -284,6 +312,42 @@ mod tests {
         // Not a `conflict_name` result: the marker is not just before the extension.
         let trailing = RelPath("a (conflict, x, 27 Oct 13.05) b.md".to_string());
         assert!(!is_conflict_copy(&trailing));
+    }
+
+    #[test]
+    fn a_long_machine_name_is_shortened_so_the_copy_can_be_written() {
+        let tz = TimeZone::UTC;
+        let at = ts("2026-10-27T13:05:00Z");
+        let dir = tempfile::tempdir().unwrap();
+        for machine in ["m".repeat(300), "é".repeat(300), "😀".repeat(200)] {
+            let c = conflict_name(&rel("sub/SKILL.md"), &machine, at, &tz);
+            let name = c.as_str().strip_prefix("sub/").unwrap();
+            assert!(name.encode_utf16().count() <= 255, "{name}");
+            assert!(name.starts_with("SKILL (conflict, "), "{name}");
+            assert!(name.ends_with(", 27 Oct 13.05).md"), "{name}");
+            assert!(is_conflict_copy(&c));
+            assert_eq!(conflict_original(&c), Some(rel("sub/SKILL.md")));
+            assert_eq!(safe_rel_path(c.as_str()), Some(c.clone()));
+            std::fs::write(dir.path().join(name), b"copy").expect("the copy is writable");
+        }
+        // A stem so long the marker can't fit beside it is shortened too, keeping the extension.
+        let long = format!("{}.md", "s".repeat(250));
+        let c = conflict_name(&rel(&long), "Desktop", at, &tz);
+        assert!(c.as_str().encode_utf16().count() <= 255);
+        assert!(c.as_str().ends_with(", 27 Oct 13.05).md"));
+        assert!(is_conflict_copy(&c));
+        std::fs::write(dir.path().join(c.as_str()), b"copy").expect("the copy is writable");
+    }
+
+    #[test]
+    fn a_conflict_copy_names_its_original() {
+        let tz = TimeZone::UTC;
+        let at = ts("2026-10-27T13:05:00Z");
+        for p in ["a.md", "dir/b.tar.gz", "noext", "x (conflict, y).md"] {
+            let c = conflict_name(&rel(p), "Davo's desktop, 2", at, &tz);
+            assert_eq!(conflict_original(&c), Some(rel(p)));
+        }
+        assert_eq!(conflict_original(&rel("a.md")), None);
     }
 
     #[test]

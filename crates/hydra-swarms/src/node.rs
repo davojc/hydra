@@ -584,6 +584,13 @@ impl SwarmNode {
         Ok(self.core.entries(query).await?.len())
     }
 
+    /// How many file entries the document holds, every author's and tombstones included, for
+    /// tests.
+    pub async fn file_entries_for_tests(&self) -> anyhow::Result<usize> {
+        let query = Query::key_prefix(FILES_PREFIX).include_empty().build();
+        Ok(self.core.entries(query).await?.len())
+    }
+
     pub async fn shutdown(self) {
         let _ = self.core.doc.close().await;
         stop(self.router, self.core.blobs.clone()).await;

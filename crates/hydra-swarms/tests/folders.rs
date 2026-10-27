@@ -1,0 +1,711 @@
+//! Folders kept in sync through swarm nodes on loopback, relays off. Each side reconciles
+//! explicitly rather than waiting on timers, except where the watcher itself is under test.
+
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+use bytes::Bytes;
+use hydra_swarms::folder::{Attention, Folder, FolderEvent};
+use hydra_swarms::ids::{PersonId, PersonKey};
+use hydra_swarms::node::{NodeConfig, NodeEvent, SwarmNode};
+use hydra_swarms::paths::{
+    MAX_FILE_BYTES, RelPath, conflict_name, is_conflict_copy, safe_rel_path,
+};
+use hydra_swarms::roster::{Change, Machine, Member, Role, Roster, SignedChange};
+use iroh_blobs::Hash;
+use iroh_docs::Author;
+use jiff::Timestamp;
+use jiff::tz::TimeZone;
+
+const WAIT: Duration = Duration::from_secs(20);
+
+fn random32() -> [u8; 32] {
+    let mut b = [0u8; 32];
+    getrandom::fill(&mut b).expect("random bytes");
+    b
+}
+
+fn now() -> u64 {
+    jiff::Timestamp::now().as_microsecond() as u64
+}
+
+fn rel(s: &str) -> RelPath {
+    safe_rel_path(s).unwrap()
+}
+
+fn config(dir: &Path, person: &PersonKey, anchor: Option<PersonId>) -> NodeConfig {
+    NodeConfig {
+        dir: dir.to_path_buf(),
+        machine_key: random32(),
+        relays: false,
+        person: PersonKey::from_bytes(person.to_bytes()),
+        anchor,
+    }
+}
+
+/// Polls `check` until it gives a value or `WAIT` runs out.
+async fn eventually<T, F, Fut>(what: &str, mut check: F) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Option<T>>,
+{
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        if let Some(v) = check().await {
+            return v;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// One machine: its node, its person and its folder.
+struct Side {
+    node: SwarmNode,
+    key: PersonKey,
+    folder: Folder,
+    root: PathBuf,
+    _dirs: Vec<tempfile::TempDir>,
+}
+
+impl Side {
+    async fn roster(&self) -> Roster {
+        self.node.roster().await.unwrap().expect("a roster")
+    }
+
+    async fn reconcile(&mut self) -> Vec<FolderEvent> {
+        let roster = self.roster().await;
+        let me = roster
+            .members
+            .iter()
+            .find(|m| m.person == self.key.id())
+            .expect("a member")
+            .clone();
+        self.folder
+            .reconcile(&self.node, &roster, &me)
+            .await
+            .expect("reconcile")
+    }
+
+    /// Reconciles until `done` holds, and gives every event seen on the way.
+    async fn settle(&mut self, what: &str, done: impl Fn(&Side) -> bool) -> Vec<FolderEvent> {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        let mut events = Vec::new();
+        loop {
+            events.extend(self.reconcile().await);
+            if done(self) {
+                return events;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for {what}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    fn path(&self, p: &str) -> PathBuf {
+        self.root.join(p)
+    }
+
+    fn read(&self, p: &str) -> Option<String> {
+        std::fs::read_to_string(self.path(p)).ok()
+    }
+
+    fn write(&self, p: &str, text: &str) {
+        let path = self.path(p);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    fn remove(&self, p: &str) {
+        std::fs::remove_file(self.path(p)).unwrap();
+    }
+
+    /// The swarm's latest word on `p`, as this machine sees it.
+    async fn remote_hash(&self, p: &str) -> Option<Option<Hash>> {
+        let roster = self.roster().await;
+        let files = self.node.files(&roster).await.unwrap();
+        files.get(&rel(p)).map(|r| r.hash)
+    }
+
+    async fn in_doc(&self, p: &str) -> bool {
+        matches!(self.remote_hash(p).await, Some(Some(_)))
+    }
+
+    /// Waits until this machine has heard that `p` is now `hash` (None for a delete).
+    async fn hears(&self, p: &str, hash: Option<Hash>) {
+        eventually(&format!("{p} to be {hash:?}"), || async {
+            (self.remote_hash(p).await == Some(hash)).then_some(())
+        })
+        .await;
+    }
+
+    async fn shutdown(self) {
+        self.node.shutdown().await;
+    }
+}
+
+fn hash(text: &str) -> Hash {
+    Hash::new(text.as_bytes())
+}
+
+fn member(key: &PersonKey, name: &str, role: Role, endpoint: String, author: String) -> Member {
+    Member {
+        person: key.id(),
+        name: name.into(),
+        role,
+        machines: vec![Machine {
+            endpoint,
+            name: format!("{name}-pc"),
+            author,
+        }],
+    }
+}
+
+/// An owner whose folder already holds `files`, creating the swarm from it.
+async fn owner_with(files: &[(&str, &str)]) -> Side {
+    let dir = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    for (p, text) in files {
+        let path = root.path().join(p);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let key = PersonKey::generate();
+    let me = member(&key, "olive", Role::Owner, String::new(), String::new());
+    let node = SwarmNode::create(config(dir.path(), &key, None), "Notes", me)
+        .await
+        .expect("create");
+    let folder =
+        Folder::new(root.path().to_path_buf(), dir.path().join("folder"), false).expect("folder");
+    Side {
+        node,
+        key,
+        folder,
+        root: root.path().to_path_buf(),
+        _dirs: vec![dir, root],
+    }
+}
+
+async fn owner() -> Side {
+    owner_with(&[]).await
+}
+
+/// A new person with `role`, added by `owner`, joining into a new folder and syncing with it.
+async fn joiner(owner: &Side, name: &str, role: Role) -> Side {
+    let dir = tempfile::tempdir().unwrap();
+    let key = PersonKey::generate();
+    let cfg = config(dir.path(), &key, Some(owner.key.id()));
+    let endpoint = iroh::SecretKey::from_bytes(&cfg.machine_key)
+        .public()
+        .to_string();
+    let author = Author::from_bytes(&random32());
+    let add = SignedChange::sign(
+        &owner.node.id(),
+        Change::AddMember {
+            member: member(&key, name, role, endpoint, author.id().to_string()),
+        },
+        &owner.key,
+        now(),
+    );
+    owner.node.write_change(&add).await.expect("add member");
+    let cap = owner.node.capability(role).await.unwrap();
+    let node = SwarmNode::join(cfg, cap, author).await.expect("join");
+    let root = dir.path().join("swarm folder");
+    let folder = Folder::new(root.clone(), dir.path().join("folder"), true).expect("folder");
+    node.remember_addr(owner.node.addr_for_tests());
+    owner.node.remember_addr(node.addr_for_tests());
+    owner.node.set_gate(&[node.endpoint_id()]);
+    node.set_gate(&[owner.node.endpoint_id()]);
+    node.sync_with(&[owner.node.endpoint_id()])
+        .await
+        .expect("sync");
+    let side = Side {
+        node,
+        key,
+        folder,
+        root,
+        _dirs: vec![dir],
+    };
+    eventually("the roster on the joiner", || async {
+        side.node
+            .roster()
+            .await
+            .unwrap()
+            .filter(|r| r.members.len() == 2)
+    })
+    .await;
+    side
+}
+
+/// An owner and a writer, both holding `p` as "one".
+async fn synced_pair(p: &str) -> (Side, Side) {
+    let mut o = owner().await;
+    let mut w = joiner(&o, "wren", Role::Writer).await;
+    o.write(p, "one");
+    o.reconcile().await;
+    w.settle("the file on the writer", |s| {
+        s.read(p).as_deref() == Some("one")
+    })
+    .await;
+    (o, w)
+}
+
+fn set_mtime(path: &Path, at: Timestamp) {
+    let when = SystemTime::UNIX_EPOCH + Duration::from_micros(at.as_microsecond() as u64);
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+}
+
+/// Both sides change `p` from "one": the writer first (its file dated `wren_at`), then the owner,
+/// which publishes. The writer then meets the owner's newer edit: the owner keeps the name and
+/// the writer's edit becomes a conflict copy, which reaches the owner too. Gives the copy.
+async fn make_conflict(o: &mut Side, w: &mut Side, p: &str, wren_at: Timestamp) -> RelPath {
+    w.write(p, "wren's");
+    set_mtime(&w.path(p), wren_at);
+    o.write(p, "olive's");
+    o.reconcile().await;
+    w.hears(p, Some(hash("olive's"))).await;
+    let copy = conflict_name(&rel(p), "wren-pc", wren_at, &TimeZone::system());
+    let events = w
+        .settle("the conflict on the writer", |s| {
+            s.read(copy.as_str()).is_some() && s.read(p).as_deref() == Some("olive's")
+        })
+        .await;
+    assert!(events.contains(&FolderEvent::NewConflict {
+        path: rel(p),
+        copy: copy.clone()
+    }));
+    o.settle("the conflict copy on the owner", |s| {
+        s.read(copy.as_str()).is_some()
+    })
+    .await;
+    copy
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_file_reaches_the_other_folder() {
+    let mut o = owner().await;
+    let mut w = joiner(&o, "wren", Role::Writer).await;
+    o.write("notes/a.md", "hello");
+    let events = o.reconcile().await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, FolderEvent::LastChange { machine, .. } if machine == "olive-pc"))
+    );
+    let events = w
+        .settle("a.md on the writer", |s| {
+            s.read("notes/a.md").as_deref() == Some("hello")
+        })
+        .await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, FolderEvent::LastChange { machine, .. } if machine == "olive-pc"))
+    );
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_edit_reaches_the_other_folder() {
+    let (mut o, mut w) = synced_pair("x.md").await;
+    w.write("x.md", "two");
+    w.reconcile().await;
+    o.settle("the edit on the owner", |s| {
+        s.read("x.md").as_deref() == Some("two")
+    })
+    .await;
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delete_reaches_the_other_folder() {
+    let (mut o, mut w) = synced_pair("x.md").await;
+    o.remove("x.md");
+    o.reconcile().await;
+    assert_eq!(o.remote_hash("x.md").await, Some(None));
+    w.settle("the delete on the writer", |s| s.read("x.md").is_none())
+        .await;
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn files_of_other_types_stay_local() {
+    let mut o = owner().await;
+    let mut w = joiner(&o, "wren", Role::Writer).await;
+    o.write("a.py", "print()");
+    o.write("x.md", "hello");
+    o.reconcile().await;
+    assert!(o.in_doc("x.md").await);
+    assert_eq!(o.remote_hash("a.py").await, None);
+    w.settle("x.md on the writer", |s| s.read("x.md").is_some())
+        .await;
+    assert!(w.read("a.py").is_none());
+    assert_eq!(w.remote_hash("a.py").await, None);
+    assert!(o.folder.attention().is_empty());
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_oversize_file_stays_local_and_is_flagged() {
+    let mut o = owner().await;
+    let big = vec![b'a'; MAX_FILE_BYTES as usize + 1];
+    std::fs::write(o.path("big.md"), &big).unwrap();
+    let events = o.reconcile().await;
+    assert_eq!(o.remote_hash("big.md").await, None);
+    let flagged = vec![Attention::TooBig {
+        path: rel("big.md"),
+    }];
+    assert_eq!(o.folder.attention(), flagged);
+    assert!(events.contains(&FolderEvent::Attention(flagged)));
+    // Back under the cap, it syncs and the flag goes.
+    o.write("big.md", "small now");
+    o.reconcile().await;
+    assert!(o.in_doc("big.md").await);
+    assert!(o.folder.attention().is_empty());
+    o.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_conflict_keeps_both_and_both_sides_see_it() {
+    let (mut o, mut w) = synced_pair("SKILL.md").await;
+    let wren_at: Timestamp = "2026-10-27T13:05:00Z".parse().unwrap();
+    let copy = make_conflict(&mut o, &mut w, "SKILL.md", wren_at).await;
+
+    let when = wren_at
+        .to_zoned(TimeZone::system())
+        .strftime("%-d %b %H.%M")
+        .to_string();
+    assert_eq!(
+        copy.as_str(),
+        format!("SKILL (conflict, wren-pc, {when}).md")
+    );
+    assert!(is_conflict_copy(&copy));
+    for side in [&o, &w] {
+        assert_eq!(side.read("SKILL.md").as_deref(), Some("olive's"));
+        assert_eq!(side.read(copy.as_str()).as_deref(), Some("wren's"));
+        assert_eq!(
+            side.folder.attention(),
+            vec![Attention::Conflict {
+                path: rel("SKILL.md"),
+                copy: copy.clone()
+            }]
+        );
+    }
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keep_mine_and_keep_theirs_resolve_everywhere() {
+    let mut o = owner().await;
+    let mut w = joiner(&o, "wren", Role::Writer).await;
+    o.write("x.md", "one");
+    o.write("y.md", "one");
+    o.reconcile().await;
+    w.settle("both files on the writer", |s| {
+        s.read("x.md").is_some() && s.read("y.md").is_some()
+    })
+    .await;
+    let at: Timestamp = "2026-10-27T09:00:00Z".parse().unwrap();
+    let x_copy = make_conflict(&mut o, &mut w, "x.md", at).await;
+    let y_copy = make_conflict(&mut o, &mut w, "y.md", at).await;
+
+    // The owner keeps its own version of x.md: the copy goes everywhere.
+    o.folder
+        .keep_theirs(&o.node, &rel("x.md"), &x_copy)
+        .await
+        .unwrap();
+    assert!(o.read(x_copy.as_str()).is_none());
+    w.settle("x's copy gone on the writer", |s| {
+        s.read(x_copy.as_str()).is_none()
+    })
+    .await;
+    assert_eq!(w.read("x.md").as_deref(), Some("olive's"));
+
+    // The writer keeps its version of y.md, from the copy.
+    w.folder
+        .keep_mine(&w.node, &rel("y.md"), &y_copy)
+        .await
+        .unwrap();
+    assert_eq!(w.read("y.md").as_deref(), Some("wren's"));
+    assert!(w.read(y_copy.as_str()).is_none());
+    o.settle("y resolved on the owner", |s| {
+        s.read("y.md").as_deref() == Some("wren's") && s.read(y_copy.as_str()).is_none()
+    })
+    .await;
+
+    w.reconcile().await;
+    assert!(o.folder.attention().is_empty());
+    assert!(w.folder.attention().is_empty());
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_edit_after_a_remote_delete_is_held_locally() {
+    let (mut o, mut w) = synced_pair("x.md").await;
+    w.write("x.md", "kept");
+    o.remove("x.md");
+    o.reconcile().await;
+    w.hears("x.md", None).await;
+    let events = w.reconcile().await;
+    let held = Attention::EditedAfterDelete { path: rel("x.md") };
+    assert!(events.contains(&FolderEvent::Held(held.clone())));
+    assert_eq!(w.folder.attention(), vec![held]);
+    assert_eq!(w.read("x.md").as_deref(), Some("kept"));
+    assert_eq!(w.remote_hash("x.md").await, Some(None));
+
+    // Share it again: it comes back for everyone.
+    w.folder.share_again(&w.node, &rel("x.md")).await.unwrap();
+    assert!(w.folder.attention().is_empty());
+    o.settle("x.md back on the owner", |s| {
+        s.read("x.md").as_deref() == Some("kept")
+    })
+    .await;
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delete_held_removes_the_kept_edit() {
+    let (mut o, mut w) = synced_pair("x.md").await;
+    w.write("x.md", "kept");
+    o.remove("x.md");
+    o.reconcile().await;
+    w.hears("x.md", None).await;
+    w.reconcile().await;
+    w.folder.delete_held(&rel("x.md")).await.unwrap();
+    assert!(w.read("x.md").is_none());
+    assert!(w.folder.attention().is_empty());
+    w.reconcile().await;
+    assert!(w.read("x.md").is_none());
+    assert_eq!(w.remote_hash("x.md").await, Some(None));
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_local_delete_meeting_a_remote_edit_restores_it() {
+    let (mut o, mut w) = synced_pair("x.md").await;
+    w.remove("x.md");
+    o.write("x.md", "two");
+    o.reconcile().await;
+    w.hears("x.md", Some(hash("two"))).await;
+    let events = w
+        .settle("x.md restored", |s| {
+            s.read("x.md").as_deref() == Some("two")
+        })
+        .await;
+    assert!(events.contains(&FolderEvent::Restored(rel("x.md"))));
+    assert_eq!(o.remote_hash("x.md").await, Some(Some(hash("two"))));
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_readers_edit_is_held_and_use_swarm_version_resumes() {
+    let mut o = owner().await;
+    let mut r = joiner(&o, "rae", Role::Reader).await;
+    o.write("x.md", "one");
+    o.reconcile().await;
+    r.settle("x.md on the reader", |s| s.read("x.md").is_some())
+        .await;
+
+    r.write("x.md", "mine");
+    let events = r.reconcile().await;
+    let held = Attention::ReaderEdit { path: rel("x.md") };
+    assert!(events.contains(&FolderEvent::Held(held.clone())));
+    assert_eq!(r.folder.attention(), vec![held]);
+
+    // While held, the swarm's changes don't land here.
+    o.write("x.md", "two");
+    o.reconcile().await;
+    r.hears("x.md", Some(hash("two"))).await;
+    r.reconcile().await;
+    assert_eq!(r.read("x.md").as_deref(), Some("mine"));
+    assert_eq!(o.read("x.md").as_deref(), Some("two"));
+
+    r.folder
+        .use_swarm_version(&r.node, &rel("x.md"))
+        .await
+        .unwrap();
+    assert_eq!(r.read("x.md").as_deref(), Some("two"));
+    assert!(r.folder.attention().is_empty());
+
+    // Syncing has resumed.
+    o.write("x.md", "three");
+    o.reconcile().await;
+    r.settle("the next edit on the reader", |s| {
+        s.read("x.md").as_deref() == Some("three")
+    })
+    .await;
+    o.shutdown().await;
+    r.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn writes_from_sync_are_not_republished() {
+    let (mut o, mut w) = synced_pair("x.md").await;
+    // One entry: the owner's.
+    assert_eq!(w.node.file_entries_for_tests().await.unwrap(), 1);
+    let events = w.reconcile().await;
+    assert!(events.is_empty(), "{events:?}");
+    o.reconcile().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(w.node.file_entries_for_tests().await.unwrap(), 1);
+    assert_eq!(o.node.file_entries_for_tests().await.unwrap(), 1);
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_burst_of_saves_publishes_only_the_last_content() {
+    let mut o = owner().await;
+    let mut events = o.node.events();
+    // Let the genesis' own events go by.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    while events.try_recv().is_ok() {}
+
+    let mut changes = o.folder.watch();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let p = o.path("x.md");
+    std::fs::write(&p, "first").unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    std::fs::write(&p, "").unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    std::fs::write(&p, "last").unwrap();
+
+    // Act on every signal, as the service does, for a few seconds, noting what the file held
+    // when the watcher spoke.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    let mut seen_at_signal = Vec::new();
+    while let Ok(Some(())) = tokio::time::timeout_at(deadline, changes.recv()).await {
+        seen_at_signal.push(o.read("x.md").unwrap_or_default());
+        o.reconcile().await;
+    }
+    assert_eq!(seen_at_signal, vec!["last".to_string()]);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut publishes = 0;
+    while let Ok(e) = events.try_recv() {
+        if e == NodeEvent::Changed {
+            publishes += 1;
+        }
+    }
+    assert_eq!(publishes, 1);
+    assert_eq!(o.remote_hash("x.md").await, Some(Some(hash("last"))));
+    o.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_empty_file_never_publishes() {
+    let (mut o, mut w) = synced_pair("x.md").await;
+    o.write("x.md", "");
+    o.write("new.md", "");
+    o.reconcile().await;
+    assert_eq!(o.remote_hash("x.md").await, Some(Some(hash("one"))));
+    assert_eq!(o.remote_hash("new.md").await, None);
+    w.reconcile().await;
+    assert_eq!(w.read("x.md").as_deref(), Some("one"));
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[test]
+fn joining_refuses_a_non_empty_folder() {
+    let state = tempfile::tempdir().unwrap();
+    let full = tempfile::tempdir().unwrap();
+    std::fs::write(full.path().join("a.txt"), "x").unwrap();
+    assert!(Folder::new(full.path().to_path_buf(), state.path().join("a"), true).is_err());
+    // Creating from it is fine.
+    assert!(Folder::new(full.path().to_path_buf(), state.path().join("b"), false).is_ok());
+    let empty = tempfile::tempdir().unwrap();
+    assert!(Folder::new(empty.path().to_path_buf(), state.path().join("c"), true).is_ok());
+    let new = empty.path().join("new");
+    assert!(Folder::new(new.clone(), state.path().join("d"), true).is_ok());
+    assert!(new.is_dir());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn creating_shares_the_files_already_there() {
+    let mut o = owner_with(&[
+        ("a.md", "alpha"),
+        ("skills/b.md", "beta"),
+        ("c.txt", "local"),
+    ])
+    .await;
+    o.reconcile().await;
+    assert_eq!(o.remote_hash("a.md").await, Some(Some(hash("alpha"))));
+    assert_eq!(o.remote_hash("skills/b.md").await, Some(Some(hash("beta"))));
+    assert_eq!(o.remote_hash("c.txt").await, None);
+    let mut w = joiner(&o, "wren", Role::Writer).await;
+    w.settle("the shared files on the joiner", |s| {
+        s.read("a.md").as_deref() == Some("alpha")
+            && s.read("skills/b.md").as_deref() == Some("beta")
+    })
+    .await;
+    assert!(w.read("c.txt").is_none());
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+/// `link` in the owner's folder points at a folder outside it holding `secret.md`: nothing under
+/// it is shared, and a swarm entry under it is never written there.
+async fn links_are_not_followed(make_link: impl Fn(&Path, &Path)) {
+    let mut o = owner().await;
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.md"), "secret").unwrap();
+    make_link(outside.path(), &o.path("link"));
+    assert!(o.path("link").join("secret.md").exists());
+    o.write("x.md", "visible");
+    o.reconcile().await;
+    assert!(o.in_doc("x.md").await);
+    assert_eq!(o.remote_hash("link/secret.md").await, None);
+
+    o.node
+        .put_file(&rel("link/evil.md"), Bytes::from_static(b"evil"))
+        .await
+        .unwrap();
+    let events = o.reconcile().await;
+    assert!(
+        events.iter().any(|e| matches!(e, FolderEvent::Error(_))),
+        "{events:?}"
+    );
+    assert!(!outside.path().join("evil.md").exists());
+    o.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn symlinks_are_not_followed() {
+    links_are_not_followed(|target, link| std::os::unix::fs::symlink(target, link).unwrap()).await;
+    // A link to a single file isn't shared either.
+    let mut o = owner().await;
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("secret.md");
+    std::fs::write(&secret, "secret").unwrap();
+    std::os::unix::fs::symlink(&secret, o.path("file.md")).unwrap();
+    o.reconcile().await;
+    assert_eq!(o.remote_hash("file.md").await, None);
+    o.shutdown().await;
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn junctions_are_not_followed() {
+    links_are_not_followed(|target, link| junction::create(target, link).unwrap()).await;
+}

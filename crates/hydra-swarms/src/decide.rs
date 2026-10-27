@@ -3,6 +3,7 @@
 use crate::paths::{RelPath, conflict_name};
 use iroh_blobs::Hash;
 use jiff::{Timestamp, tz::TimeZone};
+use serde::{Deserialize, Serialize};
 
 /// The file on this machine. `hash` is None when the file is absent.
 pub struct Local {
@@ -20,7 +21,8 @@ pub struct Remote {
     pub machine: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Held {
     ReaderEdit,
     EditedAfterDelete,

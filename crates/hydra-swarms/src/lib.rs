@@ -2,6 +2,7 @@
 //! keys), the signed membership roster, each swarm's iroh node, and the invites and hydra
 //! protocol that bring machines in.
 pub mod decide;
+pub mod folder;
 pub mod ids;
 pub mod invites;
 pub mod node;

@@ -865,3 +865,27 @@ stopped keeps its sessions, so a person can look at what went wrong. Toasts abou
 terminals say which: **Claude finished** and **Claude needs you** are titled
 `<pipeline> · <ticket> · …`, the stopped-ticket toast's overline is `<PIPELINE> STOPPED · NEEDS
 YOU`, and the wake-up, Automatic and Check Linear toasts carry the pipeline's name too.
+
+## 31. One orchestrator, several tickets; Sessions and Pipelines apart (added 2026-10-27)
+
+Three things from using the Review PR's pipeline (Jordan, 2026-10-27):
+
+- **Tickets under one orchestrator.** `runs_at_once` used to start another orchestrator per
+  ticket ("Orchestrator 1, 2…", each with its sessions). Now one orchestrator holds up to
+  `runs_at_once` open runs, each with its own stage sessions, so related pull requests are seen
+  by the one conversation that can relate them. `run_start` refuses a ticket already open, or
+  once that many are open; `run_status` with no run returns every open run (`open_runs`);
+  `stage_start` with no run asks which when several are open. Its card reads *N tickets in
+  progress*; under its row, each ticket's line (click opens its Pipeline tab) then that
+  ticket's sessions; the tab row has a Pipeline tab per ticket, by ticket. Wake-ups for
+  different tickets are joined, not replaced (`join_wake`). After a restart, tickets of the
+  same orchestrator conversation come back under one terminal. A second orchestrator is only
+  ever started by hand.
+- **Every PR in a message.** A message with several PR links gets one 👀 and a run per link,
+  each told the others it was posted with. The watcher keeps looking while the orchestrator is
+  full: what it takes waits in the queue, already marked, so nobody else picks it up (before,
+  it stopped looking while a review ran and others took those messages).
+- **Sessions · Pipelines.** The left list has two tabs: Sessions (Open session and your own
+  terminals) and Pipelines (Start pipeline, Create pipeline, interrupted runs and each
+  pipeline's block). It opens on Pipelines when any run here, and switches to whichever holds
+  a terminal shown from a toast or link.

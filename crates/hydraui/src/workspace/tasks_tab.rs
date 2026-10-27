@@ -513,6 +513,28 @@ impl Workspace {
                 continue;
             }
             let here = m == id;
+            // An orchestrator holding several tickets: a Pipeline tab for each, by ticket.
+            let lanes = self.lanes(m, cx);
+            if !lanes.is_empty() {
+                let chosen = self.pipeline_tabs.get(&m).and_then(|t| t.run.clone());
+                let first = lanes.last().map(|l| l.0.id.clone()).unwrap_or_default();
+                for (run, _, _) in lanes {
+                    let picked = chosen.as_deref().unwrap_or(first.as_str()) == run.id;
+                    let id_for = run.id.clone();
+                    strip = strip.child(
+                        tab(
+                            &format!("pipeline-run-{}", run.id),
+                            m,
+                            here && pipeline_shown && picked,
+                        )
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.open_pipeline_run(m, id_for.clone(), window, cx)
+                        }))
+                        .child(run.ticket.clone()),
+                    );
+                }
+                continue;
+            }
             strip = strip.child(
                 tab("pipeline-tab", m, here && pipeline_shown)
                     .on_click(cx.listener(move |ws, _, window, cx| {

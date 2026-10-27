@@ -294,6 +294,14 @@ impl Runs {
         self.runs.iter()
     }
 
+    /// The runs `orchestrator` holds open, oldest first.
+    pub fn open_of(&self, orchestrator: &str) -> Vec<&Run> {
+        self.runs
+            .iter()
+            .filter(|r| r.orchestrator == orchestrator && r.state.open())
+            .collect()
+    }
+
     /// The latest run `orchestrator` started.
     pub fn current(&self, orchestrator: &str) -> Option<&Run> {
         self.runs
@@ -327,8 +335,9 @@ impl Runs {
         }
     }
 
-    /// Starts a run of `pipeline` for `ticket`, owned by the terminal `orchestrator`. One open
-    /// run per orchestrator (the user's decision: one ticket at a time).
+    /// Starts a run of `pipeline` for `ticket`, owned by the terminal `orchestrator`. One
+    /// orchestrator holds up to the pipeline's `runs_at_once` open runs, each its own ticket
+    /// with its own stage sessions under it (one at a time unless the pipeline says more).
     pub fn start_run(
         &mut self,
         orchestrator: &str,
@@ -356,15 +365,30 @@ impl Runs {
         if self.stage_of(orchestrator).is_some() {
             return Err("a stage session can't start a run".into());
         }
-        if let Some(r) = self
-            .runs
-            .iter()
-            .find(|r| r.orchestrator == orchestrator && r.state.open())
+        let open: Vec<&str> = self
+            .open_of(orchestrator)
+            .into_iter()
+            .map(|r| r.id.as_str())
+            .collect();
+        if let Some(same) = self
+            .open_of(orchestrator)
+            .into_iter()
+            .find(|r| r.ticket.eq_ignore_ascii_case(ticket))
         {
-            return Err(format!(
-                "run {} isn't finished or stopped: one ticket at a time",
-                r.id
-            ));
+            return Err(format!("{ticket} is already running as {}", same.id));
+        }
+        let most = usize::from(pipeline.runs_at_once.max(1));
+        if open.len() >= most {
+            return Err(match most {
+                1 => format!(
+                    "run {} isn't finished or stopped: one ticket at a time",
+                    open[0]
+                ),
+                n => format!(
+                    "{n} tickets are open already ({}), the most this pipeline runs at once",
+                    open.join(", ")
+                ),
+            });
         }
         let id = (self.runs.iter().filter(|r| r.ticket == ticket).count() + 1..)
             .map(|n| format!("{ticket}-{n}"))
@@ -1745,6 +1769,38 @@ mod tests {
         let e = runs.person(&id, checked("fine")).unwrap_err();
         assert!(e.contains("asked a person to check"), "{e}");
         assert_eq!(status(&runs, &id, 1), StageStatus::Stopped);
+    }
+
+    #[test]
+    fn one_orchestrator_holds_up_to_runs_at_once_tickets() {
+        let mut runs = Runs::default();
+        let mut p = pipeline(&["a"]);
+        p.runs_at_once = 2;
+        let first = runs
+            .start_run("orch", p.clone(), "PR-1", "x")
+            .unwrap()
+            .id
+            .clone();
+        let e = runs.start_run("orch", p.clone(), "pr-1", "x").unwrap_err();
+        assert!(e.contains("already running as PR-1-1"), "{e}");
+        let second = runs
+            .start_run("orch", p.clone(), "PR-2", "y")
+            .unwrap()
+            .id
+            .clone();
+        let e = runs.start_run("orch", p.clone(), "PR-3", "z").unwrap_err();
+        assert!(
+            e.contains("2 tickets are open already (PR-1-1, PR-2-1)"),
+            "{e}"
+        );
+        let open: Vec<&str> = runs.open_of("orch").iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(open, [first.as_str(), second.as_str()]);
+        // Each run's stages go on by themselves.
+        started(&mut runs, &first, "a", "t1");
+        started(&mut runs, &second, "a", "t2");
+        runs.report("t2", rated(90)).unwrap();
+        assert_eq!(runs.open_of("orch").len(), 1);
+        assert!(runs.start_run("orch", p, "PR-3", "z").is_ok());
     }
 
     #[test]

@@ -33,8 +33,10 @@ pub fn schemas() -> Vec<Value> {
             "description": "Orchestrator: start a run of one ticket through a pipeline's stages. \
                 Returns the run's id, its stages with their skills and confidence bars, and the \
                 first stage. You coordinate: start each stage with stage_start and never do a \
-                stage's work yourself. One ticket at a time: refused while your last run is still \
-                going or waiting for a person.",
+                stage's work yourself. You may hold as many tickets at once as the pipeline's \
+                runs_at_once (one unless it says more): each run has its own id and its own \
+                stage sessions, and hydraui's messages name the run they're about. Refused \
+                when that many are still going or waiting for a person.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -76,7 +78,8 @@ pub fn schemas() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "run": string("The run's id; your current run when left out."),
+                    "run": string("The run's id; left out, your only open run (or latest), and \
+                        when you hold several open, each of them."),
                 },
             },
         }),
@@ -302,7 +305,23 @@ fn stage_start(
     stage: &str,
     brief: &str,
 ) -> (Outcome, Option<McpEvent>) {
+    let open: Vec<String> = reg
+        .runs
+        .open_of(token)
+        .iter()
+        .map(|r| r.id.clone())
+        .collect();
     let run = match run {
+        "" if open.len() > 1 => {
+            return (
+                Outcome::err(format!(
+                    "you hold {} tickets ({}): say which run",
+                    open.len(),
+                    open.join(", ")
+                )),
+                None,
+            );
+        }
         "" => reg
             .runs
             .current(token)
@@ -335,6 +354,15 @@ fn stage_start(
 }
 
 fn run_status(reg: &Registry, token: &str, run: &str) -> Outcome {
+    let live = |t: &str| reg.session(t).map(super::SessionState::word);
+    let open = reg.runs.open_of(token);
+    if run.is_empty() && open.len() > 1 {
+        let all: Vec<Value> = open
+            .iter()
+            .map(|r| reg.runs.status_json(r, reg.min_week_left, live))
+            .collect();
+        return Outcome::ok(pretty(&json!({ "open_runs": all })));
+    }
     let found = match run {
         "" => reg.runs.current(token),
         id => reg.runs.run(id),
@@ -344,10 +372,7 @@ fn run_status(reg: &Registry, token: &str, run: &str) -> Outcome {
         Some(r) if r.orchestrator != token => {
             Outcome::err("only the run's orchestrator reads its status")
         }
-        Some(r) => {
-            let live = |t: &str| reg.session(t).map(super::SessionState::word);
-            Outcome::ok(pretty(&reg.runs.status_json(r, reg.min_week_left, live)))
-        }
+        Some(r) => Outcome::ok(pretty(&reg.runs.status_json(r, reg.min_week_left, live))),
     }
 }
 

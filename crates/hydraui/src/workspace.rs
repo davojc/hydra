@@ -159,6 +159,8 @@ pub struct Workspace {
     /// The divider between the panes and the tree is being dragged.
     tree_drag: bool,
     list_width: f32,
+    /// The list's tab the user picked; `None` shows Pipelines when any run here, else Sessions.
+    list_tab: Option<terminal_list::ListTab>,
     /// The divider between the terminal list and the middle is being dragged.
     list_drag: bool,
     /// The terminal list is collapsed: the middle takes its room.
@@ -230,8 +232,11 @@ pub struct Workspace {
     /// next hook state, or 30 s (auto-pickup design §6).
     reserved: HashMap<PaneId, Instant>,
     /// Each orchestrator's wake-up waiting to be typed, with its run (orchestrator spec §6): the
-    /// newest only.
+    /// newest for each of its tickets, joined (`join_wake`).
     pending_wakes: HashMap<PaneId, (String, String)>,
+    /// The terminal each resumed orchestrator conversation reopened in, by its Claude session,
+    /// so its other tickets come back under it.
+    resumed_orchestrators: HashMap<String, PaneId>,
     /// Wake-ups typed but not yet seen to start the session working: (run, message, when,
     /// times sent). One that doesn't take (a Claude Code prompt was open) is sent again.
     sent_wakes: HashMap<PaneId, (String, String, Instant, u8)>,
@@ -430,6 +435,7 @@ impl Workspace {
             tree_width: DEFAULT_TREE_WIDTH,
             tree_drag: false,
             list_width: DEFAULT_LIST_WIDTH,
+            list_tab: None,
             list_drag: false,
             list_hidden: false,
             focus: cx.focus_handle(),
@@ -466,6 +472,7 @@ impl Workspace {
             board_events: HashMap::new(),
             reserved: HashMap::new(),
             pending_wakes: HashMap::new(),
+            resumed_orchestrators: HashMap::new(),
             sent_wakes: HashMap::new(),
             wake_tries: HashMap::new(),
             ask_checks: HashMap::new(),
@@ -716,6 +723,7 @@ impl Workspace {
             .env_of(id)
             .is_some_and(|env| self.all_tasks.remove(env))
             | self.settings.take().is_some();
+        let left = left | self.reveal_in_list(id, cx);
         if self.envs.show(id) || left {
             self.shown_changed(window, cx);
         }

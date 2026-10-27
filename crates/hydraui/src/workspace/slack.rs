@@ -52,8 +52,9 @@ impl Workspace {
         self.slack_queues.get(file).map_or(0, VecDeque::len)
     }
 
-    /// Each second, for a `[slack]` orchestrator with no run open: the next waiting pull
-    /// request is started; with none waiting, a look is due (`true`) by the usual timer.
+    /// Each second, for a `[slack]` orchestrator: the next waiting pull request starts when an
+    /// orchestrator has room (`false`: the look waits a tick); otherwise a look is due (`true`)
+    /// by the usual timer, full or not.
     pub(super) fn slack_tick(
         &mut self,
         orch: PaneId,
@@ -103,10 +104,10 @@ impl Workspace {
             );
         }
         if self.slack_queue(&pipeline.file).is_empty() {
-            return self.can_take(orch, cx);
+            return true;
         }
         let Some(slot) = self.slot_for_work(orch, window, cx) else {
-            return false;
+            return true;
         };
         self.start_next_pr(orch, slot, &pipeline, &settings, window, cx);
         false
@@ -136,7 +137,7 @@ impl Workspace {
             pipeline.file, pr.ticket, pr.url
         ));
         let prompt = slack_watch::start_prompt(pipeline, settings, &pr);
-        self.pending_wakes.insert(slot, (pr.ticket.clone(), prompt));
+        self.queue_wake(slot, pr.ticket.clone(), prompt);
         self.send_wakes(window, cx);
         cx.notify();
     }

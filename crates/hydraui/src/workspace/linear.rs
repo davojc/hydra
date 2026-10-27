@@ -193,11 +193,12 @@ impl Workspace {
         self.slots(orch, cx)[0]
     }
 
-    /// One of `orch`'s pipeline's orchestrators that can take a ticket now: no run open, no
-    /// ticket on its way to it.
+    /// One of `orch`'s pipeline's orchestrators that can take a ticket now: fewer open runs
+    /// than `runs_at_once`, no ticket on its way to it.
     pub(super) fn free_slot(&self, orch: PaneId, cx: &gpui::App) -> Option<PaneId> {
+        let most = self.max_runs(orch);
         self.slots(orch, cx).into_iter().find(|s| {
-            !self.has_open_run(*s, cx)
+            self.open_runs_of(*s, cx).len() < most
                 && !self.pending_wakes.contains_key(s)
                 && self
                     .linear_watch
@@ -207,10 +208,9 @@ impl Workspace {
         })
     }
 
-    /// Whether `orch`'s pipeline can take another ticket now: a free orchestrator, or room for
-    /// one more (`runs_at_once`).
+    /// Whether `orch`'s pipeline can take another ticket now: an orchestrator with room.
     pub(super) fn can_take(&self, orch: PaneId, cx: &gpui::App) -> bool {
-        self.free_slot(orch, cx).is_some() || self.slots(orch, cx).len() < self.max_runs(orch)
+        self.free_slot(orch, cx).is_some()
     }
 
     /// `orch`'s pipeline's `runs_at_once`.
@@ -218,35 +218,22 @@ impl Workspace {
         self.orchestrators
             .get(&orch)
             .and_then(|f| crate::pipeline::load(self.hydra.paths.root(), f).ok())
-            .map_or(1, |p| usize::from(p.runs_at_once))
+            .map_or(1, |p| usize::from(p.runs_at_once.max(1)))
     }
 
-    /// The orchestrator a new ticket goes to: a free one, else a new one when the pipeline may
-    /// run another (each starts only when the others are busy and work is waiting).
+    /// The orchestrator a new ticket goes to: one with room for another run (`runs_at_once`
+    /// tickets side by side under one orchestrator); `None` while every one is full.
     pub(super) fn slot_for_work(
         &mut self,
         orch: PaneId,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<PaneId> {
-        if let Some(slot) = self.free_slot(orch, cx) {
-            return Some(slot);
-        }
-        let slots = self.slots(orch, cx);
-        if slots.len() >= self.max_runs(orch) {
-            return None;
-        }
-        let file = self.orchestrators.get(&orch)?.clone();
-        let env = self.panes.get(&orch)?.read(cx).env().to_string();
-        crate::action_log::write(format!(
-            "{file}: every orchestrator is busy, starting orchestrator {}",
-            slots.len() + 1
-        ));
-        Some(self.open_orchestrator_slot(&env, &file, window, cx))
+        self.free_slot(orch, cx)
     }
 
-    /// Whether `orch` has a run open (one ticket at a time).
-    pub(super) fn has_open_run(&self, orch: PaneId, cx: &gpui::App) -> bool {
+    /// The tickets `orch` holds open, oldest first.
+    pub(super) fn open_runs_of(&self, orch: PaneId, cx: &gpui::App) -> Vec<String> {
         let token = self
             .panes
             .get(&orch)
@@ -254,9 +241,11 @@ impl Workspace {
         match (token, server::get()) {
             (Some(token), Some(sv)) => server::lock(sv.registry())
                 .runs
-                .current(&token)
-                .is_some_and(|r| r.state.open()),
-            _ => false,
+                .open_of(&token)
+                .iter()
+                .map(|r| r.ticket.clone())
+                .collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -272,20 +261,16 @@ impl Workspace {
         server::get().is_some_and(|sv| {
             server::lock(sv.registry())
                 .runs
-                .current(&token)
-                .is_some_and(|r| r.asking.is_some())
+                .open_of(&token)
+                .iter()
+                .any(|r| r.asking.is_some())
         })
     }
 
-    /// The ticket of `orch`'s run in progress.
+    /// The tickets of `orch`'s runs in progress, as one phrase.
     fn open_run_ticket(&self, orch: PaneId, cx: &gpui::App) -> Option<String> {
-        let token = self.panes.get(&orch)?.read(cx).mcp_token()?.to_string();
-        let sv = server::get()?;
-        let reg = server::lock(sv.registry());
-        reg.runs
-            .current(&token)
-            .filter(|r| r.state.open())
-            .map(|r| r.ticket.clone())
+        let open = self.open_runs_of(orch, cx);
+        (!open.is_empty()).then(|| open.join(", "))
     }
 
     /// **Pick tickets automatically**: on looks at once; only one orchestrator may watch a team
@@ -391,7 +376,13 @@ impl Workspace {
         let started: Vec<PaneId> = self
             .linear_watch
             .iter()
-            .filter(|(id, w)| w.starting.is_some() && self.has_open_run(**id, cx))
+            .filter(|(id, w)| {
+                w.starting.as_ref().is_some_and(|(ticket, _)| {
+                    self.open_runs_of(**id, cx)
+                        .iter()
+                        .any(|t| t.eq_ignore_ascii_case(ticket))
+                })
+            })
             .map(|(id, _)| *id)
             .collect();
         for id in started {
@@ -431,9 +422,12 @@ impl Workspace {
                         .map_or(5, |(_, s, _)| s.every_minutes),
                 };
                 let w = &self.linear_watch[id];
+                // A Slack watcher keeps looking while its orchestrators are full: what it
+                // takes waits in its queue, marked, so nobody else picks it up meanwhile.
+                let busy = self.slack_of(*id, cx).is_none() && !self.can_take(*id, cx);
                 linear_watch::due(
                     w.on,
-                    !self.can_take(*id, cx),
+                    busy,
                     w.last,
                     now,
                     Duration::from_secs(u64::from(every) * 60),
@@ -821,12 +815,13 @@ impl Workspace {
         }
         let w = self.linear_watch.get(&orch);
         // With several runs at once, the next waits only while every one is busy.
-        let open_run = if slots.len() == 1 {
+        let open_run = if self.max_runs(orch) == 1 && slots.len() == 1 {
             self.open_run_ticket(orch, cx)
         } else {
-            self.free_slot(orch, cx)
-                .is_none()
-                .then(|| format!("all {} running", slots.len()))
+            self.free_slot(orch, cx).is_none().then(|| {
+                let open: usize = slots.iter().map(|s| self.open_runs_of(*s, cx).len()).sum();
+                format!("all {open} running")
+            })
         };
         let (mode, line) = linear_watch::trigger(&linear_watch::TriggerFacts {
             on: w.is_some_and(|w| w.on),

@@ -189,6 +189,18 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
     })
 }
 
+/// The wake-up waiting for an orchestrator after `new` for run `run` joins `waiting`: a newer
+/// one for the same run replaces it; one for another of its tickets is added, so an
+/// orchestrator holding several tickets hears about each.
+pub fn join_wake(waiting: Option<(String, String)>, run: String, new: String) -> (String, String) {
+    match waiting {
+        Some((old_run, old)) if old_run != run && !old.contains(&new) => {
+            (run, format!("{old} {new}"))
+        }
+        _ => (run, new),
+    }
+}
+
 /// Keys a run's escalation toast, so a newer one for the same run replaces it.
 struct RunAlert;
 
@@ -382,22 +394,39 @@ impl Workspace {
         } else {
             self.env_cwd(&i.env, cx)
         };
-        let mut request = PaneRequest::new(&i.env, folder.clone(), shell);
-        request.command = Some(command_line(
-            shell,
-            &[
-                "claude".into(),
-                "--resume".into(),
-                i.claude.clone(),
-                resume_prompt(&run_id, &i.run.ticket),
-            ],
-        ));
-        let id = self.open_terminal(&i.env, request, window, cx);
-        self.starting_up.insert(id, std::time::Instant::now());
+        // Another ticket of the same orchestrator came back already: this one joins it there,
+        // rather than a second terminal resuming the same conversation.
+        let joined = self
+            .resumed_orchestrators
+            .get(&i.claude)
+            .copied()
+            .filter(|p| self.panes.contains_key(p));
+        let id = match joined {
+            Some(p) => {
+                self.queue_wake(p, run_id.clone(), resume_prompt(&run_id, &i.run.ticket));
+                p
+            }
+            None => {
+                let mut request = PaneRequest::new(&i.env, folder.clone(), shell);
+                request.command = Some(command_line(
+                    shell,
+                    &[
+                        "claude".into(),
+                        "--resume".into(),
+                        i.claude.clone(),
+                        resume_prompt(&run_id, &i.run.ticket),
+                    ],
+                ));
+                let id = self.open_terminal(&i.env, request, window, cx);
+                self.starting_up.insert(id, std::time::Instant::now());
+                self.resumed_orchestrators.insert(i.claude.clone(), id);
+                id
+            }
+        };
         let Some(view) = self.panes.get(&id).cloned() else {
             return;
         };
-        // Numbered like a fresh one when its pipeline runs several at once.
+        // Numbered like a fresh one when another orchestrator runs its pipeline already.
         let n = self
             .orchestrators
             .iter()
@@ -406,13 +435,15 @@ impl Workspace {
                     && self.panes.get(o).is_some_and(|v| v.read(cx).env() == i.env)
             })
             .count();
-        let name = if i.run.pipeline.runs_at_once > 1 {
+        let name = if n > 0 {
             format!("Orchestrator {}", n + 1)
         } else {
             "Orchestrator".to_string()
         };
-        view.update(cx, |v, cx| v.set_name(Some(name), cx));
-        self.orchestrators.insert(id, i.run.pipeline.file.clone());
+        if joined.is_none() {
+            view.update(cx, |v, cx| v.set_name(Some(name), cx));
+            self.orchestrators.insert(id, i.run.pipeline.file.clone());
+        }
         let (Some(token), Some(sv)) =
             (view.read(cx).mcp_token().map(str::to_string), server::get())
         else {
@@ -803,7 +834,7 @@ impl Workspace {
                 .find(|(_, v)| v.read(cx).mcp_token() == Some(token.as_str()))
                 .map(|(id, _)| *id);
             if let Some(pane) = pane {
-                self.pending_wakes.insert(pane, (run, message));
+                self.queue_wake(pane, run, message);
             }
         }
         self.send_wakes(window, cx);
@@ -915,6 +946,7 @@ impl Workspace {
         if !window.is_window_active() {
             crate::claim::flash(crate::claim::hwnd_of(window));
         }
+        let run_owned = run_id.to_string();
         let ws = cx.entity();
         let note = Notification::new()
             .id1::<RunAlert>(SharedString::from(format!("run-{run_id}")))
@@ -923,6 +955,7 @@ impl Workspace {
             .bg(color(theme::TOAST))
             .border_color(color(theme::RED_BORDER))
             .content(move |_, _, cx| {
+                let run = run_owned.clone();
                 let ws = ws.clone();
                 v_flex()
                     .gap_1()
@@ -960,7 +993,10 @@ impl Workspace {
                                     .primary()
                                     .on_click(cx.listener(move |note, _, window, cx| {
                                         note.dismiss(window, cx);
-                                        ws.update(cx, |ws, cx| ws.open_pipeline(orch, window, cx));
+                                        let run = run.clone();
+                                        ws.update(cx, |ws, cx| {
+                                            ws.open_pipeline_run(orch, run, window, cx)
+                                        });
                                     })),
                             )
                             .child(Button::new("later").label("Later").ghost().on_click(
@@ -1064,7 +1100,7 @@ impl Workspace {
             ));
             // Back out, with the tries already made counted.
             self.wake_tries.insert(pane, tries);
-            self.pending_wakes.insert(pane, (run, message));
+            self.queue_wake(pane, run, message);
         }
         self.send_wakes(window, cx);
     }
@@ -1080,7 +1116,7 @@ impl Workspace {
             .pipeline_of(orch, cx)
             .map_or_else(|| "this pipeline".to_string(), |(n, _)| n);
         let slots = self.slots(orch, cx);
-        let open = slots.iter().filter(|s| self.has_open_run(**s, cx)).count();
+        let open: usize = slots.iter().map(|s| self.open_runs_of(*s, cx).len()).sum();
         let tickets = match open {
             0 => "No ticket is in progress.".to_string(),
             1 => "Its ticket in progress is stopped, recorded as stopped by you.".to_string(),
@@ -1141,14 +1177,18 @@ impl Workspace {
                 .panes
                 .get(s)
                 .and_then(|v| v.read(cx).mcp_token().map(str::to_string));
-            let run = token.zip(server::get()).and_then(|(t, sv)| {
-                server::lock(sv.registry())
-                    .runs
-                    .current(&t)
-                    .filter(|r| r.state.open())
-                    .map(|r| r.id.clone())
-            });
-            if let Some(run) = run {
+            let open: Vec<String> = token
+                .zip(server::get())
+                .map(|(t, sv)| {
+                    server::lock(sv.registry())
+                        .runs
+                        .open_of(&t)
+                        .iter()
+                        .map(|r| r.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            for run in open {
                 self.person_choice(*s, &run, crate::runs::Choice::Stop, window, cx);
             }
         }
@@ -1200,6 +1240,14 @@ impl Workspace {
         }
     }
 
+    /// Queues `message` about `run` for orchestrator `pane` (`join_wake`), typed when it's
+    /// ready for a prompt.
+    pub(super) fn queue_wake(&mut self, pane: PaneId, run: String, message: String) {
+        let waiting = self.pending_wakes.remove(&pane);
+        self.pending_wakes
+            .insert(pane, join_wake(waiting, run, message));
+    }
+
     /// The name and colour of the pipeline terminal `pane` belongs to, when it belongs to one.
     pub(super) fn pipeline_of(&self, pane: PaneId, cx: &gpui::App) -> Option<(String, u32)> {
         self.pipeline_cards(cx)
@@ -1229,6 +1277,25 @@ impl Workspace {
         tokens
             .iter()
             .filter_map(|(id, token)| {
+                // Several tickets under one orchestrator: one card for them all, and every
+                // ticket's sessions under it.
+                let open = reg.runs.open_of(token);
+                if open.len() > 1 {
+                    let cards: Vec<Card> = open.iter().map(|r| self.card_now(r)).collect();
+                    let mut c = crate::pipeline_card::group_card(&cards.iter().collect::<Vec<_>>());
+                    c.line = format!("{} tickets in progress", open.len());
+                    let panes = std::iter::once(*id)
+                        .chain(open.iter().flat_map(|r| {
+                            crate::pipeline_card::stage_tokens(r)
+                                .into_iter()
+                                .filter_map(|t| {
+                                    tokens.iter().find(|(_, x)| *x == t).map(|(p, _)| *p)
+                                })
+                                .collect::<Vec<_>>()
+                        }))
+                        .collect();
+                    return Some((*id, c, panes));
+                }
                 let Some(run) = reg.runs.current(token) else {
                     // Started from the launcher, no ticket yet: the card of its pipeline.
                     let file = self.orchestrators.get(id)?;
@@ -1239,12 +1306,54 @@ impl Workspace {
                     .iter()
                     .filter_map(|t| tokens.iter().find(|(_, x)| x == t).map(|(p, _)| *p))
                     .collect();
-                // The colour as the file has it now, so a change in Settings shows at once.
-                let mut c = card(run);
-                if let Ok(p) = crate::pipeline::load(root, &run.pipeline.file) {
-                    c.accent = crate::pipeline_card::accent(&p);
-                }
-                Some((*id, c, panes))
+                Some((*id, self.card_now(run), panes))
+            })
+            .collect()
+    }
+
+    /// `run`'s card, in its pipeline's colour as the file has it now, so a change in Settings
+    /// shows at once.
+    fn card_now(&self, run: &Run) -> Card {
+        let mut c = card(run);
+        if let Ok(p) = crate::pipeline::load(self.hydra.paths.root(), &run.pipeline.file) {
+            c.accent = crate::pipeline_card::accent(&p);
+        }
+        c
+    }
+
+    /// The tickets orchestrator `orch` holds open, each with its card and the terminals of its
+    /// stage sessions; empty unless it holds more than one.
+    pub(super) fn lanes(&self, orch: PaneId, cx: &gpui::App) -> Vec<(Run, Card, Vec<PaneId>)> {
+        let (Some(token), Some(sv)) = (
+            self.panes
+                .get(&orch)
+                .and_then(|v| v.read(cx).mcp_token().map(str::to_string)),
+            server::get(),
+        ) else {
+            return Vec::new();
+        };
+        let open: Vec<Run> = server::lock(sv.registry())
+            .runs
+            .open_of(&token)
+            .into_iter()
+            .cloned()
+            .collect();
+        if open.len() < 2 {
+            return Vec::new();
+        }
+        open.into_iter()
+            .map(|r| {
+                let panes = crate::pipeline_card::stage_tokens(&r)
+                    .iter()
+                    .filter_map(|t| {
+                        self.panes
+                            .iter()
+                            .find(|(_, v)| v.read(cx).mcp_token() == Some(t.as_str()))
+                            .map(|(id, _)| *id)
+                    })
+                    .collect();
+                let c = self.card_now(&r);
+                (r, c, panes)
             })
             .collect()
     }
@@ -1260,8 +1369,15 @@ impl Workspace {
             .flat_map(|t| t.terminals.iter())
             .filter_map(|id| {
                 let token = self.panes.get(id)?.read(cx).mcp_token()?.to_string();
-                reg.runs.current(&token).filter(|r| r.state.open()).cloned()
+                Some(
+                    reg.runs
+                        .open_of(&token)
+                        .into_iter()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
             })
+            .flatten()
             .collect()
     }
 
@@ -1469,18 +1585,28 @@ impl Workspace {
         &self,
         orchestrator: PaneId,
         c: &Card,
+        run: Option<&Run>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (fg, bg) = pill_colors(c.state, c.accent);
+        let id = run.map(|r| r.id.clone());
+        let link = match run {
+            Some(r) => Some((r.ticket.clone(), crate::linear_watch::pr_links(r))),
+            None => self.current_ticket(orchestrator, cx),
+        };
         v_flex()
-            .id(SharedString::from(format!("run-line-{orchestrator}")))
+            .id(SharedString::from(format!(
+                "run-line-{orchestrator}-{}",
+                id.as_deref().unwrap_or("")
+            )))
             .ml(px(26.))
             .mr_1()
             .gap_0p5()
             .cursor_pointer()
-            .on_click(
-                cx.listener(move |ws, _, window, cx| ws.open_pipeline(orchestrator, window, cx)),
-            )
+            .on_click(cx.listener(move |ws, _, window, cx| match id.clone() {
+                Some(run) => ws.open_pipeline_run(orchestrator, run, window, cx),
+                None => ws.open_pipeline(orchestrator, window, cx),
+            }))
             .child(
                 h_flex()
                     .gap_2()
@@ -1505,10 +1631,7 @@ impl Workspace {
                             .child(c.state.word()),
                     ),
             )
-            .children(
-                self.current_ticket(orchestrator, cx)
-                    .and_then(|(t, prs)| self.render_ticket_link(&t, &prs, c.accent)),
-            )
+            .children(link.and_then(|(t, prs)| self.render_ticket_link(&t, &prs, c.accent)))
             .into_any_element()
     }
 
@@ -1628,6 +1751,16 @@ fn pill_colors(state: CardState, accent: u32) -> (gpui::Hsla, gpui::Hsla) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wake_ups_for_different_tickets_add_up_and_one_ticket_keeps_its_newest() {
+        let first = super::join_wake(None, "A-1".into(), "A passed.".into());
+        assert_eq!(first, ("A-1".into(), "A passed.".into()));
+        let newer = super::join_wake(Some(first.clone()), "A-1".into(), "A needs you.".into());
+        assert_eq!(newer.1, "A needs you.");
+        let both = super::join_wake(Some(first), "B-1".into(), "B passed.".into());
+        assert_eq!(both, ("B-1".into(), "A passed. B passed.".into()));
+    }
+
     use serde_json::json;
 
     use super::*;

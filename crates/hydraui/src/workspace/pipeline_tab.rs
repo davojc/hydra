@@ -51,6 +51,8 @@ pub(super) struct PipelineTab {
     pub stepped_in: bool,
     /// **Stop this ticket** is asking to be confirmed.
     pub confirm_stop: bool,
+    /// The run this tab shows, when its orchestrator holds several; `None` follows its latest.
+    pub run: Option<String>,
 }
 
 /// What the tab draws, copied out of the registry so its lock isn't held while drawing.
@@ -141,6 +143,18 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Opens orchestrator `orch`'s Pipeline tab on run `run`, one of the tickets it holds.
+    pub(super) fn open_pipeline_run(
+        &mut self,
+        orch: PaneId,
+        run: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_pipeline(orch, window, cx);
+        self.pipeline_tab_update(orch, cx, |t| t.run = Some(run));
+    }
+
     /// Shows orchestrator `orch`'s Pipeline tab at `view`, opening the tab when it has none.
     pub(super) fn show_pipeline_view(
         &mut self,
@@ -217,7 +231,13 @@ impl Workspace {
             };
         };
         let reg = server::lock(sv.registry());
-        let run = reg.runs.current(&token).cloned();
+        let chosen = self
+            .pipeline_tabs
+            .get(&orch)
+            .and_then(|t| t.run.as_deref())
+            .and_then(|id| reg.runs.run(id))
+            .filter(|r| r.orchestrator == token);
+        let run = chosen.or_else(|| reg.runs.current(&token)).cloned();
         let live = run
             .iter()
             .flat_map(|r| r.stages.iter().flat_map(|s| &s.attempts))
@@ -674,7 +694,7 @@ impl Workspace {
         let message = "The user wants the next ticket. Ask them which one if they haven't said, \
                        then start it with run_start."
             .to_string();
-        self.pending_wakes.insert(orch, (run, message));
+        self.queue_wake(orch, run, message);
         self.send_wakes(window, cx);
     }
 

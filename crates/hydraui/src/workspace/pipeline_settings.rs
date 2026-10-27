@@ -1077,10 +1077,10 @@ impl Workspace {
                                                 .gap_2()
                                                 .child(section_tip(
                                                     "Tickets at once",
-                                                    "One at a time: one orchestrator, one ticket \
-                                                     after another. Up to N: when every \
-                                                     orchestrator is busy and more work is \
-                                                     waiting, another starts, up to N.",
+                                                    "One at a time: one ticket after another. Up \
+                                                     to N: the orchestrator runs up to N tickets \
+                                                     side by side, each with its own sessions \
+                                                     under it, so it sees how they relate.",
                                                 ))
                                                 .child(runs_buttons(orch, draft.runs, cx)),
                                         )

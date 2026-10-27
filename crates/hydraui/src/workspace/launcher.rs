@@ -642,10 +642,8 @@ impl Workspace {
     ) -> crate::envs::PaneId {
         let open = self.open_slots(env, pipeline, cx);
         let first = open == 0;
-        let want = crate::pipeline::load(self.hydra.paths.root(), pipeline)
-            .map_or(1, |p| usize::from(p.runs_at_once));
-        // Several at once are numbered under the pipeline's card.
-        let name = if want > 1 {
+        // One orchestrator holds a pipeline's tickets; a second one, started by hand, is numbered.
+        let name = if open > 0 {
             format!("Orchestrator {}", open + 1)
         } else {
             "Orchestrator".to_string()

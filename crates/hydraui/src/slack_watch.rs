@@ -1,5 +1,6 @@
 //! A `[slack]` pipeline's watcher: which messages in its channel to take, marking each with the
-//! reaction, and the pull requests that become its runs, one at a time. The calls are
+//! reaction, and the pull requests that become its runs, side by side under one orchestrator
+//! up to the pipeline's `runs_at_once`. The calls are
 //! `slack::Http`'s, made off the UI thread; what waits to run is kept in a file, so a restart
 //! doesn't lose pull requests whose message is already marked.
 
@@ -24,6 +25,9 @@ pub struct Queued {
     /// Times it was handed to an orchestrator that didn't start it.
     #[serde(default)]
     pub tries: u8,
+    /// The other pull requests posted in the same message, which may be related.
+    #[serde(default)]
+    pub with: Vec<String>,
 }
 
 impl Queued {
@@ -34,6 +38,7 @@ impl Queued {
             title: pr.title(),
             by: by.to_string(),
             tries: 0,
+            with: Vec::new(),
         }
     }
 }
@@ -103,18 +108,34 @@ pub fn find_and_mark(
         }
         // Marked first: if that fails, nothing is queued, and the next look tries again.
         api.react(&settings.channel, &m.ts, &settings.reaction)?;
-        found
-            .queued
-            .extend(theirs.iter().map(|p| Queued::of(p, &m.user)));
+        // One reaction for the message, a run for each pull request in it, each told the others.
+        found.queued.extend(theirs.iter().map(|p| {
+            let mut q = Queued::of(p, &m.user);
+            q.with = theirs
+                .iter()
+                .filter(|o| o.url != p.url)
+                .map(|o| o.url.clone())
+                .collect();
+            q
+        }));
     }
     Ok(found)
 }
 
 /// What the orchestrator is told to start the next pull request.
 pub fn start_prompt(pipeline: &Pipeline, settings: &SlackSettings, pr: &Queued) -> String {
+    let with = match pr.with.as_slice() {
+        [] => String::new(),
+        others => format!(
+            " It was posted in the same message as {}, so they may be related: say so to their \
+             stages when it matters.",
+            others.join(" and ")
+        ),
+    };
     format!(
         "A pull request was posted in {channel}: {url}. Start it: call run_start with pipeline \
-         \"{file}\", ticket \"{ticket}\", summary \"{title}\" and link \"{url}\".",
+         \"{file}\", ticket \"{ticket}\", summary \"{title}\" and link \"{url}\". It runs \
+         beside any other tickets you hold.{with}",
         channel = settings.label,
         url = pr.url,
         file = pipeline.file,
@@ -132,8 +153,8 @@ pub fn looking(settings: &SlackSettings) -> String {
 pub fn tooltip(settings: &SlackSettings) -> String {
     format!(
         "On: every {} min, takes each message in {} with a pull request link and no :{}: \
-         (adding yours), and runs its pull requests one at a time. Off: nothing starts by \
-         itself.",
+         (adding yours), and reviews each pull request in it under the orchestrator, several \
+         at once when the pipeline allows. Off: nothing starts by itself.",
         settings.every_minutes, settings.label, settings.reaction
     )
 }
@@ -265,6 +286,15 @@ mod tests {
             "only the message it took"
         );
         assert_eq!(found[0].url, "https://github.com/iov42/svc-usage/pull/61");
+        // Each knows the other posted with it.
+        assert_eq!(
+            found[0].with,
+            ["https://github.com/iov42/svc-usage/pull/62"]
+        );
+        assert_eq!(
+            found[1].with,
+            ["https://github.com/iov42/svc-usage/pull/61"]
+        );
     }
 
     #[test]
@@ -318,7 +348,17 @@ mod tests {
             "name = \"PRs\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\nprompt = \"review {pr}\"\n",
         )
         .unwrap();
-        let pr = Queued::of(&pr_links(&format!("{PR}62|x>"))[0], "U1");
+        let mut pr = Queued::of(&pr_links(&format!("{PR}62|x>"))[0], "U1");
+        let alone = start_prompt(
+            &Pipeline {
+                file: "review-pr-s".into(),
+                ..p.clone()
+            },
+            &settings(),
+            &pr,
+        );
+        assert!(!alone.contains("same message"), "{alone}");
+        pr.with = vec!["https://github.com/iov42/svc-usage/pull/63".into()];
         let text = start_prompt(
             &Pipeline {
                 file: "review-pr-s".into(),
@@ -331,6 +371,10 @@ mod tests {
         assert!(text.contains("ticket \"svc-usage-62\""), "{text}");
         assert!(
             text.contains("link \"https://github.com/iov42/svc-usage/pull/62\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("same message as https://github.com/iov42/svc-usage/pull/63"),
             "{text}"
         );
     }

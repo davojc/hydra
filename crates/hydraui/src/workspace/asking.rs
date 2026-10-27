@@ -101,7 +101,7 @@ impl Workspace {
         for (pane, run, prompt) in due {
             self.ask_checks.insert(run.clone(), now);
             crate::action_log::write(format!("run {run}: the waiting stage looks for its answer"));
-            self.pending_wakes.insert(pane, (run, prompt));
+            self.queue_wake(pane, run, prompt);
         }
         self.send_wakes(window, cx);
     }
@@ -195,10 +195,7 @@ impl Workspace {
                 crate::action_log::write(format!("run {run}: the user answered: {answer}"));
                 self.ask_checks.remove(run);
                 if let Some(pane) = pane {
-                    self.pending_wakes.insert(
-                        pane,
-                        (run.to_string(), crate::asking::answer_prompt(answer)),
-                    );
+                    self.queue_wake(pane, run.to_string(), crate::asking::answer_prompt(answer));
                 }
                 tell(changes);
             }
@@ -211,7 +208,12 @@ impl Workspace {
         let token = self.panes.get(&orch)?.read(cx).mcp_token()?.to_string();
         let sv = server::get()?;
         let reg = server::lock(sv.registry());
-        let r = reg.runs.current(&token)?;
+        let open = reg.runs.open_of(&token);
+        let r = open
+            .iter()
+            .find(|r| r.asking.is_some())
+            .copied()
+            .or_else(|| reg.runs.current(&token))?;
         Some((
             r.id.clone(),
             r.asking.clone()?,

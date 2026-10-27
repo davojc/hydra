@@ -257,7 +257,6 @@ impl Workspace {
     }
 
     /// Sends `cmd` to the swarms; nothing when they don't run in this window.
-    #[expect(dead_code, reason = "Settings › Swarms calls it")]
     pub(super) fn swarms_command(&self, cmd: Command) {
         if let Some(run) = &self.swarms_run {
             let _ = run.commands.unbounded_send(cmd);
@@ -266,7 +265,6 @@ impl Workspace {
 
     /// Makes or joins a swarm (`Command::Create` or `Command::Join`). The first one starts the
     /// swarms, which don't run while this machine is in none: the search tries again at once.
-    #[expect(dead_code, reason = "Settings › Swarms calls it")]
     pub(super) fn swarms_create_or_join(
         &mut self,
         cmd: Command,

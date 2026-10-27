@@ -3618,6 +3618,7 @@ dependencies = [
  "hydraui-sets",
  "hydraui-term",
  "ignore",
+ "jiff",
  "keyring",
  "libc",
  "notify",

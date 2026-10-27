@@ -18,6 +18,7 @@ mod settings_tab;
 mod shortcuts;
 mod start_page;
 mod swarms;
+mod swarms_page;
 mod tasks_tab;
 mod terminal_list;
 mod title_bar;

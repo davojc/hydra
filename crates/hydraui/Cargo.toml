@@ -25,6 +25,7 @@ gpui-kit-assets.workspace = true
 gpui-base.workspace = true
 gpui-component.workspace = true
 futures.workspace = true
+jiff.workspace = true
 ignore.workspace = true
 regex.workspace = true
 notify.workspace = true

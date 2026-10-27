@@ -24,6 +24,7 @@ use crate::keys::SaveFile;
 use crate::open_files::{after_close, find, to_close};
 use crate::openapi::SpecKind;
 use crate::openapi_view::{ApiView, ApiViewEvent};
+use crate::pdf_view::PdfView;
 
 use std::sync::Arc;
 
@@ -61,6 +62,8 @@ enum Body {
     CantShow(String),
     /// A PNG, JPEG, GIF or ICO, shown as a picture; or why it can't be.
     Image(Result<Picture, String>),
+    /// A PDF's pages, drawn as they come.
+    Pdf(Entity<PdfView>),
     /// How the file differs from git's last commit (spec §7.3), or why it can't be shown.
     Diff(Result<Entity<DiffState>, String>),
 }
@@ -228,6 +231,9 @@ impl FilePane {
     fn push(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let body = if file_doc::is_image(&path) {
             Body::Image(picture(&path))
+        } else if file_doc::is_pdf(&path) {
+            let p = path.clone();
+            Body::Pdf(cx.new(|cx| PdfView::new(p, cx)))
         } else {
             match file_doc::load(&path) {
                 Ok(doc) => Self::text_body(&path, doc, window, cx),
@@ -670,6 +676,13 @@ impl FilePane {
             cx.notify();
             return;
         }
+        if let Body::Pdf(view) = &t.body {
+            if t.path.is_file() {
+                let path = t.path.clone();
+                view.update(cx, |v, cx| v.load(path, cx));
+            }
+            return;
+        }
         let Body::Text {
             editor,
             saved,
@@ -850,6 +863,11 @@ impl Render for FilePane {
                 file_doc::size_label(p.bytes)
             )));
         }
+        if let Body::Pdf(view) = &t.body
+            && let Some(summary) = view.read(cx).summary()
+        {
+            header = header.child(div().text_sm().text_color(muted).child(summary));
+        }
         if let Body::Text { swagger: true, .. } = &t.body {
             header = header.child(
                 div()
@@ -945,6 +963,7 @@ impl Render for FilePane {
                 .child(format!("Can't show this image: {why}"))
                 .into_any_element(),
             Body::Image(Ok(p)) => picture_view(p.image.clone(), muted),
+            Body::Pdf(view) => view.clone().into_any_element(),
             // Wrapped, so both sides fit the pane instead of the new side scrolling off.
             Body::Diff(Ok(state)) => Diff::new(state)
                 .soft_wrap(true)

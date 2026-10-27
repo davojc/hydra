@@ -10,7 +10,8 @@ use hydra_swarms::folder::{Attention, Folder, FolderEvent};
 use hydra_swarms::ids::{PersonId, PersonKey};
 use hydra_swarms::node::{NodeConfig, NodeEvent, SwarmNode};
 use hydra_swarms::paths::{
-    MAX_FILE_BYTES, RelPath, conflict_name, is_conflict_copy, safe_rel_path,
+    MAX_FILE_BYTES, RelPath, conflict_name, conflict_original, is_conflict_copy, numbered_copy,
+    safe_rel_path,
 };
 use hydra_swarms::roster::{Change, Machine, Member, Role, Roster, SignedChange};
 use iroh_blobs::Hash;
@@ -220,7 +221,8 @@ async fn joiner(owner: &Side, name: &str, role: Role) -> Side {
     let folder = Folder::new(root.clone(), dir.path().join("folder"), true).expect("folder");
     node.remember_addr(owner.node.addr_for_tests());
     owner.node.remember_addr(node.addr_for_tests());
-    owner.node.set_gate(&[node.endpoint_id()]);
+    let roster = owner.node.roster().await.unwrap().unwrap();
+    owner.node.set_gate(&roster.endpoints());
     node.set_gate(&[owner.node.endpoint_id()]);
     node.sync_with(&[owner.node.endpoint_id()])
         .await
@@ -237,7 +239,7 @@ async fn joiner(owner: &Side, name: &str, role: Role) -> Side {
             .roster()
             .await
             .unwrap()
-            .filter(|r| r.members.len() == 2)
+            .filter(|r| r.role_of(&side.key.id()).is_some())
     })
     .await;
     side
@@ -270,15 +272,28 @@ fn set_mtime(path: &Path, at: Timestamp) {
 /// which publishes. The writer then meets the owner's newer edit: the owner keeps the name and
 /// the writer's edit becomes a conflict copy, which reaches the owner too. Gives the copy.
 async fn make_conflict(o: &mut Side, w: &mut Side, p: &str, wren_at: Timestamp) -> RelPath {
-    w.write(p, "wren's");
-    set_mtime(&w.path(p), wren_at);
-    o.write(p, "olive's");
-    o.reconcile().await;
-    w.hears(p, Some(hash("olive's"))).await;
     let copy = conflict_name(&rel(p), "wren-pc", wren_at, &TimeZone::system());
+    conflict_named(o, w, p, wren_at, ("wren's", "olive's"), copy).await
+}
+
+/// As `make_conflict`, with the writer's and owner's contents given, and the copy's name
+/// expected to be `copy`.
+async fn conflict_named(
+    o: &mut Side,
+    w: &mut Side,
+    p: &str,
+    wren_at: Timestamp,
+    (wren, olive): (&str, &str),
+    copy: RelPath,
+) -> RelPath {
+    w.write(p, wren);
+    set_mtime(&w.path(p), wren_at);
+    o.write(p, olive);
+    o.reconcile().await;
+    w.hears(p, Some(hash(olive))).await;
     let events = w
         .settle("the conflict on the writer", |s| {
-            s.read(copy.as_str()).is_some() && s.read(p).as_deref() == Some("olive's")
+            s.read(copy.as_str()).as_deref() == Some(wren) && s.read(p).as_deref() == Some(olive)
         })
         .await;
     assert!(events.contains(&FolderEvent::NewConflict {
@@ -286,10 +301,51 @@ async fn make_conflict(o: &mut Side, w: &mut Side, p: &str, wren_at: Timestamp) 
         copy: copy.clone()
     }));
     o.settle("the conflict copy on the owner", |s| {
-        s.read(copy.as_str()).is_some()
+        s.read(copy.as_str()).as_deref() == Some(wren)
     })
     .await;
     copy
+}
+
+/// The conflict copies of `p` in a folder.
+fn copies_of(side: &Side, p: &str) -> Vec<String> {
+    let dir = side.path(p).parent().unwrap().to_path_buf();
+    let mut out: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| conflict_original(&rel(n)).is_some_and(|o| o == rel(p)))
+        .collect();
+    out.sort();
+    out
+}
+
+/// Lets two machines reach each other again after `cut_off`.
+async fn reconnect(a: &Side, b: &Side) {
+    a.node.set_gate(&[b.node.endpoint_id()]);
+    b.node.set_gate(&[a.node.endpoint_id()]);
+    b.node.sync_with(&[a.node.endpoint_id()]).await.unwrap();
+}
+
+fn cut_off(a: &Side, b: &Side) {
+    a.node.set_gate(&[]);
+    b.node.set_gate(&[]);
+}
+
+/// Waits until `side` holds `n` entries for `p`, each with its author's parent record.
+async fn has_entries(side: &Side, p: &str, n: usize) {
+    eventually(&format!("{n} entries for {p}"), || async {
+        let roster = side.roster().await;
+        let all = side.node.file_entries(&roster).await.unwrap();
+        let h = all.get(&rel(p))?;
+        let complete = h.entries.len() == n
+            && h.entries.iter().all(|e| {
+                h.records
+                    .iter()
+                    .any(|(a, r)| *a == e.author && r.hash == e.hash)
+            });
+        complete.then_some(())
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -606,7 +662,8 @@ async fn a_burst_of_saves_publishes_only_the_last_content() {
             publishes += 1;
         }
     }
-    assert_eq!(publishes, 1);
+    // One publish: its parent record, then the file entry.
+    assert_eq!(publishes, 2);
     assert_eq!(o.remote_hash("x.md").await, Some(Some(hash("last"))));
     o.shutdown().await;
 }
@@ -708,4 +765,207 @@ async fn symlinks_are_not_followed() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn junctions_are_not_followed() {
     links_are_not_followed(|target, link| junction::create(target, link).unwrap()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_taken_copy_name_gets_a_number() {
+    let (mut o, mut w) = synced_pair("x.md").await;
+    let at: Timestamp = "2026-10-27T13:05:00Z".parse().unwrap();
+    let first = make_conflict(&mut o, &mut w, "x.md", at).await;
+    // The same machine, the same minute, different content: the name is taken.
+    let second = numbered_copy(&first, 2);
+    assert!(second.as_str().ends_with(") 2.md"), "{second:?}");
+    conflict_named(
+        &mut o,
+        &mut w,
+        "x.md",
+        at,
+        ("wren again", "olive again"),
+        second.clone(),
+    )
+    .await;
+    for side in [&o, &w] {
+        assert_eq!(side.read(first.as_str()).as_deref(), Some("wren's"));
+        assert_eq!(side.read(second.as_str()).as_deref(), Some("wren again"));
+    }
+    w.reconcile().await;
+    assert_eq!(
+        w.folder.attention(),
+        // In name order: " 2" sorts before ".md".
+        vec![
+            Attention::Conflict {
+                path: rel("x.md"),
+                copy: second
+            },
+            Attention::Conflict {
+                path: rel("x.md"),
+                copy: first
+            },
+        ]
+    );
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_publishes_keep_both() {
+    let (mut o, mut w) = synced_pair("x.md").await;
+    cut_off(&o, &w);
+    o.write("x.md", "olive's");
+    o.reconcile().await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    w.write("x.md", "wren's");
+    w.reconcile().await;
+    // Each published without seeing the other's edit.
+    assert_eq!(o.remote_hash("x.md").await, Some(Some(hash("olive's"))));
+    assert_eq!(w.remote_hash("x.md").await, Some(Some(hash("wren's"))));
+    reconnect(&o, &w).await;
+    has_entries(&o, "x.md", 2).await;
+    has_entries(&w, "x.md", 2).await;
+
+    // The writer's is newer and keeps the name; the owner's becomes a copy named for it.
+    let roster = o.roster().await;
+    let at = o.node.file_entries(&roster).await.unwrap()[&rel("x.md")]
+        .entries
+        .iter()
+        .find(|e| e.author == o.node.author())
+        .unwrap()
+        .at;
+    let when = Timestamp::from_microsecond(at as i64).unwrap();
+    let copy = conflict_name(&rel("x.md"), "olive-pc", when, &TimeZone::system());
+    for side in [&mut o, &mut w] {
+        side.settle("both versions kept", |s| {
+            s.read("x.md").as_deref() == Some("wren's")
+                && s.read(copy.as_str()).as_deref() == Some("olive's")
+        })
+        .await;
+    }
+    for side in [&mut o, &mut w] {
+        side.reconcile().await;
+        assert_eq!(copies_of(side, "x.md"), vec![copy.as_str().to_string()]);
+        assert_eq!(
+            side.folder.attention(),
+            vec![Attention::Conflict {
+                path: rel("x.md"),
+                copy: copy.clone()
+            }]
+        );
+    }
+
+    // Resolving it sticks: the stale entry doesn't bring the copy back.
+    o.folder
+        .keep_theirs(&o.node, &rel("x.md"), &copy)
+        .await
+        .unwrap();
+    w.settle("the copy gone on the writer", |s| {
+        s.read(copy.as_str()).is_none()
+    })
+    .await;
+    for side in [&mut o, &mut w] {
+        side.reconcile().await;
+        side.reconcile().await;
+        assert!(copies_of(side, "x.md").is_empty());
+        assert!(side.folder.attention().is_empty());
+    }
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sequential_chain_is_not_a_conflict() {
+    let mut a = owner().await;
+    let mut b = joiner(&a, "bea", Role::Writer).await;
+    let mut c = joiner(&a, "cy", Role::Writer).await;
+    eventually("the full roster on bea's machine", || async {
+        b.node
+            .roster()
+            .await
+            .unwrap()
+            .filter(|r| r.members.len() == 3)
+    })
+    .await;
+
+    a.write("x.md", "a1");
+    a.reconcile().await;
+    b.settle("a1 on bea's", |s| s.read("x.md").as_deref() == Some("a1"))
+        .await;
+    b.write("x.md", "b2");
+    b.reconcile().await;
+    c.settle("b2 on cy's", |s| s.read("x.md").as_deref() == Some("b2"))
+        .await;
+    c.write("x.md", "c3");
+    c.reconcile().await;
+    for side in [&mut a, &mut b] {
+        side.settle("c3 everywhere", |s| s.read("x.md").as_deref() == Some("c3"))
+            .await;
+    }
+    for side in [&a, &b, &c] {
+        has_entries(side, "x.md", 3).await;
+    }
+    for side in [&mut a, &mut b, &mut c] {
+        let events = side.reconcile().await;
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, FolderEvent::NewConflict { .. })),
+            "{events:?}"
+        );
+        assert!(copies_of(side, "x.md").is_empty());
+        assert!(side.folder.attention().is_empty());
+        assert_eq!(side.read("x.md").as_deref(), Some("c3"));
+    }
+    a.shutdown().await;
+    b.shutdown().await;
+    c.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_readers_held_edit_publishes_after_promotion() {
+    let mut o = owner().await;
+    let mut r = joiner(&o, "rae", Role::Reader).await;
+    o.write("x.md", "one");
+    o.reconcile().await;
+    r.settle("x.md on the reader", |s| s.read("x.md").is_some())
+        .await;
+    r.write("x.md", "mine");
+    r.reconcile().await;
+    assert_eq!(
+        r.folder.attention(),
+        vec![Attention::ReaderEdit { path: rel("x.md") }]
+    );
+
+    let promote = SignedChange::sign(
+        &o.node.id(),
+        Change::SetRole {
+            person: r.key.id(),
+            role: Role::Writer,
+        },
+        &o.key,
+        now(),
+    );
+    o.node.write_change(&promote).await.unwrap();
+    o.node
+        .send_promoted(&r.node.endpoint_id())
+        .await
+        .expect("promoted");
+    assert!(r.node.can_write());
+
+    // Once the reader's machine has the new roster, its held edit goes out.
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while r.remote_hash("x.md").await != Some(Some(hash("mine"))) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the edit never went out"
+        );
+        r.reconcile().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(r.read("x.md").as_deref(), Some("mine"));
+    assert!(r.folder.attention().is_empty());
+    o.settle("the edit on the owner", |s| {
+        s.read("x.md").as_deref() == Some("mine")
+    })
+    .await;
+    o.shutdown().await;
+    r.shutdown().await;
 }

@@ -10,6 +10,8 @@ use crate::roster::SignedChange;
 pub const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 pub const LOG_PREFIX: &[u8] = b"log/";
 pub const FILES_PREFIX: &[u8] = b"files/";
+/// Where each author records what each of its file entries was made from.
+pub const PARENTS_PREFIX: &[u8] = b"parents/";
 
 /// A swarm-relative path with `/` separators, checked safe on every OS.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -96,8 +98,9 @@ pub fn allowed(p: &RelPath, size: u64, types: &[String]) -> bool {
     !ext.is_empty() && types.iter().any(|t| t.eq_ignore_ascii_case(ext))
 }
 
-/// Windows' limit on one file name, in UTF-16 units.
-const MAX_NAME_UNITS: usize = 255;
+/// Windows' limit on one file name, in UTF-16 units, less room for the " 999" a copy gets when
+/// its name is already taken.
+const MAX_NAME_UNITS: usize = 255 - 4;
 
 fn units(s: &str) -> usize {
     s.encode_utf16().count()
@@ -133,16 +136,32 @@ pub fn conflict_name(p: &RelPath, machine: &str, at: Timestamp, tz: &TimeZone) -
     RelPath(format!("{dir}{stem} (conflict, {machine}, {when}){ext}"))
 }
 
-pub fn file_key(p: &RelPath) -> Vec<u8> {
-    let mut k = FILES_PREFIX.to_vec();
+fn key_under(prefix: &[u8], p: &RelPath) -> Vec<u8> {
+    let mut k = prefix.to_vec();
     k.extend_from_slice(p.0.as_bytes());
     k.push(0);
     k
 }
 
-pub fn path_of_key(key: &[u8]) -> Option<RelPath> {
-    let rest = key.strip_prefix(FILES_PREFIX)?.strip_suffix(&[0])?;
+fn path_under(prefix: &[u8], key: &[u8]) -> Option<RelPath> {
+    let rest = key.strip_prefix(prefix)?.strip_suffix(&[0])?;
     safe_rel_path(std::str::from_utf8(rest).ok()?)
+}
+
+pub fn file_key(p: &RelPath) -> Vec<u8> {
+    key_under(FILES_PREFIX, p)
+}
+
+pub fn path_of_key(key: &[u8]) -> Option<RelPath> {
+    path_under(FILES_PREFIX, key)
+}
+
+pub fn parent_key(p: &RelPath) -> Vec<u8> {
+    key_under(PARENTS_PREFIX, p)
+}
+
+pub fn path_of_parent_key(key: &[u8]) -> Option<RelPath> {
+    path_under(PARENTS_PREFIX, key)
 }
 
 /// Sorts by time, then signature, so the log reads in the order the roster folds it.
@@ -153,9 +172,24 @@ pub fn log_key(c: &SignedChange) -> Vec<u8> {
     k
 }
 
-/// The path a conflict copy was made from, or None if `p` isn't named like one.
+/// `copy` numbered `n`, for when its name is taken by other content:
+/// `SKILL (conflict, M, 27 Oct 13.05) 2.md`.
+pub fn numbered_copy(copy: &RelPath, n: u32) -> RelPath {
+    let (dir, stem, ext) = split_name(&copy.0);
+    RelPath(format!("{dir}{stem} {n}{ext}"))
+}
+
+/// The path a conflict copy (numbered or not) was made from, or None if `p` isn't named like one.
 pub fn conflict_original(p: &RelPath) -> Option<RelPath> {
     let (dir, stem, ext) = split_name(&p.0);
+    let stem = match stem.rsplit_once(' ') {
+        Some((head, n))
+            if head.ends_with(')') && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            head
+        }
+        _ => stem,
+    };
     let inner = stem.strip_suffix(')')?;
     let i = inner.rfind(" (conflict, ")?;
     let (_machine, when) = inner[i + " (conflict, ".len()..].rsplit_once(", ")?;
@@ -278,6 +312,10 @@ mod tests {
         assert!(path_of_key(b"log/x").is_none());
         assert!(path_of_key(b"files/a.md").is_none());
         assert!(path_of_key(b"files/../x\0").is_none());
+        assert_eq!(parent_key(&a), b"parents/a.md\0");
+        assert_eq!(path_of_parent_key(&parent_key(&b)).unwrap(), b);
+        assert!(path_of_parent_key(&file_key(&a)).is_none());
+        assert!(path_of_key(&parent_key(&a)).is_none());
     }
 
     #[test]
@@ -348,6 +386,26 @@ mod tests {
             assert_eq!(conflict_original(&c), Some(rel(p)));
         }
         assert_eq!(conflict_original(&rel("a.md")), None);
+    }
+
+    #[test]
+    fn numbered_copies_are_recognised() {
+        let at = ts("2026-10-27T13:05:00Z");
+        for p in ["SKILL.md", "dir/b.tar.gz", "noext"] {
+            let c = conflict_name(&rel(p), "M", at, &TimeZone::UTC);
+            let two = numbered_copy(&c, 2);
+            assert!(is_conflict_copy(&two), "{two:?}");
+            assert_eq!(conflict_original(&two), Some(rel(p)));
+            assert_eq!(safe_rel_path(two.as_str()), Some(two.clone()));
+        }
+        assert_eq!(
+            numbered_copy(&conflict_name(&rel("SKILL.md"), "M", at, &TimeZone::UTC), 3).as_str(),
+            "SKILL (conflict, M, 27 Oct 13.05) 3.md"
+        );
+        // A number needs the bracket before it.
+        assert!(!is_conflict_copy(&rel("SKILL 2.md")));
+        let long = conflict_name(&rel("a.md"), &"m".repeat(300), at, &TimeZone::UTC);
+        assert!(numbered_copy(&long, 999).as_str().encode_utf16().count() <= 255);
     }
 
     #[test]

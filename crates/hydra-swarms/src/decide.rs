@@ -13,6 +13,7 @@ pub struct Local {
 }
 
 /// The swarm's latest word on a path. `hash` is None for a tombstone (a delete).
+#[derive(Debug, Clone)]
 pub struct Remote {
     pub hash: Option<Hash>,
     /// Unix microseconds.

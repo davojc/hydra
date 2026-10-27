@@ -1,7 +1,7 @@
 //! A swarm's folder on this machine, kept in step with the swarm document: a scan of the folder,
 //! an index of the version each path last synced as, `decide`'s actions applied to disk and
 //! document, conflict copies, held files, the attention list, and a debounced watcher.
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::{self, File, Metadata};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -11,6 +11,7 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, bail};
 use bytes::Bytes;
 use iroh_blobs::Hash;
+use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use notify::{RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
@@ -18,10 +19,10 @@ use tokio::sync::mpsc;
 
 use crate::decide::{Action, Held, Local, Remote, decide};
 use crate::ids::to_hex;
-use crate::node::{SwarmNode, now_micros};
+use crate::node::{FileHistory, ParentRecord, SwarmNode, now_micros};
 use crate::paths::{
-    MAX_FILE_BYTES, RelPath, allowed, conflict_original, is_conflict_copy, rel_from_disk,
-    safe_rel_path,
+    MAX_FILE_BYTES, RelPath, allowed, conflict_name, conflict_original, is_conflict_copy,
+    numbered_copy, rel_from_disk, safe_rel_path,
 };
 use crate::roster::{Member, Role, Roster};
 
@@ -35,6 +36,8 @@ const SETTLE: Duration = Duration::from_millis(100);
 /// How often an idle watcher checks that someone is still listening.
 const IDLE: Duration = Duration::from_secs(1);
 const INDEX_FILE: &str = "index.json";
+/// How many earlier versions a parent record lists.
+const MAX_ANCESTORS: usize = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Attention {
@@ -113,6 +116,15 @@ struct Scan {
     unreadable: BTreeSet<RelPath>,
 }
 
+/// What one pass knows of the swarm, for carrying out decisions.
+struct Pass<'a> {
+    node: &'a SwarmNode,
+    history: &'a BTreeMap<RelPath, FileHistory>,
+    /// The newest entry per path.
+    remote: &'a BTreeMap<RelPath, Remote>,
+    machine: &'a str,
+}
+
 pub struct Folder {
     root: PathBuf,
     /// Where the index is kept: this machine's state for the swarm, outside the folder.
@@ -164,11 +176,15 @@ impl Folder {
             let types = types.clone();
             tokio::task::spawn_blocking(move || scan(&root, &types, &seen)).await??
         };
-        let remote: BTreeMap<RelPath, Remote> = node
-            .files(roster)
+        let history: BTreeMap<RelPath, FileHistory> = node
+            .file_entries(roster)
             .await?
             .into_iter()
             .filter(|(p, _)| allowed(p, 0, &types))
+            .collect();
+        let remote: BTreeMap<RelPath, Remote> = history
+            .iter()
+            .filter_map(|(p, h)| Some((p.clone(), newest(&h.entries)?.clone())))
             .collect();
         for (p, seen) in &scan.seen {
             self.index.entry(p.clone()).or_default().seen = Some(*seen);
@@ -180,6 +196,12 @@ impl Folder {
         let author = node.author();
         let machine = machine_name(roster, me, &node.endpoint_id());
         let tz = TimeZone::system();
+        let pass = Pass {
+            node,
+            history: &history,
+            remote: &remote,
+            machine: &machine,
+        };
 
         let mut paths: BTreeSet<RelPath> =
             scan.files.keys().chain(remote.keys()).cloned().collect();
@@ -196,7 +218,12 @@ impl Folder {
             if scan.too_big.contains(&p) || scan.unreadable.contains(&p) {
                 continue;
             }
-            let entry = self.index.get(&p).cloned().unwrap_or_default();
+            let mut entry = self.index.get(&p).cloned().unwrap_or_default();
+            // A reader promoted since its edit was held: the edit goes through like any other.
+            if writer && entry.held == Some(Held::ReaderEdit) {
+                entry.held = None;
+                self.entry(&p).held = None;
+            }
             let file = scan.files.get(&p);
             // An empty file is never published, since iroh-docs can't tell it from a delete: it
             // counts as untouched.
@@ -216,7 +243,7 @@ impl Folder {
                 &tz,
             );
             match self
-                .apply(node, &p, action, &local, r, &machine, &mut events)
+                .apply(&pass, &p, action, &local, entry.base, &mut events)
                 .await
             {
                 Ok(Some(change)) => {
@@ -226,6 +253,21 @@ impl Folder {
                 }
                 Ok(None) => {}
                 Err(e) => events.push(FolderEvent::Error(format!("{}: {e:#}", p.as_str()))),
+            }
+        }
+        // Edits made at the same time as the newest version, which it would otherwise hide.
+        if writer {
+            for (p, hist) in &history {
+                for edit in unseen_edits(hist).unwrap_or_default() {
+                    match self.capture(&pass, p, edit, &tz, &scan.files).await {
+                        Ok(Some(copy)) => events.push(FolderEvent::NewConflict {
+                            path: p.clone(),
+                            copy,
+                        }),
+                        Ok(None) => {}
+                        Err(e) => events.push(FolderEvent::Error(format!("{}: {e:#}", p.as_str()))),
+                    }
+                }
             }
         }
         self.index
@@ -276,7 +318,10 @@ impl Folder {
         copy: &RelPath,
     ) -> anyhow::Result<()> {
         check_copy(path, copy)?;
-        node.delete_file(copy).await?;
+        let history = node_history(node).await?;
+        let base = self.index.get(copy).and_then(|e| e.base);
+        self.publish(node, history.get(copy), copy, None, &Vec::from_iter(base))
+            .await?;
         self.drop_copy(copy)
     }
 
@@ -296,10 +341,27 @@ impl Folder {
             bail!("{} can't be shared.", copy.as_str());
         }
         let hash = Hash::new(&bytes);
-        node.put_file(path, bytes.clone()).await?;
+        let history = node_history(node).await?;
+        // Made on top of both the version at `path` and the copy.
+        let heads: Vec<Hash> = self
+            .index
+            .get(path)
+            .and_then(|e| e.base)
+            .into_iter()
+            .chain([hash])
+            .collect();
         self.write(path, &bytes)?;
-        self.entry(path).base = Some(hash);
-        node.delete_file(copy).await?;
+        self.publish(node, history.get(path), path, Some((bytes, hash)), &heads)
+            .await?;
+        let copy_base = self.index.get(copy).and_then(|e| e.base);
+        self.publish(
+            node,
+            history.get(copy),
+            copy,
+            None,
+            &Vec::from_iter(copy_base),
+        )
+        .await?;
         self.drop_copy(copy)
     }
 
@@ -309,20 +371,26 @@ impl Folder {
             bail!("{} isn't waiting to be shared again.", path.as_str());
         }
         let types = types(node).await?;
-        let base = match self.read(path)? {
+        let history = node_history(node).await?;
+        let before = self.index.get(path).and_then(|e| e.base);
+        match self.read(path)? {
             Some(bytes) => {
                 if bytes.is_empty() || !allowed(path, bytes.len() as u64, &types) {
                     bail!("{} can't be shared.", path.as_str());
                 }
                 let hash = Hash::new(&bytes);
-                node.put_file(path, bytes).await?;
-                Some(hash)
+                self.publish(
+                    node,
+                    history.get(path),
+                    path,
+                    Some((bytes, hash)),
+                    &Vec::from_iter(before),
+                )
+                .await?;
             }
-            None => None,
-        };
-        let entry = self.entry(path);
-        entry.base = base;
-        entry.held = None;
+            None => self.entry(path).base = None,
+        }
+        self.entry(path).held = None;
         self.tidy(path);
         self.save()
     }
@@ -384,19 +452,20 @@ impl Folder {
 
     /// Carries out one decision. Gives the change applied, as (machine, unix microseconds),
     /// when there was one.
-    #[allow(clippy::too_many_arguments)]
     async fn apply(
         &mut self,
-        node: &SwarmNode,
+        pass: &Pass<'_>,
         p: &RelPath,
         action: Action,
         local: &Local,
-        remote: Option<&Remote>,
-        machine: &str,
+        base: Option<Hash>,
         events: &mut Vec<FolderEvent>,
     ) -> anyhow::Result<Option<(String, u64)>> {
+        let node = pass.node;
+        let remote = pass.remote.get(p);
+        let history = pass.history.get(p);
         let theirs = remote.map(|r| (r.machine.clone(), r.at));
-        let mine = Some((machine.to_string(), now_micros()));
+        let mine = Some((pass.machine.to_string(), now_micros()));
         match action {
             Action::Nothing => {
                 // Both sides made the same change: that is the new base.
@@ -421,16 +490,17 @@ impl Folder {
                 Ok(theirs)
             }
             Action::Publish => {
-                match local.hash {
+                let content = match local.hash {
                     Some(hash) => {
                         let Some(bytes) = self.read_unchanged(p, hash)? else {
                             return Ok(None);
                         };
-                        node.put_file(p, bytes).await?;
+                        Some((bytes, hash))
                     }
-                    None => node.delete_file(p).await?,
-                }
-                self.entry(p).base = local.hash;
+                    None => None,
+                };
+                self.publish(node, history, p, content, &Vec::from_iter(base))
+                    .await?;
                 Ok(mine)
             }
             Action::Hold(held) => {
@@ -447,9 +517,17 @@ impl Folder {
                     return Ok(None);
                 };
                 // The local edit is safe in its copy before the name takes the remote's.
+                let copy = self.free_copy_name(&copy, mine_hash, pass.remote)?;
                 self.write(&copy, &mine_bytes)?;
-                node.put_file(&copy, mine_bytes).await?;
-                self.entry(&copy).base = Some(mine_hash);
+                let copy_history = pass.history.get(&copy);
+                self.publish(
+                    node,
+                    copy_history,
+                    &copy,
+                    Some((mine_bytes, mine_hash)),
+                    &[],
+                )
+                .await?;
                 self.write(p, &theirs_bytes)?;
                 self.entry(p).base = Some(theirs_hash);
                 events.push(FolderEvent::NewConflict {
@@ -466,11 +544,21 @@ impl Folder {
                 else {
                     return Ok(None);
                 };
+                let copy = self.free_copy_name(&copy, theirs_hash, pass.remote)?;
                 self.write(&copy, &theirs_bytes)?;
-                node.put_file(&copy, theirs_bytes).await?;
-                self.entry(&copy).base = Some(theirs_hash);
-                node.put_file(p, mine_bytes).await?;
-                self.entry(p).base = Some(mine_hash);
+                let copy_history = pass.history.get(&copy);
+                self.publish(
+                    node,
+                    copy_history,
+                    &copy,
+                    Some((theirs_bytes, theirs_hash)),
+                    &[],
+                )
+                .await?;
+                // The local version has now seen the remote one, kept as the copy.
+                let heads: Vec<Hash> = std::iter::once(theirs_hash).chain(base).collect();
+                self.publish(node, history, p, Some((mine_bytes, mine_hash)), &heads)
+                    .await?;
                 events.push(FolderEvent::NewConflict {
                     path: p.clone(),
                     copy,
@@ -487,6 +575,112 @@ impl Folder {
                 Ok(theirs)
             }
         }
+    }
+
+    /// Publishes `content` at `p` (a delete when None), made on top of `heads`: first a parent
+    /// record saying so, then the entry. Records the new base.
+    async fn publish(
+        &mut self,
+        node: &SwarmNode,
+        history: Option<&FileHistory>,
+        p: &RelPath,
+        content: Option<(Bytes, Hash)>,
+        heads: &[Hash],
+    ) -> anyhow::Result<()> {
+        let hash = content.as_ref().map(|(_, h)| *h);
+        let record = ParentRecord {
+            hash,
+            parent: heads.first().copied(),
+            ancestors: lineage(heads, history),
+        };
+        node.put_parent(p, &record).await?;
+        match content {
+            Some((bytes, _)) => {
+                node.put_file(p, bytes).await?;
+            }
+            None => node.delete_file(p).await?,
+        }
+        self.entry(p).base = hash;
+        Ok(())
+    }
+
+    /// Writes out `edit`, another writer's version of `p` that the newest version wasn't made
+    /// on top of, as a conflict copy named for its machine and time, and publishes it, unless a
+    /// copy of `p` already holds or held that content. Every machine names it the same, so they
+    /// converge on one copy.
+    async fn capture(
+        &mut self,
+        pass: &Pass<'_>,
+        p: &RelPath,
+        edit: &Remote,
+        tz: &TimeZone,
+        on_disk: &BTreeMap<RelPath, OnDisk>,
+    ) -> anyhow::Result<Option<RelPath>> {
+        let Some(hash) = edit.hash else {
+            return Ok(None);
+        };
+        if self.captured(p, hash, pass.history, on_disk) {
+            return Ok(None);
+        }
+        let Some(bytes) = pass.node.read_blob(hash).await? else {
+            return Ok(None);
+        };
+        let name = conflict_name(p, &edit.machine, timestamp(edit.at), tz);
+        let copy = self.free_copy_name(&name, hash, pass.remote)?;
+        self.write(&copy, &bytes)?;
+        let copy_history = pass.history.get(&copy);
+        self.publish(pass.node, copy_history, &copy, Some((bytes, hash)), &[])
+            .await?;
+        Ok(Some(copy))
+    }
+
+    /// Whether some conflict copy of `p`, here or in the swarm, holds `hash` or once did (a
+    /// resolved copy's delete records what it held).
+    fn captured(
+        &self,
+        p: &RelPath,
+        hash: Hash,
+        history: &BTreeMap<RelPath, FileHistory>,
+        on_disk: &BTreeMap<RelPath, OnDisk>,
+    ) -> bool {
+        let copy_of_p = |c: &RelPath| conflict_original(c).as_ref() == Some(p);
+        let in_swarm = history.iter().filter(|(c, _)| copy_of_p(c)).any(|(_, h)| {
+            h.entries.iter().any(|e| e.hash == Some(hash))
+                || h.records
+                    .iter()
+                    .any(|(_, r)| r.hash == Some(hash) || r.ancestors.contains(&hash))
+        });
+        let here = self
+            .index
+            .iter()
+            .any(|(c, e)| copy_of_p(c) && e.base == Some(hash))
+            || on_disk
+                .iter()
+                .any(|(c, f)| copy_of_p(c) && f.hash == Some(hash));
+        in_swarm || here
+    }
+
+    /// `name`, or the first numbered variant of it (`… 2.md`, `… 3.md`) not already holding
+    /// other content, here or in the swarm.
+    fn free_copy_name(
+        &self,
+        name: &RelPath,
+        hash: Hash,
+        remote: &BTreeMap<RelPath, Remote>,
+    ) -> anyhow::Result<RelPath> {
+        for n in 1..=999 {
+            let candidate = if n == 1 {
+                name.clone()
+            } else {
+                numbered_copy(name, n)
+            };
+            let here = self.read(&candidate)?.map(|b| Hash::new(&b));
+            let there = remote.get(&candidate).and_then(|r| r.hash);
+            if here.is_none_or(|h| h == hash) && there.is_none_or(|h| h == hash) {
+                return Ok(candidate);
+            }
+        }
+        bail!("no free name for another copy of {}", name.as_str())
     }
 
     /// For a conflict: the remote content and the local content, each with its hash, once both
@@ -643,6 +837,80 @@ fn held_attention(p: &RelPath, held: Held) -> Attention {
         Held::ReaderEdit => Attention::ReaderEdit { path },
         Held::EditedAfterDelete => Attention::EditedAfterDelete { path },
     }
+}
+
+/// The newest of a path's entries: latest time, ties to the higher author, as `files()` picks.
+fn newest(entries: &[Remote]) -> Option<&Remote> {
+    entries
+        .iter()
+        .max_by(|a, b| (a.at, &a.author).cmp(&(b.at, &b.author)))
+}
+
+fn timestamp(micros: u64) -> Timestamp {
+    Timestamp::from_microsecond(i64::try_from(micros).unwrap_or(i64::MAX)).unwrap_or(Timestamp::MAX)
+}
+
+/// `heads` and every version before them that the parent records know of, nearest first.
+fn lineage(heads: &[Hash], history: Option<&FileHistory>) -> Vec<Hash> {
+    let mut known: HashMap<Hash, Vec<Hash>> = HashMap::new();
+    for (_, r) in history.map_or(&[][..], |h| &h.records[..]) {
+        if let Some(hash) = r.hash {
+            known.entry(hash).or_default().extend(&r.ancestors);
+        }
+    }
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut queue: VecDeque<Hash> = heads.iter().copied().collect();
+    while let Some(h) = queue.pop_front() {
+        if out.len() >= MAX_ANCESTORS {
+            break;
+        }
+        if !seen.insert(h) {
+            continue;
+        }
+        out.push(h);
+        if let Some(earlier) = known.get(&h) {
+            queue.extend(earlier);
+        }
+    }
+    out
+}
+
+/// The entries of a path, other than the newest, holding content the newest wasn't made on top
+/// of. None until every entry's author's parent record for it has arrived and matches it.
+fn unseen_edits(history: &FileHistory) -> Option<Vec<&Remote>> {
+    let record_of = |e: &Remote| {
+        history
+            .records
+            .iter()
+            .find(|(author, r)| *author == e.author && r.hash == e.hash)
+            .map(|(_, r)| r)
+    };
+    if history.entries.iter().any(|e| record_of(e).is_none()) {
+        return None;
+    }
+    let top = newest(&history.entries)?;
+    let heads: Vec<Hash> = top
+        .hash
+        .into_iter()
+        .chain(record_of(top)?.ancestors.iter().copied())
+        .collect();
+    let seen: HashSet<Hash> = lineage(&heads, Some(history)).into_iter().collect();
+    Some(
+        history
+            .entries
+            .iter()
+            .filter(|e| e.author != top.author && e.hash.is_some_and(|h| !seen.contains(&h)))
+            .collect(),
+    )
+}
+
+async fn node_history(node: &SwarmNode) -> anyhow::Result<BTreeMap<RelPath, FileHistory>> {
+    let roster = node
+        .roster()
+        .await?
+        .context("This swarm's member list hasn't arrived yet.")?;
+    node.file_entries(&roster).await
 }
 
 fn check_copy(path: &RelPath, copy: &RelPath) -> anyhow::Result<()> {

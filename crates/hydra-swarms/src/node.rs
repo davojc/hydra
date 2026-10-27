@@ -26,19 +26,42 @@ use iroh_docs::protocol::Docs;
 use iroh_docs::store::Query;
 use iroh_docs::{Author, AuthorId, Capability, CapabilityKind, Entry, NamespaceId};
 use iroh_gossip::net::Gossip;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::decide::Remote;
 use crate::ids::{PersonId, PersonKey};
 use crate::invites::{Hydra, Invites};
 use crate::paths::{
-    FILES_PREFIX, LOG_PREFIX, MAX_FILE_BYTES, RelPath, file_key, log_key, path_of_key,
+    FILES_PREFIX, LOG_PREFIX, MAX_FILE_BYTES, PARENTS_PREFIX, RelPath, file_key, log_key,
+    parent_key, path_of_key, path_of_parent_key,
 };
 use crate::roster::{Change, Machine, Member, Role, Roster, SignedChange};
 use crate::wire::ALPN;
 
 /// A signed change is a few hundred bytes; anything far bigger in the log is not one.
 const MAX_CHANGE_BYTES: u64 = 64 * 1024;
+/// A parent record holds at most a few hundred hashes.
+const MAX_RECORD_BYTES: u64 = 64 * 1024;
+
+/// What one author's file entry for a path was made from, so other machines can tell an edit
+/// made on top of theirs from one made at the same time. `hash` is the entry's (None for a
+/// delete), `parent` the version it was made from (None for a new file), and `ancestors`
+/// `parent` and the versions before it, as far as the author knew them.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ParentRecord {
+    pub hash: Option<Hash>,
+    pub parent: Option<Hash>,
+    #[serde(default)]
+    pub ancestors: Vec<Hash>,
+}
+
+/// Every current writer's entry for one path, and their parent records for it, by author.
+#[derive(Default, Debug, Clone)]
+pub struct FileHistory {
+    pub entries: Vec<Remote>,
+    pub records: Vec<(String, ParentRecord)>,
+}
 
 pub struct NodeConfig {
     /// `state_root/swarms/<ns>/`, holding the persistent `docs/` and `blobs/` stores.
@@ -470,8 +493,61 @@ impl SwarmNode {
     /// current writers or owners. Keys that aren't safe paths and entries over the size cap are
     /// left out.
     pub async fn files(&self, roster: &Roster) -> anyhow::Result<BTreeMap<RelPath, Remote>> {
-        let query = Query::key_prefix(FILES_PREFIX).include_empty().build();
         let mut out: BTreeMap<RelPath, Remote> = BTreeMap::new();
+        for (path, remote) in self.file_versions(roster).await? {
+            let newer = out
+                .get(&path)
+                .is_none_or(|r| (remote.at, &remote.author) > (r.at, &r.author));
+            if newer {
+                out.insert(path, remote);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Per file key, every entry from a current writer or owner (one per author, tombstones
+    /// included, oldest first), and those authors' parent records for it.
+    pub async fn file_entries(
+        &self,
+        roster: &Roster,
+    ) -> anyhow::Result<BTreeMap<RelPath, FileHistory>> {
+        let mut out: BTreeMap<RelPath, FileHistory> = BTreeMap::new();
+        for (path, remote) in self.file_versions(roster).await? {
+            out.entry(path).or_default().entries.push(remote);
+        }
+        for h in out.values_mut() {
+            h.entries
+                .sort_by(|a, b| (a.at, &a.author).cmp(&(b.at, &b.author)));
+        }
+        let query = Query::key_prefix(PARENTS_PREFIX).build();
+        for e in self.core.entries(query).await? {
+            let Some(path) = path_of_parent_key(e.key()) else {
+                continue;
+            };
+            if e.content_len() > MAX_RECORD_BYTES {
+                continue;
+            }
+            let author = e.author().to_string();
+            if roster
+                .member_by_author(&author)
+                .is_none_or(|m| m.role < Role::Writer)
+            {
+                continue;
+            }
+            let Some(bytes) = self.read_blob(e.content_hash()).await? else {
+                continue;
+            };
+            if let Ok(record) = serde_json::from_slice::<ParentRecord>(&bytes) {
+                out.entry(path).or_default().records.push((author, record));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every file entry from a current writer or owner, with its path.
+    async fn file_versions(&self, roster: &Roster) -> anyhow::Result<Vec<(RelPath, Remote)>> {
+        let query = Query::key_prefix(FILES_PREFIX).include_empty().build();
+        let mut out = Vec::new();
         for e in self.core.entries(query).await? {
             let Some(path) = path_of_key(e.key()) else {
                 continue;
@@ -486,12 +562,6 @@ impl SwarmNode {
             if member.role < Role::Writer {
                 continue;
             }
-            let newer = out
-                .get(&path)
-                .is_none_or(|r| (e.timestamp(), &author) > (r.at, &r.author));
-            if !newer {
-                continue;
-            }
             let machine = member
                 .machines
                 .iter()
@@ -499,7 +569,7 @@ impl SwarmNode {
                 .map(|m| m.name.clone())
                 .unwrap_or_default();
             let hash = (e.content_hash() != Hash::EMPTY).then(|| e.content_hash());
-            out.insert(
+            out.push((
                 path,
                 Remote {
                     hash,
@@ -507,9 +577,21 @@ impl SwarmNode {
                     author,
                     machine,
                 },
-            );
+            ));
         }
         Ok(out)
+    }
+
+    /// Records what this machine's next entry for `p` is made from. Written before the entry
+    /// itself.
+    pub async fn put_parent(&self, p: &RelPath, record: &ParentRecord) -> anyhow::Result<()> {
+        let core = &self.core;
+        core.ensure_writable()?;
+        let bytes = serde_json::to_vec(record)?;
+        core.doc
+            .set_bytes(core.author, parent_key(p), bytes)
+            .await?;
+        Ok(())
     }
 
     /// Stores `bytes` and points `p`'s key at them.

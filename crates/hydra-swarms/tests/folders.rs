@@ -969,3 +969,178 @@ async fn a_readers_held_edit_publishes_after_promotion() {
     o.shutdown().await;
     r.shutdown().await;
 }
+
+/// Makes `side`'s next pass save `text` to `p` once, after the scan and just before `p`'s
+/// decision is carried out.
+fn save_during_next_pass(side: &mut Side, p: &str, text: &'static str) {
+    let target = side.path(p);
+    let path = rel(p);
+    let mut armed = true;
+    side.folder.before_apply_for_tests(move |at| {
+        if armed && *at == path {
+            armed = false;
+            std::fs::write(&target, text).unwrap();
+        }
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_save_during_a_pass_is_not_overwritten_by_an_incoming_edit() {
+    let (mut o, mut w) = synced_pair("x.md").await;
+    o.write("x.md", "two");
+    o.reconcile().await;
+    w.hears("x.md", Some(hash("two"))).await;
+    save_during_next_pass(&mut w, "x.md", "saved meanwhile");
+    w.reconcile().await;
+    assert_eq!(w.read("x.md").as_deref(), Some("saved meanwhile"));
+    // The next pass sees the save meet the incoming edit, and keeps both.
+    w.settle("both versions kept", |s| copies_of(s, "x.md").len() == 1)
+        .await;
+    let copy = copies_of(&w, "x.md").remove(0);
+    let mut kept = vec![w.read("x.md").unwrap(), w.read(&copy).unwrap()];
+    kept.sort();
+    assert_eq!(kept, vec!["saved meanwhile".to_string(), "two".to_string()]);
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_save_during_a_pass_is_not_removed_by_an_incoming_delete() {
+    let (mut o, mut w) = synced_pair("x.md").await;
+    o.remove("x.md");
+    o.reconcile().await;
+    w.hears("x.md", None).await;
+    save_during_next_pass(&mut w, "x.md", "saved meanwhile");
+    w.reconcile().await;
+    assert_eq!(w.read("x.md").as_deref(), Some("saved meanwhile"));
+    w.reconcile().await;
+    assert_eq!(w.read("x.md").as_deref(), Some("saved meanwhile"));
+    assert_eq!(
+        w.folder.attention(),
+        vec![Attention::EditedAfterDelete { path: rel("x.md") }]
+    );
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_long_run_of_edits_over_another_authors_version_is_not_a_conflict() {
+    let (mut o, mut w) = synced_pair("x.md").await;
+    // Well past the recent window a parent record carries.
+    for i in 0..210 {
+        w.write("x.md", &format!("version {i}"));
+        w.reconcile().await;
+    }
+    o.settle("the last version on the owner", |s| {
+        s.read("x.md").as_deref() == Some("version 209")
+    })
+    .await;
+    has_entries(&o, "x.md", 2).await;
+    for side in [&mut o, &mut w] {
+        let events = side.reconcile().await;
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, FolderEvent::NewConflict { .. })),
+            "{events:?}"
+        );
+        assert!(copies_of(side, "x.md").is_empty());
+        assert!(side.folder.attention().is_empty());
+    }
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_local_spelling_that_differs_by_case_publishes_under_the_swarms() {
+    let (mut o, mut w) = synced_pair("Notes.md").await;
+    // An editor saves the file back under another case.
+    w.remove("Notes.md");
+    w.write("notes.md", "two");
+    w.reconcile().await;
+    assert_eq!(w.remote_hash("Notes.md").await, Some(Some(hash("two"))));
+    assert_eq!(w.remote_hash("notes.md").await, None);
+    o.settle("the edit on the owner", |s| {
+        s.read("Notes.md").as_deref() == Some("two")
+    })
+    .await;
+    assert_eq!(o.remote_hash("notes.md").await, None);
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+/// `p` in any case, as Windows and macOS would find it.
+fn read_any_case(side: &Side, p: &str) -> Option<String> {
+    let dir = side.path(p).parent().unwrap().to_path_buf();
+    let name = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .find(|n| n.eq_ignore_ascii_case(p))?;
+    side.read(&name)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_keys_differing_only_by_case_keep_both() {
+    let mut o = owner().await;
+    let mut w = joiner(&o, "wren", Role::Writer).await;
+    cut_off(&o, &w);
+    o.write("Plan.md", "olive's");
+    o.reconcile().await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    w.write("plan.md", "wren's");
+    w.reconcile().await;
+    reconnect(&o, &w).await;
+    for side in [&o, &w] {
+        has_entries(side, "Plan.md", 1).await;
+        has_entries(side, "plan.md", 1).await;
+    }
+
+    // The writer's key is newer and owns the file; the owner's content becomes its copy.
+    let roster = o.roster().await;
+    let at = o.node.file_entries(&roster).await.unwrap()[&rel("Plan.md")].entries[0].at;
+    let when = Timestamp::from_microsecond(at as i64).unwrap();
+    let copy = conflict_name(&rel("plan.md"), "olive-pc", when, &TimeZone::system());
+    for side in [&mut o, &mut w] {
+        side.settle("both versions kept", |s| {
+            read_any_case(s, "plan.md").as_deref() == Some("wren's")
+                && s.read(copy.as_str()).as_deref() == Some("olive's")
+        })
+        .await;
+    }
+    for side in [&mut o, &mut w] {
+        side.reconcile().await;
+        assert_eq!(copies_of(side, "plan.md"), vec![copy.as_str().to_string()]);
+        assert_eq!(
+            side.folder.attention(),
+            vec![Attention::Conflict {
+                path: rel("plan.md"),
+                copy: copy.clone()
+            }]
+        );
+    }
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reader_cannot_resolve() {
+    let mut o = owner().await;
+    let mut r = joiner(&o, "rae", Role::Reader).await;
+    o.write("x.md", "one");
+    o.reconcile().await;
+    r.settle("x.md on the reader", |s| s.read("x.md").is_some())
+        .await;
+    let copy = conflict_name(
+        &rel("x.md"),
+        "m",
+        "2026-10-27T13:05:00Z".parse().unwrap(),
+        &TimeZone::UTC,
+    );
+    let refused = r.folder.keep_theirs(&r.node, &rel("x.md"), &copy).await;
+    assert_eq!(
+        refused.unwrap_err().to_string(),
+        "This machine can only read this swarm."
+    );
+    o.shutdown().await;
+    r.shutdown().await;
+}

@@ -125,6 +125,8 @@ struct Pass<'a> {
     machine: &'a str,
 }
 
+type ApplyHook = Box<dyn FnMut(&RelPath) + Send>;
+
 pub struct Folder {
     root: PathBuf,
     /// Where the index is kept: this machine's state for the swarm, outside the folder.
@@ -135,6 +137,10 @@ pub struct Folder {
     too_big: BTreeSet<RelPath>,
     /// The attention list as last reported, so only changes are reported.
     reported: Vec<Attention>,
+    /// Where a path is on disk when its spelling there differs from the swarm's only by case.
+    disk_names: HashMap<RelPath, RelPath>,
+    /// Runs just before each path's decision is carried out, so tests can save in between.
+    before_apply: Option<ApplyHook>,
 }
 
 impl Folder {
@@ -154,6 +160,8 @@ impl Folder {
             copies: BTreeSet::new(),
             too_big: BTreeSet::new(),
             reported: Vec::new(),
+            disk_names: HashMap::new(),
+            before_apply: None,
         })
     }
 
@@ -171,7 +179,7 @@ impl Folder {
             let seen: HashMap<RelPath, Seen> = self
                 .index
                 .iter()
-                .filter_map(|(p, e)| Some((p.clone(), e.seen?)))
+                .filter_map(|(p, e)| Some((self.disk_names.get(p).unwrap_or(p).clone(), e.seen?)))
                 .collect();
             let types = types.clone();
             tokio::task::spawn_blocking(move || scan(&root, &types, &seen)).await??
@@ -182,10 +190,16 @@ impl Folder {
             .into_iter()
             .filter(|(p, _)| allowed(p, 0, &types))
             .collect();
+        // Keys that differ only by case are one file on Windows and macOS. The key whose newest
+        // entry is newest owns it; the content of the others is kept as conflict copies of it.
+        let (mut names, shadowed) = case_owners(&history);
         let remote: BTreeMap<RelPath, Remote> = history
             .iter()
+            .filter(|(p, _)| names.get(&fold(p)) == Some(p))
             .filter_map(|(p, h)| Some((p.clone(), newest(&h.entries)?.clone())))
             .collect();
+        self.adopt_spellings(&mut names);
+        let scan = self.respell(scan, &names);
         for (p, seen) in &scan.seen {
             self.index.entry(p.clone()).or_default().seen = Some(*seen);
         }
@@ -232,6 +246,7 @@ impl Folder {
                 modified: file.map_or(0, |f| f.modified),
             };
             let r = remote.get(&p);
+            let scanned = file.map(|f| f.hash.unwrap_or_else(|| Hash::new([])));
             let action = decide(
                 &p,
                 entry.base,
@@ -242,8 +257,11 @@ impl Folder {
                 entry.held,
                 &tz,
             );
+            if let Some(hook) = self.before_apply.as_mut() {
+                hook(&p);
+            }
             match self
-                .apply(&pass, &p, action, &local, entry.base, &mut events)
+                .apply(&pass, &p, action, &local, entry.base, scanned, &mut events)
                 .await
             {
                 Ok(Some(change)) => {
@@ -255,18 +273,26 @@ impl Folder {
                 Err(e) => events.push(FolderEvent::Error(format!("{}: {e:#}", p.as_str()))),
             }
         }
-        // Edits made at the same time as the newest version, which it would otherwise hide.
+        // Edits made at the same time as the newest version, which it would otherwise hide, and
+        // the content of keys owned by a key differing only by case.
         if writer {
-            for (p, hist) in &history {
-                for edit in unseen_edits(hist).unwrap_or_default() {
-                    match self.capture(&pass, p, edit, &tz, &scan.files).await {
-                        Ok(Some(copy)) => events.push(FolderEvent::NewConflict {
-                            path: p.clone(),
-                            copy,
-                        }),
-                        Ok(None) => {}
-                        Err(e) => events.push(FolderEvent::Error(format!("{}: {e:#}", p.as_str()))),
-                    }
+            let unseen = history.iter().flat_map(|(p, h)| {
+                unseen_edits(h)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(move |e| (p, e))
+            });
+            let cased = shadowed
+                .iter()
+                .filter_map(|(owner, key)| Some((owner, newest(&history[key].entries)?)));
+            for (p, edit) in unseen.chain(cased).collect::<Vec<_>>() {
+                match self.capture(&pass, p, edit, &tz, &scan.files).await {
+                    Ok(Some(copy)) => events.push(FolderEvent::NewConflict {
+                        path: p.clone(),
+                        copy,
+                    }),
+                    Ok(None) => {}
+                    Err(e) => events.push(FolderEvent::Error(format!("{}: {e:#}", p.as_str()))),
                 }
             }
         }
@@ -310,6 +336,13 @@ impl Folder {
         conflicts.chain(held).chain(big).collect()
     }
 
+    /// Runs `hook` just before each path's decision is carried out, for tests that change the
+    /// folder mid-pass.
+    #[doc(hidden)]
+    pub fn before_apply_for_tests(&mut self, hook: impl FnMut(&RelPath) + Send + 'static) {
+        self.before_apply = Some(Box::new(hook));
+    }
+
     /// Keeps the version at `path`: the conflict copy is deleted everywhere.
     pub async fn keep_theirs(
         &mut self,
@@ -318,6 +351,7 @@ impl Folder {
         copy: &RelPath,
     ) -> anyhow::Result<()> {
         check_copy(path, copy)?;
+        can_write(node)?;
         let history = node_history(node).await?;
         let base = self.index.get(copy).and_then(|e| e.base);
         self.publish(node, history.get(copy), copy, None, &Vec::from_iter(base))
@@ -333,6 +367,7 @@ impl Folder {
         copy: &RelPath,
     ) -> anyhow::Result<()> {
         check_copy(path, copy)?;
+        can_write(node)?;
         let types = types(node).await?;
         let bytes = self
             .read(copy)?
@@ -370,6 +405,7 @@ impl Folder {
         if self.index.get(path).and_then(|e| e.held) != Some(Held::EditedAfterDelete) {
             bail!("{} isn't waiting to be shared again.", path.as_str());
         }
+        can_write(node)?;
         let types = types(node).await?;
         let history = node_history(node).await?;
         let before = self.index.get(path).and_then(|e| e.base);
@@ -452,6 +488,7 @@ impl Folder {
 
     /// Carries out one decision. Gives the change applied, as (machine, unix microseconds),
     /// when there was one.
+    #[allow(clippy::too_many_arguments)]
     async fn apply(
         &mut self,
         pass: &Pass<'_>,
@@ -459,6 +496,7 @@ impl Folder {
         action: Action,
         local: &Local,
         base: Option<Hash>,
+        scanned: Option<Hash>,
         events: &mut Vec<FolderEvent>,
     ) -> anyhow::Result<Option<(String, u64)>> {
         let node = pass.node;
@@ -480,11 +518,17 @@ impl Folder {
                 let Some(bytes) = node.read_blob(hash).await? else {
                     return Ok(None);
                 };
+                if !self.as_scanned(p, scanned)? {
+                    return Ok(None);
+                }
                 self.write(p, &bytes)?;
                 self.entry(p).base = Some(hash);
                 Ok(theirs)
             }
             Action::RemoveFile => {
+                if !self.as_scanned(p, scanned)? {
+                    return Ok(None);
+                }
                 self.remove(p)?;
                 self.entry(p).base = None;
                 Ok(theirs)
@@ -528,6 +572,10 @@ impl Folder {
                     &[],
                 )
                 .await?;
+                // Saved again meanwhile: that edit meets the remote one next pass.
+                if !self.as_scanned(p, scanned)? {
+                    return Ok(None);
+                }
                 self.write(p, &theirs_bytes)?;
                 self.entry(p).base = Some(theirs_hash);
                 events.push(FolderEvent::NewConflict {
@@ -569,6 +617,9 @@ impl Folder {
                 let Some(bytes) = node.read_blob(hash).await? else {
                     return Ok(None);
                 };
+                if !self.as_scanned(p, scanned)? {
+                    return Ok(None);
+                }
                 self.write(p, &bytes)?;
                 self.entry(p).base = Some(hash);
                 events.push(FolderEvent::Restored(p.clone()));
@@ -704,6 +755,52 @@ impl Folder {
         Ok(Some((theirs_bytes, theirs, mine_bytes, mine)))
     }
 
+    /// Whether `p` on disk is still what the scan saw (`scanned`: its content's hash, None when
+    /// absent), so that a save made since is never overwritten or removed.
+    fn as_scanned(&self, p: &RelPath, scanned: Option<Hash>) -> anyhow::Result<bool> {
+        Ok(self.read(p)?.map(|b| Hash::new(&b)) == scanned)
+    }
+
+    /// Moves index entries spelled differently (by case) from the path that owns them onto
+    /// that path, and adds the index's own spellings to `names` for paths the swarm lacks.
+    fn adopt_spellings(&mut self, names: &mut HashMap<String, RelPath>) {
+        let keys: Vec<RelPath> = self.index.keys().cloned().collect();
+        for k in keys {
+            let owner = names.entry(fold(&k)).or_insert_with(|| k.clone()).clone();
+            if owner != k
+                && let Some(e) = self.index.remove(&k)
+            {
+                self.index.entry(owner).or_insert(e);
+            }
+        }
+    }
+
+    /// The scan keyed by the swarm's spelling of each path, remembering the disk's spelling where
+    /// it differs. A second spelling of the same path (possible on a case-sensitive disk) stays
+    /// local.
+    fn respell(&mut self, scan: Scan, names: &HashMap<String, RelPath>) -> Scan {
+        let key = |p: &RelPath| names.get(&fold(p)).cloned().unwrap_or_else(|| p.clone());
+        let mut seen = scan.seen;
+        let mut out = Scan::default();
+        self.disk_names.clear();
+        for (p, f) in scan.files {
+            let k = key(&p);
+            if out.files.contains_key(&k) {
+                continue;
+            }
+            if let Some(s) = seen.remove(&p) {
+                out.seen.insert(k.clone(), s);
+            }
+            if k != p {
+                self.disk_names.insert(k.clone(), p);
+            }
+            out.files.insert(k, f);
+        }
+        out.too_big = scan.too_big.iter().map(key).collect();
+        out.unreadable = scan.unreadable.iter().map(key).collect();
+        out
+    }
+
     fn entry(&mut self, p: &RelPath) -> &mut Entry {
         self.index.entry(p.clone()).or_default()
     }
@@ -730,6 +827,7 @@ impl Folder {
     /// written outside the folder. With `create`, missing folders on the way are made; without,
     /// None means one is missing.
     fn inside(&self, p: &RelPath, create: bool) -> anyhow::Result<Option<PathBuf>> {
+        let p = self.disk_names.get(p).unwrap_or(p);
         let mut at = self.root.clone();
         let mut parts = p.as_str().split('/').peekable();
         while let Some(part) = parts.next() {
@@ -858,22 +956,69 @@ fn lineage(heads: &[Hash], history: Option<&FileHistory>) -> Vec<Hash> {
             known.entry(hash).or_default().extend(&r.ancestors);
         }
     }
-    let mut out = Vec::new();
+    let mut all = Vec::new();
     let mut seen = HashSet::new();
     let mut queue: VecDeque<Hash> = heads.iter().copied().collect();
     while let Some(h) = queue.pop_front() {
-        if out.len() >= MAX_ANCESTORS {
-            break;
-        }
         if !seen.insert(h) {
             continue;
         }
-        out.push(h);
+        all.push(h);
         if let Some(earlier) = known.get(&h) {
             queue.extend(earlier);
         }
     }
-    out
+    // The recent window, plus any older version that is still some author's latest entry, so
+    // that entry never looks like an edit made alongside this one.
+    let current: HashSet<Hash> = history
+        .map(|h| h.entries.iter().filter_map(|e| e.hash).collect())
+        .unwrap_or_default();
+    all.iter()
+        .enumerate()
+        .filter(|(i, h)| *i < MAX_ANCESTORS || current.contains(*h))
+        .map(|(_, h)| *h)
+        .collect()
+}
+
+/// `p` folded for comparing paths the way Windows and macOS do.
+fn fold(p: &RelPath) -> String {
+    p.as_str().to_lowercase()
+}
+
+/// For each case-folded path in the swarm, the key that owns it (the one whose newest entry is
+/// newest, live entries first), and the other keys still holding content, with their owner.
+fn case_owners(
+    history: &BTreeMap<RelPath, FileHistory>,
+) -> (HashMap<String, RelPath>, Vec<(RelPath, RelPath)>) {
+    let mut groups: HashMap<String, Vec<&RelPath>> = HashMap::new();
+    for p in history.keys() {
+        groups.entry(fold(p)).or_default().push(p);
+    }
+    let rank = |p: &RelPath| {
+        newest(&history[p].entries).map(|e| (e.hash.is_some(), e.at, e.author.clone()))
+    };
+    let mut names = HashMap::new();
+    let mut shadowed = Vec::new();
+    for (folded, keys) in groups {
+        let Some(owner) = keys.iter().max_by_key(|p| rank(p)).copied() else {
+            continue;
+        };
+        for k in keys.iter().filter(|k| **k != owner) {
+            if rank(k).is_some_and(|r| r.0) {
+                shadowed.push((owner.clone(), (*k).clone()));
+            }
+        }
+        names.insert(folded, owner.clone());
+    }
+    shadowed.sort();
+    (names, shadowed)
+}
+
+fn can_write(node: &SwarmNode) -> anyhow::Result<()> {
+    if !node.can_write() {
+        bail!("This machine can only read this swarm.");
+    }
+    Ok(())
 }
 
 /// The entries of a path, other than the newest, holding content the newest wasn't made on top

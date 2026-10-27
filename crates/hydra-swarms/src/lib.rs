@@ -2,5 +2,6 @@
 //! keys) and the signed membership roster; nothing here touches the network.
 pub mod decide;
 pub mod ids;
+pub mod node;
 pub mod paths;
 pub mod roster;

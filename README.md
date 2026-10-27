@@ -85,11 +85,11 @@ hydraui can serve one phone: its sessions and their alerts, and the task boards,
 
 ### Swarms
 
-A swarm keeps a folder in sync between hydra machines, say a folder of skills shared across a team. Machines talk to each other directly over the same encrypted peer-to-peer link (iroh) as phone access, with no server of ours in the middle. Find it in **Settings › Swarms**: **You and this machine**, **+ New swarm** and **Join a swarm…**.
+A swarm keeps a folder in sync between hydra machines, say a folder of skills shared across a team. Machines connect peer to peer over iroh, end-to-end encrypted, falling back to iroh's public relays when a direct path can't be made; the relays can't read anything. Find it in **Settings › SWARMS**: **You and this machine**, **+ New swarm** and **Join a swarm…**.
 
 - **Roles.** Owners manage the members, their roles, the file types and the swarm's name, and can add other owners. Writers change files. Readers only receive: if a reader edits a file, that file stops syncing on their machine until they choose **Use the swarm's version**.
 - **What syncs.** Files whose extension is on the swarm's list (`.md` only, by default), up to 10 MB each. Everything else stays on each machine.
-- **Conflicts.** Nothing is lost. When two machines change the same file, the newer change keeps the name and the other is kept beside it as `<name> (conflict, <machine>, <d Mon HH.MM>).<ext>` (a dot in the time, as Windows forbids a colon). hydraui flags it under **Needs attention**. A delete that meets an edit keeps the edit.
+- **Conflicts.** Nothing is lost. When two machines change the same file, the newer change keeps the name and the other is kept beside it as `<name> (conflict, <machine>, <d Mon HH.MM>).<ext>` (a dot in the time, as Windows forbids a colon). hydraui flags it under **Needs attention**. When a delete meets an edit, the edit wins and the file survives.
 - **Only while hydraui runs.** Sync happens only while hydraui is running, and one hydraui window per machine does it.
 - **Invites.** An invite works once and expires after 7 days. The person who made it needs hydraui running when it is used.
 - **Removing someone.** Their machines stop syncing. They keep the files they already have.

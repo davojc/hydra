@@ -1336,6 +1336,8 @@ fn fixes(item: &Attention, role: Role) -> Vec<Fix> {
         Attention::Conflict { .. } if role == Role::Reader => Vec::new(),
         Attention::Conflict { .. } => vec![Fix::Compare, Fix::KeepTheirs, Fix::KeepMine],
         Attention::EditedAfterDelete { .. } => vec![Fix::ShareAgain, Fix::DeleteIt],
+        Attention::NoLongerShared { .. } if role == Role::Reader => vec![Fix::DeleteIt],
+        Attention::NoLongerShared { .. } => vec![Fix::ShareAgain, Fix::DeleteIt],
         Attention::ReaderEdit { .. } => vec![Fix::UseSwarmVersion],
         Attention::TooBig { .. } => Vec::new(),
     }
@@ -1355,12 +1357,14 @@ fn resolution(fix: Fix, item: &Attention) -> Option<Resolution> {
             let (path, copy) = pair(path, copy);
             Some(Resolution::KeepMine { path, copy })
         }
-        (Fix::ShareAgain, Attention::EditedAfterDelete { path }) => {
-            Some(Resolution::ShareAgain(path.as_str().into()))
-        }
-        (Fix::DeleteIt, Attention::EditedAfterDelete { path }) => {
-            Some(Resolution::DeleteHeld(path.as_str().into()))
-        }
+        (
+            Fix::ShareAgain,
+            Attention::EditedAfterDelete { path } | Attention::NoLongerShared { path },
+        ) => Some(Resolution::ShareAgain(path.as_str().into())),
+        (
+            Fix::DeleteIt,
+            Attention::EditedAfterDelete { path } | Attention::NoLongerShared { path },
+        ) => Some(Resolution::DeleteHeld(path.as_str().into())),
         (Fix::UseSwarmVersion, Attention::ReaderEdit { path }) => {
             Some(Resolution::UseSwarmVersion(path.as_str().into()))
         }
@@ -1393,6 +1397,11 @@ fn fix_warning(fix: Fix, item: &Attention) -> Option<(String, String, &'static s
             "Your edit is the only copy and can't be recovered.".into(),
             "Delete",
         )),
+        (Fix::DeleteIt, Attention::NoLongerShared { path }) => Some((
+            format!("Delete {}?", path.as_str()),
+            "The copy on this machine may be the only one, and can't be recovered.".into(),
+            "Delete",
+        )),
         (Fix::UseSwarmVersion, Attention::ReaderEdit { path }) => Some((
             format!("Replace your {}?", path.as_str()),
             "Your change is on this machine only and can't be recovered.".into(),
@@ -1412,6 +1421,12 @@ fn attention_text(item: &Attention) -> (&'static str, String, String) {
                 "Two machines changed it. The newer change kept the name; the other is beside it as {}.",
                 file_name(copy.as_str())
             ),
+        ),
+        Attention::NoLongerShared { path } => (
+            "No longer in the swarm:",
+            path.as_str().into(),
+            "Whoever wrote it was taken out of the swarm; your copy is on this machine only."
+                .into(),
         ),
         Attention::EditedAfterDelete { path } => (
             "Edited after a delete:",
@@ -1707,6 +1722,19 @@ mod tests {
         );
         let held = Attention::ReaderEdit { path: rel("a.md") };
         assert_eq!(fixes(&held, Role::Reader), vec![Fix::UseSwarmVersion]);
+        let orphan = Attention::NoLongerShared {
+            path: rel("new.md"),
+        };
+        assert_eq!(
+            fixes(&orphan, Role::Writer),
+            vec![Fix::ShareAgain, Fix::DeleteIt]
+        );
+        assert_eq!(fixes(&orphan, Role::Reader), vec![Fix::DeleteIt]);
+        assert_eq!(
+            resolution(Fix::ShareAgain, &orphan),
+            Some(Resolution::ShareAgain("new.md".into()))
+        );
+        assert!(fix_warning(Fix::DeleteIt, &orphan).is_some());
         let big = Attention::TooBig {
             path: rel("big.md"),
         };

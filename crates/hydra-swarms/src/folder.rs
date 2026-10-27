@@ -49,6 +49,10 @@ pub enum Attention {
     EditedAfterDelete {
         path: RelPath,
     },
+    /// The swarm no longer counts the only version it had; the file stays here.
+    NoLongerShared {
+        path: RelPath,
+    },
     ReaderEdit {
         path: RelPath,
     },
@@ -269,11 +273,21 @@ impl Folder {
             };
             let r = remote.get(&p);
             // Ruling 20: a version taken in whose entry no longer counts (its author was taken
-            // out without it being kept) is kept as a conflict copy before anything replaces it.
-            if let (Some(base), Some(from)) = (entry.base, entry.from.as_ref())
-                && local.hash == Some(base)
+            // out without it being kept) is kept as a conflict copy before anything replaces it,
+            // and when nothing replaces it, the file is flagged as on this machine only.
+            let orphan = match (entry.base, entry.from.as_ref()) {
+                (Some(base), Some(from)) if local.hash == Some(base) && entry.held.is_none() => {
+                    (!counts(roster, history.get(&p), &p, from, base)).then_some((base, from))
+                }
+                _ => None,
+            };
+            if orphan.is_some() && r.is_none() {
+                self.entry(&p).held = Some(Held::NoLongerShared);
+                events.push(FolderEvent::Held(held_attention(&p, Held::NoLongerShared)));
+                continue;
+            }
+            if let Some((base, from)) = orphan
                 && r.is_some_and(|r| r.hash != Some(base))
-                && !counts(roster, history.get(&p), &p, from, base)
             {
                 let gone = Remote {
                     hash: Some(base),
@@ -453,7 +467,8 @@ impl Folder {
 
     /// Publishes a file kept here after the swarm deleted it, and resumes syncing it.
     pub async fn share_again(&mut self, node: &SwarmNode, path: &RelPath) -> anyhow::Result<()> {
-        if self.index.get(path).and_then(|e| e.held) != Some(Held::EditedAfterDelete) {
+        let held = self.index.get(path).and_then(|e| e.held);
+        if !matches!(held, Some(Held::EditedAfterDelete | Held::NoLongerShared)) {
             bail!("{} isn't waiting to be shared again.", path.as_str());
         }
         can_write(node)?;
@@ -1012,6 +1027,7 @@ fn held_attention(p: &RelPath, held: Held) -> Attention {
     match held {
         Held::ReaderEdit => Attention::ReaderEdit { path },
         Held::EditedAfterDelete => Attention::EditedAfterDelete { path },
+        Held::NoLongerShared => Attention::NoLongerShared { path },
     }
 }
 
@@ -1026,7 +1042,6 @@ fn timestamp(micros: u64) -> Timestamp {
     Timestamp::from_microsecond(i64::try_from(micros).unwrap_or(i64::MAX)).unwrap_or(Timestamp::MAX)
 }
 
-/// `heads` and every version before them that the parent records know of, nearest first.
 /// Whether `base`, the version of `p` this folder took in from `from`'s entry, still counts:
 /// that author is a writer, or the roster kept that version of theirs, or a version that counts
 /// was made on top of it.
@@ -1051,6 +1066,7 @@ fn counts(
     roster.writes(&from.author) || kept || built_on
 }
 
+/// `heads` and every version before them that the parent records know of, nearest first.
 fn lineage(heads: &[Hash], history: Option<&FileHistory>) -> Vec<Hash> {
     let mut known: HashMap<Hash, Vec<Hash>> = HashMap::new();
     for (_, r) in history.map_or(&[][..], |h| &h.records[..]) {

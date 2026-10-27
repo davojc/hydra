@@ -1288,6 +1288,11 @@ impl Worker {
                         path.as_str()
                     )
                 }
+                FolderEvent::Held(Attention::NoLongerShared { path }) => format!(
+                    "{}: {} is no longer in the swarm, as whoever wrote it was taken out. It stays on this machine only.",
+                    self.name,
+                    path.as_str()
+                ),
                 FolderEvent::Restored(path) => {
                     let machine = self.remote_machine(node, &mut files, &path).await;
                     format!(

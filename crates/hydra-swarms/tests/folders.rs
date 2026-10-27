@@ -1410,3 +1410,43 @@ async fn an_unseen_members_edit_is_kept_as_a_flagged_copy() {
         side.shutdown().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_removed_writers_new_file_that_stops_counting_is_flagged_and_kept() {
+    let mut o = owner().await;
+    let mut w = joiner(&o, "wren", Role::Writer).await;
+    // What the owner holds of wren's work before wren's new file reaches it.
+    let kept = o.node.kept(&w.key.id()).await.unwrap();
+    w.write("new.md", "fresh");
+    w.reconcile().await;
+    o.settle("wren's new file", |s| {
+        s.read("new.md").as_deref() == Some("fresh")
+    })
+    .await;
+    let remove = SignedChange::sign(
+        &o.node.id(),
+        Change::Remove {
+            person: w.key.id(),
+            kept,
+        },
+        &o.key,
+        now(),
+    );
+    o.node.write_change(&remove).await.unwrap();
+    let flagged = Attention::NoLongerShared {
+        path: rel("new.md"),
+    };
+    let events = o
+        .settle("the file flagged", |s| {
+            s.folder.attention().contains(&flagged)
+        })
+        .await;
+    assert!(events.contains(&FolderEvent::Held(flagged.clone())));
+    assert_eq!(o.read("new.md").as_deref(), Some("fresh"));
+    // Shared again, it is the owner's now.
+    o.folder.share_again(&o.node, &rel("new.md")).await.unwrap();
+    assert!(o.folder.attention().is_empty());
+    assert_eq!(o.remote_hash("new.md").await, Some(Some(hash("fresh"))));
+    o.shutdown().await;
+    w.shutdown().await;
+}

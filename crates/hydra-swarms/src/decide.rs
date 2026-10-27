@@ -27,6 +27,9 @@ pub struct Remote {
 pub enum Held {
     ReaderEdit,
     EditedAfterDelete,
+    /// The only version the swarm had stopped counting (its author was taken out without it
+    /// being kept), so the file is on this machine only.
+    NoLongerShared,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

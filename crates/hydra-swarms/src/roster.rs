@@ -14,7 +14,7 @@
 //! Owners rank by seniority down the tree of who promoted whom (see [`Rank`]), and an owner can
 //! demote or remove only owners junior to them, whatever the date. So two owners can never undo
 //! each other, and a change taking someone out never drops a senior's changes.
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 use iroh_blobs::Hash;
 use serde::{Deserialize, Serialize};
@@ -202,8 +202,20 @@ pub struct Roster {
     pub ids: BTreeMap<String, PersonId>,
     /// Each owner's seniority: lower is more senior (see [`Rank`]).
     pub ranks: BTreeMap<PersonId, Rank>,
-    /// For each person, the (at, sig) of the latest change that took them out of a role.
-    pub last_out: BTreeMap<PersonId, (u64, String)>,
+    /// Who promoted each owner but the anchor, with that promotion's (at, sig). Kept for an
+    /// owner's promotees while that owner is out, so their ranks follow if they come back.
+    pub promoters: BTreeMap<PersonId, (PersonId, u64, String)>,
+    /// For each person, every change that took them out of a role, oldest first.
+    pub outs: BTreeMap<PersonId, Vec<Out>>,
+}
+
+/// A change that took someone out of a role.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Out {
+    pub at: u64,
+    pub sig: String,
+    /// They took themselves out (left or stepped down), so it is only their word.
+    pub by_self: bool,
 }
 
 /// An owner's place in the promotion tree: the (at, sig) of each promotion from the anchor down
@@ -255,15 +267,19 @@ impl Roster {
     /// Folds every change, in (at, sig) order, from the genesis signed by `anchor`. Changes that
     /// break the rules (a bad signature, someone without the standing to make them) are skipped.
     ///
-    /// When a change takes someone out of a role, their changes since they were last taken out
-    /// of one, dated before it and not listed in it, are dropped if, folded again without them,
-    /// it still takes them out; then the fold starts again. So nobody can backdate a change to
-    /// before they lost the standing to make it. Owners can only be taken out by owners senior
-    /// to them (or leave), so a junior's change never drops a senior's.
+    /// When a change takes someone out of a role, their changes since someone else last took
+    /// them out of one, dated before it and not listed in it, are dropped if, folded again
+    /// without them, it still takes them out; then the fold starts again. So nobody can backdate
+    /// a change to before they lost the standing to make it, and taking themselves out first
+    /// doesn't help: that is one more of their changes to drop. A drop stands only while the
+    /// change that made it does. Owners can only be taken out by owners senior to them (or
+    /// leave), so a junior's change never drops a senior's.
     pub fn fold(swarm: &str, anchor: &PersonId, changes: &[SignedChange]) -> Option<Roster> {
         let mut ordered: Vec<&SignedChange> = changes.iter().filter(|c| c.verify(swarm)).collect();
         ordered.sort_by(|a, b| (a.at, &a.sig).cmp(&(b.at, &b.sig)));
         ordered.dedup_by(|a, b| a.sig == b.sig);
+        // (dropped by, dropped), as positions in `ordered`. Only grows, so the fold ends.
+        let mut drops: BTreeSet<(usize, usize)> = BTreeSet::new();
         let mut dropped: HashSet<&str> = HashSet::new();
         'again: loop {
             let mut roster: Option<Roster> = None;
@@ -277,10 +293,14 @@ impl Roster {
                 };
                 if let Some(unlisted) = r.unlisted(&ordered[..i], c, &dropped) {
                     let mut without = dropped.clone();
-                    without.extend(unlisted);
+                    without.extend(unlisted.iter().map(|j| ordered[*j].sig.as_str()));
                     let before = Roster::fold_plain(anchor, &ordered[..i], &without);
                     if before.is_some_and(|b| b.retires(c)) {
-                        dropped = without;
+                        drops.extend(unlisted.into_iter().map(|j| (i, j)));
+                        dropped = Roster::in_force(&drops)
+                            .into_iter()
+                            .map(|j| ordered[j].sig.as_str())
+                            .collect();
                         continue 'again;
                     }
                 }
@@ -290,27 +310,49 @@ impl Roster {
         }
     }
 
-    /// When `c` would take someone out of a role, their changes in `earlier` since they were
-    /// last taken out of one that `c` doesn't list and that aren't dropped already, if any.
-    fn unlisted<'a>(
+    /// The changes `drops` leave out: a drop counts unless whatever made it was dropped too.
+    /// Whatever drops a change is later than it, so the latest decide first.
+    fn in_force(drops: &BTreeSet<(usize, usize)>) -> HashSet<usize> {
+        let mut out = HashSet::new();
+        for (by, j) in drops.iter().rev() {
+            if !out.contains(by) {
+                out.insert(*j);
+            }
+        }
+        out
+    }
+
+    /// When `c` would take someone out of a role, the positions of their changes in `earlier`
+    /// since they were last taken out of one that `c` doesn't list and that aren't dropped
+    /// already, if any.
+    fn unlisted(
         &self,
-        earlier: &[&'a SignedChange],
+        earlier: &[&SignedChange],
         c: &SignedChange,
         dropped: &HashSet<&str>,
-    ) -> Option<Vec<&'a str>> {
+    ) -> Option<Vec<usize>> {
         let (person, kept) = c.change.retiring()?;
-        let since = self.last_out.get(person);
         let listed: HashSet<&str> = kept.changes.iter().map(String::as_str).collect();
-        let unlisted: Vec<&str> = earlier
+        // Their changes before the latest time someone else took them out were settled then.
+        // Taking themselves out is only their word, so it shields nothing unless `c` lists it,
+        // and is otherwise one more change to drop.
+        let since = self.outs.get(person).and_then(|outs| {
+            outs.iter()
+                .rev()
+                .find(|o| !o.by_self || listed.contains(o.sig.as_str()))
+                .map(|o| (o.at, &o.sig))
+        });
+        let unlisted: Vec<usize> = earlier
             .iter()
-            .filter(|d| {
+            .enumerate()
+            .filter(|(_, d)| {
                 d.by == *person
                     && !matches!(d.change, Change::Genesis { .. })
-                    && since.is_none_or(|(at, sig)| (d.at, &d.sig) > (*at, sig))
+                    && since.is_none_or(|(at, sig)| (d.at, &d.sig) > (at, sig))
                     && !listed.contains(d.sig.as_str())
                     && !dropped.contains(d.sig.as_str())
             })
-            .map(|d| d.sig.as_str())
+            .map(|(j, _)| j)
             .collect();
         (!unlisted.is_empty()).then_some(unlisted)
     }
@@ -349,7 +391,8 @@ impl Roster {
             retired: BTreeMap::new(),
             ids: BTreeMap::new(),
             ranks: BTreeMap::from([(owner.person, Rank::new())]),
-            last_out: BTreeMap::new(),
+            promoters: BTreeMap::new(),
+            outs: BTreeMap::new(),
         };
         r.admit(owner);
         Some(r)
@@ -382,11 +425,41 @@ impl Roster {
                 || self.outranks(by, person))
     }
 
-    /// `person`'s rank once promoted to owner by `c`'s signer.
+    /// Makes `person`'s rank the one `c`'s signer promotes them to, and moves the owners they
+    /// promoted (and theirs) down with them.
     fn promoted(&mut self, person: PersonId, c: &SignedChange) {
+        // The promoter and those above it stay where they are, even if `person` once promoted
+        // them: the newest promotion wins, so that link no longer moves them.
+        let mut above = HashSet::new();
+        let mut at = Some(c.by);
+        while let Some(p) = at.filter(|p| above.insert(*p)) {
+            at = self.promoters.get(&p).map(|(by, ..)| *by);
+        }
+        self.promoters
+            .retain(|p, (by, ..)| !(*by == person && above.contains(p)));
         let mut rank = self.ranks.get(&c.by).cloned().unwrap_or_default();
         rank.push((c.at, c.sig.clone()));
         self.ranks.insert(person, rank);
+        self.promoters.insert(person, (c.by, c.at, c.sig.clone()));
+        let mut moved = HashSet::from([person]);
+        let mut queue = VecDeque::from([person]);
+        while let Some(p) = queue.pop_front() {
+            let base = self.ranks[&p].clone();
+            let below: Vec<(PersonId, u64, String)> = self
+                .promoters
+                .iter()
+                .filter(|(x, (by, ..))| *by == p && self.ranks.contains_key(x))
+                .map(|(x, (_, at, sig))| (*x, *at, sig.clone()))
+                .collect();
+            for (x, at, sig) in below {
+                if moved.insert(x) {
+                    let mut rank = base.clone();
+                    rank.push((at, sig));
+                    self.ranks.insert(x, rank);
+                    queue.push_back(x);
+                }
+            }
+        }
     }
 
     fn apply(&mut self, c: &SignedChange) {
@@ -469,9 +542,14 @@ impl Roster {
         if now >= Some(before) {
             return;
         }
-        self.last_out.insert(person, (c.at, c.sig.clone()));
+        self.outs.entry(person).or_default().push(Out {
+            at: c.at,
+            sig: c.sig.clone(),
+            by_self: c.by == person,
+        });
         if now != Some(Role::Owner) {
             self.ranks.remove(&person);
+            self.promoters.remove(&person);
         }
         if before >= Role::Writer && now.is_none_or(|r| r < Role::Writer) {
             self.retire(&machines, kept, c.at);
@@ -1201,6 +1279,198 @@ mod tests {
         assert_eq!(r.role_of(&q.id()), None);
         assert_eq!(r.role_of(&w.id()), None);
         assert_eq!(r.role_of(&o.id()), Some(Role::Writer));
+    }
+
+    // The next six came from the second re-review's probes.
+
+    /// The changes a change lists, as their signatures.
+    fn listing(changes: &[&SignedChange]) -> Kept {
+        Kept {
+            changes: changes.iter().map(|c| c.sig.clone()).collect(),
+            authors: Vec::new(),
+        }
+    }
+
+    fn step_down(who: &PersonKey, at: u64, kept: Kept) -> SignedChange {
+        demote(who, at, who, Role::Writer, kept)
+    }
+
+    #[test]
+    fn a_backdated_step_down_does_not_shield_a_removed_owners_backdated_add() {
+        let o = PersonKey::generate();
+        let p = PersonKey::generate();
+        let a = PersonKey::generate();
+        let mut log = vec![genesis(&o), add(&o, 3, &p, "pat", Role::Owner)];
+        let kept = changes_of(&log, &p);
+        log.push(sign(
+            &o,
+            10,
+            Change::Remove {
+                person: p.id(),
+                kept,
+            },
+        ));
+        // After his removal at 10, pat signs these, dated 7 and 8.
+        let crony = add(&p, 7, &a, "alice", Role::Owner);
+        let down = step_down(&p, 8, listing(&[&crony]));
+        log.extend([crony, down]);
+        let r = fold_in_any_order(&o, &log);
+        assert_eq!(r.role_of(&a.id()), None);
+        assert_eq!(r.role_of(&p.id()), None);
+    }
+
+    #[test]
+    fn a_backdated_leave_does_not_shield_a_removed_owners_backdated_add() {
+        let o = PersonKey::generate();
+        let p = PersonKey::generate();
+        let a = PersonKey::generate();
+        let mut log = vec![genesis(&o), add(&o, 3, &p, "pat", Role::Owner)];
+        let kept = changes_of(&log, &p);
+        log.push(sign(
+            &o,
+            10,
+            Change::Remove {
+                person: p.id(),
+                kept,
+            },
+        ));
+        let crony = add(&p, 7, &a, "alice", Role::Writer);
+        let kept = listing(&[&crony]);
+        let leave = sign(
+            &p,
+            8,
+            Change::Leave {
+                person: p.id(),
+                kept,
+            },
+        );
+        log.extend([crony, leave]);
+        let r = fold_in_any_order(&o, &log);
+        assert_eq!(r.role_of(&a.id()), None);
+    }
+
+    #[test]
+    fn a_backdated_step_down_does_not_shield_a_demoted_owners_backdated_removal() {
+        let o = PersonKey::generate();
+        let p = PersonKey::generate();
+        let q = PersonKey::generate();
+        let a = PersonKey::generate();
+        let mut log = vec![
+            genesis(&o),
+            add(&o, 2, &p, "pat", Role::Owner),
+            add(&o, 3, &q, "quin", Role::Owner),
+            add(&q, 5, &a, "alice", Role::Writer),
+        ];
+        log.push(demote(&o, 10, &p, Role::Writer, changes_of(&log, &p)));
+        let kept = Kept::default();
+        let hit = sign(
+            &p,
+            7,
+            Change::Remove {
+                person: q.id(),
+                kept,
+            },
+        );
+        let down = step_down(&p, 8, listing(&[&hit]));
+        log.extend([hit, down]);
+        let r = fold_in_any_order(&o, &log);
+        assert_eq!(r.role_of(&q.id()), Some(Role::Owner));
+        assert_eq!(r.role_of(&a.id()), Some(Role::Writer));
+        assert_eq!(r.role_of(&p.id()), Some(Role::Writer));
+    }
+
+    #[test]
+    fn an_honest_step_down_still_shields_against_a_later_removal() {
+        // Pat steps down, listing everything; a junior who has seen that removes pat later,
+        // listing only the step-down. Pat's owner-era add of alice stays.
+        let o = PersonKey::generate();
+        let p = PersonKey::generate();
+        let j = PersonKey::generate();
+        let a = PersonKey::generate();
+        let mut log = vec![
+            genesis(&o),
+            add(&o, 2, &p, "pat", Role::Owner),
+            add(&o, 3, &j, "jo", Role::Owner),
+            add(&p, 4, &a, "alice", Role::Writer),
+        ];
+        let down = step_down(&p, 5, changes_of(&log, &p));
+        log.push(down.clone());
+        let kept = listing(&[&down]);
+        log.push(sign(
+            &j,
+            9,
+            Change::Remove {
+                person: p.id(),
+                kept,
+            },
+        ));
+        let r = fold_in_any_order(&o, &log);
+        assert_eq!(r.role_of(&p.id()), None);
+        assert_eq!(r.role_of(&a.id()), Some(Role::Writer));
+    }
+
+    #[test]
+    fn a_re_promoted_owners_promotees_rank_below_them() {
+        let o = PersonKey::generate();
+        let p = PersonKey::generate();
+        let q = PersonKey::generate();
+        let ray = PersonKey::generate();
+        let mut log = vec![
+            genesis(&o),
+            add(&o, 2, &p, "pat", Role::Owner),
+            add(&o, 3, &q, "quin", Role::Owner),
+            add(&p, 4, &ray, "ray", Role::Owner),
+        ];
+        log.push(step_down(&p, 5, changes_of(&log, &p)));
+        log.push(set_role(&q, 6, &p, Role::Owner));
+        let r = fold_in_any_order(&o, &log);
+        assert!(r.outranks(&q.id(), &p.id()));
+        assert!(r.outranks(&p.id(), &ray.id()));
+        assert!(r.outranks(&q.id(), &ray.id()));
+        // Ray, below pat again, can't demote pat; pat can demote ray.
+        let mut tried = log.clone();
+        tried.push(demote(&ray, 9, &p, Role::Writer, changes_of(&log, &p)));
+        assert_eq!(
+            fold(&o, &tried).unwrap().role_of(&p.id()),
+            Some(Role::Owner)
+        );
+    }
+
+    #[test]
+    fn a_re_promoted_owner_cannot_backdate_a_promotion_to_when_he_was_senior() {
+        let o = PersonKey::generate();
+        let p = PersonKey::generate();
+        let q = PersonKey::generate();
+        let c = PersonKey::generate();
+        let mut log = vec![
+            genesis(&o),
+            add(&o, 2, &p, "pat", Role::Owner),
+            add(&o, 3, &q, "quin", Role::Owner),
+        ];
+        log.push(step_down(&p, 5, changes_of(&log, &p)));
+        log.push(set_role(&q, 6, &p, Role::Owner));
+        log.push(add(&p, 4, &c, "cro", Role::Owner));
+        let r = fold_in_any_order(&o, &log);
+        assert!(!r.outranks(&c.id(), &q.id()));
+    }
+
+    #[test]
+    fn a_promotion_cycle_keeps_the_newest_promotion() {
+        // Pat promotes ray, steps down, and ray makes pat an owner again: pat now ranks below
+        // ray, and every machine agrees.
+        let o = PersonKey::generate();
+        let p = PersonKey::generate();
+        let ray = PersonKey::generate();
+        let mut log = vec![
+            genesis(&o),
+            add(&o, 2, &p, "pat", Role::Owner),
+            add(&p, 3, &ray, "ray", Role::Owner),
+        ];
+        log.push(step_down(&p, 5, changes_of(&log, &p)));
+        log.push(set_role(&ray, 6, &p, Role::Owner));
+        let r = fold_in_any_order(&o, &log);
+        assert!(r.outranks(&o.id(), &ray.id()));
+        assert!(r.outranks(&ray.id(), &p.id()));
     }
 
     #[test]

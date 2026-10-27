@@ -70,6 +70,12 @@ fn wants_check(s: &crate::runs::StageRun) -> bool {
             .is_some_and(|r| r.outcome == crate::rating::Outcome::Check)
 }
 
+/// Whether `run` stays on its orchestrator's card once it's the last one there: open or
+/// stopped yes (someone may want to look); finished, no: the card goes back to ready.
+pub fn stays_on_card(run: &Run) -> bool {
+    run.state != RunState::Finished
+}
+
 /// What the card says about `run`.
 pub fn card(run: &Run) -> Card {
     let state = match &run.state {
@@ -385,6 +391,19 @@ mod tests {
         assert_eq!(c.state, CardState::Checking);
         assert_eq!(c.state.word(), "Check it");
         assert_eq!(c.segments[0], Segment::Checking);
+    }
+
+    #[test]
+    fn a_finished_ticket_leaves_the_card_and_a_stopped_one_stays() {
+        let (mut runs, id) = runs_of(&[("only", "Only")]);
+        start(&mut runs, &id, "only", "t1");
+        assert!(stays_on_card(runs.run(&id).unwrap()), "open");
+        runs.report("t1", rated(99)).unwrap();
+        assert!(!stays_on_card(runs.run(&id).unwrap()), "finished");
+        let (mut runs, id) = runs_of(&STAGES);
+        start(&mut runs, &id, "replicate", "t1");
+        runs.person(&id, crate::runs::Choice::Stop).unwrap();
+        assert!(stays_on_card(runs.run(&id).unwrap()), "stopped");
     }
 
     #[test]

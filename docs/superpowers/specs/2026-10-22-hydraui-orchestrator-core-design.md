@@ -946,3 +946,9 @@ was a question back ("where does this solution apply if we're allowing larger ru
 saves?"). The check told it only to look for an answer, so nobody would ever have replied.
 The 5-minute check now also has the stage reply in the thread to a question or request to
 explain that nobody has answered yet, then wait for the decision as before.
+
+A finished ticket no longer stays on its orchestrator's card (Jordan, 2026-10-27: Review PR's
+kept saying "version-2-backend-1840 · Done" after the review ended). Once the last ticket there
+is finished, the card goes back to its pipeline's ready state and drops the ticket's link; a
+stopped one stays so someone can look (`pipeline_card::stays_on_card`). Ticket history keeps
+every finished ticket.

@@ -1349,10 +1349,19 @@ impl Workspace {
                         .collect();
                     return Some((*id, c, panes));
                 }
-                let Some(run) = reg.runs.current(token) else {
-                    // Started from the launcher, no ticket yet: the card of its pipeline.
-                    let file = self.orchestrators.get(id)?;
-                    let pipeline = crate::pipeline::load(root, file).ok()?;
+                // No ticket yet, or its last one is done: the card of its pipeline, ready for
+                // the next (a finished ticket doesn't stay on the card).
+                let Some(run) = reg
+                    .runs
+                    .current(token)
+                    .filter(|r| crate::pipeline_card::stays_on_card(r))
+                else {
+                    let file = self
+                        .orchestrators
+                        .get(id)
+                        .cloned()
+                        .or_else(|| reg.runs.current(token).map(|r| r.pipeline.file.clone()))?;
+                    let pipeline = crate::pipeline::load(root, &file).ok()?;
                     return Some((*id, ready_card(&pipeline), vec![*id]));
                 };
                 let panes = card_tokens(run)
@@ -1624,7 +1633,7 @@ impl Workspace {
             .when(!c.segments.is_empty(), |d| {
                 d.child(h_flex().gap(px(3.)).children(segments))
             })
-            .when(ticket, |d| {
+            .when(ticket && c.state != CardState::Ready, |d| {
                 d.children(
                     self.current_ticket(orchestrator, cx)
                         .and_then(|(t, prs)| self.render_ticket_link(&t, &prs, c.accent)),

@@ -1,0 +1,773 @@
+# Peer groups (plan A: groups, roles, invites, folder sync) Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** hydraui machines form owner/writer/reader groups over iroh. Members join with
+single-use invites, and each group's folder is kept in sync with iroh-docs and iroh-blobs. Edits
+are never silently lost, and changes from non-writers never land in anyone's folder.
+
+**Architecture:**
+- **`crates/hydra-groups`** holds the whole engine and has no GPUI.
+  - **Pure rules:** roster folding, path rules, the sync decision.
+  - **Per group:** a `GroupNode` runs its own iroh endpoint and router, with docs, blobs, gossip
+    and a gated hydra ALPN.
+  - **`GroupsService`** owns every group on a tokio runtime of its own and talks to its caller
+    over channels.
+  - **Tests:** integration tests run several nodes in one process with relays off.
+- **hydraui** gets a bridge modelled on the phone link: a cross-process lock, a worker, and
+  events pumped into `Workspace`. It also gets Settings pages that follow the mockup.
+
+**Tech Stack:**
+- Rust 1.91 and iroh 1.x (the workspace has 1.4.1).
+- `iroh-docs` 0.101, `iroh-blobs` 0.103 and `iroh-gossip` 0.101, all on `iroh ^1`, checked on
+  crates.io.
+- tokio, `notify` (already a workspace dependency), `keyring`, `serde_json`.
+- `jiff` 0.2 (new), for local-time conflict names.
+
+**Spec:** `docs/superpowers/specs/2026-10-27-peer-groups-design.md`. The mockup is
+`docs/superpowers/specs/peer-groups-mockups/settings.html`.
+
+**Scope:** this is plan A. Plan B, written after this lands, is the spec's machine linking:
+- "Add another machine of mine";
+- groups offered to your other machines;
+- the machine-to-machine key and channel;
+- Remove… with personal-key replacement (spec §3 machine key, §6 last three bullets).
+
+In plan A a person has exactly one machine. The data model still records machines as a list
+under each person, so plan B adds to it without migrating anything.
+
+## Global Constraints
+
+- **Roles:**
+  - Owner ⊃ writer ⊃ reader.
+  - Owners invite, promote, demote and remove, add owners, edit file types and rename the
+    group.
+  - The creator is the first owner.
+  - The last owner can't be removed, demoted or leave.
+- **Enforcement on every machine:**
+  - A membership or settings change counts only if signed by someone who was an owner at that
+    point in the log.
+  - A file change reaches the folder only if its author is currently a writer or owner.
+  - Machines not in the roster, removed ones included, are refused on docs, blobs and gossip.
+- **Readers** hold only the read capability (`Capability::Read`). Their own changes (name,
+  machine name, leave) go to an online owner, who writes them for them.
+- **What syncs:**
+  - Extension on the group's list, compared case-insensitively. The default list is `[".md"]`.
+  - Files ≤ 10 MiB (`MAX_FILE_BYTES = 10 * 1024 * 1024`). Anything else stays local and
+    unflagged.
+  - Owners edit the list.
+- **Conflict copy name:** `<stem> (conflict, <machine name>, <d Mon HH:MM>).<ext>`, in the
+  machine's local time, e.g. `SKILL (conflict, Davo's desktop, 27 Oct 13:05).md`.
+- **"Newer"** is the entry or file timestamp (the author's clock), with ties broken by the
+  higher author id. Nothing is ever dropped.
+- **Invites:** single-use, a 7-day expiry (`INVITE_LIFETIME = 7 * 24 * 3600` s), cancellable.
+  They are redeemed only while the inviting machine runs.
+- **Joining** needs an empty or new folder. **Creating** a group shares the allowed files already
+  in its folder. **Leaving** keeps the files.
+- **Identity:**
+  - Your name and this machine's name are set once in config.toml (`peer_name`,
+    `machine_name`). The machine name defaults to the host name.
+  - The personal key lives in the keyring (service `hydraui`, user `peer-person-key`). Each
+    group's machine key lives under user `peer-group-key-<namespace id>`.
+  - Changing a name updates every group.
+- **Storage:** group stores live under `HydraPaths::state_root()/groups/<namespace id>/`, never
+  in an environment's state folder.
+- **One window runs it:** one hydraui window per machine runs all groups, holding the lock
+  `<running_dir>/peer-groups.lock`. The others retry every 10 s, as the phone link does.
+- **Never outside the folder:** hydra never writes outside a group folder. It doesn't follow
+  symlinks or junctions while scanning, and refuses remote paths with `..`, absolute paths,
+  drive letters, backslashes, empty segments or a NUL.
+- **The UI thread never blocks** on the network or the disk.
+- **Workspace standards:** fmt; clippy `--workspace --all-targets --all-features -D warnings`;
+  `cargo test --workspace --all-features`.
+- **Dev hydraui** is stopped by PID or `scripts\stop-dev-hydraui.ps1`, never by name.
+
+## Review Focus
+
+1. **A file saved while the watcher is mid-write:** an editor saves twice in quick succession,
+   or truncates then writes. Only the final content is published, never a 0-byte file. Task 6:
+   `a_burst_of_saves_publishes_only_the_last_content` (debounce, and a read once the size is
+   stable).
+2. **hydra writing a file that the watcher then reports** must not be echoed back as a local
+   edit, and must not cause a conflict. Task 6: `writes_from_sync_are_not_republished`.
+3. **A peer's entry naming a path outside the folder or a forbidden name** (`../x.md`, `C:/x.md`,
+   `a\b.md`, `con.md` on Windows) is ignored and logged, never written. Task 2:
+   `remote_paths_that_escape_or_are_reserved_are_refused`.
+4. **A machine whose clock is far ahead** wins the name but never loses the other side's edit.
+   Task 3: `a_clock_far_ahead_wins_the_name_but_the_other_edit_is_kept`.
+5. **Two owners making conflicting membership changes while offline** (A removes C while B makes
+   C an owner). Every machine ends with the same roster, whatever order the entries arrive in.
+   Task 1: `the_roster_is_the_same_whatever_order_entries_arrive_in`.
+
+---
+
+## File structure
+
+```
+crates/hydra-groups/
+  Cargo.toml
+  src/lib.rs            re-exports
+  src/ids.rs            PersonId, PersonKey (sign/verify via iroh SecretKey/PublicKey), keyring helpers
+  src/roster.rs         Role, Member, Machine, Change, SignedChange, Roster::fold
+  src/paths.rs          safe_rel_path, allowed, conflict_name, doc keys
+  src/decide.rs         the pure per-file sync decision
+  src/node.rs           GroupNode: endpoint + router + docs/blobs/gossip + Gate + doc read/write
+  src/wire.rs           hydra/group/1 messages, invite code encode/decode
+  src/invites.rs        invite store (hashed tokens), redeem
+  src/folder.rs         scanner, watcher, index, applying decisions, attention items
+  src/service.rs        GroupsService: registry, commands, events, one tokio runtime
+  tests/two_nodes.rs    node-level integration tests
+  tests/folders.rs      folder sync integration tests
+  tests/service.rs      service-level tests
+crates/hydraui/src/groups/
+  mod.rs, store.rs      config keys and keyring wiring for hydraui
+crates/hydraui/src/link/owner.rs        generalised to a named lock
+crates/hydraui/src/workspace/groups.rs        bridge: start/stop/events/commands/toasts
+crates/hydraui/src/workspace/groups_page.rs   Settings pages and dialogs
+crates/hydraui/src/workspace/settings_tab.rs  GROUPS section
+crates/hydraui/src/config.rs                  peer_name, machine_name
+```
+
+---
+
+### Task 1: The crate, identities and the roster
+
+**Files:**
+- Create: `crates/hydra-groups/Cargo.toml`, `src/lib.rs`, `src/ids.rs`, `src/roster.rs`
+- Modify: `Cargo.toml` (root workspace deps): `iroh-docs = "0.101"`, `iroh-blobs = "0.103"`,
+  `iroh-gossip = "0.101"`, `jiff = "0.2"`
+
+**Interfaces (produces):**
+
+```rust
+// ids.rs
+pub struct PersonId(pub iroh::PublicKey);            // Display/FromStr = iroh's z32 form; serde as string
+pub struct PersonKey(iroh::SecretKey);
+impl PersonKey {
+    pub fn generate() -> PersonKey;
+    pub fn from_bytes(b: [u8; 32]) -> PersonKey;
+    pub fn to_bytes(&self) -> [u8; 32];
+    pub fn id(&self) -> PersonId;
+    pub fn sign(&self, msg: &[u8]) -> Vec<u8>;
+}
+pub fn verify(id: &PersonId, msg: &[u8], sig: &[u8]) -> bool;
+/// Keyring-backed 32-byte secrets as lowercase hex (the phone link's `LinkKey` pattern); a damaged
+/// entry is an error, never replaced.
+pub struct Keyring { service: String }
+impl Keyring {
+    pub fn new(service: &str) -> Keyring;
+    pub fn get_or_create(&self, user: &str) -> Result<[u8; 32], String>;
+    pub fn delete(&self, user: &str) -> Result<(), String>;
+}
+
+// roster.rs
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum Role { Reader, Writer, Owner }
+pub struct Machine { pub endpoint: String, pub name: String, pub author: String }  // author = iroh-docs AuthorId string
+pub struct Member { pub person: PersonId, pub name: String, pub role: Role, pub machines: Vec<Machine> }
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Change {
+    Genesis { name: String, owner: Member },
+    AddMember { member: Member },
+    SetRole { person: PersonId, role: Role },
+    Remove { person: PersonId },
+    Leave { person: PersonId },
+    Rename { person: PersonId, name: String },
+    RenameMachine { person: PersonId, endpoint: String, name: String },
+    RenameGroup { name: String },
+    SetTypes { types: Vec<String> },
+}
+pub struct SignedChange { pub change: Change, pub by: PersonId, pub at: u64 /* unix µs */, pub sig: String /* hex */ }
+impl SignedChange {
+    pub fn sign(group: &str /* namespace id */, change: Change, key: &PersonKey, at: u64) -> SignedChange;
+    pub fn verify(&self, group: &str) -> bool;
+}
+pub struct Roster { pub name: String, pub members: Vec<Member>, pub types: Vec<String>, pub removed: Vec<PersonId> }
+impl Roster {
+    /// Folds every change, in (at, sig) order, from the genesis signed by `anchor`.
+    pub fn fold(group: &str, anchor: &PersonId, changes: &[SignedChange]) -> Option<Roster>;
+    pub fn role_of(&self, p: &PersonId) -> Option<Role>;
+    pub fn member_by_author(&self, author: &str) -> Option<&Member>;
+    pub fn member_by_endpoint(&self, endpoint: &str) -> Option<&Member>;
+    pub fn endpoints(&self) -> Vec<String>;      // every current member machine
+}
+```
+
+- **Signing:** the signed message is the bytes of `serde_json::to_vec(&(group, &change, &by, at))`.
+- **Fold rules** (changes that break them are skipped, not errors):
+  - `Genesis` counts only once, only when `by == anchor` and `owner.person == anchor`, and only
+    if it is the earliest valid one. With no valid genesis, `fold` returns `None`.
+  - The default types are `[".md"]`.
+  - `AddMember`, `SetRole`, `Remove`, `RenameGroup` and `SetTypes` need `by` to be an owner at
+    that point.
+  - `SetRole` (away from Owner), `Remove` and `Leave` are skipped if they would leave no owner.
+  - `AddMember` for a person in `removed` re-adds them and takes them off `removed`. A removed
+    person is otherwise ignored.
+  - `Rename` and `RenameMachine` need `by == person`, or an owner.
+  - `Leave` needs `by == person`.
+  - `SetTypes` normalises to lowercase with a leading dot, deduplicates, and drops empties.
+  - Any change whose `verify` fails is skipped.
+
+- [ ] **Step 1: Write the failing tests** in `roster.rs`:
+  - `a_genesis_by_the_anchor_makes_its_signer_the_owner`
+  - `a_genesis_by_anyone_else_is_ignored`
+  - `only_owners_add_members`
+  - `an_owner_can_add_another_owner`
+  - `a_writer_cannot_remove_anyone`
+  - `the_last_owner_cannot_be_demoted_removed_or_leave`
+  - `a_removed_writer_readded_as_reader_is_a_reader`
+  - `members_rename_themselves_and_readers_cannot_rename_others`
+  - `a_change_with_a_bad_signature_is_skipped`
+  - `types_are_normalised`: `["MD", ".Py", "", ".md"]` → `[".md", ".py"]`.
+  - `the_roster_is_the_same_whatever_order_entries_arrive_in`: Review Focus 5. Shuffle a 12-change
+    log 50 times with a fixed seed; every fold is equal.
+  - In `ids.rs`: `a_signature_verifies_only_for_its_signer_and_message`, plus
+    `the_keyring_never_replaces_a_damaged_key`. The latter uses service `hydraui-test-<random>`
+    and is marked `#[ignore]` on CI-less machines only if the keyring is unavailable, mirroring
+    `link::store`'s tests.
+- [ ] **Step 2: Run them and check they fail.** Run `cargo test -p hydra-groups`. Expected:
+  compile errors.
+- [ ] **Step 3: Implement** `ids.rs` and `roster.rs`.
+- [ ] **Step 4: Run them and check they pass.** Run `cargo test -p hydra-groups`.
+- [ ] **Step 5: Run clippy and fmt,** then **commit**:
+  `feat(hydra-groups): people, signed changes and the roster`.
+
+### Task 2: Paths, allow-list, conflict names and doc keys
+
+**Files:**
+- Create: `crates/hydra-groups/src/paths.rs`
+
+**Interfaces (produces):**
+
+```rust
+pub const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
+/// A group-relative path with `/` separators, checked safe on every OS.
+pub struct RelPath(String);
+pub fn safe_rel_path(s: &str) -> Option<RelPath>;
+pub fn rel_from_disk(root: &Path, file: &Path) -> Option<RelPath>;
+pub fn allowed(p: &RelPath, size: u64, types: &[String]) -> bool;
+pub fn conflict_name(p: &RelPath, machine: &str, at: jiff::Timestamp, tz: &jiff::tz::TimeZone) -> RelPath;
+pub fn file_key(p: &RelPath) -> Vec<u8>;          // b"files/" + path + b"\0"  (the NUL makes prefix deletes exact)
+pub fn path_of_key(key: &[u8]) -> Option<RelPath>;
+pub fn log_key(c: &SignedChange) -> Vec<u8>;      // b"log/" + format!("{:020}-{}", at, &sig[..16])
+pub const LOG_PREFIX: &[u8] = b"log/";
+pub const FILES_PREFIX: &[u8] = b"files/";
+pub fn is_conflict_copy(p: &RelPath) -> bool;     // name matches "<stem> (conflict, <anything>, <d Mon HH:MM>).<ext>"
+```
+
+- `safe_rel_path` refuses:
+  - empty input or empty segments;
+  - `.` and `..`;
+  - a leading `/` or a drive letter (`C:`);
+  - `\`, NUL, or `:` anywhere;
+  - a segment ending in a space or a dot;
+  - Windows reserved names (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`), in any
+    case and with any extension, on every OS, so files stay portable.
+- `conflict_name` replaces characters in the machine name that aren't allowed in a file name
+  (`<>:"/\|?*` and control characters) with `_`.
+
+- [ ] **Step 1: Write the failing tests:**
+  - `remote_paths_that_escape_or_are_reserved_are_refused` (Review Focus 3): each of `../x.md`,
+    `a/../x.md`, `/x.md`, `C:/x.md`, `a\\b.md`, `a//b.md`, `con.md`, `Aux.txt`, `x.md.`,
+    `a /b.md` and `x\0.md` gives `None`. `skills/review/SKILL.md` gives `Some`.
+  - `allowed_checks_extension_case_insensitively_and_size`: `A.MD` is allowed with `[".md"]`,
+    `a.py` isn't, and a file of `MAX_FILE_BYTES + 1` isn't.
+  - `conflict_names_follow_the_spec`: `skills/review/SKILL.md`, `Davo's desktop`, and
+    2026-10-27 13:05 in `Europe/London` give `skills/review/SKILL (conflict, Davo's desktop, 27 Oct 13:05).md`.
+    `a/b` as the machine name gives `a_b`.
+  - `file_keys_round_trip_and_never_prefix_each_other`: `file_key("a.md")` is not a prefix of
+    `file_key("a.md.md")`.
+  - `conflict_copies_are_recognised`
+- [ ] **Step 2: Run them; they fail.**
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run them; they pass.** Then commit:
+  `feat(hydra-groups): safe group paths, the allow-list and conflict names`.
+
+### Task 3: The sync decision
+
+**Files:**
+- Create: `crates/hydra-groups/src/decide.rs`
+
+**Interfaces (produces):**
+
+```rust
+pub struct Local { pub hash: Option<Hash>, pub modified: u64 /* unix µs */ }   // hash None = file absent
+pub struct Remote { pub hash: Option<Hash>, pub at: u64, pub author: String, pub machine: String }  // hash None = tombstone
+pub enum Held { ReaderEdit, EditedAfterDelete }
+pub enum Action {
+    Nothing,
+    Write(Hash),                    // put remote content at the path
+    RemoveFile,                     // delete the local file
+    Publish,                        // writer: publish local content (or a tombstone if absent)
+    Hold(Held),                     // stop syncing this path here, raise attention
+    ConflictKeepRemote { copy_from_local: RelPath },  // remote takes the name; local content → this copy, then publish the copy
+    ConflictKeepLocal { copy_from_remote: RelPath },  // local keeps the name and is published; remote content → this copy, published
+    Restore(Hash),                  // a local delete met a remote edit: the edit comes back
+}
+pub fn decide(path: &RelPath, base: Option<Hash>, local: &Local, remote: Option<&Remote>,
+              me: (&str /*author*/, &str /*machine*/), writer: bool, held: Option<Held>, tz: &TimeZone) -> Action;
+```
+
+- **Rules,** where `changed` = local hash ≠ base and `incoming` = there is a remote whose hash
+  ≠ base:
+  - `held` is Some → `Nothing`.
+  - Neither changed nor incoming → `Nothing`.
+  - Incoming only → `Write`, or `RemoveFile` for a tombstone.
+  - Changed only:
+    - writer → `Publish`;
+    - reader → `Hold(ReaderEdit)`.
+  - Both, with the same resulting hash → `Nothing` (the caller updates the base).
+  - Both, reader → `Hold(ReaderEdit)`.
+  - Both, writer:
+    - The remote is a tombstone and the local file exists → `Hold(EditedAfterDelete)`.
+    - The local file is absent and the remote is an edit → `Restore`.
+    - Otherwise the newer side keeps the name: `local.modified` against `remote.at`, ties going
+      to the higher author string. The loser's copy name uses the loser's machine and time.
+
+- [ ] **Step 1: Write the failing tests,** one per rule:
+  - `an_untouched_file_takes_the_incoming_edit`
+  - `an_untouched_file_follows_a_delete`
+  - `a_writers_local_edit_is_published`
+  - `a_readers_local_edit_is_held`
+  - `a_readers_local_delete_is_held`
+  - `both_changed_the_newer_remote_wins_and_local_is_copied`
+  - `both_changed_the_newer_local_wins_and_remote_is_copied`
+  - `a_tie_goes_to_the_higher_author`
+  - `delete_meeting_an_edit_keeps_the_edit`: both directions, `Hold(EditedAfterDelete)` and
+    `Restore`.
+  - `the_same_change_on_both_sides_is_not_a_conflict`
+  - `a_held_path_is_left_alone`
+  - `a_clock_far_ahead_wins_the_name_but_the_other_edit_is_kept` (Review Focus 4): the remote
+    `at` is 10 years ahead. The result is `ConflictKeepRemote`, with a copy holding the local
+    content.
+- [ ] **Step 2: Run them; they fail.**
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run them; they pass.** Then commit: `feat(hydra-groups): the per-file sync decision`.
+
+### Task 4: `GroupNode`: endpoint, gated protocols, the document
+
+**Files:**
+- Create: `crates/hydra-groups/src/node.rs`, `crates/hydra-groups/tests/two_nodes.rs`
+
+**Interfaces:**
+- **Consumes:** Tasks 1–2.
+- **Produces:**
+
+```rust
+pub struct NodeConfig {
+    pub dir: PathBuf,                 // state_root/groups/<ns>/  (docs/ and blobs/ inside, persistent)
+    pub machine_key: [u8; 32],        // this machine's key for this group
+    pub relays: bool,                 // false in tests
+}
+pub struct GroupNode { /* endpoint, router, docs api, blobs store, doc, author, gate */ }
+pub enum NodeEvent { Changed /* any doc insert */, ContentReady(Hash), PeerUp(String), PeerDown(String), SyncFinished }
+impl GroupNode {
+    /// A new group: makes the namespace, this machine's author, and writes the genesis signed by `person`.
+    pub async fn create(cfg: NodeConfig, name: &str, person: &PersonKey, me: Member) -> anyhow::Result<GroupNode>;
+    /// Opens a group this machine already belongs to.
+    pub async fn open(cfg: NodeConfig, ns: NamespaceId) -> anyhow::Result<GroupNode>;
+    /// Joins with the capability an inviter handed over; `author` is created here.
+    pub async fn join(cfg: NodeConfig, cap: Capability) -> anyhow::Result<GroupNode>;
+    pub fn id(&self) -> String;                         // namespace id
+    pub fn endpoint_id(&self) -> String;
+    pub fn author(&self) -> String;
+    pub fn can_write(&self) -> bool;
+    pub fn events(&self) -> tokio::sync::broadcast::Receiver<NodeEvent>;
+    pub async fn roster(&self, anchor: &PersonId) -> anyhow::Result<Option<Roster>>;
+    pub async fn write_change(&self, c: &SignedChange) -> anyhow::Result<()>;
+    /// Per file key, the newest entry whose author maps to a current writer/owner (Global Constraints).
+    pub async fn files(&self, roster: &Roster) -> anyhow::Result<BTreeMap<RelPath, Remote>>;
+    pub async fn put_file(&self, p: &RelPath, bytes: Bytes) -> anyhow::Result<Hash>;
+    pub async fn delete_file(&self, p: &RelPath) -> anyhow::Result<()>;
+    pub async fn read_blob(&self, h: Hash) -> anyhow::Result<Option<Bytes>>;
+    pub fn set_gate(&self, endpoints: &[String]);       // who may connect on docs/blobs/gossip
+    pub async fn sync_with(&self, endpoints: &[String]) -> anyhow::Result<()>;
+    pub fn addr_for_tests(&self) -> EndpointAddr;
+    pub async fn shutdown(self);
+}
+```
+
+- **The gate:** a `Gated<P: ProtocolHandler>` wrapper that refuses a connection whose remote
+  endpoint id isn't in the gate set, before handing it on. It wraps the docs, blobs and gossip
+  ALPNs. Task 5's hydra ALPN is not gated, since invitees aren't members yet.
+- **Writes:** `put_file` imports the bytes into blobs and calls `set_hash` with `file_key`.
+  `delete_file` calls `del(author, file_key)`, which leaves a tombstone.
+- **Reading files:** `files()` drops keys that `path_of_key` rejects, and drops entries over
+  `MAX_FILE_BYTES`.
+- **Tests:** in `tests/two_nodes.rs`, nodes run with relays off and dial each other by
+  `addr_for_tests()`, the way `crates/hydra-link/tests/link.rs` does. Each test node gets its
+  `Capability` handed over directly, since invites come in Task 5.
+
+- [ ] **Step 1: Write the failing tests:**
+  - `a_created_group_has_its_creator_as_owner`
+  - `a_file_put_by_a_writer_reaches_another_writer`: the content is readable via `read_blob`.
+  - `a_delete_reaches_the_other_side_as_a_tombstone`
+  - `a_reader_cannot_write`: `put_file` errors, and `can_write()` is false.
+  - `entries_from_an_author_who_is_not_a_writer_are_ignored`: B is added as a writer and puts
+    `x.md`. An owner then demotes B to reader. On A, `files()` no longer shows B's `x.md`.
+  - `a_machine_outside_the_gate_cannot_sync`: a third node with the write capability but not in
+    the roster or gate never receives `x.md` within 5 s.
+  - `a_reopened_group_keeps_its_files_and_roster`: shut down, `open` again from the same `dir`.
+- [ ] **Step 2: Run them; they fail.**
+- [ ] **Step 3: Implement.** Follow the iroh-docs README's router setup. The stores are
+  persistent: `iroh_docs::protocol::Docs::persistent(dir/"docs")` and the iroh-blobs FS store at
+  `dir/"blobs"`.
+- [ ] **Step 4: Run them twice; they pass both times.** Then commit:
+  `feat(hydra-groups): a gated iroh node per group, with files and a change log`.
+
+### Task 5: Invites and joining
+
+**Files:**
+- Create: `crates/hydra-groups/src/wire.rs`, `src/invites.rs`
+- Modify: `src/node.rs` (accept the hydra ALPN), `tests/two_nodes.rs`
+
+**Interfaces (produces):**
+
+```rust
+pub const ALPN: &[u8] = b"hydra/group/1";
+pub struct InviteCode { pub host: String /* endpoint id */, pub relay: Option<String>, pub token: String /* 64 hex */ }
+impl InviteCode { pub fn encode(&self) -> String /* "hydra-group:" + base64url(json) */; pub fn decode(s: &str) -> Option<InviteCode> /* trims */ }
+pub struct Invite { pub id: String, pub role: Role, pub created: u64, pub expires: u64, pub used: bool }  // stored with sha256(token), never the token
+pub struct Invites { /* dir/invites.json */ }
+impl Invites {
+    pub fn create(&self, role: Role, now: u64) -> std::io::Result<(Invite, String /* token */)>;
+    pub fn cancel(&self, id: &str) -> std::io::Result<()>;
+    pub fn pending(&self, now: u64) -> Vec<Invite>;
+    /// Marks it used and returns its role if `token` is unused, uncancelled and unexpired.
+    pub fn redeem(&self, token: &str, now: u64) -> Option<Role>;
+}
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Request {
+    Join { token: String, member: Member /* role ignored */, proof: String /* sig by member.person over token */ },
+    Relay { change: SignedChange },         // a reader's own change for an owner to write
+    Removed,                                // an owner telling this machine it was removed
+}
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Reply {
+    Joined { ns: String, anchor: String, name: String, write_secret: Option<String> /* hex, writers and owners only */ },
+    Ok,
+    Refused { reason: String },
+}
+impl GroupNode {
+    pub async fn invite(&self, role: Role, person: &PersonKey) -> anyhow::Result<(Invite, InviteCode)>;  // owners only
+    pub fn cancel_invite(&self, id: &str) -> anyhow::Result<()>;
+    pub fn pending_invites(&self) -> Vec<Invite>;
+}
+pub async fn redeem(code: &InviteCode, me: Member, person: &PersonKey, machine_key: [u8; 32], relays: bool)
+    -> anyhow::Result<(Capability, PersonId /* anchor */, String /* group name */)>;
+```
+
+- **Framing:** one bi-stream per request, with plan 1's framing: a length-prefixed JSON frame of
+  at most 1 MiB. *Ruling:* copy `hydra_link::framing` into `wire.rs` rather than depending on
+  `hydra-link`; the two protocols version separately.
+- **Handling `Join`:**
+  1. Check `proof`.
+  2. `redeem` the token.
+  3. Write `AddMember` with the invite's role, signed by this machine's person key. Only an owner
+     machine has invites.
+  4. Refresh the gate, then reply `Joined`.
+- **`Join` refusal copy:**
+  - spent or unknown: "This invite has already been used."
+  - expired: "This invite has expired."
+  - cancelled: "This invite was cancelled."
+  - not an owner any more: "Whoever invited you is no longer an owner of this group."
+- **Handling `Relay`:** only an owner node accepts it. It verifies the signature, and it accepts
+  only `Rename`, `RenameMachine` or `Leave` where `by == person`. It writes the change and
+  replies `Ok`, else `Refused`.
+- **Handling `Removed`:** accepted only from an endpoint whose member is an owner in this node's
+  roster. It is surfaced as a `NodeEvent::Removed`; add this variant.
+
+- [ ] **Step 1: Write the failing tests:**
+  - `an_invite_lets_a_reader_join_with_read_only_access`: the joiner's `can_write()` is false,
+    and it receives the owner's files.
+  - `an_invite_lets_a_writer_join_and_write`
+  - `an_invite_works_once`: a second redeem gets `Refused` with "This invite has already been
+    used."
+  - `an_expired_invite_is_refused`: inject `now`.
+  - `a_cancelled_invite_is_refused`
+  - `a_writer_cannot_make_invites`
+  - `a_readers_rename_goes_through_an_owner`: the reader `Relay`s `Rename`, and every node's
+    roster shows the new name.
+  - `a_relay_for_someone_else_is_refused`
+  - `invite_codes_round_trip_and_tolerate_whitespace`
+- [ ] **Step 2: Run them; they fail.**
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run them twice; they pass.** Then commit:
+  `feat(hydra-groups): single-use invites, joining, and readers' changes via owners`.
+
+### Task 6: Folder sync
+
+**Files:**
+- Create: `crates/hydra-groups/src/folder.rs`, `crates/hydra-groups/tests/folders.rs`
+
+**Interfaces:**
+- **Consumes:** Tasks 2–5.
+- **Produces:**
+
+```rust
+pub enum Attention {
+    Conflict { path: RelPath, copy: RelPath },          // derived from conflict-copy files present (any machine sees it)
+    EditedAfterDelete { path: RelPath },
+    ReaderEdit { path: RelPath },
+    TooBig { path: RelPath },                           // allowed type but over MAX_FILE_BYTES, local only
+}
+pub enum FolderEvent { Attention(Vec<Attention>), NewConflict { path: RelPath, copy: RelPath }, Held(Attention), Restored(RelPath), LastChange { machine: String, at: u64 }, Error(String) }
+pub struct Folder { /* root, index (dir/index.json: path -> {base, held}), watcher */ }
+impl Folder {
+    pub fn new(root: PathBuf, state: PathBuf) -> anyhow::Result<Folder>;
+    /// Scans disk and doc, decides per path, applies; run at start, on doc changes, on (debounced) watcher events, and every 60 s.
+    pub async fn reconcile(&mut self, node: &GroupNode, roster: &Roster, me: &Member) -> anyhow::Result<Vec<FolderEvent>>;
+    pub fn attention(&self) -> Vec<Attention>;
+    pub async fn keep_theirs(&mut self, node: &GroupNode, path: &RelPath, copy: &RelPath) -> anyhow::Result<()>;   // delete the copy (publish its delete)
+    pub async fn keep_mine(&mut self, node: &GroupNode, path: &RelPath, copy: &RelPath) -> anyhow::Result<()>;     // copy's content → path, delete copy, publish both
+    pub async fn share_again(&mut self, node: &GroupNode, path: &RelPath) -> anyhow::Result<()>;
+    pub async fn delete_held(&mut self, path: &RelPath) -> anyhow::Result<()>;
+    pub async fn use_group_version(&mut self, node: &GroupNode, path: &RelPath) -> anyhow::Result<()>;
+    pub fn watch(&self) -> tokio::sync::mpsc::Receiver<()>;   // debounced: fires 500 ms after the last change, and only once a changed file's size is stable across two reads 100 ms apart
+}
+```
+
+- **The loop:** `reconcile` hashes local files whose size or mtime differs from the index (the
+  hash is iroh-blobs' BLAKE3 of the bytes), calls `decide` per path, and applies the result.
+  - Writes go through a temp file in the same folder, then a rename.
+  - After applying, it records the new base. A file hydra just wrote then matches its base, so
+    it isn't republished.
+  - Scanning skips symlinks, junctions and disallowed files, and never follows links.
+  - `TooBig` is raised for an allowed type over the cap.
+- **Creating a group from a folder** is the first `reconcile` with an empty doc: every allowed
+  file publishes.
+- **Joining** needs the folder to be empty or new. `Folder::new` refuses a non-empty folder when
+  given `join: true`; add that flag.
+
+- [ ] **Step 1: Write the failing tests** in `tests/folders.rs`. Use two or three nodes, temp
+  folders, and an explicit `reconcile` on each side instead of waiting on timers.
+  - `a_new_file_reaches_the_other_folder`
+  - `an_edit_reaches_the_other_folder`
+  - `a_delete_reaches_the_other_folder`
+  - `files_of_other_types_stay_local`: `a.py` is never in the doc.
+  - `an_oversize_file_stays_local_and_is_flagged`
+  - `a_conflict_keeps_both_and_both_sides_see_it`: the conflict copy exists in both folders, with
+    the exact name, and `Attention::Conflict` shows on both.
+  - `keep_mine_and_keep_theirs_resolve_everywhere`
+  - `an_edit_after_a_remote_delete_is_held_locally`, then `share_again` brings it back for
+    everyone.
+  - `a_local_delete_meeting_a_remote_edit_restores_it`
+  - `a_readers_edit_is_held_and_use_group_version_resumes`
+  - `writes_from_sync_are_not_republished` (Review Focus 2): after B writes A's file, B's next
+    `reconcile` publishes nothing; check the doc's entry count.
+  - `a_burst_of_saves_publishes_only_the_last_content` (Review Focus 1): use `watch()` with
+    three writes 50 ms apart, the middle one 0 bytes. Exactly one publish, with the last content.
+  - `joining_refuses_a_non_empty_folder`
+  - `creating_shares_the_files_already_there`
+  - `symlinks_are_not_followed`: `#[cfg(unix)]`, plus a Windows junction variant using the
+    workspace `junction` crate.
+- [ ] **Step 2: Run them; they fail.**
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run them twice; they pass.** Then commit:
+  `feat(hydra-groups): folders kept in sync, with conflicts kept and flagged`.
+
+### Task 7: `GroupsService`: every group, membership actions, one runtime
+
+**Files:**
+- Create: `crates/hydra-groups/src/service.rs`, `crates/hydra-groups/tests/service.rs`
+
+**Interfaces:**
+- **Consumes:** everything above.
+- **Produces** (the only API hydraui uses):
+
+```rust
+pub struct Identity { pub person: [u8; 32], pub name: String, pub machine_name: String }
+pub struct ServiceConfig {
+    pub root: PathBuf,                                // state_root/groups
+    pub identity: Identity,
+    pub group_key: Box<dyn Fn(&str /*ns*/) -> Result<[u8; 32], String> + Send>,   // keyring in hydraui, in-memory in tests
+    pub relays: bool,
+}
+pub struct GroupView {
+    pub id: String, pub name: String, pub folder: PathBuf, pub my_role: Role,
+    pub members: Vec<MemberView>, pub types: Vec<String>, pub pending_invites: Vec<Invite>,
+    pub attention: Vec<Attention>, pub online: usize, pub machines: usize,
+    pub syncing: bool, pub last_change: Option<(String, u64)>, pub removed: bool,
+}
+pub struct MemberView { pub person: String, pub name: String, pub role: Role, pub machines: Vec<MachineView> }
+pub struct MachineView { pub name: String, pub online: bool, pub last_seen: Option<u64>, pub this_machine: bool }
+pub enum Command {
+    Create { name: String, folder: PathBuf },
+    Join { code: String, folder: PathBuf },
+    Invite { group: String, role: Role, reply: oneshot::Sender<Result<String, String>> },  // the code
+    CancelInvite { group: String, id: String },
+    SetRole { group: String, person: String, role: Role },
+    Remove { group: String, person: String },
+    RenameGroup { group: String, name: String },
+    SetTypes { group: String, types: Vec<String> },
+    SetFolder { group: String, folder: PathBuf },    // moves nothing: syncs into the new folder (must be empty or new)
+    Leave { group: String },
+    SetIdentity { name: String, machine_name: String },   // updates every group (relayed where reader)
+    Resolve { group: String, action: Resolution },
+    Stop,
+}
+pub enum Resolution { KeepTheirs { path: String, copy: String }, KeepMine { path: String, copy: String },
+                      ShareAgain(String), DeleteHeld(String), UseGroupVersion(String) }
+pub enum ServiceEvent { Groups(Vec<GroupView>), Toast { group: String, text: String }, Failed(String) }
+pub struct GroupsService;
+impl GroupsService {
+    /// Starts a tokio runtime on a thread named `hydra-groups`, opens every group in `root/registry.json`, and returns the command sender and the event receiver.
+    pub fn start(cfg: ServiceConfig) -> std::io::Result<(futures::channel::mpsc::UnboundedSender<Command>, futures::channel::mpsc::UnboundedReceiver<ServiceEvent>)>;
+}
+```
+
+- **Registry:** `registry.json` lists `{ ns, anchor, folder, removed }`.
+- **Peers:** each group's peers are the roster's endpoints minus this machine. Call `sync_with`
+  on start and whenever the roster changes, and refresh the gate.
+- **Removing someone:** the owner's node sends `Request::Removed` to that person's online
+  machines. A machine that receives it, or that sees itself missing from a roster it can still
+  read:
+  - marks the group `removed`;
+  - stops syncing and keeps the folder;
+  - toasts "You were removed from <group>."
+- **"Online"** counts this machine plus the member machines currently `PeerUp`. `last_seen` for
+  a machine is the last `PeerDown` time, kept locally in `root/<ns>/seen.json`.
+- **Toast copy:**
+  - new conflict: "<group>: a conflict. You and <machine> both changed <path>. Both copies are kept."
+  - reader edit held: "<group>: your change isn't shared. You're a reader, so <path> stopped syncing on this machine."
+  - edit after delete: "<group>: <machine> deleted <path>, but your edit is kept on this machine."
+  - restored: "<group>: <path> was changed on <machine> after you deleted it, so it's back."
+  - removed: "You were removed from <group>."
+  - joined: "Joined <group>."
+- **Errors:** each failing command sends `ServiceEvent::Failed(text)` and keeps running.
+- **Refused actions:** a `SetRole`, `Remove` or `Leave` that the roster would skip (the last
+  owner) is refused up front with "<group> needs at least one owner."
+
+- [ ] **Step 1: Write the failing tests** in `tests/service.rs`. Two or three services, each with
+  its own temp root and relays off. Add a `ServiceConfig::direct_peers_for_tests` hook so tests
+  can supply addresses.
+  - `create_invite_join_and_a_file_syncs`
+  - `the_service_reopens_its_groups_after_a_restart`
+  - `removing_a_member_stops_their_sync_and_tells_them`
+  - `demoting_a_writer_ignores_their_later_changes`
+  - `the_last_owner_is_kept`: the exact message above.
+  - `a_name_change_reaches_every_group`: two groups, one as a reader.
+  - `leaving_keeps_the_files_and_stops_syncing`
+  - `set_types_lets_py_files_sync`
+- [ ] **Step 2: Run them; they fail.**
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run all of `hydra-groups` twice; it passes both times.** Then commit:
+  `feat(hydra-groups): a service running every group`.
+
+### Task 8: The hydraui bridge
+
+**Files:**
+- Modify:
+  - `crates/hydraui/src/link/owner.rs`: `try_own_named(paths, name)` and
+    `held_elsewhere_named(paths, name)`. The existing functions call them with `"phone-link"`.
+  - `crates/hydraui/src/config.rs`: `peer_name: Option<String>` and
+    `machine_name: Option<String>`, set through `config::set`.
+  - `crates/hydraui/Cargo.toml`: `hydra-groups`.
+  - `crates/hydraui/src/workspace.rs`: fields and module declarations.
+- Create:
+  - `crates/hydraui/src/groups/mod.rs`, `crates/hydraui/src/groups/store.rs`: the person key,
+    the group keys and the default machine name (host name via
+    `std::env::var("COMPUTERNAME")`, else `HOSTNAME`, else `"This machine"`).
+    *Ruling:* the keyring service is `hydraui`, but when `HYDRA_HOME` is set it becomes
+    `hydraui:<HYDRA_HOME>`. Two dev copies with separate roots then really are two people with
+    separate keys.
+  - `crates/hydraui/src/workspace/groups.rs`
+
+**Interfaces:**
+- **Produces:**
+  - `Workspace::groups_start(&mut self, window, cx)` and `groups_stop(&mut self)`. These copy
+    `phone_start`/`phone_stop`: the `RETRY` loop, `seek` counter, reading disk off the UI
+    thread, and releasing the lock only after the service has stopped.
+  - `Workspace::groups_command(&self, cmd: hydra_groups::Command)`
+  - Fields:
+    - `groups: Vec<GroupView>`
+    - `groups_here: bool`: this window runs them.
+    - `groups_elsewhere: bool`
+  - `ServiceEvent::Toast` → `window.push_notification(Notification::warning(text).title("Groups"), cx)`.
+    `Failed` uses `Notification::error`. `Groups` replaces the field and calls `cx.notify()`.
+- **Starting:** groups start when `peer_name` is set and the registry has at least one group.
+  Making or joining the first group sets it up and starts it.
+
+- [ ] **Step 1: Write the failing tests** (unit, in `workspace/groups.rs` and `link/owner.rs`):
+  - `two_named_locks_are_independent`
+  - `a_hydra_home_gets_its_own_keyring_service`
+  - `groups_do_not_start_before_a_name_is_set`
+  - `the_default_machine_name_is_the_host_name`
+- [ ] **Step 2: Run them; they fail.** Then implement, and run them again: they pass.
+- [ ] **Step 3: Run the full workspace tests and clippy.** Then commit:
+  `feat(hydraui): groups run in one window, like the phone link`.
+
+### Task 9: Settings › Groups
+
+**Files:**
+- Create: `crates/hydraui/src/workspace/groups_page.rs`
+- Modify: `crates/hydraui/src/workspace/settings_tab.rs`. Add `Section::You` and
+  `Section::Group(String)`, plus the GROUPS heading after Phone, matching the mockup's sidebar.
+
+**Behaviour:** the mockup, `docs/superpowers/specs/peer-groups-mockups/settings.html`, minus the
+plan-B parts (Your machines, Add another machine, Remove…). Exact copy is in the mockup. Built
+with gpui-component, as `phone_page.rs` is.
+- **Sidebar:**
+  - **You and this machine**
+  - one entry per group, with a status dot (green when up to date, amber when there's
+    attention, grey when offline or removed) and the attention count
+  - **+ New group**, which asks for a name and a folder, the folder picked with GPUI's path prompt
+  - **Join a group…**: invite and folder
+- **You and this machine:** Your name, and This machine's name (default host name) with the
+  hint "Starts as the computer's name (<HOST>). Pick something your teammates will recognise."
+  Save sends `SetIdentity`. Making or joining a group asks for both first if `peer_name` is
+  unset.
+- **Group page:**
+  - Title, status pill (`Up to date · N of M machines online` / `Syncing…` / `Removed from this
+    group`), and a role badge.
+  - Folder: Open (`file_ops::reveal_in_explorer`) and Change… (an empty or new folder only).
+  - Last change.
+  - **Needs attention:** one row per `Attention`, with buttons:
+    - Conflict: Compare (opens both files with the OS default app), Keep theirs, Keep mine. Not
+      shown to readers.
+    - EditedAfterDelete: Share it again, Delete it.
+    - ReaderEdit: Use the group's version.
+    - TooBig: no action.
+  - **Members:** people, with their machines and online or last seen. Owners get a ⋯ menu per
+    other member: Make owner / Make writer / Make reader / Remove…, each confirmed. Owners also
+    get **Invite…** and pending invites with **Cancel invite**.
+  - **File types that sync:** chips. Owners can add and remove; others see read-only chips.
+  - **Leave group…**, confirmed. It is disabled with the tooltip "Make someone else an owner
+    first" for the last owner.
+- **Invite dialog:** Writer / Reader / Owner segments, then the code and Copy invite, with
+  "Works once · expires in 7 days · your hydraui must be running when they join".
+- **Status line:** while another window runs the groups, the page shows "Groups run in another
+  hydraui window", and actions still send nothing.
+
+- [ ] **Step 1: Implement the pages.**
+- [ ] **Step 2: Run the workspace tests, clippy and fmt; all pass.**
+- [ ] **Step 3: Check it by hand** with two dev hydraui instances that use separate hydra roots
+  (`$env:HYDRA_HOME` set to a different scratch folder for each, which gives each its own config,
+  state and keyring service). Start each with `Start-Process -PassThru` and note the PIDs.
+  - Create a group, invite a writer, join, and edit a file: it syncs.
+  - Make a conflict: both windows show it.
+  - Demote to reader, then edit: the reader's change is held.
+  - Remove the member: they're told.
+  - Stop both instances by PID.
+  - Write what you saw in the report.
+- [ ] **Step 4: Commit**: `feat(hydraui): Settings › Groups for making, joining and running groups`.
+
+### Task 10: README and the by-hand checklist
+
+- [ ] **Step 1:** Add a README section, "Peer groups", covering:
+  - what a group is;
+  - roles;
+  - what syncs (file types, 10 MB);
+  - conflicts;
+  - that sync runs only while hydraui runs;
+  - that invites need the inviter's hydraui to be running.
+- [ ] **Step 2: Commit**: `docs: peer groups in the README`.
+- [ ] **Step 3: Hand the user the by-hand checklist** across two real machines:
+  1. Create a group from a folder of skills.
+  2. Invite a teammate as a reader, and reuse the code: it's refused.
+  3. Edit on both sides offline, then reconnect: a conflict copy and alerts appear on both.
+  4. The reader edits: it's held, and Use the group's version works.
+  5. Make the reader a writer, then demote them again.
+  6. Remove them: they're told, and their folder stays.
+  7. Over mobile data or a different network, sync still works (through the relays).

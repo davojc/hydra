@@ -124,6 +124,11 @@ pub fn is_svg(path: &Path) -> bool {
     ext(path).as_deref() == Some("svg")
 }
 
+/// Whether the file pane shows the file as PDF pages.
+pub fn is_pdf(path: &Path) -> bool {
+    ext(path).as_deref() == Some("pdf")
+}
+
 /// An image's kind from its first bytes, whatever its name says.
 pub fn image_kind(bytes: &[u8]) -> Option<ImageKind> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
@@ -345,6 +350,9 @@ mod tests {
         assert!(!is_image(Path::new("png")));
         assert!(is_svg(Path::new("a/Logo.SVG")));
         assert!(!is_svg(Path::new("svg")));
+        assert!(is_pdf(Path::new("docs/Guide.PDF")));
+        assert!(!is_pdf(Path::new("pdf")));
+        assert!(!is_image(Path::new("guide.pdf")), "a PDF has its own view");
     }
 
     #[test]

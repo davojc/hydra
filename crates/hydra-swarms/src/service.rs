@@ -41,6 +41,9 @@ const VIEWS_EVERY: Duration = Duration::from_millis(250);
 const RESYNC_AFTER: Duration = Duration::from_secs(1);
 /// How often a leaving machine asks the owners again until one confirms its leaving.
 const LEAVE_RETRY: Duration = Duration::from_secs(5);
+/// The first wait before another change no owner took is sent again; it doubles on each miss,
+/// up to `PERIODIC`.
+const RELAY_RETRY: Duration = Duration::from_secs(5);
 const REGISTRY_FILE: &str = "registry.json";
 const SEEN_FILE: &str = "seen.json";
 const OWED_FILE: &str = "owed.json";
@@ -970,8 +973,11 @@ struct Worker {
     /// Set by a handler; carried out once it returns, when no one holds the node.
     removed_now: bool,
     leave_done: bool,
-    /// When a leaving machine next asks every owner machine, connected or not.
-    leave_retry_at: Option<Instant>,
+    /// When the changes no owner took yet are next sent to every owner machine, connected or
+    /// not.
+    relay_retry_at: Option<Instant>,
+    /// The wait before that, for changes other than leaving.
+    relay_backoff: Duration,
     finished: bool,
     /// Whether the names in the roster have been checked against this machine's, which may have
     /// changed while the service wasn't running.
@@ -1018,7 +1024,8 @@ impl Worker {
             leaving: entry.leaving,
             removed_now: false,
             leave_done: false,
-            leave_retry_at: None,
+            relay_retry_at: None,
+            relay_backoff: RELAY_RETRY,
             finished: false,
             names_checked: false,
             shared,
@@ -1040,8 +1047,8 @@ impl Worker {
                 Some(()) = next_signal(&mut self.watch) => self.soon(Duration::ZERO),
                 _ = tick.tick() => self.periodic().await,
                 () = sleep_until(self.pass_at) => self.pass().await,
-                () = sleep_until(self.leave_retry_at) => {
-                    self.leave_retry_at = None;
+                () = sleep_until(self.relay_retry_at) => {
+                    self.relay_retry_at = None;
                     self.deliver(true);
                 }
                 Some(done) = self.sends.join_next(), if !self.sends.is_empty() => {
@@ -1725,7 +1732,7 @@ impl Worker {
             }
         }
         self.save_outbox();
-        self.deliver(false);
+        self.deliver(true);
     }
 
     /// Sends what is owed to connected machines: the write capability to promoted ones, and this
@@ -1814,11 +1821,15 @@ impl Worker {
                 if ok {
                     self.outbox.retain(|c| c.sig != sig);
                     self.save_outbox();
+                    self.relay_backoff = RELAY_RETRY;
                     if leave {
                         self.leave_done = true;
                     }
                 } else if leave && self.leaving {
-                    self.leave_retry_at = Some(Instant::now() + LEAVE_RETRY);
+                    self.relay_retry_at = Some(Instant::now() + LEAVE_RETRY);
+                } else if self.relay_retry_at.is_none() {
+                    self.relay_retry_at = Some(Instant::now() + self.relay_backoff);
+                    self.relay_backoff = (self.relay_backoff * 2).min(PERIODIC);
                 }
             }
             Sent::Removed => {}

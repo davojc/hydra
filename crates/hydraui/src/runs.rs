@@ -936,6 +936,10 @@ impl Runs {
         if r.asking.is_some() {
             return Err("this run is already waiting for an answer".into());
         }
+        if !r.pipeline.product_asks {
+            return Err("this pipeline doesn't ask product: decide it within your stage, and                         name it in your report's reasons against if it matters"
+                .into());
+        }
         let question = question.trim();
         if question.is_empty() {
             return Err("the question is empty".into());
@@ -1469,6 +1473,12 @@ fn stage_note(run: &Run, i: usize) -> String {
     let product = match &run.pipeline.product_style {
         Some(style) => format!("{product} How to write a product question: {style}"),
         None => product,
+    };
+    // A pipeline can leave product out (`[product] ask = false`), e.g. reviews.
+    let product = if run.pipeline.product_asks {
+        product
+    } else {
+        String::new()
     };
     format!(
         "---\nhydraui pipeline \"{}\" · {} · stage {} of {}: {}{skill}.\n{around}Do only this \
@@ -2234,6 +2244,20 @@ mod tests {
             p.contains("How to write a product question: Keep it short."),
             "{p}"
         );
+
+        // A pipeline that leaves product out: no rule, no pre-approved tools, no stage_ask.
+        let mut runs = Runs::default();
+        let mut pipe = pipeline(&["review"]);
+        pipe.product_channel = Some("#product-".into());
+        pipe.product_asks = false;
+        let id = runs
+            .start_run("orch", pipe, "version2-frontend-5536", "x")
+            .unwrap()
+            .id
+            .clone();
+        let s = runs.begin("orch", &id, "review", "tok", 30).unwrap();
+        assert!(!s.prompt.contains("product decision"), "{}", s.prompt);
+        assert_eq!(s.claude, ["claude"]);
     }
 
     #[test]

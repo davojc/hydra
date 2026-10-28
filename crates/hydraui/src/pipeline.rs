@@ -34,6 +34,10 @@ pub struct Pipeline {
     /// How a stage writes the questions it asks product (`[product] style`), e.g. short and
     /// plain, or technical with data; `None`: as the stage sees fit.
     pub product_style: Option<String>,
+    /// Its stages are told that a change beyond the ticket altering what users see or do is
+    /// product's call, and ask (`[product] ask`, on unless `false`). Off: no such rule, and
+    /// `stage_ask` is refused (core spec §41).
+    pub product_asks: bool,
     /// How many tickets it runs at once (`runs_at_once`, 1 to `MAX_RUNS_AT_ONCE`): each has
     /// its own orchestrator and card, and the trigger hands work to whichever is free.
     pub runs_at_once: u8,
@@ -159,7 +163,7 @@ impl Pipeline {
     /// when the pipeline asks product in a channel.
     pub fn stage_claude(&self) -> Vec<String> {
         let mut argv = vec!["claude".to_string()];
-        if self.product_channel.is_some() {
+        if self.product_asks && self.product_channel.is_some() {
             // One word: the flag takes a list, and would take the prompt after it too.
             argv.push(format!("--allowedTools={PRODUCT_TOOLS}"));
         }
@@ -314,6 +318,8 @@ struct FileProduct {
     channel: Option<String>,
     #[serde(default)]
     style: Option<String>,
+    #[serde(default)]
+    ask: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -488,6 +494,7 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
             Some(c) => Some(c.trim().to_string()),
             None => None,
         },
+        product_asks: file.product.as_ref().and_then(|p| p.ask).unwrap_or(true),
         product_style: file
             .product
             .as_ref()
@@ -525,6 +532,7 @@ pub struct Edit {
     pub autostart: Option<String>,
     pub product_channel: Option<String>,
     pub product_style: Option<String>,
+    pub product_asks: bool,
     pub color: Option<u32>,
     pub slack: Option<SlackSettings>,
     pub runs_at_once: u8,
@@ -567,6 +575,7 @@ impl From<&Pipeline> for Edit {
             autostart: p.autostart.clone(),
             product_channel: p.product_channel.clone(),
             product_style: p.product_style.clone(),
+            product_asks: p.product_asks,
             color: p.color,
             slack: p.slack.clone(),
             runs_at_once: p.runs_at_once,
@@ -743,7 +752,7 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
         ("style", edit.product_style.as_deref()),
     ]
     .map(|(k, v)| (k, v.map(str::trim).filter(|v| !v.is_empty())));
-    if product.iter().all(|(_, v)| v.is_none()) {
+    if product.iter().all(|(_, v)| v.is_none()) && edit.product_asks {
         doc.remove("product");
     } else {
         if !doc.get("product").is_some_and(Item::is_table) {
@@ -759,6 +768,12 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
                     table.remove(k);
                 }
             }
+        }
+        // On is the default, so only off is written.
+        if edit.product_asks {
+            table.remove("ask");
+        } else {
+            table["ask"] = value(false);
         }
     }
     match &edit.slack {
@@ -1469,6 +1484,20 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
             "the style stays without the channel"
         );
         edit.product_style = Some(" ".into());
+        save(d.path(), "t", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("t.toml")).unwrap();
+        assert!(!text.contains("[product]"), "{text}");
+        assert!(
+            load(d.path(), "t").unwrap().product_asks,
+            "asking is on by default"
+        );
+        // Off is kept, even with nothing else in [product]; on again drops the key.
+        edit.product_asks = false;
+        save(d.path(), "t", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("t.toml")).unwrap();
+        assert!(text.contains("ask = false"), "{text}");
+        assert!(!load(d.path(), "t").unwrap().product_asks);
+        edit.product_asks = true;
         save(d.path(), "t", &edit).unwrap();
         let text = std::fs::read_to_string(folder(d.path()).join("t.toml")).unwrap();
         assert!(!text.contains("[product]"), "{text}");

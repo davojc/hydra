@@ -988,3 +988,7 @@ In Pipeline settings each stage's prompt, and the product-question style, is a b
 ## 40. A pull request posted again is reviewed again (added 2026-10-28)
 
 A Slack look used to pass over any pull request hydraui had ever run, so a re-post asking for a re-review (new commits dismissed the approval) was never picked up: version2-frontend#5550, reviewed at 13:21, posted again by its author at 16:53. Now only a run that hasn't ended (running, or interrupted and waiting to resume) holds its pull request, with the queue and the person's own pull requests as before. A message without the reaction is a new ask, so a pull request whose earlier run ended (done or stopped) starts a new run (`<ticket>-2`, …) and the message is marked.
+
+## 41. Asking product is a setting (added 2026-10-28)
+
+The "a change beyond the ticket that alters what users see or do is product's call: ask" rule (§15) went into every stage of every pipeline, from hydraui's own stage note, where Pipeline settings never showed it. A PR review took it as a reason to ask product about a line in someone else's PR (version2-frontend#5536). It is now `[product] ask` (on unless `false`) and **Steps ask product · On | Off** under Product questions, which says the rule in words. Off: the note leaves the rule out, no Slack tools are pre-approved for it, and `stage_ask` is refused ("decide it within your stage"). The style and channel fields show only when it's on. A run takes its pipeline as it was when it started, so a run already waiting on product keeps waiting.

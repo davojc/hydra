@@ -53,6 +53,8 @@ pub(super) struct SettingsDraft {
     product: Entity<InputState>,
     /// How steps write product questions; empty: as each sees fit.
     product_style: Entity<TextareaState>,
+    /// Steps ask product before a change beyond the ticket (`[product] ask`).
+    product_asks: bool,
     /// The card's accent; `None`: the default teal.
     color: Option<u32>,
     /// Tickets run at once, each with its own orchestrator.
@@ -174,6 +176,7 @@ impl SettingsDraft {
                 .filter(|c| !c.is_empty()),
             product_style: Some(self.product_style.read(cx).value().trim().to_string())
                 .filter(|c| !c.is_empty()),
+            product_asks: self.product_asks,
             color: self.color,
             runs_at_once: self.runs,
             bar: slider_value(&self.bar, cx),
@@ -407,6 +410,7 @@ impl Workspace {
             branch,
             product,
             product_style,
+            product_asks: saved.product_asks,
             color: saved.color,
             runs: saved.runs_at_once,
             advanced: false,
@@ -1257,14 +1261,56 @@ impl Workspace {
                         }
                     }),
             );
-        v_flex()
+        let asks = draft.product_asks;
+        let ask = |on: bool, label: &'static str| {
+            let b = Button::new(SharedString::from(format!("product-asks-{on}-{orch}")))
+                .label(label)
+                .xsmall()
+                .on_click(cx.listener(move |ws, _, _, cx| {
+                    ws.with_draft(orch, cx, |d| d.product_asks = on)
+                }));
+            if asks == on { b.primary() } else { b.ghost() }
+        };
+        let rule = if asks {
+            "Every step is told: a change beyond the ticket that alters what users see or do \
+             (a feature, copy or a flow) is product's call, so it asks before making it and the \
+             ticket waits for the answer."
+        } else {
+            "Steps aren't told to ask product and can't: they decide within their own prompt. \
+             Right for reviews, where the PR's author owns the change."
+        };
+        let mut body = v_flex()
             .gap_2()
             .child(section_tip(
                 "Product questions",
-                "When a step meets a product decision it asks instead of deciding. Choose how \
-                 it writes the question, and the Slack channel it goes to (empty: it asks you \
-                 here).",
+                "Whether steps ask product before a change beyond the ticket, how they write the \
+                 question, and the Slack channel it goes to (empty: they ask you here).",
             ))
+            .child(
+                h_flex()
+                    .gap_3()
+                    .child(
+                        text(12.5, theme::TEXT_SECONDARY)
+                            .w(px(170.))
+                            .flex_none()
+                            .child("Steps ask product"),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(ask(true, "On"))
+                            .child(ask(false, "Off")),
+                    ),
+            )
+            .child(
+                div()
+                    .max_w(px(640.))
+                    .child(text(12., theme::TEXT_MUTED).child(rule)),
+            );
+        if !asks {
+            return body.into_any_element();
+        }
+        body = body
             .child(presets)
             .child(
                 div()
@@ -1276,8 +1322,8 @@ impl Workspace {
                     Input::new(&draft.product)
                         .prefix(text(11.5, theme::TEXT_MUTED).pr(px(6.)).child("Channel")),
                 ),
-            )
-            .into_any_element()
+            );
+        body.into_any_element()
     }
 }
 

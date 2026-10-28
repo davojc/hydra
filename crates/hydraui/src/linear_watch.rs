@@ -10,15 +10,22 @@ use crate::runs::{Run, RunState, StageStatus};
 /// How many failed checks in a row stop watching (the user's three-retries rule).
 pub const MAX_FAILURES: u32 = 3;
 
-/// The ticket to take from `tickets` (§3): the one whose SLA breaches soonest, unassigned only
-/// when `unassigned_only`.
-pub fn pick(tickets: &[Ticket], unassigned_only: bool) -> Option<&Ticket> {
+/// The ticket to take from `tickets` (§3), unassigned only when `unassigned_only`: the one
+/// whose SLA breaches soonest; with `sla_only` off, tickets without an SLA come after those
+/// with one, most urgent priority first (no priority last), then oldest.
+pub fn pick(tickets: &[Ticket], unassigned_only: bool, sla_only: bool) -> Option<&Ticket> {
+    let urgency = |p: u8| if p == 0 { 5 } else { p };
     tickets
         .iter()
         .filter(|t| !unassigned_only || t.assignee.is_none())
-        .filter(|t| t.sla_breaches_at.is_some())
-        // RFC 3339 times in UTC sort as text.
-        .min_by(|a, b| a.sla_breaches_at.cmp(&b.sla_breaches_at))
+        .filter(|t| !sla_only || t.sla_breaches_at.is_some())
+        // RFC 3339 times in UTC sort as text; a ticket with an SLA before one without.
+        .min_by(|a, b| {
+            (a.sla_breaches_at.is_none(), &a.sla_breaches_at)
+                .cmp(&(b.sla_breaches_at.is_none(), &b.sla_breaches_at))
+                .then(urgency(a.priority).cmp(&urgency(b.priority)))
+                .then(a.created_at.cmp(&b.created_at))
+        })
 }
 
 /// Whether a check is due: watching, no open run, and `every` since the last one (or none yet).
@@ -170,10 +177,16 @@ pub fn trigger_tooltip(s: &LinearSettings) -> String {
         Assignee::Any => "",
     };
     format!(
-        "On: every {} min, picks the {who}{} ticket in {} whose SLA breaches first, one at a \
-         time. Off: nothing starts unless you give the orchestrator a ticket or press Pick \
-         next ticket.",
-        s.every_minutes, s.team, s.pick
+        "On: every {} min, picks the {who}{} ticket in {} {}. Off: nothing starts unless you \
+         give the orchestrator a ticket or press Pick next ticket.",
+        s.every_minutes,
+        s.team,
+        s.pick,
+        if s.sla_only {
+            "whose SLA breaches first"
+        } else {
+            "whose SLA breaches first, else the most urgent and oldest"
+        }
     )
 }
 
@@ -382,7 +395,7 @@ pub fn find_and_claim(
             }
         }
         tickets.retain(|t| !ran(&t.identifier));
-        let Some(next) = pick(&tickets, unassigned_only) else {
+        let Some(next) = pick(&tickets, unassigned_only, settings.sla_only) else {
             return Ok(Check {
                 claimed: None,
                 skipped,
@@ -553,6 +566,8 @@ mod tests {
             sla_high_risk_at: None,
             assignee: assignee.map(str::to_string),
             state: "Ready for Investigation".into(),
+            priority: 0,
+            created_at: String::new(),
         }
     }
 
@@ -563,16 +578,44 @@ mod tests {
             t("INTH-2", "2026-11-01T09:00:00.000Z", Some("u-9")),
             t("INTH-3", "2026-11-02T09:00:00.000Z", None),
         ];
-        assert_eq!(pick(&tickets, true).unwrap().identifier, "INTH-3");
-        assert_eq!(pick(&tickets, false).unwrap().identifier, "INTH-2");
-        assert_eq!(pick(&[], true), None);
+        assert_eq!(pick(&tickets, true, true).unwrap().identifier, "INTH-3");
+        assert_eq!(pick(&tickets, false, true).unwrap().identifier, "INTH-2");
+        assert_eq!(pick(&[], true, true), None);
         // Taken meanwhile: the claim found it assigned, so it's left out and the next one goes.
         let rest: Vec<Ticket> = tickets
             .iter()
             .filter(|x| x.identifier != "INTH-3")
             .cloned()
             .collect();
-        assert_eq!(pick(&rest, true).unwrap().identifier, "INTH-1");
+        assert_eq!(pick(&rest, true, true).unwrap().identifier, "INTH-1");
+    }
+
+    #[test]
+    fn without_sla_only_a_ticket_with_no_sla_is_taken_by_priority_then_age() {
+        let none = |id: &str, priority: u8, created: &str| Ticket {
+            sla_breaches_at: None,
+            priority,
+            created_at: created.into(),
+            ..t(id, "", None)
+        };
+        let tickets = [
+            none("PRE-1978", 0, "2026-10-01T00:00:00Z"),
+            none("PRE-1482", 4, "2026-09-01T00:00:00Z"),
+            none("PRE-2005", 3, "2026-10-20T00:00:00Z"),
+            none("PRE-1363", 3, "2026-08-01T00:00:00Z"),
+        ];
+        assert_eq!(pick(&tickets, true, true), None, "SLA only: none of them");
+        assert_eq!(pick(&tickets, true, false).unwrap().identifier, "PRE-1363");
+        // One with an SLA still goes first.
+        let mut with_sla = tickets.to_vec();
+        with_sla.push(t("PRE-9", "2026-12-01T00:00:00.000Z", None));
+        assert_eq!(pick(&with_sla, true, false).unwrap().identifier, "PRE-9");
+        // No priority comes after Low.
+        let low_or_none = [tickets[0].clone(), tickets[1].clone()];
+        assert_eq!(
+            pick(&low_or_none, true, false).unwrap().identifier,
+            "PRE-1482"
+        );
     }
 
     fn inth() -> LinearSettings {
@@ -584,6 +627,7 @@ mod tests {
             passed: "Ready for Peer Review".into(),
             every_minutes: 5,
             watch: true,
+            sla_only: true,
         }
     }
 

@@ -960,3 +960,13 @@ Beside each reason against's **+ Mark must address** there is **Not needed** (Jo
 both (`Runs::mark_as`, logged as `not needed`). Marked, its text is struck through and muted;
 the stage's next session (a re-run, a send-back, or **Score again**) is told those concerns are
 not needed and not to count them against its score again (`waived_note`).
+
+## 36. Tickets without an SLA (added 2026-10-28)
+
+The Hydra Triage pipeline watches PRE's *Next up (prioritised)* for unassigned tickets and found
+none, though Linear had four (Jordan, 2026-10-28): the pick only ever took tickets with an SLA
+running (§3), right for SLA Tickets, but PRE's tickets have none. `[linear] sla_only` (default
+true, so existing pipelines are unchanged) set to false also takes tickets without an SLA: those
+with one still first, by breach; then by priority, Urgent first and no priority last; then the
+oldest. Linear's `priority` and `createdAt` are now read with each ticket. Pipeline settings show
+it as **Which tickets: With an SLA · All, by priority**.

@@ -107,6 +107,8 @@ struct LinearDraft {
     /// Kept as the file has it (`watch`).
     watch: bool,
     any: bool,
+    /// Tickets without an SLA too (`sla_only` off).
+    no_sla: bool,
     team: Entity<InputState>,
     pick: Entity<InputState>,
     claim: Entity<InputState>,
@@ -130,6 +132,7 @@ impl LinearDraft {
             // Not a number: 0, which validation names.
             every_minutes: text(&self.every).parse().unwrap_or(0),
             watch: self.watch,
+            sla_only: !self.no_sla,
         })
     }
 }
@@ -304,6 +307,7 @@ impl Workspace {
             on: l.is_some(),
             watch: l.as_ref().is_some_and(|l| l.watch),
             any: l.as_ref().is_some_and(|l| l.assignee == Assignee::Any),
+            no_sla: l.as_ref().is_some_and(|l| !l.sla_only),
             team: input(field(|l| l.team.clone(), ""), "INTH"),
             pick: input(
                 field(|l| l.pick.clone(), pipeline::DEFAULT_PICK),
@@ -512,9 +516,35 @@ impl Workspace {
                         ws.with_draft(orch, cx, |d| d.linear.any = any)
                     }))
             };
+            let sla = |no_sla: bool, label: &'static str| {
+                Button::new(SharedString::from(format!("linear-sla-{no_sla}-{orch}")))
+                    .label(label)
+                    .when(l.no_sla == no_sla, |b| b.primary())
+                    .when(l.no_sla != no_sla, |b| b.ghost())
+                    .xsmall()
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        ws.with_draft(orch, cx, |d| d.linear.no_sla = no_sla)
+                    }))
+            };
             body = body
                 .child(row("Team", &l.team))
                 .child(row("Pick tickets in", &l.pick))
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .child(
+                            text(12.5, theme::TEXT_SECONDARY)
+                                .w(px(170.))
+                                .flex_none()
+                                .child("Which tickets"),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(sla(false, "With an SLA"))
+                                .child(sla(true, "All, by priority")),
+                        ),
+                )
                 .child(
                     h_flex()
                         .gap_3()

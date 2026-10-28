@@ -45,6 +45,10 @@ pub struct Ticket {
     pub sla_high_risk_at: Option<String>,
     pub assignee: Option<String>,
     pub state: String,
+    /// Linear's priority: 1 Urgent … 4 Low, 0 none.
+    pub priority: u8,
+    /// When it was made, RFC 3339.
+    pub created_at: String,
 }
 
 /// What the orchestrator asks of Linear, so the watcher can be tested with a fake.
@@ -52,8 +56,7 @@ pub trait LinearApi {
     /// The id of the user the key belongs to.
     fn viewer(&self) -> Result<String, LinearError>;
     fn states(&self, team: &str) -> Result<Vec<State>, LinearError>;
-    /// The team's tickets in `state_id` with an SLA running; unassigned ones only when
-    /// `unassigned_only`.
+    /// The team's tickets in `state_id`; unassigned ones only when `unassigned_only`.
     fn pickable(
         &self,
         team: &str,
@@ -67,8 +70,8 @@ pub trait LinearApi {
     fn comment(&self, id: &str, body: &str) -> Result<(), LinearError>;
 }
 
-const TICKET_FIELDS: &str =
-    "id identifier title url slaBreachesAt slaHighRiskAt assignee { id } state { name }";
+const TICKET_FIELDS: &str = "id identifier title url slaBreachesAt slaHighRiskAt priority createdAt assignee { id } \
+     state { name }";
 
 pub fn viewer_request() -> Value {
     json!({"query": "query { viewer { id } }"})
@@ -166,6 +169,8 @@ fn read_one_ticket(t: &Value) -> Option<Ticket> {
         sla_high_risk_at: text("slaHighRiskAt"),
         assignee: t["assignee"]["id"].as_str().map(str::to_string),
         state: t["state"]["name"].as_str().unwrap_or_default().to_string(),
+        priority: t["priority"].as_u64().map_or(0, |p| p.min(4) as u8),
+        created_at: text("createdAt").unwrap_or_default(),
     })
 }
 
@@ -196,14 +201,14 @@ pub fn read_states(reply: &Value, team: &str) -> Result<Vec<State>, LinearError>
         .collect())
 }
 
-/// The tickets in the reply that have an SLA running (spec §3).
+/// The tickets in the reply; whether one without an SLA counts is the pipeline's choice
+/// (`linear_watch::pick`).
 pub fn read_pickable(reply: &Value) -> Result<Vec<Ticket>, LinearError> {
     Ok(data(reply)?["issues"]["nodes"]
         .as_array()
         .ok_or_else(|| unexpected("issues"))?
         .iter()
         .filter_map(read_one_ticket)
-        .filter(|t| t.sla_breaches_at.is_some())
         .collect())
 }
 
@@ -310,6 +315,8 @@ mod tests {
             "slaHighRiskAt": sla.map(|_| "2026-11-03T14:04:05.535Z"),
             "assignee": assignee.map(|a| json!({"id": a})),
             "state": {"name": "Ready for Investigation"},
+            "priority": 2,
+            "createdAt": "2026-10-01T00:00:00Z",
         })
     }
 
@@ -341,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn tickets_without_an_sla_are_left_out() {
+    fn every_ticket_is_read_with_its_priority_and_age() {
         let reply = json!({"data": {"issues": {"nodes": [
             ticket_json("INTH-170", Some("2026-11-04T14:04:05.535Z"), None),
             ticket_json("INTH-171", None, None),
@@ -349,8 +356,12 @@ mod tests {
         ]}}});
         let got = read_pickable(&reply).unwrap();
         let ids: Vec<&str> = got.iter().map(|t| t.identifier.as_str()).collect();
-        assert_eq!(ids, ["INTH-170", "INTH-172"]);
-        assert_eq!(got[1].assignee.as_deref(), Some("u-9"));
+        assert_eq!(ids, ["INTH-170", "INTH-171", "INTH-172"]);
+        assert_eq!(got[2].assignee.as_deref(), Some("u-9"));
+        assert_eq!(
+            (got[1].priority, got[1].created_at.as_str()),
+            (2, "2026-10-01T00:00:00Z")
+        );
         assert_eq!(
             got[0].sla_breaches_at.as_deref(),
             Some("2026-11-04T14:04:05.535Z")

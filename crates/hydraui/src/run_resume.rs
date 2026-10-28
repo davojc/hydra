@@ -133,6 +133,8 @@ fn read(hydra_root: &Path, file: &Path, alive: &impl Fn(u32) -> bool) -> Option<
             sla_high_risk_at: e["sla_high_risk_at"].as_str().map(str::to_string),
             assignee: None,
             state: String::new(),
+            priority: 0,
+            created_at: String::new(),
         });
     Some(Interrupted {
         ticket,

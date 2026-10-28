@@ -79,6 +79,9 @@ pub struct LinearSettings {
     pub every_minutes: u32,
     /// Its orchestrator starts in Automatic (the card's switch on).
     pub watch: bool,
+    /// Only tickets with an SLA running are picked (the default). Off: tickets without one
+    /// too, after those with one, by priority then age.
+    pub sla_only: bool,
 }
 
 /// Which tickets in the `pick` state a pipeline takes.
@@ -321,6 +324,7 @@ struct FileLinear {
     passed: Option<String>,
     every_minutes: Option<u32>,
     watch: Option<bool>,
+    sla_only: Option<bool>,
 }
 
 /// The `[linear]` defaults (phase 2 spec §2).
@@ -361,6 +365,7 @@ fn linear_settings(f: FileLinear) -> Result<LinearSettings, String> {
         passed: text(f.passed, DEFAULT_PASSED),
         every_minutes,
         watch: f.watch.unwrap_or(false),
+        sla_only: f.sla_only.unwrap_or(true),
     })
 }
 
@@ -682,6 +687,11 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
                 t["watch"] = value(true);
             } else if let Some(t) = t.as_table_mut() {
                 t.remove("watch");
+            }
+            if !l.sla_only {
+                t["sla_only"] = value(false);
+            } else if let Some(t) = t.as_table_mut() {
+                t.remove("sla_only");
             }
         }
         None => {
@@ -1089,6 +1099,7 @@ mod tests {
             passed: DEFAULT_PASSED.into(),
             every_minutes: 5,
             watch: false,
+            sla_only: true,
         });
         assert_eq!(
             validate(&both),
@@ -1477,6 +1488,7 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
                 passed: "Ready for Peer Review".into(),
                 every_minutes: 5,
                 watch: false,
+                sla_only: true,
             })
         );
     }
@@ -1526,15 +1538,17 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
         let mut l = edit.linear.clone().unwrap();
         l.pick = "Ready for Review".into();
         l.assignee = Assignee::Any;
+        l.sla_only = false;
         edit.linear = Some(l);
         save(d.path(), "t", &edit).unwrap();
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(text.contains("# The INTH queue."), "{text}");
         let l = load(d.path(), "t").unwrap().linear.unwrap();
         assert_eq!(
-            (l.pick.as_str(), l.assignee),
-            ("Ready for Review", Assignee::Any)
+            (l.pick.as_str(), l.assignee, l.sla_only),
+            ("Ready for Review", Assignee::Any, false)
         );
+        assert!(text.contains("sla_only = false"), "{text}");
         edit.linear = None;
         save(d.path(), "t", &edit).unwrap();
         assert_eq!(load(d.path(), "t").unwrap().linear, None);

@@ -621,6 +621,16 @@ impl SwarmNode {
         self.core.kept(person).await
     }
 
+    /// What the machine whose author id is `author` wrote, as a change taking that one machine
+    /// out lists it: its file entries and parent records, and no changes.
+    pub async fn kept_machine(&self, author: &str) -> anyhow::Result<Kept> {
+        let authors = self.core.kept_authors(&[author.to_string()]).await?;
+        Ok(Kept {
+            changes: Vec::new(),
+            authors,
+        })
+    }
+
     /// Records what this machine's next entry for `p` is made from. Written before the entry
     /// itself.
     pub async fn put_parent(&self, p: &RelPath, record: &ParentRecord) -> anyhow::Result<()> {
@@ -792,16 +802,22 @@ impl Core {
         else {
             return Ok(kept);
         };
-        let mut authors: BTreeMap<String, KeptAuthor> = member
-            .machines
+        let authors: Vec<String> = member.machines.iter().map(|m| m.author.clone()).collect();
+        kept.authors = self.kept_authors(&authors).await?;
+        Ok(kept)
+    }
+
+    /// The file entries and parent records each of `authors` wrote.
+    pub(crate) async fn kept_authors(&self, authors: &[String]) -> anyhow::Result<Vec<KeptAuthor>> {
+        let mut authors: BTreeMap<String, KeptAuthor> = authors
             .iter()
-            .map(|m| {
+            .map(|a| {
                 let author = KeptAuthor {
-                    author: m.author.clone(),
+                    author: a.clone(),
                     files: Vec::new(),
                     records: Vec::new(),
                 };
-                (m.author.clone(), author)
+                (a.clone(), author)
             })
             .collect();
         let files = Query::key_prefix(FILES_PREFIX).include_empty().build();
@@ -832,8 +848,7 @@ impl Core {
                 author.records.push(kept_entry(&path, e.timestamp(), hash));
             }
         }
-        kept.authors = authors.into_values().collect();
-        Ok(kept)
+        Ok(authors.into_values().collect())
     }
 
     pub(crate) async fn write_change(&self, c: &SignedChange) -> anyhow::Result<()> {

@@ -1007,3 +1007,125 @@ async fn a_declined_offer_does_not_come_back() {
     olive.stop().await;
     olive2.stop().await;
 }
+
+/// Olive and olive2 (linked, both in Notes, which holds a.md) and wren, a writer in it.
+async fn olive_twice_and_wren() -> (Svc, Svc, Svc, String) {
+    let book = DirectPeers::new();
+    let mut olive = Svc::new("olive", &book);
+    let mut wren = Svc::new("wren", &book);
+    let mut olive2 = Svc::new("olive2", &book);
+    let notes = olive.create("Notes", &[("a.md", "alpha")]).await;
+    let code = olive.invite(&notes.id, Role::Writer).await;
+    wren.join(code, "notes").await;
+    let code = olive.link_code().await;
+    olive2.link(code, 2).await;
+    olive2.offer(&notes.id).await;
+    olive2.accept(&notes.id, "notes2").await;
+    file_arrives(olive2.folder("notes2").join("a.md"), "alpha").await;
+    let person = olive.person();
+    machines_of(&mut wren, &notes.id, &person, 2).await;
+    (olive, olive2, wren, notes.id)
+}
+
+/// `svc`'s view of swarm `ns` shows `person` named `name`, and still does after `QUIET`.
+async fn named_and_stays(svc: &mut Svc, ns: &str, person: &str, name: &str) {
+    let shows = |v: &SwarmView| {
+        v.id == ns
+            && v.members
+                .iter()
+                .any(|m| m.person == person && m.name == name)
+    };
+    svc.view(&format!("{person} named {name}"), shows).await;
+    svc.drain_for(QUIET).await;
+    let v = svc.views.iter().find(|v| v.id == ns).unwrap();
+    assert!(shows(v), "{name} didn't stay: {:?}", v.members);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn your_name_changes_on_every_machine() {
+    let (mut olive, mut olive2, mut wren, ns) = olive_twice_and_wren().await;
+    olive.send(Command::SetIdentity {
+        name: "Olive O".into(),
+        machine_name: "olive-pc".into(),
+    });
+    olive2
+        .until("olive2 named Olive O", |s| {
+            s.named.iter().any(|n| n == "Olive O").then_some(())
+        })
+        .await;
+    let person = olive.person();
+    named_and_stays(&mut wren, &ns, &person, "Olive O").await;
+    let v = wren.views.iter().find(|v| v.id == ns).unwrap();
+    assert_eq!(v.members.iter().filter(|m| m.person == person).count(), 1);
+    for s in [&mut olive, &mut olive2, &mut wren] {
+        s.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn names_set_apart_settle_on_the_newer() {
+    let (mut olive, mut olive2, mut wren, ns) = olive_twice_and_wren().await;
+    let person = olive.person();
+    olive2.stop().await;
+    olive.send(Command::SetIdentity {
+        name: "A".into(),
+        machine_name: "olive-pc".into(),
+    });
+    named_and_stays(&mut wren, &ns, &person, "A").await;
+    olive.stop().await;
+    olive2.restart();
+    olive2.send(Command::SetIdentity {
+        name: "B".into(),
+        machine_name: "olive2-pc".into(),
+    });
+    named_and_stays(&mut wren, &ns, &person, "B").await;
+    olive.restart();
+    olive
+        .until("olive named B", |s| {
+            s.named.iter().any(|n| n == "B").then_some(())
+        })
+        .await;
+    named_and_stays(&mut wren, &ns, &person, "B").await;
+    named_and_stays(&mut olive, &ns, &person, "B").await;
+    for s in [&mut olive, &mut olive2, &mut wren] {
+        s.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn leaving_on_one_machine_keeps_the_person_in() {
+    let (mut olive, mut olive2, mut wren, ns) = olive_twice_and_wren().await;
+    std::fs::write(olive2.folder("notes2").join("x.md"), "xray").unwrap();
+    file_arrives(wren.folder("notes").join("x.md"), "xray").await;
+    olive2.send(Command::Leave { swarm: ns.clone() });
+    olive2
+        .until("the swarm gone from olive2", |s| {
+            s.views.iter().all(|v| v.id != ns).then_some(())
+        })
+        .await;
+    let person = olive.person();
+    machines_of(&mut wren, &ns, &person, 1).await;
+    machines_of(&mut olive, &ns, &person, 1).await;
+    std::fs::write(olive.folder("Notes").join("y.md"), "yankee").unwrap();
+    file_arrives(wren.folder("notes").join("y.md"), "yankee").await;
+    tokio::time::sleep(QUIET).await;
+    // Olive2 keeps its files and gets nothing new; what it wrote before stays with the others.
+    assert_eq!(
+        read(&olive2.folder("notes2").join("a.md")).as_deref(),
+        Some("alpha")
+    );
+    assert_eq!(read(&olive2.folder("notes2").join("y.md")), None);
+    assert_eq!(
+        read(&wren.folder("notes").join("x.md")).as_deref(),
+        Some("xray")
+    );
+    assert_eq!(
+        read(&olive.folder("Notes").join("x.md")).as_deref(),
+        Some("xray")
+    );
+    let v = olive.views.iter().find(|v| v.id == ns).unwrap();
+    assert_eq!(v.my_role, Role::Owner);
+    for s in [&mut olive, &mut olive2, &mut wren] {
+        s.stop().await;
+    }
+}

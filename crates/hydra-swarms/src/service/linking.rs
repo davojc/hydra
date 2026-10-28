@@ -231,6 +231,20 @@ impl Machines {
         Ok(code.encode())
     }
 
+    /// You renamed yourself or this machine here: your other machines take it at the next sync.
+    pub(super) fn set_identity(&self, name: &str, machine_name: &str) {
+        {
+            let mut mine = lock(&self.mine);
+            let now = now_micros();
+            if mine.name != name {
+                mine.set_name(name, now);
+            }
+            mine.set_device_name(&self.me, machine_name, now);
+            self.save_mine(&mine);
+        }
+        self.publish();
+    }
+
     pub(super) fn cancel_link(&self, id: &str) {
         if let Err(e) = self.links.cancel(id) {
             self.shared

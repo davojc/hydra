@@ -661,6 +661,7 @@ async fn run(
     shared.dirty.notify_one();
     let mut last_push: Option<Instant> = None;
     let mut push_at: Option<Instant> = None;
+    let mut offered: HashSet<String> = HashSet::new();
     loop {
         tokio::select! {
             cmd = commands.next() => match cmd {
@@ -672,6 +673,10 @@ async fn run(
                     opening.spawn(join(Arc::clone(&shared), identity.clone(), code, folder));
                 }
                 Some(Command::SetIdentity { name, machine_name }) => {
+                    if let Some(m) = &machines {
+                        m.set_identity(&name, &machine_name);
+                        tokio::spawn(Arc::clone(m).sync_all());
+                    }
                     identity.name = name;
                     identity.machine_name = machine_name;
                     for h in swarms.values() {
@@ -745,10 +750,6 @@ async fn run(
                     let worker = Worker::new(Arc::clone(&shared), identity.clone(), opened);
                     let task = tokio::spawn(worker.run(rx));
                     swarms.insert(ns, Handle { tx, task });
-                    // Offered to your other machines.
-                    if let Some(m) = &machines {
-                        tokio::spawn(Arc::clone(m).sync_all());
-                    }
                 }
             }
             () = shared.dirty.notified() => {
@@ -760,7 +761,17 @@ async fn run(
             () = sleep_until(push_at) => {
                 push_at = None;
                 last_push = Some(Instant::now());
-                shared.emit(ServiceEvent::Swarms(shared.views()));
+                let views = shared.views();
+                // A swarm showing for the first time is offered to your other machines; its
+                // view is what the offer is made from.
+                let shown: HashSet<String> = views.iter().map(|v| v.id.clone()).collect();
+                if let Some(m) = &machines
+                    && !shown.is_subset(&offered)
+                {
+                    tokio::spawn(Arc::clone(m).sync_all());
+                }
+                offered = shown;
+                shared.emit(ServiceEvent::Swarms(views));
             }
         }
     }
@@ -1827,16 +1838,32 @@ impl Worker {
         let node = self.live_node()?;
         let r = self.fresh_roster(&node).await?;
         let me = self.person.id();
-        if Self::is_last_owner(&r, &me) {
-            return Err(self.needs_an_owner());
-        }
-        let kept = self.kept(&node, &me).await?;
-        let signed = SignedChange::sign(
-            &self.ns,
-            Change::Leave { person: me, kept },
-            &self.person,
-            now_micros(),
-        );
+        let others = r
+            .person_machines(&me)
+            .iter()
+            .any(|x| x.endpoint != self.my_endpoint);
+        // With other machines of yours in the swarm, only this one leaves.
+        let change = if others {
+            let kept = if r.role_of(&me) >= Some(Role::Writer) {
+                node.kept_machine(&node.author())
+                    .await
+                    .map_err(|e| format!("{}: {e:#}", self.name))?
+            } else {
+                Kept::default()
+            };
+            Change::RemoveMachine {
+                person: me,
+                endpoint: self.my_endpoint.clone(),
+                kept,
+            }
+        } else {
+            if Self::is_last_owner(&r, &me) {
+                return Err(self.needs_an_owner());
+            }
+            let kept = self.kept(&node, &me).await?;
+            Change::Leave { person: me, kept }
+        };
+        let signed = SignedChange::sign(&self.ns, change, &self.person, now_micros());
         if node.can_write() {
             node.write_change(&signed)
                 .await
@@ -2053,9 +2080,14 @@ impl Worker {
             let node = Arc::clone(&node);
             let owners = owners.clone();
             let shared = Arc::clone(&self.shared);
+            let me = self.my_endpoint.clone();
             self.sends.spawn(async move {
                 let sig = change.sig.clone();
-                let leave = matches!(change.change, Change::Leave { .. });
+                let leave = match &change.change {
+                    Change::Leave { .. } => true,
+                    Change::RemoveMachine { endpoint, .. } => *endpoint == me,
+                    _ => false,
+                };
                 let mut ok = false;
                 for owner in owners {
                     let answer = node.relay(&owner, change.clone()).await;

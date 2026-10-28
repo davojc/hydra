@@ -978,3 +978,9 @@ A Linear trigger can be narrowed to labels: `labels = ["Bug", "Frontend"]` in `[
 ## 38. Open pipelines stay open across a restart (added 2026-10-28)
 
 hydraui saves the pipelines that are open (`~/.hydra/hydraui/open-pipelines.toml`: each one's name, the environment of its first orchestrator, and whether that orchestrator is in Automatic) whenever the set changes, checked each second. At launch each saved pipeline opens again, Automatic or Manual as it was, and its interrupted runs carry on, as an `[autostart]` pipeline's do; `[autostart]` pipelines that weren't open start as before. End pipeline (or closing its orchestrator) takes a pipeline off the list. Nothing is saved before launch has reopened the saved ones, nor while the window is closing, so a quit or a crash both leave the list as it was. `HYDRAUI_NO_AUTOSTART` turns reopening off too.
+
+## 39. Folding pipelines; prompts read whole (added 2026-10-28)
+
+Each pipeline's card in the sidebar has an arrow (▾) that folds it to one line: the arrow (▸), the pipeline's name and its state pill (Needs you, Asked product, Check it, Working, Stopped, …), then how many sessions it has open and how its trigger is set (Automatic, Manual or Stopped). Its arrow unfolds it; clicking the rest opens the pipeline, as the card does. A pipeline running several tickets folds as a whole, its pill the most urgent of them. Folding is kept with the open pipelines (§38, `collapsed`), so it lasts across a restart.
+
+In Pipeline settings each stage's prompt, and the product-question style, is a box that grows with what's written (prompts 3 to 14 lines, the style 2 to 10), wrapping instead of running off the edge.

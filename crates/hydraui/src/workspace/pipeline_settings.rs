@@ -11,7 +11,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandItem, CommandState};
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::notification::Notification;
 use gpui_component::select::{Select, SelectEvent, SelectState};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
@@ -39,7 +39,7 @@ struct DraftStage {
     /// The bar is the stage's own, not the pipeline's.
     own: bool,
     /// What its session is asked, before hydraui's note.
-    prompt: Entity<InputState>,
+    prompt: Entity<TextareaState>,
 }
 
 /// The settings being edited for one orchestrator's pipeline file.
@@ -52,7 +52,7 @@ pub(super) struct SettingsDraft {
     /// The Slack channel for product questions; empty: stages ask the user in hydraui.
     product: Entity<InputState>,
     /// How steps write product questions; empty: as each sees fit.
-    product_style: Entity<InputState>,
+    product_style: Entity<TextareaState>,
     /// The card's accent; `None`: the default teal.
     color: Option<u32>,
     /// Tickets run at once, each with its own orchestrator.
@@ -279,7 +279,8 @@ impl Workspace {
                 .default_value(saved.product_channel.clone().unwrap_or_default())
         });
         let product_style = cx.new(|cx| {
-            InputState::new(window, cx)
+            TextareaState::new(window, cx)
+                .auto_grow(2, 10)
                 .placeholder("Or say how, e.g. one line on why it matters, then the options")
                 .default_value(saved.product_style.clone().unwrap_or_default())
         });
@@ -446,8 +447,10 @@ impl Workspace {
         });
         let bar = slider(s.bar.unwrap_or(default), cx);
         subs.push(cx.subscribe_in(&title, window, |_, _, _: &InputEvent, _, cx| cx.notify()));
+        // A prompt is read whole: the box grows with it (a long one scrolls past 14 lines).
         let prompt = cx.new(|cx| {
-            InputState::new(window, cx)
+            TextareaState::new(window, cx)
+                .auto_grow(3, 14)
                 .placeholder("e.g. replicate {ticket}")
                 .default_value(s.prompt.clone())
         });
@@ -949,9 +952,10 @@ impl Workspace {
                     .child(
                         // Lined up under the title: past the number, the arrows and their gaps.
                         div().pl(px(24. + 10. + ARROWS_W + 10.)).child(
-                            Input::new(&s.prompt)
-                                .small()
-                                .prefix(text(11.5, theme::TEXT_MUTED).pr(px(6.)).child("Prompt")),
+                            v_flex()
+                                .gap_1()
+                                .child(text(11.5, theme::TEXT_MUTED).child("Prompt"))
+                                .child(Textarea::new(&s.prompt)),
                         ),
                     ),
             );
@@ -1265,7 +1269,7 @@ impl Workspace {
             .child(
                 div()
                     .max_w(px(640.))
-                    .child(Input::new(&draft.product_style)),
+                    .child(Textarea::new(&draft.product_style)),
             )
             .child(
                 div().max_w(px(480.)).child(

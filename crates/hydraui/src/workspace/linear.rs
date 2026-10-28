@@ -843,6 +843,18 @@ impl Workspace {
     /// The Linear lines under an orchestrator's card: the Automatic/Manual switch, its state,
     /// **Pick now**, and one line on what that means now; `None` when its pipeline has no
     /// `[linear]` table.
+    /// How orchestrator `orch`'s trigger is set, when it leads one.
+    pub(super) fn trigger_mode(
+        &self,
+        orch: PaneId,
+        cx: &mut Context<Self>,
+    ) -> Option<linear_watch::Mode> {
+        match self.trigger_view(orch, cx)? {
+            Trigger::Lead(t) => Some(t.mode),
+            Trigger::Follower(_) => None,
+        }
+    }
+
     /// What orchestrator `orch`'s trigger is doing now (Linear or Slack), or that it takes its
     /// work from the first orchestrator's; `None` without a trigger.
     pub(super) fn trigger_view(&self, orch: PaneId, cx: &mut Context<Self>) -> Option<Trigger> {

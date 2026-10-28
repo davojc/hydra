@@ -1594,6 +1594,7 @@ impl Workspace {
             .child(
                 h_flex()
                     .gap_2()
+                    .child(self.collapse_toggle(orchestrator, false, cx))
                     .child(div().text_xs().text_color(color(c.accent)).child("◆"))
                     .child(
                         div()

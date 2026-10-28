@@ -58,6 +58,20 @@ pub struct Card {
     pub accent: u32,
 }
 
+/// A collapsed pipeline's one line in the sidebar: how many sessions it has open, and how its
+/// trigger is set (`Automatic`, `Manual`, `Stopped`), when it has one.
+pub fn collapsed_line(sessions: usize, mode: Option<&str>) -> String {
+    let sessions = match sessions {
+        0 => "No sessions".to_string(),
+        1 => "1 session".to_string(),
+        n => format!("{n} sessions"),
+    };
+    match mode {
+        Some(m) => format!("{sessions} · {m}"),
+        None => sessions,
+    }
+}
+
 /// `pipeline`'s accent on its card.
 pub fn accent(pipeline: &crate::pipeline::Pipeline) -> u32 {
     pipeline.color.unwrap_or(crate::orchestrator_theme::TEAL)
@@ -284,6 +298,17 @@ pub fn meter(week_used: Option<f64>, floor: u8) -> Option<Meter> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_collapsed_pipeline_says_its_sessions_and_mode() {
+        use super::collapsed_line;
+        assert_eq!(collapsed_line(0, None), "No sessions");
+        assert_eq!(collapsed_line(1, Some("Manual")), "1 session · Manual");
+        assert_eq!(
+            collapsed_line(4, Some("Automatic")),
+            "4 sessions · Automatic"
+        );
+    }
+
     #[test]
     fn a_pipelines_runs_share_one_card_with_the_most_urgent_state() {
         let c = |state| Card {

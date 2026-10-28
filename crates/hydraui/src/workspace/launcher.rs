@@ -711,6 +711,7 @@ impl Workspace {
                 name: name.clone(),
                 env: self.panes[&id].read(cx).env().to_string(),
                 watch: self.linear_watch.get(&id).is_some_and(|w| w.on),
+                collapsed: self.collapsed_pipelines.contains(name),
             });
         }
         open.sort();
@@ -748,7 +749,10 @@ impl Workspace {
         let envs = self.hydra.env_names();
         let names = crate::pipeline::names(&root);
         // What was open, then what starts itself; a pipeline once, as it was left.
-        let mut starts: Vec<(String, String, Option<bool>)> = crate::open_pipelines::load(&root)
+        let saved = crate::open_pipelines::load(&root);
+        self.collapsed_pipelines
+            .extend(saved.iter().filter(|o| o.collapsed).map(|o| o.name.clone()));
+        let mut starts: Vec<(String, String, Option<bool>)> = saved
             .into_iter()
             .filter(|o| names.contains(&o.name))
             .map(|o| (o.name, o.env, Some(o.watch)))

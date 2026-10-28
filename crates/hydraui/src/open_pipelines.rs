@@ -11,6 +11,9 @@ pub struct OpenPipeline {
     pub name: String,
     pub env: String,
     pub watch: bool,
+    /// Folded to one line in the sidebar.
+    #[serde(default)]
+    pub collapsed: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -57,6 +60,7 @@ mod tests {
             name: name.into(),
             env: env.into(),
             watch,
+            collapsed: false,
         }
     }
 
@@ -65,13 +69,28 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         assert_eq!(load(d.path()), []);
         let set = [
-            open("hydra-triage", "iov42", false),
+            OpenPipeline {
+                collapsed: true,
+                ..open("hydra-triage", "iov42", false)
+            },
             open("inth", "iov42", true),
         ];
         save(d.path(), &set).unwrap();
         assert_eq!(load(d.path()), set);
         save(d.path(), &[]).unwrap();
         assert_eq!(load(d.path()), []);
+    }
+
+    #[test]
+    fn a_file_from_before_collapsing_loads_expanded() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("hydraui")).unwrap();
+        std::fs::write(
+            file(d.path()),
+            "[[pipeline]]\nname = \"inth\"\nenv = \"iov42\"\nwatch = true\n",
+        )
+        .unwrap();
+        assert_eq!(load(d.path()), [open("inth", "iov42", true)]);
     }
 
     #[test]

@@ -172,6 +172,14 @@ come and go.
     list. *My call:* any online owner's hydra adds it automatically after checking that the
     request is signed by that person's identity.
   - Swarms you join later are offered to your other machines without a new invite.
+- *My call (plan B):* only a machine in no swarm can be linked; one already in swarms as
+  someone is refused before the code is spent, since merging two people isn't supported.
+- *My call (plan B):* where you have other machines in a swarm, Leave takes out only this
+  machine; on your last machine there it is the person leaving, as before.
+- *My call (plan B):* an offer carries the swarm's write capability only to your own machines,
+  over their own channel (`hydra/mine/1`), and only when you are a writer or owner there.
+- *My call (plan B):* your machines share which endpoint each of them has in each swarm, so a
+  removal knows what to take out.
 - **Removing one of your machines** (You and this machine › Remove…) shuts it out, which is
   the user's decision (option a):
   - hydra makes you a new personal key and hands it to your remaining machines over their

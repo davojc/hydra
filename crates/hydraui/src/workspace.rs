@@ -7,6 +7,7 @@ mod busy;
 mod finder;
 mod launcher;
 mod layout_file;
+mod machines_page;
 mod orchestrator;
 mod phone;
 mod phone_page;

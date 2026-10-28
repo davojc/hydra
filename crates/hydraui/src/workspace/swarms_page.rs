@@ -33,7 +33,7 @@ const MAX_NAME_CHARS: usize = 200;
 /// How much of an invite code the dialog shows; Copy invite copies all of it.
 const SHOWN_CODE_CHARS: usize = 48;
 /// What the page says while another window runs the swarms.
-const ELSEWHERE: &str = "Swarms run in another hydraui window";
+pub(super) const ELSEWHERE: &str = "Swarms run in another hydraui window";
 
 /// Your name and this machine's name, as typed.
 pub(super) struct IdentityFields {
@@ -43,13 +43,13 @@ pub(super) struct IdentityFields {
 
 impl IdentityFields {
     /// Both names, checked.
-    fn read(&self, cx: &App) -> Result<(String, String), String> {
+    pub(super) fn read(&self, cx: &App) -> Result<(String, String), String> {
         let name = checked_name("Your name", &self.name.read(cx).value())?;
         let machine = checked_name("This machine's name", &self.machine.read(cx).value())?;
         Ok((name, machine))
     }
 
-    fn render(&self, cx: &App) -> AnyElement {
+    pub(super) fn render(&self, cx: &App) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         v_flex()
             .gap_3()
@@ -159,7 +159,7 @@ impl Workspace {
     }
 
     /// Whether making or joining a swarm has to ask for the names first.
-    fn swarms_need_identity(&self) -> bool {
+    pub(super) fn swarms_need_identity(&self) -> bool {
         self.ui
             .peer_name
             .as_deref()
@@ -243,7 +243,7 @@ impl Workspace {
     }
 
     /// Makes or joins a swarm, saving the names first when they were asked for.
-    fn swarms_make_or_join(
+    pub(super) fn swarms_make_or_join(
         &mut self,
         identity: Option<(String, String)>,
         cmd: Command,
@@ -264,7 +264,7 @@ impl Workspace {
 
     /// Asks, then runs `then`.
     #[allow(clippy::too_many_arguments)]
-    fn swarms_confirm(
+    pub(super) fn swarms_confirm(
         &mut self,
         title: String,
         body: String,
@@ -744,6 +744,8 @@ impl Workspace {
             .child(div().text_sm().text_color(muted).child(
                 "The first time you make or join a swarm, hydraui asks for these if they aren't set yet.",
             ))
+            .child(self.your_machines(cx))
+            .when_some(self.offered_here(cx), |d, offers| d.child(offers))
             .into_any_element()
     }
 
@@ -1105,10 +1107,13 @@ impl Workspace {
 
     fn swarm_leave(&self, swarm: &SwarmView, cx: &mut Context<Self>) -> AnyElement {
         let (muted, border) = (cx.theme().muted_foreground, cx.theme().border);
-        let stuck = last_owner(swarm);
+        // Leaving on one of your machines leaves the rest in, owners included.
+        let stuck = last_owner(swarm) && swarm.my_other_machines == 0;
         let (id, name) = (swarm.id.clone(), swarm.name.clone());
+        let note = leave_note(swarm);
+        let body = note.clone();
         let leave = Button::new("swarm-leave")
-            .label("Leave swarm…")
+            .label(leave_label(swarm))
             .danger()
             .small()
             .disabled(stuck)
@@ -1117,7 +1122,7 @@ impl Workspace {
                 let id = id.clone();
                 ws.swarms_confirm(
                     format!("Leave {name}?"),
-                    "Leaving keeps the folder's files here, but stops syncing them.".into(),
+                    body.clone(),
                     "Leave",
                     true,
                     move |ws, window, cx| {
@@ -1133,15 +1138,29 @@ impl Workspace {
             .pt_4()
             .border_t_1()
             .border_color(border)
-            .child(
-                div()
-                    .flex_1()
-                    .text_sm()
-                    .text_color(muted)
-                    .child("Leaving keeps the folder's files here, but stops syncing them."),
-            )
+            .child(div().flex_1().text_sm().text_color(muted).child(note))
             .child(leave)
             .into_any_element()
+    }
+}
+
+/// The Leave button: on one of your machines only, when you have others in the swarm.
+fn leave_label(swarm: &SwarmView) -> &'static str {
+    if swarm.my_other_machines > 0 {
+        "Leave on this machine…"
+    } else {
+        "Leave swarm…"
+    }
+}
+
+fn leave_note(swarm: &SwarmView) -> String {
+    if swarm.my_other_machines > 0 {
+        format!(
+            "Your other machines stay in {}. This machine keeps its files but stops syncing them.",
+            swarm.name
+        )
+    } else {
+        "Leaving keeps the folder's files here, but stops syncing them.".into()
     }
 }
 
@@ -1182,7 +1201,7 @@ fn you_line(workspace: &Entity<Workspace>, lead: &str, cx: &App) -> AnyElement {
 }
 
 /// A folder box with Browse…, which fills it from GPUI's folder prompt.
-fn folder_row(
+pub(super) fn folder_row(
     workspace: &Entity<Workspace>,
     folder: &Entity<InputState>,
     id: &'static str,
@@ -1213,7 +1232,7 @@ fn folder_row(
         .into_any_element()
 }
 
-fn labelled(label: &'static str, control: impl IntoElement, cx: &App) -> AnyElement {
+pub(super) fn labelled(label: &'static str, control: impl IntoElement, cx: &App) -> AnyElement {
     v_flex()
         .gap_1()
         .child(section_label(label, cx))
@@ -1230,7 +1249,7 @@ fn section_label(label: &'static str, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-fn dot(colour: Hsla) -> AnyElement {
+pub(super) fn dot(colour: Hsla) -> AnyElement {
     div()
         .size(px(8.))
         .flex_none()
@@ -1240,7 +1259,7 @@ fn dot(colour: Hsla) -> AnyElement {
 }
 
 /// A role's badge: owners in violet, writers in teal, readers plain.
-fn badge(text: String, role: Role, cx: &App) -> AnyElement {
+pub(super) fn badge(text: String, role: Role, cx: &App) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let colour: Hsla = match role {
         Role::Owner => rgb(0xa78bfa).into(),
@@ -1308,7 +1327,7 @@ fn status_text(s: &SwarmView) -> String {
     }
 }
 
-fn role_name(role: Role) -> &'static str {
+pub(super) fn role_name(role: Role) -> &'static str {
     match role {
         Role::Owner => "owner",
         Role::Writer => "writer",
@@ -1569,7 +1588,7 @@ fn checked_invite(typed: &str) -> Result<String, String> {
         .ok_or_else(|| "That isn't a swarm invite. Paste all of the hydra-swarm: code.".into())
 }
 
-fn chosen_folder(typed: &str) -> Result<PathBuf, String> {
+pub(super) fn chosen_folder(typed: &str) -> Result<PathBuf, String> {
     let folder = typed.trim();
     if folder.is_empty() {
         Err("Pick a folder on this machine.".into())
@@ -1611,7 +1630,7 @@ fn zoned(secs: u64, tz: &TimeZone) -> Option<jiff::Zoned> {
 }
 
 /// "26 Oct".
-fn day(secs: u64, tz: &TimeZone) -> String {
+pub(super) fn day(secs: u64, tz: &TimeZone) -> String {
     zoned(secs, tz).map_or_else(String::new, |z| z.strftime("%-d %b").to_string())
 }
 
@@ -1681,6 +1700,14 @@ mod tests {
             role,
             vec![machine("Davo's desktop", true, None, true)],
         )
+    }
+
+    #[test]
+    fn leaving_says_whether_your_other_machines_stay() {
+        let mut s = swarm(Role::Writer, vec![me(Role::Writer)]);
+        assert_eq!(leave_label(&s), "Leave swarm…");
+        s.my_other_machines = 1;
+        assert_eq!(leave_label(&s), "Leave on this machine…");
     }
 
     #[test]

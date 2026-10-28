@@ -255,6 +255,8 @@ pub struct Workspace {
     phone_connected: bool,
     /// Every swarm, as the service last showed them; empty while they don't run here.
     swarms: Vec<hydra_swarms::SwarmView>,
+    /// Your machines, as the service last showed them; None while the swarms don't run here.
+    swarm_machines: Option<hydra_swarms::MachinesView>,
     /// This window runs the swarms.
     swarms_here: bool,
     /// Another window runs the swarms; this one tries again every 10 s.
@@ -482,6 +484,7 @@ impl Workspace {
             phone_offer: None,
             phone_connected: false,
             swarms: Vec::new(),
+            swarm_machines: None,
             swarms_here: false,
             swarms_elsewhere: false,
             swarms_run: None,

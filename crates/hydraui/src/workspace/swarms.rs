@@ -66,7 +66,7 @@ enum Opened {
 struct Saved {
     name: Option<String>,
     machine: Option<String>,
-    /// This machine is in at least one swarm.
+    /// This machine is in at least one swarm, or linked to another machine of yours.
     swarms: bool,
 }
 
@@ -77,7 +77,7 @@ impl Saved {
         Saved {
             name: cfg.peer_name,
             machine: cfg.machine_name,
-            swarms: swarms::has_swarms(paths),
+            swarms: swarms::has_swarms_or_machines(paths),
         }
     }
 
@@ -254,6 +254,7 @@ impl Workspace {
         self.swarms_here = false;
         self.swarms_elsewhere = false;
         self.swarms.clear();
+        self.swarm_machines = None;
         self.swarms_pending.clear();
         // Wakes a waiting search, which then ends.
         self.swarms_wake = None;
@@ -390,9 +391,35 @@ impl Workspace {
                 action_log::write(format!("swarms: {text}"));
                 window.push_notification(Notification::error(text).title("Swarms"), cx);
             }
-            // Shown and kept by the You page (plan B, tasks 8 and 9).
-            ServiceEvent::Machines(_) | ServiceEvent::Named { .. } => {}
+            ServiceEvent::Machines(view) => {
+                self.swarm_machines = Some(view);
+                cx.notify();
+            }
+            ServiceEvent::Named { name } => self.swarms_named(name, window, cx),
         }
+    }
+
+    /// Another machine of yours set your name: keeps it in config.toml, off the UI thread, and
+    /// shows it on the You page.
+    fn swarms_named(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.ui.peer_name.as_deref() == Some(name.as_str()) {
+            return;
+        }
+        let paths = self.hydra.paths.clone();
+        let n = name.clone();
+        let saved = cx.background_spawn(async move { swarms::save_named(&paths, &n) });
+        cx.spawn_in(window, async move |this, cx| {
+            let saved = saved.await;
+            let _ = this.update_in(cx, |ws, window, cx| match saved {
+                Ok(()) => {
+                    ws.ui.peer_name = Some(name);
+                    ws.swarms_refresh_you(window, cx);
+                    cx.notify();
+                }
+                Err(e) => action_log::write(format!("swarms: couldn't save your name: {e}")),
+            });
+        })
+        .detach();
     }
 
     /// The service numbered `seek` stopped by itself, and its lock has gone with it.
@@ -404,6 +431,7 @@ impl Workspace {
         self.swarms_run = None;
         self.swarms_here = false;
         self.swarms.clear();
+        self.swarm_machines = None;
         cx.notify();
     }
 }

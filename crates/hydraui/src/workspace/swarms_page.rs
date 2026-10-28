@@ -148,6 +148,16 @@ impl Workspace {
         }
     }
 
+    /// Fills the You page's fields again from what is saved, when it is showing.
+    pub(super) fn swarms_refresh_you(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.as_ref().is_some_and(|t| t.you.is_some()) {
+            let fields = self.identity_fields(window, cx);
+            if let Some(tab) = self.settings.as_mut() {
+                tab.you = Some(fields);
+            }
+        }
+    }
+
     /// Whether making or joining a swarm has to ask for the names first.
     fn swarms_need_identity(&self) -> bool {
         self.ui

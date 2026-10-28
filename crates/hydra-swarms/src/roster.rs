@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use iroh_blobs::Hash;
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{PersonId, PersonKey, from_hex, to_hex, verify};
+use crate::ids::{PersonId, PersonKey, RekeyCert, chain_ends, from_hex, to_hex, verify};
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[serde(rename_all = "snake_case")]
@@ -134,6 +134,31 @@ pub enum Change {
     SetTypes {
         types: Vec<String>,
     },
+    /// Another machine of the person's, signed by the person.
+    AddMachine {
+        person: PersonId,
+        machine: Machine,
+    },
+    /// One of the person's machines taken out by the person, keeping what it wrote while they
+    /// were a writer as `kept` lists it. Never their last machine: that is leaving.
+    RemoveMachine {
+        person: PersonId,
+        endpoint: String,
+        #[serde(default)]
+        kept: Kept,
+    },
+    /// The person moved to the key `to`, which signs this, vouched for by `certs` from their
+    /// current key, after one of their machines was removed; the machines at `drop` go with it,
+    /// keeping what `kept` lists.
+    Rekey {
+        person: PersonId,
+        to: PersonId,
+        certs: Vec<RekeyCert>,
+        #[serde(default)]
+        drop: Vec<String>,
+        #[serde(default)]
+        kept: Kept,
+    },
 }
 
 impl Change {
@@ -207,6 +232,8 @@ pub struct Roster {
     pub promoters: BTreeMap<PersonId, (PersonId, u64, String)>,
     /// For each person, every change that took them out of a role, oldest first.
     pub outs: BTreeMap<PersonId, Vec<Out>>,
+    /// The endpoints of machines taken out on their own, which never come back.
+    pub dropped: BTreeSet<String>,
 }
 
 /// A change that took someone out of a role.
@@ -401,6 +428,7 @@ impl Roster {
             ranks: BTreeMap::from([(owner.person, Rank::new())]),
             promoters: BTreeMap::new(),
             outs: BTreeMap::new(),
+            dropped: BTreeSet::new(),
         };
         r.admit(owner);
         Some(r)
@@ -542,6 +570,44 @@ impl Roster {
                     self.types = normalise_types(types);
                 }
             }
+            Change::AddMachine { person, machine } => {
+                if c.by == *person
+                    && self.role_of(person).is_some()
+                    && name_fits(&machine.name)
+                    && !self.dropped.contains(&machine.endpoint)
+                    && !self.machine_taken(person, machine)
+                {
+                    self.claim(*person, machine);
+                    self.member_mut(person).machines.push(machine.clone());
+                }
+            }
+            Change::RemoveMachine {
+                person,
+                endpoint,
+                kept,
+            } => {
+                let several = self.person_machines(person).len() > 1;
+                if c.by == *person && several {
+                    self.drop_machines(person, std::slice::from_ref(endpoint), kept, c.at);
+                }
+            }
+            Change::Rekey {
+                person,
+                to,
+                certs,
+                drop,
+                kept,
+            } => {
+                if c.by == *to
+                    && self.role_of(person).is_some()
+                    && self.role_of(to).is_none()
+                    && !self.removed.contains(to)
+                    && chain_ends(certs, person) == Some(*to)
+                {
+                    self.rekey(person, *to);
+                    self.drop_machines(to, drop, kept, c.at);
+                }
+            }
         }
         let Some((person, before, machines, kept)) = retiring else {
             return;
@@ -567,20 +633,79 @@ impl Roster {
     /// Adds a member and claims their machines' ids for them.
     fn admit(&mut self, member: Member) {
         for m in &member.machines {
-            for id in [&m.author, &m.endpoint] {
-                self.ids.insert(id.clone(), member.person);
-            }
+            self.claim(member.person, m);
         }
         self.members.push(member);
     }
 
+    fn claim(&mut self, person: PersonId, m: &Machine) {
+        for id in [&m.author, &m.endpoint] {
+            self.ids.insert(id.clone(), person);
+        }
+    }
+
     /// Whether one of `member`'s machine ids is, or was, someone else's.
     pub fn taken(&self, member: &Member) -> bool {
-        member.machines.iter().any(|m| {
-            [&m.author, &m.endpoint]
-                .into_iter()
-                .any(|id| self.ids.get(id).is_some_and(|p| *p != member.person))
-        })
+        member
+            .machines
+            .iter()
+            .any(|m| self.machine_taken(&member.person, m))
+    }
+
+    /// Whether one of `m`'s ids is, or was, someone other than `person`'s.
+    pub fn machine_taken(&self, person: &PersonId, m: &Machine) -> bool {
+        [&m.author, &m.endpoint]
+            .into_iter()
+            .any(|id| self.ids.get(id).is_some_and(|p| p != person))
+    }
+
+    /// Takes `person`'s machines at `endpoints` out for good, keeping what `kept` lists of
+    /// what they wrote while `person` was a writer.
+    fn drop_machines(&mut self, person: &PersonId, endpoints: &[String], kept: &Kept, at: u64) {
+        let Some(member) = self.members.iter_mut().find(|m| m.person == *person) else {
+            return;
+        };
+        let (gone, stay): (Vec<Machine>, Vec<Machine>) = std::mem::take(&mut member.machines)
+            .into_iter()
+            .partition(|m| endpoints.contains(&m.endpoint));
+        member.machines = stay;
+        let writer = member.role >= Role::Writer;
+        self.dropped.extend(gone.iter().map(|m| m.endpoint.clone()));
+        if writer {
+            self.retire(&gone, kept, at);
+        }
+    }
+
+    /// Moves everything of `old`'s to `new`: membership, rank, promotions, outs and machine ids.
+    fn rekey(&mut self, old: &PersonId, new: PersonId) {
+        self.member_mut(old).person = new;
+        if let Some(rank) = self.ranks.remove(old) {
+            self.ranks.insert(new, rank);
+        }
+        if let Some(promoter) = self.promoters.remove(old) {
+            self.promoters.insert(new, promoter);
+        }
+        for (by, ..) in self.promoters.values_mut() {
+            if by == old {
+                *by = new;
+            }
+        }
+        if let Some(outs) = self.outs.remove(old) {
+            self.outs.insert(new, outs);
+        }
+        for p in self.ids.values_mut() {
+            if p == old {
+                *p = new;
+            }
+        }
+    }
+
+    /// `p`'s machines, none for someone who isn't a member.
+    pub fn person_machines(&self, p: &PersonId) -> &[Machine] {
+        self.members
+            .iter()
+            .find(|m| m.person == *p)
+            .map_or(&[], |m| &m.machines)
     }
 
     /// Keeps what `kept` lists for `machines`, whose person stopped being a writer at `at`;
@@ -1803,5 +1928,305 @@ mod tests {
             }
             assert_eq!(fold(&o, &shuffled).as_ref(), Some(&expected));
         }
+    }
+
+    // Plan B: a person's machines, and a new personal key.
+
+    fn machine(name: &str) -> Machine {
+        Machine {
+            endpoint: format!("ep-{name}"),
+            name: format!("{name}-pc"),
+            author: format!("au-{name}"),
+        }
+    }
+
+    fn add_machine(by: &PersonKey, at: u64, who: &PersonKey, m: Machine) -> SignedChange {
+        let person = who.id();
+        sign(by, at, Change::AddMachine { person, machine: m })
+    }
+
+    fn remove_machine(who: &PersonKey, at: u64, endpoint: &str, kept: Kept) -> SignedChange {
+        let change = Change::RemoveMachine {
+            person: who.id(),
+            endpoint: endpoint.into(),
+            kept,
+        };
+        sign(who, at, change)
+    }
+
+    fn rekey(old: &PersonKey, new: &PersonKey, at: u64, drop: &[&str], kept: Kept) -> SignedChange {
+        let change = Change::Rekey {
+            person: old.id(),
+            to: new.id(),
+            certs: vec![RekeyCert::new(old, new.id())],
+            drop: drop.iter().map(|d| d.to_string()).collect(),
+            kept,
+        };
+        sign(new, at, change)
+    }
+
+    #[test]
+    fn a_person_adds_a_second_machine_and_stays_one_member() {
+        let o = PersonKey::generate();
+        let w = PersonKey::generate();
+        let log = vec![
+            genesis(&o),
+            add(&o, 2, &w, "wren", Role::Writer),
+            add_machine(&w, 3, &w, machine("laptop")),
+        ];
+        let r = fold_in_any_order(&o, &log);
+        let wren: Vec<&Member> = r.members.iter().filter(|m| m.person == w.id()).collect();
+        assert_eq!(wren.len(), 1);
+        assert_eq!(wren[0].machines.len(), 2);
+        assert!(r.writes("au-laptop"));
+        assert_eq!(
+            r.member_by_endpoint("ep-laptop").map(|m| m.person),
+            Some(w.id())
+        );
+        assert_eq!(r.person_machines(&w.id()).len(), 2);
+    }
+
+    #[test]
+    fn only_the_person_adds_their_machine() {
+        let o = PersonKey::generate();
+        let w = PersonKey::generate();
+        let stranger = PersonKey::generate();
+        let base = vec![genesis(&o), add(&o, 2, &w, "wren", Role::Writer)];
+        let before = fold(&o, &base).unwrap();
+        for by in [&o, &stranger] {
+            let mut log = base.clone();
+            log.push(add_machine(by, 3, &w, machine("laptop")));
+            assert_eq!(fold(&o, &log).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn a_machine_whose_ids_are_someone_elses_is_not_added() {
+        let o = PersonKey::generate();
+        let w = PersonKey::generate();
+        let base = vec![genesis(&o), add(&o, 2, &w, "wren", Role::Writer)];
+        let before = fold(&o, &base).unwrap();
+        let olives_author = before.person_machines(&o.id())[0].author.clone();
+        for m in [
+            Machine {
+                author: olives_author,
+                ..machine("laptop")
+            },
+            Machine {
+                endpoint: "ep-olive".into(),
+                ..machine("laptop")
+            },
+            Machine {
+                name: " ".into(),
+                ..machine("laptop")
+            },
+        ] {
+            let mut log = base.clone();
+            log.push(add_machine(&w, 3, &w, m));
+            assert_eq!(fold(&o, &log).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn a_dropped_endpoint_never_comes_back() {
+        let o = PersonKey::generate();
+        let w = PersonKey::generate();
+        let log = vec![
+            genesis(&o),
+            add(&o, 2, &w, "wren", Role::Writer),
+            add_machine(&w, 3, &w, machine("laptop")),
+            remove_machine(&w, 4, "ep-laptop", Kept::default()),
+            add_machine(&w, 5, &w, machine("laptop")),
+        ];
+        let r = fold_in_any_order(&o, &log);
+        assert!(r.member_by_endpoint("ep-laptop").is_none());
+        assert!(r.dropped.contains("ep-laptop"));
+        assert_eq!(r.person_machines(&w.id()).len(), 1);
+        assert!(!r.endpoints().contains(&"ep-laptop".to_string()));
+    }
+
+    #[test]
+    fn the_last_machine_is_not_removed() {
+        let o = PersonKey::generate();
+        let w = PersonKey::generate();
+        let base = vec![genesis(&o), add(&o, 2, &w, "wren", Role::Writer)];
+        let before = fold(&o, &base).unwrap();
+        let mut log = base.clone();
+        log.push(remove_machine(&w, 3, "ep-wren", Kept::default()));
+        assert_eq!(fold(&o, &log).unwrap(), before);
+    }
+
+    #[test]
+    fn a_removed_writers_machine_keeps_only_what_kept_lists() {
+        let o = PersonKey::generate();
+        let w = PersonKey::generate();
+        let kept = kept_files(
+            "au-laptop",
+            vec![
+                entry("a.md", 4, Some("alpha")),
+                entry("late.md", 9, Some("late")),
+            ],
+            vec![entry("a.md", 4, Some("rec"))],
+        );
+        let log = vec![
+            genesis(&o),
+            add(&o, 2, &w, "wren", Role::Writer),
+            add_machine(&w, 3, &w, machine("laptop")),
+            remove_machine(&w, 5, "ep-laptop", kept),
+        ];
+        let r = fold_in_any_order(&o, &log);
+        let retired = &r.retired["au-laptop"];
+        assert_eq!(retired.machine, "laptop-pc");
+        assert_eq!(retired.files.keys().collect::<Vec<_>>(), vec!["a.md"]);
+        assert_eq!(retired.records.keys().collect::<Vec<_>>(), vec!["a.md"]);
+        assert!(!r.writes("au-laptop"));
+        // Wren's other machine still writes.
+        assert!(r.writes(&r.person_machines(&w.id())[0].author));
+    }
+
+    #[test]
+    fn a_rekey_moves_the_person_with_their_role_rank_and_machines() {
+        let o = PersonKey::generate();
+        let q = PersonKey::generate();
+        let q2 = PersonKey::generate();
+        let x = PersonKey::generate();
+        let log = vec![
+            genesis(&o),
+            add(&o, 2, &q, "quin", Role::Owner),
+            add_machine(&q, 3, &q, machine("q-laptop")),
+            add(&q, 4, &x, "xan", Role::Owner),
+            rekey(&q, &q2, 5, &["ep-q-laptop"], Kept::default()),
+        ];
+        let before = fold(&o, &log[..4]).unwrap();
+        let r = fold_in_any_order(&o, &log);
+        assert_eq!(r.role_of(&q.id()), None);
+        assert_eq!(r.role_of(&q2.id()), Some(Role::Owner));
+        assert_eq!(r.ranks.get(&q2.id()), before.ranks.get(&q.id()));
+        assert!(!r.ranks.contains_key(&q.id()));
+        assert_eq!(r.promoters[&x.id()].0, q2.id());
+        assert_eq!(r.promoters[&q2.id()].0, o.id());
+        assert!(r.ids.values().all(|p| *p != q.id()));
+        assert_eq!(r.ids["ep-quin"], q2.id());
+        assert!(r.member_by_endpoint("ep-q-laptop").is_none());
+        assert!(r.dropped.contains("ep-q-laptop"));
+        assert_eq!(
+            r.member_by_endpoint("ep-quin").map(|m| m.person),
+            Some(q2.id())
+        );
+        assert!(r.outranks(&q2.id(), &x.id()));
+    }
+
+    #[test]
+    fn a_rekey_needs_the_chain_and_the_new_keys_signature() {
+        let o = PersonKey::generate();
+        let w = PersonKey::generate();
+        let w2 = PersonKey::generate();
+        let other = PersonKey::generate();
+        let base = vec![genesis(&o), add(&o, 2, &w, "wren", Role::Writer)];
+        let before = fold(&o, &base).unwrap();
+        let change = |certs: Vec<RekeyCert>, to: &PersonKey| Change::Rekey {
+            person: w.id(),
+            to: to.id(),
+            certs,
+            drop: Vec::new(),
+            kept: Kept::default(),
+        };
+        let bad = vec![
+            // No chain.
+            sign(&w2, 3, change(Vec::new(), &w2)),
+            // A chain that ends elsewhere.
+            sign(&w2, 3, change(vec![RekeyCert::new(&w, other.id())], &w2)),
+            // Signed by someone other than the new key.
+            sign(&w, 3, change(vec![RekeyCert::new(&w, w2.id())], &w2)),
+            // To someone already a member.
+            sign(&o, 3, change(vec![RekeyCert::new(&w, o.id())], &o)),
+            // For someone who isn't a member.
+            rekey(&other, &w2, 3, &[], Kept::default()),
+        ];
+        for c in bad {
+            let mut log = base.clone();
+            log.push(c);
+            assert_eq!(fold(&o, &log).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn the_anchor_rekeys_and_is_still_most_senior() {
+        let o = PersonKey::generate();
+        let o2 = PersonKey::generate();
+        let j = PersonKey::generate();
+        let log = vec![
+            genesis(&o),
+            add(&o, 2, &j, "jo", Role::Owner),
+            rekey(&o, &o2, 3, &[], Kept::default()),
+            demote(&j, 4, &o2, Role::Reader, Kept::default()),
+        ];
+        let r = fold_in_any_order(&o, &log);
+        assert_eq!(r.role_of(&o2.id()), Some(Role::Owner));
+        assert!(r.outranks(&o2.id(), &j.id()));
+    }
+
+    #[test]
+    fn changes_by_the_old_key_after_a_rekey_do_not_count() {
+        let o = PersonKey::generate();
+        let w = PersonKey::generate();
+        let w2 = PersonKey::generate();
+        let log = vec![
+            genesis(&o),
+            add(&o, 2, &w, "wren", Role::Writer),
+            rekey(&w, &w2, 3, &[], Kept::default()),
+            rename(&w, 4, &w, "Not wren"),
+            add_machine(&w, 5, &w, machine("stolen")),
+        ];
+        let r = fold_in_any_order(&o, &log);
+        let wren = r.members.iter().find(|m| m.person == w2.id()).unwrap();
+        assert_eq!(wren.name, "wren");
+        assert!(r.member_by_endpoint("ep-stolen").is_none());
+    }
+
+    #[test]
+    fn a_chain_of_two_rekeys_in_one_change_counts() {
+        let o = PersonKey::generate();
+        let [w, w2, w3] = [(); 3].map(|()| PersonKey::generate());
+        let change = Change::Rekey {
+            person: w.id(),
+            to: w3.id(),
+            certs: vec![RekeyCert::new(&w, w2.id()), RekeyCert::new(&w2, w3.id())],
+            drop: Vec::new(),
+            kept: Kept::default(),
+        };
+        let log = vec![
+            genesis(&o),
+            add(&o, 2, &w, "wren", Role::Reader),
+            sign(&w3, 3, change),
+        ];
+        let r = fold_in_any_order(&o, &log);
+        assert_eq!(r.role_of(&w3.id()), Some(Role::Reader));
+    }
+
+    #[test]
+    fn plan_a_logs_fold_the_same_with_the_new_changes_known() {
+        let o = PersonKey::generate();
+        let w = PersonKey::generate();
+        let log = vec![
+            genesis(&o),
+            add(&o, 2, &w, "wren", Role::Writer),
+            rename_machine(&w, 3, &w, "wren-laptop"),
+            leave(&w, 4),
+        ];
+        let r = fold_in_any_order(&o, &log);
+        assert!(r.dropped.is_empty());
+        // The JSON a plan A change was signed over is unchanged.
+        let id = w.id().to_string();
+        let leave = Change::Leave {
+            person: w.id(),
+            kept: Kept::default(),
+        };
+        assert_eq!(
+            serde_json::to_string(&leave).unwrap(),
+            format!(r#"{{"type":"leave","person":"{id}","kept":{{"changes":[],"authors":[]}}}}"#)
+        );
+        let m = serde_json::to_string(&machine("x")).unwrap();
+        assert_eq!(m, r#"{"endpoint":"ep-x","name":"x-pc","author":"au-x"}"#);
     }
 }

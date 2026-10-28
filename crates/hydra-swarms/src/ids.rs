@@ -70,6 +70,49 @@ pub fn verify(id: &PersonId, msg: &[u8], sig: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
+/// What a rekey certificate is signed over, before the new key's 32 bytes.
+const REKEY_CONTEXT: &[u8] = b"hydra-rekey/1\0";
+
+fn rekey_message(to: &PersonId) -> Vec<u8> {
+    [REKEY_CONTEXT, to.0.as_bytes()].concat()
+}
+
+/// A person's old key vouching for their new one, after one of their machines was removed.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct RekeyCert {
+    pub from: PersonId,
+    pub to: PersonId,
+    /// Hex.
+    pub sig: String,
+}
+
+impl RekeyCert {
+    pub fn new(from: &PersonKey, to: PersonId) -> RekeyCert {
+        RekeyCert {
+            from: from.id(),
+            to,
+            sig: to_hex(&from.sign(&rekey_message(&to))),
+        }
+    }
+
+    pub fn verify(&self) -> bool {
+        from_hex(&self.sig).is_some_and(|sig| verify(&self.from, &rekey_message(&self.to), &sig))
+    }
+}
+
+/// Where `certs`, followed in order from `from`, end: each must verify and start where the one
+/// before ended. None for an empty or broken chain.
+pub fn chain_ends(certs: &[RekeyCert], from: &PersonId) -> Option<PersonId> {
+    let mut at = *from;
+    for cert in certs {
+        if cert.from != at || !cert.verify() {
+            return None;
+        }
+        at = cert.to;
+    }
+    (!certs.is_empty()).then_some(at)
+}
+
 pub(crate) fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -155,6 +198,49 @@ mod tests {
         let json = serde_json::to_string(&k.id()).unwrap();
         assert_eq!(json, format!("\"{text}\""));
         assert_eq!(serde_json::from_str::<PersonId>(&json).unwrap(), k.id());
+    }
+
+    #[test]
+    fn a_cert_verifies_only_for_its_pair() {
+        let a = PersonKey::generate();
+        let b = PersonKey::generate();
+        let c = PersonKey::generate();
+        let cert = RekeyCert::new(&a, b.id());
+        assert_eq!((cert.from, cert.to), (a.id(), b.id()));
+        assert!(cert.verify());
+        let other_to = RekeyCert {
+            to: c.id(),
+            ..cert.clone()
+        };
+        assert!(!other_to.verify());
+        let other_from = RekeyCert {
+            from: c.id(),
+            ..cert
+        };
+        assert!(!other_from.verify());
+    }
+
+    #[test]
+    fn a_chain_of_two_ends_at_the_last_key() {
+        let [a, b, c] = [(); 3].map(|()| PersonKey::generate());
+        let chain = [RekeyCert::new(&a, b.id()), RekeyCert::new(&b, c.id())];
+        assert_eq!(chain_ends(&chain, &a.id()), Some(c.id()));
+        assert_eq!(chain_ends(&chain[1..], &b.id()), Some(c.id()));
+    }
+
+    #[test]
+    fn a_broken_chain_ends_nowhere() {
+        let [a, b, c, d] = [(); 4].map(|()| PersonKey::generate());
+        assert_eq!(chain_ends(&[], &a.id()), None);
+        // Starts somewhere else.
+        assert_eq!(chain_ends(&[RekeyCert::new(&b, c.id())], &a.id()), None);
+        // A gap: b → c doesn't follow a → d.
+        let gap = [RekeyCert::new(&a, d.id()), RekeyCert::new(&b, c.id())];
+        assert_eq!(chain_ends(&gap, &a.id()), None);
+        // A forged link.
+        let mut forged = RekeyCert::new(&a, b.id());
+        forged.to = c.id();
+        assert_eq!(chain_ends(&[forged], &a.id()), None);
     }
 
     #[test]

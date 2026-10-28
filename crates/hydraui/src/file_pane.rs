@@ -1,4 +1,4 @@
-//! The file pane (spec §7.8): file tabs, Raw (an editor; Ctrl+S saves) and Rendered (Markdown),
+//! The file pane (spec §7.8): file tabs, Raw (an editor; Ctrl+S saves) and Rendered (Markdown, HTML),
 //! Open in editor, the unsaved-edits prompt, and changes on disk.
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -24,6 +24,7 @@ use crate::keys::SaveFile;
 use crate::open_files::{after_close, find, to_close};
 use crate::openapi::SpecKind;
 use crate::openapi_view::{ApiView, ApiViewEvent};
+use crate::pdf_view::PdfView;
 
 use std::sync::Arc;
 
@@ -61,6 +62,8 @@ enum Body {
     CantShow(String),
     /// A PNG, JPEG, GIF or ICO, shown as a picture; or why it can't be.
     Image(Result<Picture, String>),
+    /// A PDF's pages, drawn as they come.
+    Pdf(Entity<PdfView>),
     /// How the file differs from git's last commit (spec §7.3), or why it can't be shown.
     Diff(Result<Entity<DiffState>, String>),
 }
@@ -228,6 +231,9 @@ impl FilePane {
     fn push(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let body = if file_doc::is_image(&path) {
             Body::Image(picture(&path))
+        } else if file_doc::is_pdf(&path) {
+            let p = path.clone();
+            Body::Pdf(cx.new(|cx| PdfView::new(p, cx)))
         } else {
             match file_doc::load(&path) {
                 Ok(doc) => Self::text_body(&path, doc, window, cx),
@@ -281,7 +287,7 @@ impl FilePane {
             _ => (None, None),
         };
         let svg = file_doc::is_svg(path).then(|| svg_image(&doc.text));
-        let view = if file_doc::is_markdown(path) || api.is_some() || svg.is_some() {
+        let view = if file_doc::has_rendered(path) || api.is_some() || svg.is_some() {
             View::Rendered
         } else {
             View::Raw
@@ -670,6 +676,13 @@ impl FilePane {
             cx.notify();
             return;
         }
+        if let Body::Pdf(view) = &t.body {
+            if t.path.is_file() {
+                let path = t.path.clone();
+                view.update(cx, |v, cx| v.load(path, cx));
+            }
+            return;
+        }
         let Body::Text {
             editor,
             saved,
@@ -850,6 +863,11 @@ impl Render for FilePane {
                 file_doc::size_label(p.bytes)
             )));
         }
+        if let Body::Pdf(view) = &t.body
+            && let Some(summary) = view.read(cx).summary()
+        {
+            header = header.child(div().text_sm().text_color(muted).child(summary));
+        }
         if let Body::Text { swagger: true, .. } = &t.body {
             header = header.child(
                 div()
@@ -867,7 +885,7 @@ impl Render for FilePane {
             header = header.child(div().text_sm().text_color(muted).child("SVG image"));
         }
         if let Body::Text { view, api, svg, .. } = &t.body
-            && (file_doc::is_markdown(&t.path) || api.is_some() || svg.is_some())
+            && (file_doc::has_rendered(&t.path) || api.is_some() || svg.is_some())
         {
             let other = if *view == View::Raw {
                 "Rendered"
@@ -945,6 +963,7 @@ impl Render for FilePane {
                 .child(format!("Can't show this image: {why}"))
                 .into_any_element(),
             Body::Image(Ok(p)) => picture_view(p.image.clone(), muted),
+            Body::Pdf(view) => view.clone().into_any_element(),
             // Wrapped, so both sides fit the pane instead of the new side scrolling off.
             Body::Diff(Ok(state)) => Diff::new(state)
                 .soft_wrap(true)
@@ -980,33 +999,41 @@ impl Render for FilePane {
                 view: View::Rendered,
                 ..
             } => {
-                let md = editor.read(cx).value();
+                let text = editor.read(cx).value();
                 let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+                // HTML through the same renderer as Markdown: no browser, no script, no CSS.
+                let view = if file_doc::is_html(&path) {
+                    gpui_base::TextView::html(
+                        SharedString::from(format!("html-{}", path.display())),
+                        text,
+                    )
+                } else {
+                    gpui_base::TextView::markdown(
+                        SharedString::from(format!("md-{}", path.display())),
+                        text,
+                    )
+                };
                 div()
                     .size_full()
                     .p_3()
                     .child(
-                        gpui_base::TextView::markdown(
-                            SharedString::from(format!("md-{}", path.display())),
-                            md,
-                        )
-                        .selectable(true)
-                        .scrollable(true)
-                        // Local images only; nothing is fetched (spec §7.8).
-                        .image_source(move |uri| match file_doc::image_use(uri, &dir) {
-                            ImageUse::Local(p) => {
-                                gpui::ImageSource::Resource(gpui::Resource::Path(Arc::from(p)))
-                            }
-                            ImageUse::Blocked => {
-                                gpui::ImageSource::Resource(gpui::Resource::Embedded("".into()))
-                            }
-                        })
-                        // Web and mail links open in the browser; nothing else runs.
-                        .on_link_click(|url, _, _, cx| {
-                            if file_doc::link_opens(url) {
-                                cx.open_url(url);
-                            }
-                        }),
+                        view.selectable(true)
+                            .scrollable(true)
+                            // Local images only; nothing is fetched (spec §7.8).
+                            .image_source(move |uri| match file_doc::image_use(uri, &dir) {
+                                ImageUse::Local(p) => {
+                                    gpui::ImageSource::Resource(gpui::Resource::Path(Arc::from(p)))
+                                }
+                                ImageUse::Blocked => {
+                                    gpui::ImageSource::Resource(gpui::Resource::Embedded("".into()))
+                                }
+                            })
+                            // Web and mail links open in the browser; nothing else runs.
+                            .on_link_click(|url, _, _, cx| {
+                                if file_doc::link_opens(url) {
+                                    cx.open_url(url);
+                                }
+                            }),
                     )
                     .into_any_element()
             }

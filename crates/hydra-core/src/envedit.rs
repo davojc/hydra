@@ -281,6 +281,31 @@ pub fn set_top(text: &str, key: &str, value: Option<&str>) -> Result<String, Str
     Ok(doc.to_string())
 }
 
+/// Sets `[claude] remote_control`: on writes `remote_control = true` (adding `[claude]` when
+/// the environment has none), off removes the key and leaves the table, which keeps Claude
+/// on. Keeps the rest of the file.
+pub fn set_claude_remote_control(text: &str, on: bool) -> Result<String, String> {
+    let mut doc = parse(text)?;
+    if on && !doc.contains_key("claude") {
+        doc.insert("claude", Item::Table(Table::new()));
+    }
+    match doc.get_mut("claude") {
+        Some(item) => {
+            let t = item
+                .as_table_like_mut()
+                .ok_or("claude in env.toml isn't a table")?;
+            if on {
+                set_value(t, "remote_control", Value::from(true));
+            } else {
+                t.remove("remote_control");
+            }
+        }
+        None if on => unreachable!("[claude] was just added"),
+        None => {}
+    }
+    Ok(doc.to_string())
+}
+
 /// Tells the environment's agents about variable `var` with `about` (`[agents]`), or with
 /// `None` stops telling them; an emptied `[agents]` goes. Keeps the rest of the file.
 pub fn set_agent(text: &str, var: &str, about: Option<&str>) -> Result<String, String> {
@@ -334,6 +359,64 @@ mod tests {
 
     fn vals() -> ToolValues {
         ToolValues::default()
+    }
+
+    #[test]
+    fn claude_remote_control_changes_in_place_keeping_the_rest() {
+        let src = "# mine
+label = \"Work\" # shown
+
+[claude]
+# servers
+mcp.exclude = [\"a\"]
+
+[git]
+name = \"D\"
+";
+        let on = set_claude_remote_control(src, true).unwrap();
+        assert!(on.contains("remote_control = true"), "{on}");
+        for kept in [
+            "# mine",
+            "label = \"Work\" # shown",
+            "# servers",
+            "mcp.exclude = [\"a\"]",
+            "[git]",
+            "name = \"D\"",
+        ] {
+            assert!(on.contains(kept), "{kept} in {on}");
+        }
+        let cfg: crate::config::EnvConfig = toml::from_str(&on).unwrap();
+        assert!(cfg.claude.unwrap().remote_control);
+        let off = set_claude_remote_control(&on, false).unwrap();
+        assert_eq!(off, src);
+        // No [claude] table: off changes nothing, on adds one.
+        assert_eq!(
+            set_claude_remote_control(
+                "label = \"x\"
+",
+                false
+            )
+            .unwrap(),
+            "label = \"x\"
+"
+        );
+        assert!(
+            set_claude_remote_control(
+                "label = \"x\"
+",
+                true
+            )
+            .unwrap()
+            .contains("[claude]")
+        );
+        assert!(
+            set_claude_remote_control(
+                "claude = 3
+",
+                true
+            )
+            .is_err()
+        );
     }
 
     #[test]

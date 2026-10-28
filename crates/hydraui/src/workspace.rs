@@ -10,6 +10,8 @@ mod launcher;
 mod layout_file;
 mod linear;
 mod orchestrator;
+mod phone;
+mod phone_page;
 mod pickup;
 mod pipeline_history;
 mod pipeline_settings;
@@ -18,6 +20,8 @@ mod settings_tab;
 mod shortcuts;
 mod slack;
 mod start_page;
+mod swarms;
+mod swarms_page;
 mod tasks_tab;
 mod terminal_list;
 mod title_bar;
@@ -270,6 +274,38 @@ pub struct Workspace {
     in_flight: crate::pickup::InFlight,
     /// Listens for board files the MCP server's sessions create.
     _mcp_pump: Option<gpui::Task<()>>,
+    /// The phone link, while this window holds it (phone spec §4).
+    phone: Option<phone::PhoneLink>,
+    /// This window is waiting to take the phone link (another window holds it).
+    phone_seeking: bool,
+    /// Counts `phone_stop`s, so a wait for the link started before one ends.
+    phone_seek: u64,
+    /// Terminals the phone shows as Finished: a turn ended and the phone hasn't seen it.
+    phone_finished: HashSet<PaneId>,
+    /// Cards the phone put into Pickup, by project and text, while they are offered.
+    phone_cards: HashSet<(PathBuf, String)>,
+    /// The word pair both screens showed at the last pairing, for the Phone page.
+    phone_word: Option<String>,
+    /// The pairing code the Phone page shows, until it expires or a phone pairs.
+    phone_offer: Option<phone_page::ShownOffer>,
+    /// The paired phone is connected now.
+    phone_connected: bool,
+    /// Every swarm, as the service last showed them; empty while they don't run here.
+    swarms: Vec<hydra_swarms::SwarmView>,
+    /// This window runs the swarms.
+    swarms_here: bool,
+    /// Another window runs the swarms; this one tries again every 10 s.
+    swarms_elsewhere: bool,
+    /// The swarms service, while this window runs it.
+    swarms_run: Option<swarms::SwarmsRun>,
+    /// This window is seeking the swarms (another window may run them).
+    swarms_seeking: bool,
+    /// Counts `swarms_stop`s and restarts, so a search started before one ends.
+    swarms_seek: u64,
+    /// Swarms being made or joined, sent once the swarms start for them.
+    swarms_pending: Vec<hydra_swarms::Command>,
+    /// Wakes the search while it waits to try again.
+    swarms_wake: Option<futures::channel::oneshot::Sender<()>>,
     /// Coming back to the window clears the alert of the terminal it shows.
     _activation: Subscription,
 }
@@ -494,6 +530,22 @@ impl Workspace {
             linear_tickets: HashMap::new(),
             in_flight: Default::default(),
             _mcp_pump: mcp_pump,
+            phone: None,
+            phone_seeking: false,
+            phone_seek: 0,
+            phone_finished: HashSet::new(),
+            phone_cards: HashSet::new(),
+            phone_word: None,
+            phone_offer: None,
+            phone_connected: false,
+            swarms: Vec::new(),
+            swarms_here: false,
+            swarms_elsewhere: false,
+            swarms_run: None,
+            swarms_seeking: false,
+            swarms_seek: 0,
+            swarms_pending: Vec::new(),
+            swarms_wake: None,
             _activation: activation,
         }
     }
@@ -530,6 +582,8 @@ impl Workspace {
         }
         // Pipelines that start themselves (`[autostart]`), watching Linear when they ask to.
         self.autostart_pipelines(window, cx);
+        self.phone_start(window, cx);
+        self.swarms_start(window, cx);
         // Each pane's folder as it is when the window closes.
         let ws = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
@@ -824,6 +878,7 @@ impl Workspace {
         );
         self.subs.insert(id, sub);
         self.panes.insert(id, view);
+        self.phone_broadcast_session(id, cx);
     }
 
     /// The selected environment and its shown terminal: what the layout saves as selected.
@@ -1107,6 +1162,7 @@ impl Workspace {
         self.file_subs.remove(&id);
         self.commands.remove(&id);
         self.attention.remove(&id);
+        self.phone_pane_gone(id);
     }
 
     /// Ctrl+W: the file pane when it has the focus, else the shown terminal's Tasks tab when

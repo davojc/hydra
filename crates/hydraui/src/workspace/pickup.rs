@@ -15,7 +15,7 @@ use crate::action_log;
 use crate::envs::PaneId;
 use crate::jev::{Failure, JEV_URL, JevKey, JevSettings, Reply};
 use crate::pickup::{
-    Pick, Session, candidates, choose, describe, focused_pane, idle_in_project, is_reserved,
+    Pick, Session, candidates, choose, describe, focused_for, idle_in_project, is_reserved,
     jev_failure, no_free_text, pick, still_in_pickup,
 };
 use crate::task_board_view::SendTarget;
@@ -53,8 +53,10 @@ impl Workspace {
     }
 
     /// The sessions, each draft that may have been cleared settled from its screen first.
+    /// `away`: the user isn't at the window (a card from the phone), so none is in front.
     pub(super) fn fresh_sessions(
         &mut self,
+        away: bool,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Vec<Session> {
@@ -65,7 +67,8 @@ impl Workspace {
         for view in self.panes.values() {
             view.update(cx, |v, _| v.check_draft());
         }
-        let focused = focused_pane(
+        let focused = focused_for(
+            away,
             window.is_window_active(),
             self.envs
                 .active()
@@ -226,7 +229,8 @@ impl Workspace {
                 None
             }
         };
-        let sessions = self.fresh_sessions(window, cx);
+        let away = self.is_phone_card(&project, &text);
+        let sessions = self.fresh_sessions(away, window, cx);
         self.log_sessions(&sessions, &project, cx);
         match pick(&sessions, &project, key.is_some()) {
             Pick::Certain(panes) => {
@@ -291,21 +295,56 @@ impl Workspace {
         &mut self,
         project: PathBuf,
         text: String,
+        free: Vec<PaneId>,
+        failure: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((board, _)) = self.boards.get(&project) {
+            let still = still_in_pickup(board.read(cx).board(), &text);
+            self.after_jev_checked(project, text, free, failure, still, window, cx);
+            return;
+        }
+        // A card the phone put on a board this window hasn't loaded: read the file off the UI
+        // thread.
+        let (p, t) = (project.clone(), text.clone());
+        let still = cx.background_spawn(async move {
+            crate::tasks_project::load(&p).is_ok_and(|(board, _)| still_in_pickup(&board, &t))
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let still = still.await;
+            let _ = this.update_in(cx, |ws, window, cx| {
+                ws.after_jev_checked(project, text, free, failure, still, window, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// `after_jev` once it knows whether the card is `still` in Pickup.
+    #[allow(clippy::too_many_arguments)]
+    fn after_jev_checked(
+        &mut self,
+        project: PathBuf,
+        text: String,
         mut free: Vec<PaneId>,
         failure: Option<String>,
+        still: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if !self.in_flight.running(&project, &text) {
             action_log::write("pickup: after Jev, the card had already been sent by hand");
+            self.phone_card_done(&project, &text, None);
             return;
         }
-        if !self.in_pickup(&project, &text, cx) {
+        if !still {
             action_log::write("pickup: after Jev, the card had left Pickup: not sent");
             self.in_flight.finish(&project, &text);
+            self.phone_card_done(&project, &text, None);
             return;
         }
-        let ok = candidates(&self.fresh_sessions(window, cx), &project);
+        let away = self.is_phone_card(&project, &text);
+        let ok = candidates(&self.fresh_sessions(away, window, cx), &project);
         let before = free.len();
         free.retain(|p| ok.contains(p));
         if free.len() < before {
@@ -345,11 +384,58 @@ impl Workspace {
                 false
             }
         };
-        if sent {
+        let notice = if sent {
             self.in_flight.sent(project, text, Instant::now());
+            pane.map(|pane| self.sent_text(pane, cx))
         } else {
             self.in_flight.finish(project, text);
+            Some(phone_no_free_text(project))
+        };
+        self.phone_card_done(project, text, notice);
+    }
+
+    /// The phone put card `text` into `project`'s Pickup (phone spec §4): it is offered as a
+    /// card moved there on this window's board, with no terminal counted as in front of the
+    /// user, and the phone is told where it went.
+    pub(super) fn phone_card_arrived(
+        &mut self,
+        project: PathBuf,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.phone_cards.insert((project.clone(), text.clone()));
+        self.card_arrived(project, text, window, cx);
+    }
+
+    /// Whether card `text` of `project` is on its way from the phone.
+    fn is_phone_card(&self, project: &Path, text: &str) -> bool {
+        self.phone_cards
+            .contains(&(project.to_path_buf(), text.to_string()))
+    }
+
+    /// An offer for card `text` of `project` ended: when it came from the phone, the phone
+    /// is told `notice`, if any.
+    fn phone_card_done(&mut self, project: &Path, text: &str, notice: Option<String>) {
+        if self
+            .phone_cards
+            .remove(&(project.to_path_buf(), text.to_string()))
+            && let Some(text) = notice
+        {
+            self.phone_send(hydra_link::ServerMsg::Notice { text });
         }
+    }
+
+    /// "Sent to <terminal> in <env>", as the toast says it.
+    fn sent_text(&self, pane: PaneId, cx: &App) -> String {
+        let label = self
+            .panes
+            .get(&pane)
+            .map_or_else(|| "?".to_string(), |v| v.read(cx).label());
+        format!(
+            "Sent to {label} in {}",
+            self.envs.env_of(pane).unwrap_or("?")
+        )
     }
 
     /// Sends card `text` of `project` to terminal `pane`, the user's choice in Send to (§8):
@@ -400,25 +486,21 @@ impl Workspace {
             .panes
             .get(&pane)
             .cloned()
-            .filter(|view| view.update(cx, |v, cx| v.type_prompt(&prompt, cx)));
-        let Some(view) = typed else {
+            .is_some_and(|view| view.update(cx, |v, cx| v.type_prompt(&prompt, cx)));
+        if !typed {
             action_log::write(format!(
                 "pickup: couldn't type into {} (gone or not running)",
                 self.pane_name(pane, cx)
             ));
             self.no_free_session(project, None, window, cx);
             return false;
-        };
+        }
         action_log::write(format!(
             "pickup: typed into {}: {prompt}",
             self.pane_name(pane, cx)
         ));
         self.reserved.insert(pane, Instant::now());
-        let place = format!(
-            "Sent to {} in {}",
-            view.read(cx).label(),
-            self.envs.env_of(pane).unwrap_or("?")
-        );
+        let place = self.sent_text(pane, cx);
         let ws = cx.entity();
         let note = Notification::info(place)
             .title("Tasks")
@@ -453,6 +535,15 @@ impl Workspace {
             cx,
         );
     }
+}
+
+/// What the phone is told when no session can take its card.
+fn phone_no_free_text(project: &Path) -> String {
+    let name = project.file_name().map_or_else(
+        || project.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    format!("No free Claude session in {name}: the card stays in Pickup")
 }
 
 /// Logs Jev's answer about terminal `name`: its pick, confidence and each option's

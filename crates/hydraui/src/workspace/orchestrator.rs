@@ -1027,7 +1027,7 @@ impl Workspace {
         if self.pending_wakes.is_empty() {
             return;
         }
-        let sessions = self.fresh_sessions(window, cx);
+        let sessions = self.fresh_sessions(false, window, cx);
         let pending: Vec<(PaneId, String, String)> = self
             .pending_wakes
             .iter()

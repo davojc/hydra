@@ -124,6 +124,11 @@ pub fn is_svg(path: &Path) -> bool {
     ext(path).as_deref() == Some("svg")
 }
 
+/// Whether the file pane shows the file as PDF pages.
+pub fn is_pdf(path: &Path) -> bool {
+    ext(path).as_deref() == Some("pdf")
+}
+
 /// An image's kind from its first bytes, whatever its name says.
 pub fn image_kind(bytes: &[u8]) -> Option<ImageKind> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
@@ -164,6 +169,17 @@ pub fn is_markdown(path: &Path) -> bool {
     matches!(ext(path).as_deref(), Some("md" | "markdown"))
 }
 
+/// An HTML page: Rendered shows its text, headings, lists, tables, links and local images
+/// with hydraui's own renderer (no browser), so no script runs and no CSS layout applies.
+pub fn is_html(path: &Path) -> bool {
+    matches!(ext(path).as_deref(), Some("html" | "htm" | "xhtml"))
+}
+
+/// Whether the file has a Rendered view of its text (Markdown or HTML).
+pub fn has_rendered(path: &Path) -> bool {
+    is_markdown(path) || is_html(path)
+}
+
 fn ext(path: &Path) -> Option<String> {
     path.extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
@@ -192,7 +208,7 @@ pub fn language(path: &Path) -> &'static str {
         Some("sh" | "bash") => "bash",
         Some("yml" | "yaml") => "yaml",
         Some("css" | "scss") => "css",
-        Some("html" | "htm") => "html",
+        Some("html" | "htm" | "xhtml") => "html",
         Some("go") => "go",
         Some("c" | "h") => "c",
         Some("cpp" | "cc" | "cxx" | "hpp" | "hh") => "cpp",
@@ -334,6 +350,9 @@ mod tests {
         assert!(!is_image(Path::new("png")));
         assert!(is_svg(Path::new("a/Logo.SVG")));
         assert!(!is_svg(Path::new("svg")));
+        assert!(is_pdf(Path::new("docs/Guide.PDF")));
+        assert!(!is_pdf(Path::new("pdf")));
+        assert!(!is_image(Path::new("guide.pdf")), "a PDF has its own view");
     }
 
     #[test]
@@ -476,6 +495,18 @@ mod tests {
         #[allow(clippy::permissions_set_readonly_false)]
         perms.set_readonly(false);
         std::fs::set_permissions(&p, perms).unwrap();
+    }
+
+    #[test]
+    fn html_pages_come_from_the_extension() {
+        assert!(is_html(Path::new("index.html")));
+        assert!(is_html(Path::new("old/PAGE.HTM")));
+        assert!(is_html(Path::new("a.xhtml")));
+        assert!(!is_html(Path::new("README.md")));
+        assert!(!is_html(Path::new("html")));
+        assert!(has_rendered(Path::new("index.html")));
+        assert!(has_rendered(Path::new("README.md")));
+        assert!(!has_rendered(Path::new("main.rs")));
     }
 
     #[test]

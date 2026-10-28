@@ -21,13 +21,23 @@ use crate::settings::{ENV_COLOURS, SHELLS};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Section {
     General,
+    Phone,
+    /// Swarms › You and this machine.
+    You,
+    /// A swarm's page, by its namespace id.
+    Swarm(String),
     Env(String),
     Credentials,
 }
 
 pub(super) struct SettingsTab {
     section: Section,
+    /// You and this machine's name fields, while that page shows.
+    pub(super) you: Option<super::swarms_page::IdentityFields>,
 }
+
+/// A sidebar line's click.
+type OnClick = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>;
 
 /// What a variable shows agents before the user describes it.
 const DESCRIBE_ME: &str = "[What it is for, and how to use it]";
@@ -47,7 +57,8 @@ impl Workspace {
         if let Section::Env(env) = &section {
             self.recheck_accounts(env, cx);
         }
-        self.settings = Some(SettingsTab { section });
+        let you = (section == Section::You).then(|| self.identity_fields(window, cx));
+        self.settings = Some(SettingsTab { section, you });
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -93,7 +104,7 @@ impl Workspace {
 
     /// A one-line box filled with `initial`; Save runs `save`, and the dialog stays open
     /// showing what's wrong until it succeeds.
-    fn text_dialog(
+    pub(super) fn text_dialog(
         &mut self,
         title: String,
         initial: String,
@@ -207,6 +218,9 @@ impl Workspace {
         let (border, muted) = (theme.border, theme.muted_foreground);
         let page = match &tab.section {
             Section::General => self.general_page(cx),
+            Section::Phone => self.phone_page(cx),
+            Section::You => self.you_page(cx),
+            Section::Swarm(id) => self.swarm_page(id, cx),
             Section::Env(env) => self.env_page(env, cx),
             Section::Credentials => self.credentials_page(cx),
         };
@@ -236,7 +250,12 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let accent = cx.theme().accent;
-        let item = |id: SharedString, label: SharedString, dot: Option<Hsla>, to: Section| {
+        let warning = cx.theme().warning;
+        let item = |id: SharedString,
+                    label: SharedString,
+                    dot: Option<Hsla>,
+                    count: usize,
+                    to: Section| {
             let on = *current == to;
             h_flex()
                 .id(id)
@@ -252,6 +271,16 @@ impl Workspace {
                     d.child(div().size(px(8.)).flex_none().rounded_full().bg(c))
                 })
                 .child(div().min_w_0().truncate().child(label))
+                .when(count > 0, |d| {
+                    d.child(
+                        div()
+                            .ml_auto()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(warning)
+                            .child(count.to_string()),
+                    )
+                })
                 .on_click(
                     cx.listener(move |ws, _, window, cx| ws.open_settings(to.clone(), window, cx)),
                 )
@@ -276,10 +305,38 @@ impl Workspace {
                     SharedString::from(format!("settings-env-{e}")),
                     SharedString::from(e.clone()),
                     Some(tint),
+                    0,
                     Section::Env(e),
                 )
             })
             .collect();
+        let swarms: Vec<_> = self
+            .swarms
+            .iter()
+            .map(|s| {
+                item(
+                    SharedString::from(format!("settings-swarm-{}", s.id)),
+                    SharedString::from(s.name.clone()),
+                    Some(self.swarm_nav_dot(s, cx)),
+                    s.attention.len(),
+                    Section::Swarm(s.id.clone()),
+                )
+            })
+            .collect();
+        // A line under a heading that makes or adds something.
+        let add = |id: &'static str, label: &'static str, click: OnClick| {
+            h_flex()
+                .id(id)
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .text_sm()
+                .text_color(muted)
+                .cursor_pointer()
+                .hover(|d| d.bg(accent.opacity(0.6)))
+                .child(label)
+                .on_click(click)
+        };
         v_flex()
             .id("settings-nav")
             .w(px(200.))
@@ -314,28 +371,48 @@ impl Workspace {
                 "settings-general".into(),
                 "General".into(),
                 None,
+                0,
                 Section::General,
+            ))
+            .child(item(
+                "settings-phone".into(),
+                "Phone".into(),
+                None,
+                0,
+                Section::Phone,
+            ))
+            .child(heading("SWARMS"))
+            .child(item(
+                "settings-you".into(),
+                "You and this machine".into(),
+                None,
+                0,
+                Section::You,
+            ))
+            .children(swarms)
+            .child(add(
+                "settings-new-swarm",
+                "+ New swarm",
+                Box::new(cx.listener(|ws, _, window, cx| ws.new_swarm_dialog(window, cx))),
+            ))
+            .child(add(
+                "settings-join-swarm",
+                "Join a swarm…",
+                Box::new(cx.listener(|ws, _, window, cx| ws.join_swarm_dialog(window, cx))),
             ))
             .child(heading("ENVIRONMENTS"))
             .children(envs)
-            .child(
-                h_flex()
-                    .id("settings-new-env")
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .text_sm()
-                    .text_color(muted)
-                    .cursor_pointer()
-                    .hover(|d| d.bg(accent.opacity(0.6)))
-                    .child("+ New environment")
-                    .on_click(cx.listener(|ws, _, window, cx| ws.new_env_dialog(window, cx))),
-            )
+            .child(add(
+                "settings-new-env",
+                "+ New environment",
+                Box::new(cx.listener(|ws, _, window, cx| ws.new_env_dialog(window, cx))),
+            ))
             .child(heading("SECURITY"))
             .child(item(
                 "settings-credentials".into(),
                 "Credentials".into(),
                 None,
+                0,
                 Section::Credentials,
             ))
     }
@@ -699,6 +776,17 @@ impl Workspace {
                 let e = e.clone();
                 move |ws, w, cx| ws.set_env_home(e.clone(), w, cx)
             }));
+        let remote_row = {
+            let e = e.clone();
+            Switch::new(SharedString::from(format!("env-remote-control-{env}")))
+                .checked(self.hydra.env_remote_control(env))
+                .small()
+                .label("Claude sessions start with Remote Control")
+                .on_click(cx.listener(move |ws, on: &bool, window, cx| {
+                    let r = ws.hydra.set_env_remote_control(&e, *on);
+                    ws.env_edited(&e, r, window, cx)
+                }))
+        };
         let vars = self.hydra.env_variables(env);
         let var_rows: Vec<AnyElement> = if vars.is_empty() {
             vec![
@@ -775,6 +863,7 @@ impl Workspace {
                     setting("Label", label_row.into_any_element(), cx),
                     setting("Colour", swatches.into_any_element(), cx),
                     setting("Home", home_row.into_any_element(), cx),
+                    setting("Remote Control", remote_row.into_any_element(), cx),
                 ],
                 cx,
             ))
@@ -1036,7 +1125,12 @@ fn action_button(
 }
 
 /// A page's heading: its title and a line under it, with buttons on the right.
-fn page_title(title: &str, sub: String, buttons: impl IntoElement, cx: &App) -> AnyElement {
+pub(super) fn page_title(
+    title: &str,
+    sub: String,
+    buttons: impl IntoElement,
+    cx: &App,
+) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     h_flex()
         .justify_between()
@@ -1059,7 +1153,12 @@ fn page_title(title: &str, sub: String, buttons: impl IntoElement, cx: &App) -> 
 }
 
 /// A bordered group of rows under a heading, with something on the heading's right.
-fn group(title: &str, right: Option<AnyElement>, rows: Vec<AnyElement>, cx: &App) -> AnyElement {
+pub(super) fn group(
+    title: &str,
+    right: Option<AnyElement>,
+    rows: Vec<AnyElement>,
+    cx: &App,
+) -> AnyElement {
     group_inner(div().child(title.to_string()), right, rows, cx)
 }
 

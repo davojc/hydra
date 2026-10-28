@@ -75,6 +75,9 @@ pub struct Empty {}
 pub struct ClaudeConfig {
     #[serde(default)]
     pub mcp: McpConfig,
+    /// Claude sessions start with Remote Control on (`remoteControlAtStartup`).
+    #[serde(default)]
+    pub remote_control: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -346,6 +349,23 @@ pub fn load_env_lenient(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_control_is_off_unless_set() {
+        let on: EnvConfig = toml::from_str(
+            "[claude]
+remote_control = true
+",
+        )
+        .unwrap();
+        assert!(on.claude.unwrap().remote_control);
+        let off: EnvConfig = toml::from_str(
+            "[claude]
+",
+        )
+        .unwrap();
+        assert!(!off.claude.unwrap().remote_control);
+    }
 
     const WORK: &str = r##"
 label = "acme work"

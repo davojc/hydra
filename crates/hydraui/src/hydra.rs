@@ -77,6 +77,8 @@ pub struct Started {
     pub pane: Pane,
     pub events: Receiver<TermEvent>,
     pub warnings: Vec<String>,
+    /// The environment's `[claude] remote_control`, as the launch loaded it.
+    pub remote_control: bool,
 }
 
 pub struct Hydra {
@@ -332,6 +334,11 @@ impl Hydra {
     pub fn start(&self, req: &PaneRequest, size: GridSize) -> Result<Started, String> {
         let launch = self.prepare(req)?;
         let warnings = launch.warnings.clone();
+        let remote_control = launch
+            .config
+            .claude
+            .as_ref()
+            .is_some_and(|c| c.remote_control);
         let spec = SpawnSpec {
             paths: self.paths.clone(),
             launch,
@@ -347,6 +354,7 @@ impl Hydra {
             pane,
             events,
             warnings,
+            remote_control,
         })
     }
 
@@ -409,6 +417,21 @@ impl Hydra {
     pub fn set_env_basic(&self, env: &str, key: &str, value: Option<&str>) -> Result<(), String> {
         let text = self.env_text(env)?;
         self.write_env(env, envedit::set_top(&text, key, value)?)
+    }
+
+    /// Whether `env`'s Claude sessions start with Remote Control (`[claude] remote_control`).
+    pub fn env_remote_control(&self, env: &str) -> bool {
+        self.env_text(env)
+            .ok()
+            .and_then(|t| toml::from_str::<toml::Table>(&t).ok())
+            .and_then(|t| t.get("claude")?.get("remote_control")?.as_bool())
+            .unwrap_or(false)
+    }
+
+    /// Sets `env`'s `[claude] remote_control`.
+    pub fn set_env_remote_control(&self, env: &str, on: bool) -> Result<(), String> {
+        let text = self.env_text(env)?;
+        self.write_env(env, envedit::set_claude_remote_control(&text, on)?)
     }
 
     /// `env`'s `[env]` variables, secrets as their `secret:` reference.

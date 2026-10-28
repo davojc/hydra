@@ -143,8 +143,11 @@ fn start(paths: &HydraPaths, name: String, machine: String) -> Opened {
         name,
         machine_name: machine,
     };
-    let swarm_key = Box::new(move |id: &str| keys.swarm(id));
-    let cfg = ServiceConfig::new(swarms::root(paths), identity, swarm_key, true);
+    let keys = std::sync::Arc::new(keys);
+    let swarm_keys = std::sync::Arc::clone(&keys);
+    let swarm_key = Box::new(move |id: &str| swarm_keys.swarm(id));
+    let set_person = Box::new(move |key: [u8; 32]| keys.set_person(key));
+    let cfg = ServiceConfig::new(swarms::root(paths), identity, swarm_key, set_person, true);
     match SwarmsService::start(cfg) {
         Ok((commands, events)) => Opened::Running(lock, commands, events),
         Err(e) => Opened::Failed(format!("Couldn't start the swarms: {e}")),
@@ -387,6 +390,8 @@ impl Workspace {
                 action_log::write(format!("swarms: {text}"));
                 window.push_notification(Notification::error(text).title("Swarms"), cx);
             }
+            // Shown and kept by the You page (plan B, tasks 8 and 9).
+            ServiceEvent::Machines(_) | ServiceEvent::Named { .. } => {}
         }
     }
 

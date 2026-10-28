@@ -118,7 +118,7 @@ impl DeviceNode {
             .context("your other machine didn't answer in time")?
     }
 
-    pub async fn shutdown(self) {
+    pub async fn shutdown(&self) {
         let _ = self.router.shutdown().await;
         self.endpoint.close().await;
     }

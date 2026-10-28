@@ -51,6 +51,11 @@ impl SwarmKeys {
         self.keyring.get_or_create(PERSON_USER)
     }
 
+    /// Keeps `key` as your person key from now on.
+    pub fn set_person(&self, key: [u8; 32]) -> Result<(), String> {
+        self.keyring.set(PERSON_USER, key)
+    }
+
     /// This machine's key for the swarm whose key id is `id`, made the first time.
     pub fn swarm(&self, id: &str) -> Result<[u8; 32], String> {
         self.keyring.get_or_create(&swarm_user(id))

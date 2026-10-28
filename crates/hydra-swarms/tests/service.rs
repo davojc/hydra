@@ -11,8 +11,8 @@ use futures::StreamExt;
 use futures::channel::{mpsc, oneshot};
 use hydra_swarms::ids::PersonKey;
 use hydra_swarms::{
-    Attention, Command, DirectPeers, Identity, Role, ServiceConfig, ServiceEvent, SwarmView,
-    SwarmsService,
+    Attention, Command, DirectPeers, Identity, MachinesView, Role, ServiceConfig, ServiceEvent,
+    SwarmView, SwarmsService,
 };
 
 const WAIT: Duration = Duration::from_secs(30);
@@ -23,6 +23,8 @@ const QUIET: Duration = Duration::from_secs(4);
 const LOST_FOR: Duration = Duration::from_secs(8);
 
 type Keys = Arc<Mutex<HashMap<String, [u8; 32]>>>;
+/// The personal key as the keyring holds it.
+type Person = Arc<Mutex<[u8; 32]>>;
 
 fn random32() -> [u8; 32] {
     let mut b = [0u8; 32];
@@ -40,6 +42,9 @@ struct Svc {
     root: PathBuf,
     identity: Identity,
     keys: Keys,
+    person: Person,
+    machines: Option<MachinesView>,
+    named: Vec<String>,
     book: DirectPeers,
     /// Where this machine's folders go.
     home: PathBuf,
@@ -50,6 +55,7 @@ fn launch(
     root: &Path,
     identity: Identity,
     keys: &Keys,
+    person: &Person,
     book: &DirectPeers,
     lost_relays: Duration,
 ) -> (
@@ -61,7 +67,16 @@ fn launch(
         let mut keys = held.lock().unwrap();
         Ok(*keys.entry(id.to_string()).or_insert_with(random32))
     });
-    let cfg = ServiceConfig::new(root.to_path_buf(), identity, swarm_key, false)
+    let stored = Arc::clone(person);
+    let set_person = Box::new(move |key: [u8; 32]| {
+        *stored.lock().unwrap() = key;
+        Ok(())
+    });
+    let identity = Identity {
+        person: *person.lock().unwrap(),
+        ..identity
+    };
+    let cfg = ServiceConfig::new(root.to_path_buf(), identity, swarm_key, set_person, false)
         .direct_peers_for_tests(book)
         .lose_relay_answers_for_tests(lost_relays);
     SwarmsService::start(cfg).expect("start")
@@ -82,8 +97,9 @@ impl Svc {
             machine_name: format!("{name}-pc"),
         };
         let keys = Keys::default();
+        let person = Person::new(Mutex::new(identity.person));
         let root = state.path().join("swarms");
-        let (tx, rx) = launch(&root, identity.clone(), &keys, book, lost);
+        let (tx, rx) = launch(&root, identity.clone(), &keys, &person, book, lost);
         Svc {
             tx,
             rx,
@@ -93,6 +109,9 @@ impl Svc {
             root,
             identity,
             keys,
+            person,
+            machines: None,
+            named: Vec::new(),
             book: book.clone(),
             home: home.path().to_path_buf(),
             _dirs: vec![state, home],
@@ -100,7 +119,9 @@ impl Svc {
     }
 
     fn person(&self) -> String {
-        PersonKey::from_bytes(self.identity.person).id().to_string()
+        PersonKey::from_bytes(*self.person.lock().unwrap())
+            .id()
+            .to_string()
     }
 
     fn folder(&self, name: &str) -> PathBuf {
@@ -116,6 +137,8 @@ impl Svc {
             ServiceEvent::Swarms(v) => self.views = v,
             ServiceEvent::Toast { text, .. } => self.toasts.push(text),
             ServiceEvent::Failed(text) => self.failures.push(text),
+            ServiceEvent::Machines(v) => self.machines = Some(v),
+            ServiceEvent::Named { name } => self.named.push(name),
         }
     }
 
@@ -205,6 +228,32 @@ impl Svc {
         self.view("the joined swarm", |v| v.folder == folder).await
     }
 
+    /// A code to link another machine to this one's person.
+    async fn link_code(&mut self) -> String {
+        let (reply, code) = oneshot::channel();
+        self.send(Command::LinkCode { reply });
+        code.await.expect("a reply").expect("a link code")
+    }
+
+    /// Links this machine with `code`, and waits until it lists `devices` machines of yours,
+    /// all online.
+    async fn link(&mut self, code: String, devices: usize) {
+        self.send(Command::Link { code });
+        self.until("the machines linked", |s| {
+            let m = s.machines.as_ref()?;
+            (m.devices.len() == devices && m.devices.iter().all(|d| d.online)).then_some(())
+        })
+        .await;
+    }
+
+    /// This machine's device id, once the service has said it.
+    async fn device(&mut self) -> String {
+        self.until("this machine's device id", |s| {
+            s.machines.as_ref().map(|m| m.this.clone())
+        })
+        .await
+    }
+
     /// Stops the service and waits until it has closed everything.
     async fn stop(&mut self) {
         self.send(Command::Stop);
@@ -224,6 +273,7 @@ impl Svc {
             &self.root,
             self.identity.clone(),
             &self.keys,
+            &self.person,
             &self.book,
             Duration::ZERO,
         );
@@ -617,4 +667,151 @@ async fn a_leave_whose_answer_is_lost_still_completes() {
     );
     olive.stop().await;
     wren.stop().await;
+}
+
+// Plan B: linking your own machines.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_linked_machine_takes_the_person_and_both_list_each_other() {
+    let book = DirectPeers::new();
+    let mut olive = Svc::new("olive", &book);
+    let mut olive2 = Svc::new("olive-new", &book);
+    let code = olive.link_code().await;
+    olive2.link(code, 2).await;
+    assert_eq!(olive2.person(), olive.person());
+    olive2
+        .until("olive2 named olive", |s| {
+            s.named.iter().any(|n| n == "olive").then_some(())
+        })
+        .await;
+    olive
+        .until("olive lists both, the code spent", |s| {
+            let m = s.machines.as_ref()?;
+            (m.devices.len() == 2 && m.links.is_empty()).then_some(())
+        })
+        .await;
+    for svc in [&olive, &olive2] {
+        let m = svc.machines.as_ref().unwrap();
+        let here: Vec<&str> = m
+            .devices
+            .iter()
+            .filter(|d| d.this_machine)
+            .map(|d| d.id.as_str())
+            .collect();
+        assert_eq!(here, vec![m.this.as_str()]);
+    }
+    let names: Vec<String> = olive
+        .machines
+        .as_ref()
+        .unwrap()
+        .devices
+        .iter()
+        .map(|d| d.name.clone())
+        .collect();
+    assert!(names.contains(&"olive-pc".to_string()));
+    assert!(names.contains(&"olive-new-pc".to_string()));
+    olive.stop().await;
+    olive2.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_link_code_is_single_use() {
+    let book = DirectPeers::new();
+    let mut olive = Svc::new("olive", &book);
+    let mut olive2 = Svc::new("olive2", &book);
+    let mut olive3 = Svc::new("olive3", &book);
+    let code = olive.link_code().await;
+    olive2.link(code.clone(), 2).await;
+    olive3.send(Command::Link { code });
+    olive3
+        .failure("This link code has already been used.")
+        .await;
+    for s in [&mut olive, &mut olive2, &mut olive3] {
+        s.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_machine_in_swarms_cannot_link_and_the_code_survives() {
+    let book = DirectPeers::new();
+    let mut olive = Svc::new("olive", &book);
+    let mut wren = Svc::new("wren", &book);
+    let mut fresh = Svc::new("fresh", &book);
+    wren.create("Wren's", &[]).await;
+    let code = olive.link_code().await;
+    wren.send(Command::Link { code: code.clone() });
+    wren.failure(
+        "This machine is already in swarms as someone. Leave them before linking it to another \
+         of your machines.",
+    )
+    .await;
+    olive
+        .until("the code still pending", |s| {
+            (s.machines.as_ref()?.links.len() == 1).then_some(())
+        })
+        .await;
+    fresh.link(code, 2).await;
+    assert_eq!(fresh.person(), olive.person());
+    for s in [&mut olive, &mut wren, &mut fresh] {
+        s.stop().await;
+    }
+}
+
+/// Only asks; answers anything with Ok.
+struct Asker;
+
+impl hydra_swarms::device::DeviceHandler for Asker {
+    fn answer(
+        &self,
+        _: String,
+        _: hydra_swarms::wire::MineRequest,
+    ) -> futures::future::BoxFuture<'static, hydra_swarms::wire::MineReply> {
+        Box::pin(async { hydra_swarms::wire::MineReply::Ok })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn strangers_get_nothing_from_a_device() {
+    use hydra_swarms::mine::Mine;
+    use hydra_swarms::wire::{MineReply, MineRequest};
+    let book = DirectPeers::new();
+    let mut olive = Svc::new("olive", &book);
+    let device = olive.device().await;
+    olive.drain_for(Duration::from_secs(1)).await;
+    let before = olive.machines.clone();
+    let stranger = hydra_swarms::device::DeviceNode::start(random32(), false, Arc::new(Asker))
+        .await
+        .unwrap();
+    stranger.remember_addr(book.get(&device).expect("olive's device in the book"));
+    let mallory = PersonKey::generate();
+    let secret: String = mallory
+        .to_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let asks = [
+        MineRequest::Sync {
+            mine: Mine {
+                name: "Mallory".into(),
+                name_at: u64::MAX,
+                ..Mine::default()
+            },
+        },
+        MineRequest::NewKey {
+            secret,
+            chain: Vec::new(),
+        },
+    ];
+    for req in asks {
+        let reply = stranger.ask(&device, &req).await.unwrap();
+        let refused = MineReply::Refused {
+            reason: "This isn't one of your machines.".into(),
+        };
+        assert_eq!(reply, refused);
+    }
+    olive.drain_for(Duration::from_secs(1)).await;
+    assert_eq!(olive.machines, before);
+    assert!(olive.named.is_empty());
+    stranger.shutdown().await;
+    olive.stop().await;
 }

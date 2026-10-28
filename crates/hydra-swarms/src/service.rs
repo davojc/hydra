@@ -27,9 +27,11 @@ use tokio::time::Instant;
 use crate::folder::{Attention, Folder, FolderEvent};
 use crate::ids::{PersonId, PersonKey, to_hex};
 use crate::invites::{Invite, InviteCode, NOT_THEIR_MACHINE, Refused, redeem, redeem_at};
+use crate::mine::DEVICE_KEY_ID;
 use crate::node::{NodeConfig, NodeEvent, SwarmNode, now_micros};
 use crate::paths::{RelPath, safe_rel_path};
 use crate::roster::{Change, Kept, Machine, Member, Role, Roster, SignedChange};
+use crate::wire::Offer;
 
 /// How often every swarm reconciles its folder, and retries what it couldn't send.
 const PERIODIC: Duration = Duration::from_secs(60);
@@ -60,6 +62,11 @@ pub struct Identity {
 /// Gives a swarm's machine key for a key id, making it the first time.
 pub type SwarmKeyFn = Box<dyn Fn(&str) -> Result<[u8; 32], String> + Send>;
 
+/// Keeps a new personal key, in place of the one before.
+pub type PersonKeyFn = Box<dyn Fn([u8; 32]) -> Result<(), String> + Send>;
+
+mod linking;
+
 pub struct ServiceConfig {
     /// `state_root/swarms`.
     pub root: PathBuf,
@@ -69,17 +76,26 @@ pub struct ServiceConfig {
     /// is known (the joining machine's key is part of the request to join), and the registry
     /// remembers it.
     pub swarm_key: SwarmKeyFn,
+    /// The keyring in hydraui, for a personal key this machine is given or makes.
+    pub set_person: PersonKeyFn,
     pub relays: bool,
     direct_peers: Option<DirectPeers>,
     lose_relays: Duration,
 }
 
 impl ServiceConfig {
-    pub fn new(root: PathBuf, identity: Identity, swarm_key: SwarmKeyFn, relays: bool) -> Self {
+    pub fn new(
+        root: PathBuf,
+        identity: Identity,
+        swarm_key: SwarmKeyFn,
+        set_person: PersonKeyFn,
+        relays: bool,
+    ) -> Self {
         ServiceConfig {
             root,
             identity,
             swarm_key,
+            set_person,
             relays,
             direct_peers: None,
             lose_relays: Duration::ZERO,
@@ -114,7 +130,8 @@ impl DirectPeers {
         lock(&self.0).insert(addr.id.to_string(), addr);
     }
 
-    fn get(&self, id: &str) -> Option<EndpointAddr> {
+    /// Where the node with endpoint id `id` listens, if it is in the book.
+    pub fn get(&self, id: &str) -> Option<EndpointAddr> {
         lock(&self.0).get(id).cloned()
     }
 
@@ -159,6 +176,27 @@ pub struct MachineView {
     pub online: bool,
     /// When it was last connected, in Unix seconds, as this machine saw it.
     pub last_seen: Option<u64>,
+    pub this_machine: bool,
+}
+
+/// Your machines, as this one sees them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MachinesView {
+    /// This machine's device id.
+    pub this: String,
+    pub devices: Vec<DeviceView>,
+    /// The link codes this machine has made that can still be used.
+    pub links: Vec<Invite<()>>,
+    /// The swarms offered to this machine.
+    pub offers: Vec<Offer>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceView {
+    pub id: String,
+    pub name: String,
+    /// Heard from in the last minute (this machine always is).
+    pub online: bool,
     pub this_machine: bool,
 }
 
@@ -218,6 +256,21 @@ pub enum Command {
         swarm: String,
         action: Resolution,
     },
+    /// Replies with a code another machine of yours can link with.
+    LinkCode {
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    CancelLink {
+        id: String,
+    },
+    /// Links this machine to the one that made `code`, taking its person.
+    Link {
+        code: String,
+    },
+    /// Removes one of your machines, by device id.
+    RemoveMachine {
+        device: String,
+    },
     Stop,
 }
 
@@ -236,6 +289,10 @@ impl Command {
             Command::Create { .. }
             | Command::Join { .. }
             | Command::SetIdentity { .. }
+            | Command::LinkCode { .. }
+            | Command::CancelLink { .. }
+            | Command::Link { .. }
+            | Command::RemoveMachine { .. }
             | Command::Stop => None,
         }
     }
@@ -261,6 +318,12 @@ pub enum ServiceEvent {
         text: String,
     },
     Failed(String),
+    /// Your machines changed.
+    Machines(MachinesView),
+    /// Another machine of yours set your name; hydraui keeps it.
+    Named {
+        name: String,
+    },
 }
 
 pub struct SwarmsService;
@@ -307,7 +370,7 @@ impl SwarmsService {
                 if let Some(text) = damaged {
                     shared.failed(text);
                 }
-                rt.block_on(run(shared, cfg.identity, cmd_rx));
+                rt.block_on(run(shared, cfg.identity, cfg.set_person, cmd_rx));
             })?;
         Ok((cmd_tx, ev_rx))
     }
@@ -548,8 +611,30 @@ enum Msg {
 async fn run(
     shared: Arc<Shared>,
     mut identity: Identity,
+    set_person: PersonKeyFn,
     mut commands: fmpsc::UnboundedReceiver<Command>,
 ) {
+    let (up_tx, mut up) = mpsc::unbounded_channel();
+    let machines = match start_machines(&shared, &identity, set_person, up_tx).await {
+        Ok(m) => Some(m),
+        Err(e) => {
+            shared.failed(format!(
+                "Your other machines can't be reached from here: {e:#}"
+            ));
+            None
+        }
+    };
+    if let Some(m) = &machines {
+        let name = m.name();
+        if name != identity.name {
+            identity.name = name.clone();
+            shared.emit(ServiceEvent::Named { name });
+        }
+        m.publish();
+        tokio::spawn(Arc::clone(m).sync_all());
+    }
+    let mut tick = tokio::time::interval_at(Instant::now() + PERIODIC, PERIODIC);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut swarms: HashMap<String, Handle> = HashMap::new();
     let mut opening: JoinSet<Option<Opened>> = JoinSet::new();
     for entry in shared.registry.entries() {
@@ -576,8 +661,42 @@ async fn run(
                         let _ = h.tx.send(Msg::Identity(identity.clone()));
                     }
                 }
+                Some(Command::LinkCode { reply }) => {
+                    let code = match &machines {
+                        Some(m) => m.link_code(),
+                        None => Err(NO_DEVICE.to_string()),
+                    };
+                    let _ = reply.send(code);
+                }
+                Some(Command::CancelLink { id }) => {
+                    if let Some(m) = &machines {
+                        m.cancel_link(&id);
+                    }
+                }
+                Some(Command::Link { code }) => match &machines {
+                    Some(m) => {
+                        tokio::spawn(Arc::clone(m).link(code, identity.machine_name.clone()));
+                    }
+                    None => shared.failed(NO_DEVICE),
+                },
+                Some(Command::RemoveMachine { .. }) => shared.failed("Not yet."),
                 Some(cmd) => to_swarm(&shared, &mut swarms, cmd),
             },
+            Some(up) = up.recv() => match up {
+                linking::Up::Named(name) => {
+                    identity.name = name.clone();
+                    for h in swarms.values() {
+                        let _ = h.tx.send(Msg::Identity(identity.clone()));
+                    }
+                    shared.emit(ServiceEvent::Named { name });
+                }
+                linking::Up::Person(person) => identity.person = person,
+            },
+            _ = tick.tick() => {
+                if let Some(m) = &machines {
+                    tokio::spawn(Arc::clone(m).sync_all());
+                }
+            }
             Some(done) = opening.join_next(), if !opening.is_empty() => {
                 if let Ok(Some(opened)) = done {
                     let ns = opened.entry.ns.clone();
@@ -615,6 +734,22 @@ async fn run(
     for (_, h) in swarms {
         let _ = h.task.await;
     }
+    if let Some(m) = machines {
+        m.shutdown().await;
+    }
+}
+
+/// Why nothing to do with your other machines works here.
+const NO_DEVICE: &str = "Your other machines can't be reached from here.";
+
+async fn start_machines(
+    shared: &Arc<Shared>,
+    identity: &Identity,
+    set_person: PersonKeyFn,
+    up: mpsc::UnboundedSender<linking::Up>,
+) -> anyhow::Result<Arc<linking::Machines>> {
+    let device_key = shared.machine_key(DEVICE_KEY_ID).await?;
+    linking::Machines::start(Arc::clone(shared), device_key, identity, set_person, up).await
 }
 
 /// Passes a command to its swarm's task.
@@ -1388,6 +1523,10 @@ impl Worker {
             Command::Create { .. }
             | Command::Join { .. }
             | Command::SetIdentity { .. }
+            | Command::LinkCode { .. }
+            | Command::CancelLink { .. }
+            | Command::Link { .. }
+            | Command::RemoveMachine { .. }
             | Command::Stop => Ok(()),
         };
         if let Err(text) = done {

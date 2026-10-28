@@ -163,6 +163,12 @@ impl Keyring {
         }
     }
 
+    /// Stores `key` for `user`, in place of whatever was there.
+    pub fn set(&self, user: &str, key: [u8; 32]) -> Result<(), String> {
+        let entry = keyring::Entry::new(&self.service, user).map_err(failed)?;
+        entry.set_password(&to_hex(&key)).map_err(failed)
+    }
+
     /// Forgets the secret stored for `user`; there being none is fine.
     pub fn delete(&self, user: &str) -> Result<(), String> {
         let entry = keyring::Entry::new(&self.service, user).map_err(failed)?;
@@ -241,6 +247,24 @@ mod tests {
         let mut forged = RekeyCert::new(&a, b.id());
         forged.to = c.id();
         assert_eq!(chain_ends(&[forged], &a.id()), None);
+    }
+
+    #[test]
+    fn a_set_key_is_what_get_returns() {
+        let service = format!("hydraui-test-swarms-set-{}", std::process::id());
+        let ring = Keyring::new(&service);
+        let first = match ring.get_or_create("person") {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("skipped: no keyring here ({e})");
+                return;
+            }
+        };
+        let next = PersonKey::generate().to_bytes();
+        assert_ne!(next, first);
+        ring.set("person", next).unwrap();
+        assert_eq!(ring.get_or_create("person").unwrap(), next);
+        ring.delete("person").unwrap();
     }
 
     #[test]

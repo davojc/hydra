@@ -984,3 +984,7 @@ hydraui saves the pipelines that are open (`~/.hydra/hydraui/open-pipelines.toml
 Each pipeline's card in the sidebar has an outlined chevron button beside its name that folds it to one line: the pipeline's name, its state pill and the button (Needs you, Asked product, Check it, Working, Stopped, …), then how many sessions it has open and how its trigger is set (Automatic, Manual or Stopped). The button unfolds it; clicking the rest opens the pipeline, as the card does. A pipeline running several tickets folds as a whole, its pill the most urgent of them. Folding is kept with the open pipelines (§38, `collapsed`), so it lasts across a restart.
 
 In Pipeline settings each stage's prompt, and the product-question style, is a box that grows with what's written (prompts 3 to 14 lines, the style 2 to 10), wrapping instead of running off the edge.
+
+## 40. A pull request posted again is reviewed again (added 2026-10-28)
+
+A Slack look used to pass over any pull request hydraui had ever run, so a re-post asking for a re-review (new commits dismissed the approval) was never picked up: version2-frontend#5550, reviewed at 13:21, posted again by its author at 16:53. Now only a run that hasn't ended (running, or interrupted and waiting to resume) holds its pull request, with the queue and the person's own pull requests as before. A message without the reaction is a new ask, so a pull request whose earlier run ended (done or stopped) starts a new run (`<ticket>-2`, …) and the message is marked.

@@ -174,10 +174,10 @@ impl Workspace {
             let found = cx
                 .background_spawn(async move {
                     let token = hydra.slack_token(&env)?;
-                    let mut ran: Vec<String> = crate::run_history::read(hydra.paths.root(), &[])
-                        .into_iter()
-                        .map(|e| e.ticket)
-                        .collect();
+                    // Only a run still open holds its pull request: one posted again after its
+                    // review ended is reviewed again (core spec §40).
+                    let mut ran =
+                        slack_watch::still_open(&crate::run_history::read(hydra.paths.root(), &[]));
                     ran.extend(passed_over);
                     // Pull requests the person watching opened are theirs: GitHub won't let
                     // them approve their own, so they're left alone. Asked of GitHub as the

@@ -64,6 +64,16 @@ pub fn pick<'a>(
         .collect()
 }
 
+/// The pull requests a look leaves alone because a run of them is still open, from the runs
+/// hydraui has logged. One whose run ended (done or stopped) is taken again when someone posts
+/// it afresh: an unmarked message is a new ask, e.g. a re-review after new commits.
+pub fn still_open(runs: &[crate::run_history::Entry]) -> Vec<String> {
+    runs.iter()
+        .filter(|e| !e.ended)
+        .map(|e| e.ticket.clone())
+        .collect()
+}
+
 /// What a look found: the pull requests to run, and the ones passed over because the person
 /// watching opened them (GitHub won't let an author approve their own).
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -73,8 +83,8 @@ pub struct Found {
 }
 
 /// One look: the channel's messages from the last `lookback_hours`, each one to take marked
-/// with the reaction, and their pull requests in order. `ran` are tickets hydraui has run
-/// before or passed over; `queued` are waiting already. `mine` says whether the person watching
+/// with the reaction, and their pull requests in order. `ran` are tickets with a run still
+/// open, or passed over; `queued` are waiting already. `mine` says whether the person watching
 /// opened a pull request: theirs are left alone, and a message with only theirs isn't marked.
 pub fn find_and_mark(
     api: &dyn SlackApi,
@@ -190,6 +200,33 @@ pub fn save_queue(path: &Path, queue: &VecDeque<Queued>) -> std::io::Result<()> 
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_pull_request_is_held_only_while_its_run_is_open() {
+        let d = tempfile::tempdir().unwrap();
+        let runs = d.path().join("hydraui").join("runs");
+        std::fs::create_dir_all(&runs).unwrap();
+        let started = |t: &str| {
+            format!(
+                "{{\"at\":\"2026-10-28 13:21:30.110\",\"event\":\"run started\",\"ticket\":\"{t}\",\"summary\":\"{t}\",\"pipeline\":\"review-pr-s\"}}\n"
+            )
+        };
+        // Reviewed and ended this morning; posted again after new commits.
+        std::fs::write(
+            runs.join("version2-frontend-5550-1.jsonl"),
+            started("version2-frontend-5550")
+                + "{\"at\":\"2026-10-28 13:27:32.875\",\"event\":\"run ended\",\"outcome\":\"done\"}\n",
+        )
+        .unwrap();
+        // Still being reviewed.
+        std::fs::write(
+            runs.join("version2-frontend-5557-1.jsonl"),
+            started("version2-frontend-5557"),
+        )
+        .unwrap();
+        let open = still_open(&crate::run_history::read(d.path(), &[]));
+        assert_eq!(open, ["version2-frontend-5557"]);
+    }
     use std::cell::RefCell;
 
     use super::*;

@@ -26,6 +26,7 @@ use tokio::time::Instant;
 
 use crate::folder::{Attention, Folder, FolderEvent};
 use crate::ids::{PersonId, PersonKey, to_hex};
+use crate::ids::{RekeyCert, chain_ends};
 use crate::invites::{Invite, InviteCode, NOT_THEIR_MACHINE, Refused, redeem, redeem_at};
 use crate::mine::DEVICE_KEY_ID;
 use crate::node::{NodeConfig, NodeEvent, SwarmNode, now_micros};
@@ -381,6 +382,7 @@ impl SwarmsService {
                     views: Mutex::default(),
                     dirty: Notify::new(),
                     swarm_key: Mutex::new(cfg.swarm_key),
+                    keys: Mutex::default(),
                 });
                 if let Some(text) = damaged {
                     shared.failed(text);
@@ -525,6 +527,15 @@ struct Shared {
     /// Set when a view changes; the main task pushes them all, at most every `VIEWS_EVERY`.
     dirty: Notify,
     swarm_key: Mutex<SwarmKeyFn>,
+    /// What each swarm needs to move this person to their current key: the chain of personal
+    /// keys, and the endpoints of the machines removed from yours.
+    keys: Mutex<KeyState>,
+}
+
+#[derive(Clone, Default)]
+struct KeyState {
+    chain: Vec<RekeyCert>,
+    gone: HashSet<String>,
 }
 
 impl Shared {
@@ -621,6 +632,8 @@ enum Msg {
     Identity(Identity),
     /// Another machine of yours joining: this person's `AddMachine` for it, and where to answer.
     Joining(SignedChange, oneshot::Sender<MineReply>),
+    /// This person's new key, after one of their machines was removed.
+    Person([u8; 32]),
     Stop,
 }
 
@@ -653,9 +666,11 @@ async fn run(
     let mut tick = tokio::time::interval_at(Instant::now() + PERIODIC, PERIODIC);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut swarms: HashMap<String, Handle> = HashMap::new();
-    let mut opening: JoinSet<Option<Opened>> = JoinSet::new();
+    // Each swarm opening, with the personal key it opens as.
+    let mut opening: JoinSet<([u8; 32], Option<Opened>)> = JoinSet::new();
     for entry in shared.registry.entries() {
-        opening.spawn(open_existing(Arc::clone(&shared), identity.clone(), entry));
+        let open = open_existing(Arc::clone(&shared), identity.clone(), entry);
+        opening.spawn(as_person(identity.person, open));
     }
     // The first push says what there is, even when there is nothing.
     shared.dirty.notify_one();
@@ -664,13 +679,47 @@ async fn run(
     let mut offered: HashSet<String> = HashSet::new();
     loop {
         tokio::select! {
+            // What your other machines changed (a new key above all) comes before any command
+            // sent after it.
+            biased;
+            Some(up) = up.recv() => match up {
+                linking::Up::Named(name) => {
+                    identity.name = name.clone();
+                    for h in swarms.values() {
+                        let _ = h.tx.send(Msg::Identity(identity.clone()));
+                    }
+                    shared.emit(ServiceEvent::Named { name });
+                }
+                linking::Up::Person(person) => {
+                    // Every open swarm acts as the person's new key; ones still opening do once
+                    // they have.
+                    identity.person = person;
+                    for h in swarms.values() {
+                        let _ = h.tx.send(Msg::Person(person));
+                    }
+                }
+                linking::Up::Joining { ns, change, reply } => match swarms.get(&ns) {
+                    Some(h) => {
+                        if let Err(mpsc::error::SendError(Msg::Joining(_, reply))) =
+                            h.tx.send(Msg::Joining(*change, reply))
+                        {
+                            let _ = reply.send(linking::not_here());
+                        }
+                    }
+                    None => {
+                        let _ = reply.send(linking::not_here());
+                    }
+                },
+            },
             cmd = commands.next() => match cmd {
                 None | Some(Command::Stop) => break,
                 Some(Command::Create { name, folder }) => {
-                    opening.spawn(create(Arc::clone(&shared), identity.clone(), name, folder));
+                    let open = create(Arc::clone(&shared), identity.clone(), name, folder);
+                    opening.spawn(as_person(identity.person, open));
                 }
                 Some(Command::Join { code, folder }) => {
-                    opening.spawn(join(Arc::clone(&shared), identity.clone(), code, folder));
+                    let open = join(Arc::clone(&shared), identity.clone(), code, folder);
+                    opening.spawn(as_person(identity.person, open));
                 }
                 Some(Command::SetIdentity { name, machine_name }) => {
                     if let Some(m) = &machines {
@@ -701,11 +750,20 @@ async fn run(
                     }
                     None => shared.failed(NO_DEVICE),
                 },
-                Some(Command::RemoveMachine { .. }) => shared.failed("Not yet."),
+                Some(Command::RemoveMachine { device }) => match &machines {
+                    Some(m) => match m.remove_machine(&device).await {
+                        // Your other machines get the new key now.
+                        Ok(()) => {
+                            tokio::spawn(Arc::clone(m).sync_all());
+                        }
+                        Err(text) => shared.failed(text),
+                    },
+                    None => shared.failed(NO_DEVICE),
+                },
                 Some(Command::AcceptOffer { swarm, folder }) => match &machines {
                     Some(m) => {
                         let accept = Arc::clone(m).accept(identity.clone(), swarm, folder);
-                        opening.spawn(accept);
+                        opening.spawn(as_person(identity.person, accept));
                     }
                     None => shared.failed(NO_DEVICE),
                 },
@@ -716,36 +774,21 @@ async fn run(
                 }
                 Some(cmd) => to_swarm(&shared, &mut swarms, cmd),
             },
-            Some(up) = up.recv() => match up {
-                linking::Up::Named(name) => {
-                    identity.name = name.clone();
-                    for h in swarms.values() {
-                        let _ = h.tx.send(Msg::Identity(identity.clone()));
-                    }
-                    shared.emit(ServiceEvent::Named { name });
-                }
-                linking::Up::Person(person) => identity.person = person,
-                linking::Up::Joining { ns, change, reply } => match swarms.get(&ns) {
-                    Some(h) => {
-                        if let Err(mpsc::error::SendError(Msg::Joining(_, reply))) =
-                            h.tx.send(Msg::Joining(*change, reply))
-                        {
-                            let _ = reply.send(linking::not_here());
-                        }
-                    }
-                    None => {
-                        let _ = reply.send(linking::not_here());
-                    }
-                },
-            },
             _ = tick.tick() => {
                 if let Some(m) = &machines {
                     tokio::spawn(Arc::clone(m).sync_all());
                 }
             }
             Some(done) = opening.join_next(), if !opening.is_empty() => {
-                if let Ok(Some(opened)) = done {
+                if let Ok((person, Some(opened))) = done {
+                    // Opened as a key this person no longer has: it acts as the new one.
+                    if let (true, Some(node)) = (person != identity.person, &opened.node) {
+                        node.set_person(identity.person);
+                    }
                     let ns = opened.entry.ns.clone();
+                    if let (Some(m), Some(node)) = (&machines, &opened.node) {
+                        m.note_endpoint(&node.endpoint_id());
+                    }
                     let (tx, rx) = mpsc::unbounded_channel();
                     let worker = Worker::new(Arc::clone(&shared), identity.clone(), opened);
                     let task = tokio::spawn(worker.run(rx));
@@ -777,9 +820,12 @@ async fn run(
     }
     // Swarms still being made or joined are let finish, then closed with the rest.
     while let Some(done) = opening.join_next().await {
-        if let Ok(Some(Opened {
-            node: Some(node), ..
-        })) = done
+        if let Ok((
+            _,
+            Some(Opened {
+                node: Some(node), ..
+            }),
+        )) = done
         {
             node.shutdown().await;
         }
@@ -793,6 +839,14 @@ async fn run(
     if let Some(m) = machines {
         m.shutdown().await;
     }
+}
+
+/// `open`, with the personal key it opens the swarm as.
+async fn as_person(
+    person: [u8; 32],
+    open: impl Future<Output = Option<Opened>>,
+) -> ([u8; 32], Option<Opened>) {
+    (person, open.await)
 }
 
 /// Why nothing to do with your other machines works here.
@@ -1152,9 +1206,18 @@ struct SeenFile {
 
 /// A message to another machine finished.
 enum Sent {
-    Promoted { endpoint: String, ok: bool },
-    Relayed { sig: String, leave: bool, ok: bool },
+    Promoted {
+        endpoint: String,
+        ok: bool,
+    },
+    Relayed {
+        sig: String,
+        leave: bool,
+        ok: bool,
+    },
     Removed,
+    /// A machine of yours joining through this one has had its answer.
+    Answered,
 }
 
 /// One swarm's task: its node, its folder and everything this machine knows of it.
@@ -1208,6 +1271,11 @@ struct Worker {
     /// Whether the names in the roster have been checked against this machine's, which may have
     /// changed while the service wasn't running.
     names_checked: bool,
+    /// Taken out on its own by another machine of this person's, not with the person.
+    dropped: bool,
+    /// Old keys this machine has asked to move this person from, and removed machines it has
+    /// asked to take out, so each is asked once.
+    rekeyed: HashSet<String>,
 }
 
 impl Worker {
@@ -1254,6 +1322,8 @@ impl Worker {
             relay_backoff: RELAY_RETRY,
             finished: false,
             names_checked: false,
+            dropped: false,
+            rekeyed: HashSet::new(),
             shared,
         }
     }
@@ -1269,6 +1339,7 @@ impl Worker {
                     Some(Msg::Command(cmd)) => self.command(cmd).await,
                     Some(Msg::Identity(id)) => self.set_identity(id).await,
                     Some(Msg::Joining(change, reply)) => self.joining(change, reply).await,
+                    Some(Msg::Person(key)) => self.set_person(key),
                 },
                 ev = next_event(&mut self.events) => self.node_event(ev),
                 Some(()) = next_signal(&mut self.watch) => self.soon(Duration::ZERO),
@@ -1355,6 +1426,10 @@ impl Worker {
                     self.removed_now = true;
                 }
             }
+            Ok(NodeEvent::Dropped) => {
+                self.dropped = true;
+                self.removed_now = true;
+            }
             Err(broadcast::error::RecvError::Closed) => self.events = None,
         }
     }
@@ -1438,12 +1513,18 @@ impl Worker {
             }
             // A joiner keeps its inviter-only gate until the roster shows it.
             node.set_gate(&r.endpoints());
+        } else if self.seen_me && !self.leaving && r.dropped.contains(&self.my_endpoint) {
+            self.dropped = true;
+            self.removed_now = true;
         } else if self.seen_me
             && !self.leaving
             && r.removed.contains(&me)
             && r.role_of(&me).is_none()
         {
             self.removed_now = true;
+        }
+        if me_in && !self.removed_now {
+            self.move_to_current_key(node, &r).await;
         }
         if r.name != self.name && !r.name.is_empty() {
             self.name = r.name.clone();
@@ -1903,8 +1984,12 @@ impl Worker {
             return;
         }
         self.removed = true;
-        self.shared
-            .toast(&self.ns, format!("You were removed from {}.", self.name));
+        let text = if self.dropped {
+            format!("This machine was removed from {}.", self.name)
+        } else {
+            format!("You were removed from {}.", self.name)
+        };
+        self.shared.toast(&self.ns, text);
         let name = self.name.clone();
         if let Err(e) = self.shared.registry.update(&self.ns, |e| {
             e.removed = true;
@@ -1984,6 +2069,115 @@ impl Worker {
         self.deliver(true);
     }
 
+    /// Acts as this person's new key from now on, and looks at the roster again at once to move
+    /// them to it here.
+    fn set_person(&mut self, key: [u8; 32]) {
+        self.identity.person = key;
+        self.person = PersonKey::from_bytes(key);
+        if let Some(node) = &self.node {
+            node.set_person(key);
+        }
+        self.soon(Duration::ZERO);
+    }
+
+    /// When this swarm still knows this person by an earlier key, moves them to the current one,
+    /// taking out the machines removed from yours; and takes out any of those still listed under
+    /// the current key. Each is asked once; a reader's go through an owner.
+    async fn move_to_current_key(&mut self, node: &SwarmNode, r: &Roster) {
+        let keys = lock(&self.shared.keys).clone();
+        let me = self.person.id();
+        let earlier = keys.chain.iter().position(|c| r.role_of(&c.from).is_some());
+        if let Some(i) = earlier {
+            let old = keys.chain[i].from;
+            let certs = keys.chain[i..].to_vec();
+            if chain_ends(&certs, &old) != Some(me) || !self.rekeyed.insert(old.to_string()) {
+                return;
+            }
+            let gone: Vec<Machine> = r
+                .person_machines(&old)
+                .iter()
+                .filter(|x| keys.gone.contains(&x.endpoint))
+                .cloned()
+                .collect();
+            let kept = self.kept_machines(node, r, &old, &gone).await;
+            let change = Change::Rekey {
+                person: old,
+                to: me,
+                certs,
+                drop: gone.iter().map(|x| x.endpoint.clone()).collect(),
+                kept,
+            };
+            self.submit(node, change, &gone).await;
+            return;
+        }
+        let gone: Vec<Machine> = r
+            .person_machines(&me)
+            .iter()
+            .filter(|x| keys.gone.contains(&x.endpoint) && x.endpoint != self.my_endpoint)
+            .filter(|x| self.rekeyed.insert(x.endpoint.clone()))
+            .cloned()
+            .collect();
+        for x in gone {
+            let kept = self
+                .kept_machines(node, r, &me, std::slice::from_ref(&x))
+                .await;
+            let change = Change::RemoveMachine {
+                person: me,
+                endpoint: x.endpoint.clone(),
+                kept,
+            };
+            self.submit(node, change, &[x]).await;
+        }
+    }
+
+    /// What `machines` of `person`'s wrote, for a change taking them out; nothing for a reader.
+    async fn kept_machines(
+        &self,
+        node: &SwarmNode,
+        r: &Roster,
+        person: &PersonId,
+        machines: &[Machine],
+    ) -> Kept {
+        let mut kept = Kept::default();
+        if r.role_of(person) < Some(Role::Writer) {
+            return kept;
+        }
+        for x in machines {
+            match node.kept_machine(&x.author).await {
+                Ok(k) => kept.authors.extend(k.authors),
+                Err(e) => self.report(format!("{}: {e:#}", self.name)),
+            }
+        }
+        kept
+    }
+
+    /// Writes this person's `change`, or has an owner write it, and tells the machines it takes
+    /// out, as far as they can be reached.
+    async fn submit(&mut self, node: &SwarmNode, change: Change, out: &[Machine]) {
+        let signed = SignedChange::sign(&self.ns, change, &self.person, now_micros());
+        if node.can_write() {
+            if let Err(e) = node.write_change(&signed).await {
+                self.report(format!("{}: {e:#}", self.name));
+            }
+        } else {
+            self.outbox.push(signed.clone());
+            self.save_outbox();
+            self.deliver(true);
+        }
+        let Some(node) = self.node.clone() else {
+            return;
+        };
+        for x in out {
+            let node = Arc::clone(&node);
+            let endpoint = x.endpoint.clone();
+            let signed = signed.clone();
+            self.sends.spawn(async move {
+                let _ = node.send_removed(&endpoint, &signed).await;
+                Sent::Removed
+            });
+        }
+    }
+
     /// Another machine of yours is joining: writes this person's `AddMachine` for it (or has an
     /// owner write it), then answers once the roster shows that machine and the gate lets it in,
     /// with write access when this person has it.
@@ -2008,7 +2202,8 @@ impl Worker {
         let me = self.person.id();
         let host = self.my_endpoint.clone();
         let name = self.name.clone();
-        tokio::spawn(async move {
+        // One of the swarm's sends, so closing the swarm stops it and lets the node go.
+        self.sends.spawn(async move {
             let deadline = Instant::now() + JOINING_WAIT;
             while Instant::now() < deadline {
                 if let Ok(Some(r)) = node.roster().await
@@ -2025,13 +2220,14 @@ impl Worker {
                         _ => None,
                     };
                     let _ = reply.send(MineReply::Joined { write_secret, host });
-                    return;
+                    return Sent::Answered;
                 }
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
             let _ = reply.send(refuse(format!(
                 "Your machine in {name} couldn't add this one yet. Try again in a moment."
             )));
+            Sent::Answered
         });
     }
 
@@ -2137,7 +2333,7 @@ impl Worker {
                     self.relay_backoff = (self.relay_backoff * 2).min(PERIODIC);
                 }
             }
-            Sent::Removed => {}
+            Sent::Removed | Sent::Answered => {}
         }
     }
 

@@ -26,6 +26,34 @@ type Keys = Arc<Mutex<HashMap<String, [u8; 32]>>>;
 /// The personal key as the keyring holds it.
 type Person = Arc<Mutex<[u8; 32]>>;
 
+/// How many of these tests run at once. Each runs two to four services with their own iroh
+/// endpoints, so on a machine with many cores, running them all together starves them and
+/// their waits run out.
+const AT_ONCE: usize = 6;
+
+static RUNNING: (Mutex<usize>, std::sync::Condvar) = (Mutex::new(0), std::sync::Condvar::new());
+
+/// A place among the tests running now, held until dropped.
+struct Slot;
+
+fn slot() -> Slot {
+    let (count, freed) = &RUNNING;
+    let mut n = count.lock().unwrap_or_else(|e| e.into_inner());
+    while *n >= AT_ONCE {
+        n = freed.wait(n).unwrap_or_else(|e| e.into_inner());
+    }
+    *n += 1;
+    Slot
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let (count, freed) = &RUNNING;
+        *count.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        freed.notify_one();
+    }
+}
+
 fn random32() -> [u8; 32] {
     let mut b = [0u8; 32];
     getrandom::fill(&mut b).expect("random bytes");
@@ -287,7 +315,7 @@ impl Svc {
             match tokio::time::timeout_at(deadline, self.rx.next()).await {
                 Ok(Some(ev)) => self.take(ev),
                 Ok(None) => return,
-                Err(_) => panic!("the service didn't stop"),
+                Err(_) => panic!("{}'s service didn't stop", self.identity.name),
             }
         }
     }
@@ -380,6 +408,7 @@ async fn wren_edits_and_deletes_stay(olive: &Svc) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn create_invite_join_and_a_file_syncs() {
+    let _slot = slot();
     let (mut olive, mut wren, id) = pair(Role::Writer).await;
     wren.toast("Joined Notes.").await;
     let v = wren
@@ -419,6 +448,7 @@ async fn create_invite_join_and_a_file_syncs() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_service_reopens_its_swarms_after_a_restart() {
+    let _slot = slot();
     let (mut olive, mut wren, id) = pair(Role::Writer).await;
     wren.stop().await;
     wren.restart();
@@ -435,6 +465,7 @@ async fn the_service_reopens_its_swarms_after_a_restart() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn removing_a_member_stops_their_sync_and_tells_them() {
+    let _slot = slot();
     let (mut olive, mut wren, id) = pair(Role::Writer).await;
     wren_edits_and_deletes(&olive, &wren).await;
     olive.send(Command::Remove {
@@ -472,6 +503,7 @@ async fn removing_a_member_stops_their_sync_and_tells_them() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn demoting_a_writer_ignores_their_later_changes() {
+    let _slot = slot();
     let (mut olive, mut wren, id) = pair(Role::Writer).await;
     wren_edits_and_deletes(&olive, &wren).await;
     olive.send(Command::SetRole {
@@ -506,6 +538,7 @@ async fn demoting_a_writer_ignores_their_later_changes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_last_owner_is_kept() {
+    let _slot = slot();
     let book = DirectPeers::new();
     let mut olive = Svc::new("olive", &book);
     let notes = olive.create("Notes", &[]).await;
@@ -537,6 +570,7 @@ async fn the_last_owner_is_kept() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_name_change_reaches_every_swarm() {
+    let _slot = slot();
     let book = DirectPeers::new();
     let mut olive = Svc::new("olive", &book);
     let mut wren = Svc::new("wren", &book);
@@ -581,6 +615,7 @@ async fn a_name_change_reaches_every_swarm() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn leaving_keeps_the_files_and_stops_syncing() {
+    let _slot = slot();
     let (mut olive, mut wren, id) = pair(Role::Writer).await;
     wren_edits_and_deletes(&olive, &wren).await;
     wren.send(Command::Leave { swarm: id.clone() });
@@ -609,6 +644,7 @@ async fn leaving_keeps_the_files_and_stops_syncing() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn set_types_lets_py_files_sync() {
+    let _slot = slot();
     let book = DirectPeers::new();
     let mut olive = Svc::new("olive", &book);
     let mut wren = Svc::new("wren", &book);
@@ -636,6 +672,7 @@ async fn set_types_lets_py_files_sync() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_promoted_reader_is_handed_write_access() {
+    let _slot = slot();
     let (mut olive, mut wren, id) = pair(Role::Reader).await;
     olive.send(Command::SetRole {
         swarm: id.clone(),
@@ -659,6 +696,7 @@ async fn a_promoted_reader_is_handed_write_access() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_leave_whose_answer_is_lost_still_completes() {
+    let _slot = slot();
     let book = DirectPeers::new();
     let mut olive = Svc::new("olive", &book);
     // The owner writes wren's leaving, but wren doesn't hear so until the owner has gated wren
@@ -698,6 +736,7 @@ async fn a_leave_whose_answer_is_lost_still_completes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_linked_machine_takes_the_person_and_both_list_each_other() {
+    let _slot = slot();
     let book = DirectPeers::new();
     let mut olive = Svc::new("olive", &book);
     let mut olive2 = Svc::new("olive-new", &book);
@@ -741,6 +780,7 @@ async fn a_linked_machine_takes_the_person_and_both_list_each_other() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_link_code_is_single_use() {
+    let _slot = slot();
     let book = DirectPeers::new();
     let mut olive = Svc::new("olive", &book);
     let mut olive2 = Svc::new("olive2", &book);
@@ -758,6 +798,7 @@ async fn a_link_code_is_single_use() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_machine_in_swarms_cannot_link_and_the_code_survives() {
+    let _slot = slot();
     let book = DirectPeers::new();
     let mut olive = Svc::new("olive", &book);
     let mut wren = Svc::new("wren", &book);
@@ -797,6 +838,7 @@ impl hydra_swarms::device::DeviceHandler for Asker {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn strangers_get_nothing_from_a_device() {
+    let _slot = slot();
     use hydra_swarms::mine::Mine;
     use hydra_swarms::wire::{MineReply, MineRequest};
     let book = DirectPeers::new();
@@ -858,6 +900,7 @@ async fn machines_of(svc: &mut Svc, ns: &str, who: &str, count: usize) -> SwarmV
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_offered_swarm_joins_as_the_same_person() {
+    let _slot = slot();
     let book = DirectPeers::new();
     let mut olive = Svc::new("olive", &book);
     let mut wren = Svc::new("wren", &book);
@@ -897,6 +940,7 @@ async fn an_offered_swarm_joins_as_the_same_person() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_later_swarm_is_offered_to_your_other_machines() {
+    let _slot = slot();
     let book = DirectPeers::new();
     let mut olive = Svc::new("olive", &book);
     let mut olive2 = Svc::new("olive2", &book);
@@ -912,6 +956,7 @@ async fn a_later_swarm_is_offered_to_your_other_machines() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_reader_joins_its_other_machine_through_an_owner() {
+    let _slot = slot();
     let (mut olive, mut wren, id) = pair(Role::Reader).await;
     let mut wren2 = Svc::new("wren2", &wren.book.clone());
     let code = wren.link_code().await;
@@ -928,6 +973,7 @@ async fn a_reader_joins_its_other_machine_through_an_owner() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_offer_is_taken_through_any_machine_of_yours_in_the_swarm() {
+    let _slot = slot();
     let book = DirectPeers::new();
     let mut olive = Svc::new("olive", &book);
     let mut olive2 = Svc::new("olive2", &book);
@@ -974,6 +1020,7 @@ async fn an_offer_is_taken_through_any_machine_of_yours_in_the_swarm() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_declined_offer_does_not_come_back() {
+    let _slot = slot();
     let book = DirectPeers::new();
     let mut olive = Svc::new("olive", &book);
     let mut olive2 = Svc::new("olive2", &book);
@@ -1043,6 +1090,7 @@ async fn named_and_stays(svc: &mut Svc, ns: &str, person: &str, name: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn your_name_changes_on_every_machine() {
+    let _slot = slot();
     let (mut olive, mut olive2, mut wren, ns) = olive_twice_and_wren().await;
     olive.send(Command::SetIdentity {
         name: "Olive O".into(),
@@ -1064,6 +1112,7 @@ async fn your_name_changes_on_every_machine() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn names_set_apart_settle_on_the_newer() {
+    let _slot = slot();
     let (mut olive, mut olive2, mut wren, ns) = olive_twice_and_wren().await;
     let person = olive.person();
     olive2.stop().await;
@@ -1094,6 +1143,7 @@ async fn names_set_apart_settle_on_the_newer() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn leaving_on_one_machine_keeps_the_person_in() {
+    let _slot = slot();
     let (mut olive, mut olive2, mut wren, ns) = olive_twice_and_wren().await;
     std::fs::write(olive2.folder("notes2").join("x.md"), "xray").unwrap();
     file_arrives(wren.folder("notes").join("x.md"), "xray").await;
@@ -1128,4 +1178,136 @@ async fn leaving_on_one_machine_keeps_the_person_in() {
     for s in [&mut olive, &mut olive2, &mut wren] {
         s.stop().await;
     }
+}
+
+/// Olive2 joined to Notes as another of olive's machines, through `olive`.
+async fn add_to_notes(olive: &mut Svc, other: &mut Svc, ns: &str, devices: usize, folder: &str) {
+    let code = olive.link_code().await;
+    other.link(code, devices).await;
+    other.offer(ns).await;
+    other.accept(ns, folder).await;
+    file_arrives(other.folder(folder).join("a.md"), "alpha").await;
+}
+
+/// `who`'s device id as `svc` lists it.
+fn device_named(svc: &Svc, who: &str) -> String {
+    svc.machines
+        .as_ref()
+        .unwrap()
+        .devices
+        .iter()
+        .find(|d| d.name == format!("{who}-pc"))
+        .map(|d| d.id.clone())
+        .expect("that machine is listed")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn removing_a_machine_shuts_it_out_and_keeps_you_in() {
+    let _slot = slot();
+    let (mut olive, mut olive2, mut wren, ns) = olive_twice_and_wren().await;
+    let mut olive3 = Svc::new("olive3", &olive.book.clone());
+    add_to_notes(&mut olive, &mut olive3, &ns, 3, "notes3").await;
+    let old = olive.person();
+    machines_of(&mut wren, &ns, &old, 3).await;
+    std::fs::write(olive3.folder("notes3").join("w.md"), "whiskey").unwrap();
+    file_arrives(wren.folder("notes").join("w.md"), "whiskey").await;
+    olive
+        .until("olive3 listed", |s| {
+            (s.machines.as_ref()?.devices.len() == 3).then_some(())
+        })
+        .await;
+    let gone = device_named(&olive, "olive3");
+    olive.send(Command::RemoveMachine { device: gone });
+    olive
+        .toast("olive3-pc was removed from your machines.")
+        .await;
+    let new = olive.person();
+    assert_ne!(new, old);
+    machines_of(&mut wren, &ns, &new, 2).await;
+    let v = wren.views.iter().find(|v| v.id == ns).unwrap();
+    assert!(v.members.iter().all(|m| m.person != old));
+    olive2
+        .until("olive2 holds the new key", |s| {
+            (s.person() == new).then_some(())
+        })
+        .await;
+    olive3.toast("This machine was removed from Notes.").await;
+    std::fs::write(olive3.folder("notes3").join("z.md"), "zulu").unwrap();
+    std::fs::write(olive.folder("Notes").join("y.md"), "yankee").unwrap();
+    file_arrives(wren.folder("notes").join("y.md"), "yankee").await;
+    tokio::time::sleep(QUIET).await;
+    assert_eq!(read(&wren.folder("notes").join("z.md")), None);
+    assert_eq!(
+        read(&wren.folder("notes").join("w.md")).as_deref(),
+        Some("whiskey")
+    );
+    // Hydra no longer takes the old key: olive3 renaming itself changes nothing.
+    olive3.send(Command::SetIdentity {
+        name: "Mallory".into(),
+        machine_name: "olive3-pc".into(),
+    });
+    named_and_stays(&mut wren, &ns, &new, "olive").await;
+    for s in [&mut olive, &mut olive2, &mut olive3, &mut wren] {
+        s.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_machine_that_was_away_picks_up_the_new_key() {
+    let _slot = slot();
+    let (mut olive, mut olive2, mut wren, ns) = olive_twice_and_wren().await;
+    let mut olive3 = Svc::new("olive3", &olive.book.clone());
+    add_to_notes(&mut olive, &mut olive3, &ns, 3, "notes3").await;
+    // A swarm only olive2 of olive's machines is in.
+    let plans = wren.create("Plans", &[]).await;
+    let code = wren.invite(&plans.id, Role::Writer).await;
+    olive2.join(code, "plans").await;
+    let old = olive.person();
+    machines_of(&mut wren, &plans.id, &old, 1).await;
+    olive
+        .until("olive3 listed", |s| {
+            (s.machines.as_ref()?.devices.len() == 3).then_some(())
+        })
+        .await;
+    olive2.stop().await;
+    let gone = device_named(&olive, "olive3");
+    olive.send(Command::RemoveMachine { device: gone });
+    olive
+        .toast("olive3-pc was removed from your machines.")
+        .await;
+    let new = olive.person();
+    machines_of(&mut wren, &ns, &new, 2).await;
+    olive2.restart();
+    olive2
+        .until("olive2 holds the new key", |s| {
+            (s.person() == new).then_some(())
+        })
+        .await;
+    olive2
+        .view("olive2 still an owner of Notes", |v| {
+            v.id == ns && v.my_role == Role::Owner
+        })
+        .await;
+    machines_of(&mut wren, &plans.id, &new, 1).await;
+    machines_of(&mut wren, &ns, &new, 2).await;
+    for s in [&mut olive, &mut olive2, &mut olive3, &mut wren] {
+        s.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn you_cannot_remove_the_machine_you_are_on() {
+    let _slot = slot();
+    let book = DirectPeers::new();
+    let mut olive = Svc::new("olive", &book);
+    let me = olive.device().await;
+    olive.send(Command::RemoveMachine { device: me });
+    olive
+        .failure("You can't remove the machine you're on.")
+        .await;
+    olive.send(Command::RemoveMachine {
+        device: "nobody".into(),
+    });
+    olive.failure("That isn't one of your machines.").await;
+    olive.stop().await;
 }

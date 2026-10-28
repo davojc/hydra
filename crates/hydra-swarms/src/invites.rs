@@ -447,7 +447,7 @@ impl SwarmNode {
         role: Role,
         person: &PersonKey,
     ) -> anyhow::Result<(Invite, InviteCode)> {
-        if person.id() != self.core.person.id() {
+        if person.id() != self.core.person().id() {
             bail!("invites are made by this machine's person");
         }
         let roster = self
@@ -606,7 +606,7 @@ impl Core {
         let Some(roster) = self.roster().await? else {
             return Ok(refused(NOT_AN_OWNER));
         };
-        if roster.role_of(&self.person.id()) != Some(Role::Owner) {
+        if roster.role_of(&self.person().id()) != Some(Role::Owner) {
             return Ok(refused(NOT_AN_OWNER));
         }
         if roster.role_of(&member.person).is_some() {
@@ -645,7 +645,7 @@ impl Core {
         let add = SignedChange::sign(
             &self.id(),
             Change::AddMember { member },
-            &self.person,
+            &self.person(),
             now_micros(),
         );
         self.write_change(&add).await?;
@@ -667,13 +667,18 @@ impl Core {
         let Some(roster) = self
             .roster()
             .await?
-            .filter(|r| r.role_of(&self.person.id()) == Some(Role::Owner))
+            .filter(|r| r.role_of(&self.person().id()) == Some(Role::Owner))
         else {
             return Ok(refused("Only an owner's machine can pass your changes on."));
         };
-        // Only a current member's own machine may ask, so strangers can't fill the log.
+        // Only a current member's own machine may ask, so strangers can't fill the log. A new key
+        // is asked for by a machine of the person under their old one.
         let sender = roster.member_by_endpoint(&from.to_string());
-        if sender.is_none_or(|m| m.person != change.by) {
+        let asker = match &change.change {
+            Change::Rekey { person, to, .. } if *to == change.by => *person,
+            _ => change.by,
+        };
+        if sender.is_none_or(|m| m.person != asker) {
             return Ok(refused(NOT_THEIR_MACHINE));
         }
         if !change.verify(&self.id()) {
@@ -687,6 +692,7 @@ impl Core {
                 *person == change.by && name_fits(&machine.name)
             }
             Change::RemoveMachine { person, .. } => *person == change.by,
+            Change::Rekey { to, .. } => *to == change.by,
             _ => false,
         };
         if !own {
@@ -700,10 +706,27 @@ impl Core {
 
     /// Taken only as a hint: the roster, with the removal the owner sent, must show it.
     async fn on_removed(&self, from: EndpointId, change: &SignedChange) -> anyhow::Result<Reply> {
+        // One of this person's own machines taking this one out, with the change that does it.
+        let mine = self.endpoint.id().to_string();
+        let roster = self.roster().await?;
+        let ours = roster.as_ref().is_some_and(|r| {
+            r.member_by_endpoint(&from.to_string())
+                .zip(r.member_by_endpoint(&mine))
+                .is_some_and(|(sender, me)| sender.person == me.person)
+        });
+        if ours
+            && self
+                .roster_with(Some(change))
+                .await?
+                .is_some_and(|r| r.dropped.contains(&mine))
+        {
+            let _ = self.events.send(NodeEvent::Dropped);
+            return Ok(Reply::Ok);
+        }
         if !self.sent_by_owner(from).await? {
             return Ok(refused("Only an owner can say who was removed."));
         }
-        let me = self.person.id();
+        let me = self.person().id();
         let removed = self
             .roster_with(Some(change))
             .await?

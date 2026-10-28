@@ -57,6 +57,9 @@ pub struct Device {
     pub name: String,
     /// When `name` was set, in Unix microseconds.
     pub name_at: u64,
+    /// Its endpoint in each swarm it is in, so a removal knows what to take out.
+    #[serde(default)]
+    pub endpoints: Vec<String>,
 }
 
 /// Everything your machines agree on. `devices` includes this one.
@@ -110,6 +113,9 @@ impl Mine {
         }
         for d in &other.devices {
             self.set_device_name(&d.id, &d.name, d.name_at);
+            for e in &d.endpoints {
+                self.add_endpoint(&d.id, e);
+            }
         }
         for r in &other.removed {
             self.remove(r);
@@ -158,10 +164,30 @@ impl Mine {
                     id: id.to_string(),
                     name: name.to_string(),
                     name_at: at,
+                    endpoints: Vec::new(),
                 });
                 self.devices.sort_by(|a, b| a.id.cmp(&b.id));
             }
         }
+    }
+
+    /// Notes that device `id` is in a swarm as `endpoint`.
+    pub fn add_endpoint(&mut self, id: &str, endpoint: &str) {
+        if let Some(d) = self.devices.iter_mut().find(|d| d.id == id)
+            && !d.endpoints.iter().any(|e| e == endpoint)
+        {
+            d.endpoints.push(endpoint.to_string());
+            d.endpoints.sort();
+        }
+    }
+
+    /// Device `id`'s endpoints in swarms, as far as is known here.
+    pub fn endpoints_of(&self, id: &str) -> Vec<String> {
+        self.devices
+            .iter()
+            .find(|d| d.id == id)
+            .map(|d| d.endpoints.clone())
+            .unwrap_or_default()
     }
 
     pub fn remove(&mut self, id: &str) {
@@ -182,7 +208,31 @@ mod tests {
             id: id.into(),
             name: name.into(),
             name_at: at,
+            endpoints: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_devices_swarm_endpoints_are_kept_and_merged() {
+        let mut a = Mine {
+            devices: vec![device("d1", "desk", 1)],
+            ..Mine::default()
+        };
+        a.add_endpoint("d1", "ep-2");
+        a.add_endpoint("d1", "ep-1");
+        a.add_endpoint("d1", "ep-1");
+        assert_eq!(a.devices[0].endpoints, vec!["ep-1", "ep-2"]);
+        let mut b = Mine {
+            devices: vec![device("d1", "desk", 1), device("d2", "laptop", 1)],
+            ..Mine::default()
+        };
+        b.add_endpoint("d1", "ep-3");
+        b.add_endpoint("d2", "ep-9");
+        let ab = merged(&a, &b);
+        assert_eq!(ab, merged(&b, &a));
+        assert_eq!(ab.devices[0].endpoints, vec!["ep-1", "ep-2", "ep-3"]);
+        assert_eq!(ab.endpoints_of("d2"), vec!["ep-9".to_string()]);
+        assert!(ab.endpoints_of("nobody").is_empty());
     }
 
     fn merged(a: &Mine, b: &Mine) -> Mine {

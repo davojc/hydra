@@ -1264,6 +1264,8 @@ async fn a_machine_that_was_away_picks_up_the_new_key() {
     olive2.join(code, "plans").await;
     let old = olive.person();
     machines_of(&mut wren, &plans.id, &old, 1).await;
+    // Olive2 has seen itself in Plans before it stops.
+    machines_of(&mut olive2, &plans.id, &old, 1).await;
     olive
         .until("olive3 listed", |s| {
             (s.machines.as_ref()?.devices.len() == 3).then_some(())

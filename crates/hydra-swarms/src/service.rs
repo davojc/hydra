@@ -47,6 +47,11 @@ const LEAVE_RETRY: Duration = Duration::from_secs(5);
 /// The first wait before another change no owner took is sent again; it doubles on each miss,
 /// up to `PERIODIC`.
 const RELAY_RETRY: Duration = Duration::from_secs(5);
+/// How long after syncing with a machine new to the roster it is tried again, while it isn't
+/// connected: it may not have had the roster that lets this machine in yet.
+const FRESH_RETRY: Duration = Duration::from_secs(2);
+/// How many times a machine new to the roster is tried again.
+const FRESH_TRIES: u32 = 4;
 /// How long a machine of yours waits for the roster to show another one joining through it.
 const JOINING_WAIT: Duration = Duration::from_secs(20);
 const REGISTRY_FILE: &str = "registry.json";
@@ -1245,6 +1250,9 @@ struct Worker {
     /// straight back (a restart leaves the other side holding the old connection until it
     /// times out).
     resync: HashSet<String>,
+    /// Machines new to the roster, and how often they've been tried again since, until they
+    /// connect.
+    fresh: HashMap<String, u32>,
     seen: SeenFile,
     /// Machines owed the write capability after their person was promoted.
     owed: Vec<String>,
@@ -1309,6 +1317,7 @@ impl Worker {
             peers: HashSet::new(),
             online: HashSet::new(),
             resync: HashSet::new(),
+            fresh: HashMap::new(),
             in_flight: HashSet::new(),
             sends: JoinSet::new(),
             pass_at: Some(Instant::now()),
@@ -1409,6 +1418,7 @@ impl Worker {
             }
             Ok(NodeEvent::SyncFinished) => self.soon(SETTLE),
             Ok(NodeEvent::PeerUp(e)) => {
+                self.fresh.remove(&e);
                 self.online.insert(e.clone());
                 self.resync.insert(e);
                 self.soon(RESYNC_AFTER);
@@ -1541,7 +1551,13 @@ impl Worker {
         if !new.is_empty() && !self.removed_now {
             self.shared.remember_peers(node);
             match node.sync_with(&new).await {
-                Ok(()) => self.peers.extend(new),
+                Ok(()) => {
+                    for e in &new {
+                        self.fresh.insert(e.clone(), 0);
+                    }
+                    self.peers.extend(new);
+                    self.soon(FRESH_RETRY);
+                }
                 Err(e) => self.report(format!("{}: {e:#}", self.name)),
             }
         }
@@ -1563,11 +1579,24 @@ impl Worker {
         let Some(r) = &self.roster else {
             return;
         };
-        let again: Vec<String> = self
+        let mut again: Vec<String> = self
             .resync
             .drain()
             .filter(|e| r.member_by_endpoint(e).is_some())
             .collect();
+        // Machines new to the roster that haven't connected: they may have refused this one
+        // before their own roster let it in.
+        self.fresh
+            .retain(|e, tries| !self.online.contains(e) && *tries < FRESH_TRIES);
+        for (e, tries) in &mut self.fresh {
+            if r.member_by_endpoint(e).is_some() && !again.contains(e) {
+                *tries += 1;
+                again.push(e.clone());
+            }
+        }
+        if !self.fresh.is_empty() {
+            self.soon(FRESH_RETRY);
+        }
         if !again.is_empty() {
             self.shared.remember_peers(node);
             let _ = node.sync_with(&again).await;

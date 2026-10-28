@@ -395,7 +395,6 @@ impl Workspace {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(self.collapse_toggle(lead, true, cx))
                     .child(div().text_xs().text_color(color(c.accent)).child("◆"))
                     .child(
                         div()
@@ -417,11 +416,12 @@ impl Workspace {
                             .bg(bg)
                             .text_color(fg)
                             .child(c.state.word()),
-                    ),
+                    )
+                    .child(self.collapse_toggle(lead, true, cx)),
             )
             .child(
                 div()
-                    .pl(px(36.))
+                    .pl(px(18.))
                     .truncate()
                     .text_xs()
                     .text_color(color(crate::orchestrator_theme::TEXT_SECONDARY))
@@ -437,14 +437,19 @@ impl Workspace {
         collapsed: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        div()
-            .id(SharedString::from(format!("pipeline-fold-{orch}")))
-            .flex_none()
-            .w(px(14.))
-            .text_xs()
-            .text_color(color(crate::orchestrator_theme::TEXT_MUTED))
-            .hover(|d| d.text_color(color(crate::orchestrator_theme::TEXT)))
-            .child(if collapsed { "▸" } else { "▾" })
+        Button::new(SharedString::from(format!("pipeline-fold-{orch}")))
+            .icon(if collapsed {
+                gpui_component::IconName::ChevronRight
+            } else {
+                gpui_component::IconName::ChevronDown
+            })
+            .outline()
+            .xsmall()
+            .tooltip(if collapsed {
+                "Expand: show its sessions"
+            } else {
+                "Collapse to one line"
+            })
             .on_click(cx.listener(move |ws, _, _, cx| {
                 // The card under it opens the pipeline; the arrow only folds.
                 cx.stop_propagation();

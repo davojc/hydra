@@ -981,6 +981,6 @@ hydraui saves the pipelines that are open (`~/.hydra/hydraui/open-pipelines.toml
 
 ## 39. Folding pipelines; prompts read whole (added 2026-10-28)
 
-Each pipeline's card in the sidebar has an arrow (▾) that folds it to one line: the arrow (▸), the pipeline's name and its state pill (Needs you, Asked product, Check it, Working, Stopped, …), then how many sessions it has open and how its trigger is set (Automatic, Manual or Stopped). Its arrow unfolds it; clicking the rest opens the pipeline, as the card does. A pipeline running several tickets folds as a whole, its pill the most urgent of them. Folding is kept with the open pipelines (§38, `collapsed`), so it lasts across a restart.
+Each pipeline's card in the sidebar has an outlined chevron button beside its name that folds it to one line: the pipeline's name, its state pill and the button (Needs you, Asked product, Check it, Working, Stopped, …), then how many sessions it has open and how its trigger is set (Automatic, Manual or Stopped). The button unfolds it; clicking the rest opens the pipeline, as the card does. A pipeline running several tickets folds as a whole, its pill the most urgent of them. Folding is kept with the open pipelines (§38, `collapsed`), so it lasts across a restart.
 
 In Pipeline settings each stage's prompt, and the product-question style, is a box that grows with what's written (prompts 3 to 14 lines, the style 2 to 10), wrapping instead of running off the edge.

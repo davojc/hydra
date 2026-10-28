@@ -67,6 +67,10 @@ pub struct UiConfig {
     pub phone_access: bool,
     /// The paired phone's endpoint id.
     pub phone: Option<String>,
+    /// Your name, as the people in your swarms see it. Swarms don't start until it is set.
+    pub peer_name: Option<String>,
+    /// This machine's name in your swarms; the host name when unset.
+    pub machine_name: Option<String>,
     /// The share of the seven-day Claude limit, in percent, a pipeline stage needs left
     /// (orchestrator spec §5.1).
     pub min_week_left: u8,
@@ -85,6 +89,8 @@ impl Default for UiConfig {
             keys: BTreeMap::new(),
             phone_access: false,
             phone: None,
+            peer_name: None,
+            machine_name: None,
             min_week_left: crate::runs::MIN_WEEK_LEFT,
         }
     }
@@ -138,6 +144,8 @@ pub fn parse(text: &str) -> (UiConfig, Vec<String>) {
             "keys" => get(value).map(|k| cfg.keys = k),
             "phone_access" => get(value).map(|b| cfg.phone_access = b),
             "phone" => get(value).map(|p| cfg.phone = Some(p)),
+            "peer_name" => get(value).map(|n| cfg.peer_name = Some(n)),
+            "machine_name" => get(value).map(|n| cfg.machine_name = Some(n)),
             "min_week_left" => get::<i64>(value).and_then(|n| {
                 let n = u8::try_from(n)
                     .ok()
@@ -281,6 +289,20 @@ mod tests {
         let (cfg, problems) = parse(text);
         assert!(problems.is_empty(), "{problems:?}");
         cfg
+    }
+
+    #[test]
+    fn the_swarm_names_are_set_and_read() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = HydraPaths::new(d.path());
+        assert_eq!(load(&paths).0.peer_name, None);
+        set(&paths, "peer_name", Some("Davo".into())).unwrap();
+        set(&paths, "machine_name", Some("Davo's desktop".into())).unwrap();
+        let (cfg, problems) = load(&paths);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(cfg.peer_name.as_deref(), Some("Davo"));
+        assert_eq!(cfg.machine_name.as_deref(), Some("Davo's desktop"));
+        assert!(set(&paths, "peer_name", Some(3.into())).is_err());
     }
 
     #[test]

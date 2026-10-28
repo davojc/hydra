@@ -83,6 +83,21 @@ hydraui can serve one phone: its sessions and their alerts, and the task boards,
 - **One window holds the link.** With several hydraui windows open, the phone connects to one of them and sees its terminals and boards; when that window closes, another takes over.
 - **Remote Control.** Each environment's page in Settings has **Claude sessions start with Remote Control**, so a stuck session is already reachable from the Claude app. From the phone, a session can also have it turned on when it is idle with nothing typed.
 
+### Swarms
+
+A swarm keeps a folder in sync between hydra machines, say a folder of skills shared across a team. Machines connect peer to peer over iroh, end-to-end encrypted, falling back to iroh's public relays when a direct path can't be made; the relays can't read anything. Find it in **Settings › SWARMS**: **You and this machine**, **+ New swarm** and **Join a swarm…**.
+
+- **Roles.** Owners manage the members, their roles, the file types and the swarm's name, and can add other owners. Writers change files. Readers only receive: if a reader edits a file, that file stops syncing on their machine until they choose **Use the swarm's version**.
+- **What syncs.** Files whose extension is on the swarm's list (`.md` only, by default), up to 10 MB each. Everything else stays on each machine.
+- **Conflicts.** Nothing is lost. When two machines change the same file, the newer change keeps the name and the other is kept beside it as `<name> (conflict, <machine>, <d Mon HH.MM>).<ext>` (a dot in the time, as Windows forbids a colon). hydraui flags it under **Needs attention**. When a delete meets an edit, the edit wins and the file survives.
+- **Only while hydraui runs.** Sync happens only while hydraui is running, and one hydraui window per machine does it.
+- **Invites.** An invite works once and expires after 7 days. The person who made it needs hydraui running when it is used.
+- **Removing someone.** Their machines stop syncing. They keep the files they already have. Their past edits stay, whether they were removed, left or were made a reader. An edit of theirs that whoever took them out hadn't seen yet isn't replaced silently: the machines that had it keep it as a flagged conflict copy, and a file of theirs the swarm no longer has stays where it is, flagged. A delete of theirs nobody else had seen yet may be undone.
+- **Owners rank by seniority.** The swarm's creator ranks first, and each owner ranks below whoever made them one. An owner can demote or remove only owners junior to them.
+- **Clocks.** Machines' clocks must agree to within 10 minutes. iroh-docs drops changes dated more than 10 minutes ahead, so a machine whose clock is further out than that won't sync until its clock is corrected.
+
+Linking several of your own machines to you is not in this version; it is coming later.
+
 ## Quick start: two GitHub and Claude accounts
 
 **1. One SSH key per GitHub account.** GitHub won't accept the same key on two accounts. Add each `.pub` file to the matching account under *Settings → SSH and GPG keys*.

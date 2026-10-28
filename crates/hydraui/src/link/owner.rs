@@ -1,5 +1,6 @@
-//! One hydraui owns the phone link at a time, across processes: a lock on `phone-link.lock`
-//! in the running folder, with the owner's pid in `phone-link.pid` for the others to read.
+//! One hydraui owns something at a time, across processes: a lock on `<name>.lock` in the
+//! running folder, with the owner's pid in `<name>.pid` for the others to read. The phone link
+//! is `phone-link`; the swarms are `swarms`.
 use hydra_core::paths::HydraPaths;
 
 use std::fs::{File, OpenOptions, TryLockError};
@@ -7,15 +8,18 @@ use std::path::PathBuf;
 
 use crate::claim::running_dir;
 
-fn lock_path(paths: &HydraPaths) -> PathBuf {
-    running_dir(paths).join("phone-link.lock")
+/// The phone link's lock.
+const PHONE_LINK: &str = "phone-link";
+
+fn lock_path(paths: &HydraPaths, name: &str) -> PathBuf {
+    running_dir(paths).join(format!("{name}.lock"))
 }
 
-fn pid_path(paths: &HydraPaths) -> PathBuf {
-    running_dir(paths).join("phone-link.pid")
+fn pid_path(paths: &HydraPaths, name: &str) -> PathBuf {
+    running_dir(paths).join(format!("{name}.pid"))
 }
 
-/// This hydraui owns the phone link; dropping it (or the process ending) lets go.
+/// This hydraui owns a lock; dropping it (or the process ending) lets go.
 pub struct OwnerLock {
     /// Locked while this lives; closing it unlocks. The lock file stays in place, so a racing
     /// owner can't lock a file that is about to be deleted.
@@ -32,22 +36,33 @@ impl Drop for OwnerLock {
 /// Takes the phone link for this process, or `None` when another hydraui (or an earlier call
 /// here) has it.
 pub fn try_own(paths: &HydraPaths) -> Option<OwnerLock> {
+    try_own_named(paths, PHONE_LINK)
+}
+
+/// Whether some hydraui has the phone link.
+pub fn held_elsewhere(paths: &HydraPaths) -> bool {
+    held_elsewhere_named(paths, PHONE_LINK)
+}
+
+/// Takes the lock `name` for this process, or `None` when another hydraui (or an earlier call
+/// here) has it.
+pub fn try_own_named(paths: &HydraPaths, name: &str) -> Option<OwnerLock> {
     std::fs::create_dir_all(running_dir(paths)).ok()?;
     let lock = OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
-        .open(lock_path(paths))
+        .open(lock_path(paths, name))
         .ok()?;
     lock.try_lock().ok()?;
-    let pid = pid_path(paths);
+    let pid = pid_path(paths, name);
     let _ = std::fs::write(&pid, std::process::id().to_string());
     Some(OwnerLock { _lock: lock, pid })
 }
 
-/// Whether some hydraui has the phone link. Probes with a lock it lets go of at once.
-pub fn held_elsewhere(paths: &HydraPaths) -> bool {
-    let Ok(file) = File::open(lock_path(paths)) else {
+/// Whether some hydraui has the lock `name`. Probes with a lock it lets go of at once.
+pub fn held_elsewhere_named(paths: &HydraPaths, name: &str) -> bool {
+    let Ok(file) = File::open(lock_path(paths, name)) else {
         return false;
     };
     match file.try_lock() {
@@ -76,6 +91,22 @@ mod tests {
         assert!(!held_elsewhere(&paths));
         let again = try_own(&paths);
         assert!(again.is_some(), "free again once dropped");
+    }
+
+    #[test]
+    fn two_named_locks_are_independent() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = HydraPaths::new(d.path());
+        let phone = try_own(&paths).expect("the phone link");
+        let swarms = try_own_named(&paths, "swarms").expect("swarms, beside the phone link");
+        assert!(try_own_named(&paths, "swarms").is_none());
+        assert!(held_elsewhere_named(&paths, "swarms"));
+        drop(swarms);
+        assert!(!held_elsewhere_named(&paths, "swarms"));
+        assert!(held_elsewhere(&paths), "the phone link is still held");
+        assert!(running_dir(&paths).join("swarms.lock").exists());
+        drop(phone);
+        assert!(!held_elsewhere_named(&paths, "phone-link"));
     }
 
     #[test]

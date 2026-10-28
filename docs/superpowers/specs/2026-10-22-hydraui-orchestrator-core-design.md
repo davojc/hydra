@@ -974,3 +974,7 @@ it as **Which tickets: With an SLA · All, by priority**.
 ## 37. Labels (added 2026-10-28)
 
 A Linear trigger can be narrowed to labels: `labels = ["Bug", "Frontend"]` in `[linear]`, or "With one of the labels" in Pipeline settings (comma-separated). A ticket is picked only when it carries at least one of them, in any case; no labels means any ticket, as before. Labels are trimmed and a repeat in another case is dropped when read and saved. The check right before a claim asks again, so a ticket whose label was taken off since the list is passed over.
+
+## 38. Open pipelines stay open across a restart (added 2026-10-28)
+
+hydraui saves the pipelines that are open (`~/.hydra/hydraui/open-pipelines.toml`: each one's name, the environment of its first orchestrator, and whether that orchestrator is in Automatic) whenever the set changes, checked each second. At launch each saved pipeline opens again, Automatic or Manual as it was, and its interrupted runs carry on, as an `[autostart]` pipeline's do; `[autostart]` pipelines that weren't open start as before. End pipeline (or closing its orchestrator) takes a pipeline off the list. Nothing is saved before launch has reopened the saved ones, nor while the window is closing, so a quit or a crash both leave the list as it was. `HYDRAUI_NO_AUTOSTART` turns reopening off too.

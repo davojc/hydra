@@ -373,6 +373,7 @@ impl Workspace {
     pub(super) fn linear_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let now = SystemTime::now();
         self.pr_tick(window, cx);
+        self.remember_open_pipelines(cx);
         // A ticket an orchestrator was told to start has started: its slot is busy by its run.
         let started: Vec<PaneId> = self
             .linear_watch

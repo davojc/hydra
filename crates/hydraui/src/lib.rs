@@ -31,6 +31,8 @@ pub mod openapi_view;
 pub mod orchestrator_theme;
 pub mod palette;
 pub mod pane_view;
+pub mod pdf;
+pub mod pdf_view;
 pub mod pickup;
 pub mod pipeline;
 pub mod pipeline_card;

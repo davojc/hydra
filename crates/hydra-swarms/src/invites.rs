@@ -327,7 +327,7 @@ async fn redeem_via(
 }
 
 /// `hex` as the secret of the namespace `ns`.
-fn namespace_secret(hex: &str, ns: NamespaceId) -> Option<NamespaceSecret> {
+pub(crate) fn namespace_secret(hex: &str, ns: NamespaceId) -> Option<NamespaceSecret> {
     let bytes = <[u8; 32]>::try_from(from_hex(hex)?).ok()?;
     let secret = NamespaceSecret::from_bytes(&bytes);
     (secret.id() == ns).then_some(secret)
@@ -683,11 +683,15 @@ impl Core {
             Change::Rename { person, name } => *person == change.by && name_fits(name),
             Change::RenameMachine { person, name, .. } => *person == change.by && name_fits(name),
             Change::Leave { person, .. } => *person == change.by,
+            Change::AddMachine { person, machine } => {
+                *person == change.by && name_fits(&machine.name)
+            }
+            Change::RemoveMachine { person, .. } => *person == change.by,
             _ => false,
         };
         if !own {
             return Ok(refused(
-                "Only your own name, your machines' names or your leaving can be passed on.",
+                "Only your own name, your machines or your leaving can be passed on.",
             ));
         }
         self.write_change(&change).await?;

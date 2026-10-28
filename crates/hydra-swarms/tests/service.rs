@@ -236,12 +236,13 @@ impl Svc {
     }
 
     /// Links this machine with `code`, and waits until it lists `devices` machines of yours,
-    /// all online.
+    /// with the one it linked through online.
     async fn link(&mut self, code: String, devices: usize) {
         self.send(Command::Link { code });
         self.until("the machines linked", |s| {
             let m = s.machines.as_ref()?;
-            (m.devices.len() == devices && m.devices.iter().all(|d| d.online)).then_some(())
+            let online = m.devices.iter().filter(|d| d.online).count();
+            (m.devices.len() == devices && online >= 2).then_some(())
         })
         .await;
     }
@@ -252,6 +253,30 @@ impl Svc {
             s.machines.as_ref().map(|m| m.this.clone())
         })
         .await
+    }
+
+    /// Waits for the offer of swarm `ns`, and gives it.
+    async fn offer(&mut self, ns: &str) -> hydra_swarms::wire::Offer {
+        self.until(&format!("the offer of {ns}"), |s| {
+            s.machines
+                .as_ref()?
+                .offers
+                .iter()
+                .find(|o| o.ns == ns)
+                .cloned()
+        })
+        .await
+    }
+
+    /// Takes the offered swarm `ns` into a new folder named `folder`, and gives its view.
+    async fn accept(&mut self, ns: &str, folder: &str) -> SwarmView {
+        let folder = self.folder(folder);
+        self.send(Command::AcceptOffer {
+            swarm: ns.to_string(),
+            folder: folder.clone(),
+        });
+        self.view("the accepted swarm", |v| v.folder == folder)
+            .await
     }
 
     /// Stops the service and waits until it has closed everything.
@@ -814,4 +839,171 @@ async fn strangers_get_nothing_from_a_device() {
     assert!(olive.named.is_empty());
     stranger.shutdown().await;
     olive.stop().await;
+}
+
+/// `who`'s machines in `svc`'s view of swarm `ns`, once `who` shows there with `count` of them.
+async fn machines_of(svc: &mut Svc, ns: &str, who: &str, count: usize) -> SwarmView {
+    let who = who.to_string();
+    svc.view(&format!("{who} with {count} machines"), |v| {
+        v.id == ns
+            && v.members
+                .iter()
+                .filter(|m| m.person == who)
+                .map(|m| m.machines.len())
+                .collect::<Vec<_>>()
+                == vec![count]
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_offered_swarm_joins_as_the_same_person() {
+    let book = DirectPeers::new();
+    let mut olive = Svc::new("olive", &book);
+    let mut wren = Svc::new("wren", &book);
+    let mut olive2 = Svc::new("olive2", &book);
+    let notes = olive.create("Notes", &[("a.md", "alpha")]).await;
+    let code = olive.invite(&notes.id, Role::Writer).await;
+    wren.join(code, "notes").await;
+    file_arrives(wren.folder("notes").join("a.md"), "alpha").await;
+    let code = olive.link_code().await;
+    olive2.link(code, 2).await;
+    let offer = olive2.offer(&notes.id).await;
+    assert_eq!((offer.name.as_str(), offer.role), ("Notes", Role::Owner));
+    let here = olive2.accept(&notes.id, "notes2").await;
+    assert_eq!(here.id, notes.id);
+    file_arrives(olive2.folder("notes2").join("a.md"), "alpha").await;
+    let person = olive.person();
+    machines_of(&mut wren, &notes.id, &person, 2).await;
+    let view = wren.views.iter().find(|v| v.id == notes.id).unwrap();
+    assert_eq!(view.members.iter().filter(|m| m.name == "olive").count(), 1);
+    // The new machine got write access along with the swarm.
+    std::fs::write(olive2.folder("notes2").join("c.md"), "charlie").unwrap();
+    file_arrives(wren.folder("notes").join("c.md"), "charlie").await;
+    olive2
+        .until("the offer gone once taken", |s| {
+            s.machines.as_ref()?.offers.is_empty().then_some(())
+        })
+        .await;
+    olive2
+        .view("one other machine", |v| {
+            v.id == notes.id && v.my_other_machines == 1
+        })
+        .await;
+    for s in [&mut olive, &mut wren, &mut olive2] {
+        s.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_later_swarm_is_offered_to_your_other_machines() {
+    let book = DirectPeers::new();
+    let mut olive = Svc::new("olive", &book);
+    let mut olive2 = Svc::new("olive2", &book);
+    let code = olive.link_code().await;
+    olive2.link(code, 2).await;
+    let plans = olive.create("Plans", &[]).await;
+    olive2.toast("olive-pc offered you Plans.").await;
+    let offer = olive2.offer(&plans.id).await;
+    assert_eq!(offer.name, "Plans");
+    olive.stop().await;
+    olive2.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reader_joins_its_other_machine_through_an_owner() {
+    let (mut olive, mut wren, id) = pair(Role::Reader).await;
+    let mut wren2 = Svc::new("wren2", &wren.book.clone());
+    let code = wren.link_code().await;
+    wren2.link(code, 2).await;
+    wren2.offer(&id).await;
+    wren2.accept(&id, "notes2").await;
+    file_arrives(wren2.folder("notes2").join("a.md"), "alpha").await;
+    let person = wren.person();
+    machines_of(&mut olive, &id, &person, 2).await;
+    for s in [&mut olive, &mut wren, &mut wren2] {
+        s.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_offer_is_taken_through_any_machine_of_yours_in_the_swarm() {
+    let book = DirectPeers::new();
+    let mut olive = Svc::new("olive", &book);
+    let mut olive2 = Svc::new("olive2", &book);
+    let mut olive3 = Svc::new("olive3", &book);
+    let notes = olive.create("Notes", &[("a.md", "alpha")]).await;
+    let code = olive.link_code().await;
+    olive2.link(code, 2).await;
+    let code = olive.link_code().await;
+    olive3.link(code, 3).await;
+    olive2.offer(&notes.id).await;
+    olive2.accept(&notes.id, "notes2").await;
+    file_arrives(olive2.folder("notes2").join("a.md"), "alpha").await;
+    // The offer olive3 holds came from olive, which has stopped; olive2 takes it instead.
+    olive3.offer(&notes.id).await;
+    olive.stop().await;
+    olive3.accept(&notes.id, "notes3").await;
+    file_arrives(olive3.folder("notes3").join("a.md"), "alpha").await;
+    olive3.stop().await;
+
+    // With none of them running, the offer stays.
+    let mut olive4 = Svc::new("olive4", &book);
+    let code = olive2.link_code().await;
+    olive4.link(code, 4).await;
+    olive4.offer(&notes.id).await;
+    olive2.stop().await;
+    olive4.send(Command::AcceptOffer {
+        swarm: notes.id.clone(),
+        folder: olive4.folder("notes4"),
+    });
+    olive4
+        .failure("None of your machines in Notes is running. Try again when one is.")
+        .await;
+    assert!(
+        olive4
+            .machines
+            .as_ref()
+            .unwrap()
+            .offers
+            .iter()
+            .any(|o| o.ns == notes.id)
+    );
+    olive4.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_declined_offer_does_not_come_back() {
+    let book = DirectPeers::new();
+    let mut olive = Svc::new("olive", &book);
+    let mut olive2 = Svc::new("olive2", &book);
+    let notes = olive.create("Notes", &[]).await;
+    let code = olive.link_code().await;
+    olive2.link(code, 2).await;
+    olive2.offer(&notes.id).await;
+    olive2.send(Command::DeclineOffer {
+        swarm: notes.id.clone(),
+    });
+    olive2
+        .until("the offer gone", |s| {
+            s.machines.as_ref()?.offers.is_empty().then_some(())
+        })
+        .await;
+    // A new swarm makes olive offer everything again; only the new one shows.
+    let plans = olive.create("Plans", &[]).await;
+    olive2.offer(&plans.id).await;
+    olive2.drain_for(Duration::from_secs(1)).await;
+    let offers = &olive2.machines.as_ref().unwrap().offers;
+    assert_eq!(
+        offers.iter().map(|o| o.ns.clone()).collect::<Vec<_>>(),
+        vec![plans.id]
+    );
+    assert!(
+        !olive2
+            .toasts
+            .iter()
+            .any(|t| t.contains("offered you Notes"))
+    );
+    olive.stop().await;
+    olive2.stop().await;
 }

@@ -2,27 +2,35 @@
 //! share (`mine.json`), the link codes it has made, and the swarms offered to it. Requests from
 //! machines that aren't yours are refused here, whatever they ask.
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::Duration;
 
-use futures::FutureExt;
+use futures::channel::oneshot;
 use futures::future::BoxFuture;
+use futures::stream::FuturesUnordered;
+use futures::{FutureExt, StreamExt};
 use iroh::{EndpointAddr, EndpointId, RelayUrl, SecretKey};
+use iroh_docs::{Author, Capability, NamespaceId};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use super::{
-    DeviceView, Identity, MachinesView, PERIODIC, PersonKeyFn, ServiceEvent, Shared, load_json,
-    lock, now_secs, save_json,
+    DeviceView, Identity, Joining, MachinesView, Opened, PERIODIC, PersonKeyFn, ServiceEvent,
+    Shared, load_json, lock, now_secs, open_joined, random32, save_json,
 };
 use crate::device::{DeviceHandler, DeviceNode};
-use crate::ids::{from_hex, to_hex};
-use crate::invites::Unusable;
+use crate::ids::{PersonId, PersonKey, from_hex, to_hex};
+use crate::invites::{Unusable, namespace_secret};
 use crate::mine::{LINKS_FILE, LinkCode, Links, Mine};
 use crate::node::now_micros;
+use crate::roster::{Change, Machine, SignedChange};
 use crate::wire::{MineReply, MineRequest, Offer};
 
 const OFFERS_FILE: &str = "offers.json";
+/// How long a machine taking an offer waits on each of your other machines.
+const ACCEPT_WAIT: Duration = Duration::from_secs(25);
 
 pub(super) const NOT_YOURS: &str = "This isn't one of your machines.";
 pub(super) const IN_SWARMS: &str = "This machine is already in swarms as someone. Leave them before \
@@ -52,6 +60,17 @@ pub(super) enum Up {
     Named(String),
     /// This machine was linked and now has this personal key.
     Person([u8; 32]),
+    /// Another machine of yours is joining swarm `ns` through this one.
+    Joining {
+        ns: String,
+        change: Box<SignedChange>,
+        reply: oneshot::Sender<MineReply>,
+    },
+}
+
+/// The answer to a machine of yours asking about a swarm that isn't open here.
+pub(super) fn not_here() -> MineReply {
+    refused("Not in that swarm here.")
 }
 
 pub(super) struct Machines {
@@ -176,7 +195,7 @@ impl Machines {
             this: self.me.clone(),
             devices,
             links: self.links.pending(now_secs()),
-            offers: lock(&self.offers).offers.clone(),
+            offers: self.pending_offers(),
         }
     }
 
@@ -228,8 +247,10 @@ impl Machines {
     /// Links this machine to the one that made `code`, taking its person: the main task hears
     /// the new key through `Up::Person` and the name through `Up::Named`.
     pub(super) async fn link(self: Arc<Self>, code: String, machine_name: String) {
-        if let Err(text) = self.try_link(&code, machine_name).await {
-            self.shared.failed(text);
+        match self.try_link(&code, machine_name).await {
+            // Your other machines hear of this one, and it of them.
+            Ok(()) => self.sync_all().await,
+            Err(text) => self.shared.failed(text),
         }
     }
 
@@ -304,6 +325,8 @@ impl Machines {
     }
 
     /// Asks each of your other machines what it holds, and takes it in.
+    /// Asks each of your other machines what it holds, and takes it in, and offers each the
+    /// swarms on this machine (it ignores the ones it has, or said no to).
     pub(super) async fn sync_all(self: Arc<Self>) {
         let (devices, ours) = {
             let mine = lock(&self.mine);
@@ -314,14 +337,218 @@ impl Machines {
             return;
         }
         self.remember_peers();
+        let offers = self.offers_here();
         for id in devices {
             let req = MineRequest::Sync { mine: ours.clone() };
-            if let Ok(MineReply::Synced { mine }) = self.node().ask(&id, &req).await {
-                self.heard_from(&id);
-                self.take_in(&mine);
+            let Ok(MineReply::Synced { mine }) = self.node().ask(&id, &req).await else {
+                continue;
+            };
+            self.heard_from(&id);
+            self.take_in(&mine);
+            for offer in &offers {
+                let req = MineRequest::Offer {
+                    offer: offer.clone(),
+                };
+                let _ = self.node().ask(&id, &req).await;
             }
         }
         self.publish();
+    }
+
+    /// The swarms offered here that this machine isn't in.
+    fn pending_offers(&self) -> Vec<Offer> {
+        lock(&self.offers)
+            .offers
+            .iter()
+            .filter(|o| !self.shared.registry.contains(&o.ns))
+            .cloned()
+            .collect()
+    }
+
+    fn on_offer(&self, from: &str, offer: Offer) -> MineReply {
+        let fresh = {
+            let mut held = lock(&self.offers);
+            let known = self.shared.registry.contains(&offer.ns)
+                || held.declined.contains(&offer.ns)
+                || held.offers.iter().any(|o| o.ns == offer.ns);
+            if !known {
+                held.offers.push(offer.clone());
+                self.save_offers(&held);
+            }
+            !known
+        };
+        if fresh {
+            let device = lock(&self.mine)
+                .devices
+                .iter()
+                .find(|d| d.id == from)
+                .map(|d| d.name.clone())
+                .unwrap_or_else(|| "Another machine of yours".into());
+            self.shared
+                .toast(&offer.ns, format!("{device} offered you {}.", offer.name));
+            self.publish();
+        }
+        MineReply::Ok
+    }
+
+    pub(super) fn decline(&self, ns: &str) {
+        {
+            let mut held = lock(&self.offers);
+            held.offers.retain(|o| o.ns != ns);
+            if !held.declined.iter().any(|d| d == ns) {
+                held.declined.push(ns.to_string());
+            }
+            self.save_offers(&held);
+        }
+        self.publish();
+    }
+
+    /// A machine of yours joining swarm `ns`: checks the change is this person's `AddMachine`,
+    /// then has the swarm's task deal with it.
+    async fn on_joining(&self, ns: String, change: SignedChange) -> MineReply {
+        let me = PersonKey::from_bytes(*lock(&self.person)).id();
+        let ours = matches!(&change.change, Change::AddMachine { person, .. } if *person == me);
+        if !ours || change.by != me || !change.verify(&ns) {
+            return refused("That isn't a machine of yours joining.");
+        }
+        if !self.shared.registry.contains(&ns) {
+            return not_here();
+        }
+        let (reply, answer) = oneshot::channel();
+        let change = Box::new(change);
+        if self.up.send(Up::Joining { ns, change, reply }).is_err() {
+            return not_here();
+        }
+        answer.await.unwrap_or_else(|_| not_here())
+    }
+
+    /// Joins the offered swarm `ns` into `folder` through any machine of yours in it.
+    pub(super) async fn accept(
+        self: Arc<Self>,
+        identity: Identity,
+        ns: String,
+        folder: PathBuf,
+    ) -> Option<Opened> {
+        match self.try_accept(&identity, &ns, folder).await {
+            Ok((opened, name)) => {
+                {
+                    let mut held = lock(&self.offers);
+                    held.offers.retain(|o| o.ns != ns);
+                    self.save_offers(&held);
+                }
+                self.shared.toast(&ns, format!("Joined {name}."));
+                self.publish();
+                Some(opened)
+            }
+            Err(text) => {
+                self.shared.failed(text);
+                None
+            }
+        }
+    }
+
+    async fn try_accept(
+        &self,
+        identity: &Identity,
+        ns: &str,
+        folder: PathBuf,
+    ) -> Result<(Opened, String), String> {
+        let offer = lock(&self.offers)
+            .offers
+            .iter()
+            .find(|o| o.ns == ns)
+            .cloned()
+            .ok_or("That swarm isn't offered to this machine.")?;
+        if self.shared.registry.contains(ns) {
+            return Err(format!("You're already in {}.", offer.name));
+        }
+        if std::fs::read_dir(&folder).is_ok_and(|mut d| d.next().is_some()) {
+            return Err("A swarm can only be joined into an empty or new folder.".into());
+        }
+        let failed = |e: anyhow::Error| format!("{}: {e:#}", offer.name);
+        let key_id = format!("join-{}", to_hex(&random32().map_err(failed)?[..8]));
+        let machine_key = self.shared.machine_key(&key_id).await.map_err(failed)?;
+        let author = Author::from_bytes(&random32().map_err(failed)?);
+        let person = PersonKey::from_bytes(*lock(&self.person));
+        let machine = Machine {
+            endpoint: SecretKey::from_bytes(&machine_key).public().to_string(),
+            name: identity.machine_name.clone(),
+            author: author.id().to_string(),
+        };
+        let change = Change::AddMachine {
+            person: person.id(),
+            machine,
+        };
+        let change = SignedChange::sign(ns, change, &person, now_micros());
+        let (write_secret, host) = self.join_through_any(ns, &change).await.ok_or_else(|| {
+            format!(
+                "None of your machines in {} is running. Try again when one is.",
+                offer.name
+            )
+        })?;
+        let ns_id: NamespaceId = ns.parse().map_err(|_| "That swarm's id isn't valid.")?;
+        let cap = match write_secret.as_deref() {
+            Some(hex) => Capability::Write(
+                namespace_secret(hex, ns_id)
+                    .ok_or("Your machine sent write access that isn't valid.")?,
+            ),
+            None => Capability::Read(ns_id),
+        };
+        let anchor: PersonId = offer
+            .anchor
+            .parse()
+            .map_err(|_| "That swarm's anchor isn't valid.")?;
+        let host_id: EndpointId = host.parse().map_err(|_| "Your machine's id isn't valid.")?;
+        let host = match &self.shared.direct {
+            Some(book) => book
+                .get(&host)
+                .unwrap_or_else(|| EndpointAddr::new(host_id)),
+            None => EndpointAddr::new(host_id),
+        };
+        let joining = Joining {
+            anchor,
+            name: offer.name.clone(),
+            folder,
+            key_id,
+            machine_key,
+            cap,
+            author,
+            host,
+        };
+        let opened = open_joined(&self.shared, identity, joining)
+            .await
+            .map_err(failed)?;
+        Ok((opened, offer.name))
+    }
+
+    /// Asks every machine of yours at once to let this one into `ns`; the first to manage it
+    /// answers with write access (for a writer) and its endpoint in the swarm.
+    async fn join_through_any(
+        &self,
+        ns: &str,
+        change: &SignedChange,
+    ) -> Option<(Option<String>, String)> {
+        let devices: Vec<String> = lock(&self.mine)
+            .linked(&self.me)
+            .iter()
+            .map(|d| d.id.clone())
+            .collect();
+        self.remember_peers();
+        let req = MineRequest::Joining {
+            ns: ns.to_string(),
+            change: change.clone(),
+        };
+        let node = self.node();
+        let mut asks: FuturesUnordered<_> = devices
+            .iter()
+            .map(|id| node.ask_within(id, &req, ACCEPT_WAIT))
+            .collect();
+        while let Some(answer) = asks.next().await {
+            if let Ok(MineReply::Joined { write_secret, host }) = answer {
+                return Some((write_secret, host));
+            }
+        }
+        None
     }
 
     /// Merges what another of your machines holds; a new name goes to the main task.
@@ -356,6 +583,8 @@ impl Machines {
                     mine: lock(&self.mine).clone(),
                 }
             }
+            MineRequest::Offer { offer } => self.on_offer(&from, offer),
+            MineRequest::Joining { ns, change } => self.on_joining(ns, change).await,
             _ => refused("This machine doesn't do that yet."),
         }
     }

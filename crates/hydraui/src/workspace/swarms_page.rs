@@ -1661,6 +1661,7 @@ mod tests {
             syncing: false,
             last_change: None,
             removed: false,
+            my_other_machines: 0,
         }
     }
 

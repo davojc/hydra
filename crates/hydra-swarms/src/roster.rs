@@ -576,6 +576,10 @@ impl Roster {
                     && name_fits(&machine.name)
                     && !self.dropped.contains(&machine.endpoint)
                     && !self.machine_taken(person, machine)
+                    && !self
+                        .person_machines(person)
+                        .iter()
+                        .any(|m| m.endpoint == machine.endpoint)
                 {
                     self.claim(*person, machine);
                     self.member_mut(person).machines.push(machine.clone());
@@ -2025,6 +2029,20 @@ mod tests {
             log.push(add_machine(&w, 3, &w, m));
             assert_eq!(fold(&o, &log).unwrap(), before);
         }
+    }
+
+    #[test]
+    fn a_machine_already_there_is_not_added_twice() {
+        let o = PersonKey::generate();
+        let w = PersonKey::generate();
+        let log = vec![
+            genesis(&o),
+            add(&o, 2, &w, "wren", Role::Writer),
+            add_machine(&w, 3, &w, machine("laptop")),
+            add_machine(&w, 4, &w, machine("laptop")),
+        ];
+        let r = fold_in_any_order(&o, &log);
+        assert_eq!(r.person_machines(&w.id()).len(), 2);
     }
 
     #[test]

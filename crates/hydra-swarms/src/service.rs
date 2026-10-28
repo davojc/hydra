@@ -31,7 +31,7 @@ use crate::mine::DEVICE_KEY_ID;
 use crate::node::{NodeConfig, NodeEvent, SwarmNode, now_micros};
 use crate::paths::{RelPath, safe_rel_path};
 use crate::roster::{Change, Kept, Machine, Member, Role, Roster, SignedChange};
-use crate::wire::Offer;
+use crate::wire::{MineReply, Offer};
 
 /// How often every swarm reconciles its folder, and retries what it couldn't send.
 const PERIODIC: Duration = Duration::from_secs(60);
@@ -46,6 +46,8 @@ const LEAVE_RETRY: Duration = Duration::from_secs(5);
 /// The first wait before another change no owner took is sent again; it doubles on each miss,
 /// up to `PERIODIC`.
 const RELAY_RETRY: Duration = Duration::from_secs(5);
+/// How long a machine of yours waits for the roster to show another one joining through it.
+const JOINING_WAIT: Duration = Duration::from_secs(20);
 const REGISTRY_FILE: &str = "registry.json";
 const SEEN_FILE: &str = "seen.json";
 const OWED_FILE: &str = "owed.json";
@@ -158,6 +160,8 @@ pub struct SwarmView {
     /// The machine that made the newest change applied here, and when (Unix seconds).
     pub last_change: Option<(String, u64)>,
     pub removed: bool,
+    /// How many other machines of yours are in this swarm.
+    pub my_other_machines: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -271,6 +275,15 @@ pub enum Command {
     RemoveMachine {
         device: String,
     },
+    /// Joins the swarm offered to this machine into `folder`, which must be empty or new.
+    AcceptOffer {
+        swarm: String,
+        folder: PathBuf,
+    },
+    /// Says no to the swarm offered to this machine, for good.
+    DeclineOffer {
+        swarm: String,
+    },
     Stop,
 }
 
@@ -293,6 +306,8 @@ impl Command {
             | Command::CancelLink { .. }
             | Command::Link { .. }
             | Command::RemoveMachine { .. }
+            | Command::AcceptOffer { .. }
+            | Command::DeclineOffer { .. }
             | Command::Stop => None,
         }
     }
@@ -604,6 +619,8 @@ struct Handle {
 enum Msg {
     Command(Command),
     Identity(Identity),
+    /// Another machine of yours joining: this person's `AddMachine` for it, and where to answer.
+    Joining(SignedChange, oneshot::Sender<MineReply>),
     Stop,
 }
 
@@ -680,6 +697,18 @@ async fn run(
                     None => shared.failed(NO_DEVICE),
                 },
                 Some(Command::RemoveMachine { .. }) => shared.failed("Not yet."),
+                Some(Command::AcceptOffer { swarm, folder }) => match &machines {
+                    Some(m) => {
+                        let accept = Arc::clone(m).accept(identity.clone(), swarm, folder);
+                        opening.spawn(accept);
+                    }
+                    None => shared.failed(NO_DEVICE),
+                },
+                Some(Command::DeclineOffer { swarm }) => {
+                    if let Some(m) = &machines {
+                        m.decline(&swarm);
+                    }
+                }
                 Some(cmd) => to_swarm(&shared, &mut swarms, cmd),
             },
             Some(up) = up.recv() => match up {
@@ -691,6 +720,18 @@ async fn run(
                     shared.emit(ServiceEvent::Named { name });
                 }
                 linking::Up::Person(person) => identity.person = person,
+                linking::Up::Joining { ns, change, reply } => match swarms.get(&ns) {
+                    Some(h) => {
+                        if let Err(mpsc::error::SendError(Msg::Joining(_, reply))) =
+                            h.tx.send(Msg::Joining(*change, reply))
+                        {
+                            let _ = reply.send(linking::not_here());
+                        }
+                    }
+                    None => {
+                        let _ = reply.send(linking::not_here());
+                    }
+                },
             },
             _ = tick.tick() => {
                 if let Some(m) = &machines {
@@ -704,6 +745,10 @@ async fn run(
                     let worker = Worker::new(Arc::clone(&shared), identity.clone(), opened);
                     let task = tokio::spawn(worker.run(rx));
                     swarms.insert(ns, Handle { tx, task });
+                    // Offered to your other machines.
+                    if let Some(m) = &machines {
+                        tokio::spawn(Arc::clone(m).sync_all());
+                    }
                 }
             }
             () = shared.dirty.notified() => {
@@ -986,28 +1031,63 @@ async fn try_join(
     if shared.registry.contains(&ns) {
         bail!("You're already in {name}.");
     }
+    let joining = Joining {
+        anchor,
+        name,
+        folder,
+        key_id,
+        machine_key,
+        cap,
+        author,
+        host,
+    };
+    open_joined(shared, &identity, joining).await
+}
+
+/// A swarm this machine has been let into, before it opens.
+struct Joining {
+    anchor: PersonId,
+    name: String,
+    folder: PathBuf,
+    key_id: String,
+    machine_key: [u8; 32],
+    cap: Capability,
+    author: Author,
+    /// The member machine that let it in, which it syncs with first.
+    host: EndpointAddr,
+}
+
+/// Opens a swarm this machine was let into and syncs with the machine that let it in; with
+/// nothing left behind if that fails.
+async fn open_joined(
+    shared: &Arc<Shared>,
+    identity: &Identity,
+    j: Joining,
+) -> anyhow::Result<Opened> {
+    let ns = j.cap.id().to_string();
+    let host = j.host.id.to_string();
     let dir = shared.root.join(&ns);
     let joined = async {
-        let synced = Folder::new(folder.clone(), dir.join("folder"), true)?;
-        let mut cfg = shared.node_config(&ns, machine_key, identity.person);
-        cfg.anchor = Some(anchor);
-        let node = SwarmNode::join(cfg, cap, author).await?;
+        let synced = Folder::new(j.folder.clone(), dir.join("folder"), true)?;
+        let mut cfg = shared.node_config(&ns, j.machine_key, identity.person);
+        cfg.anchor = Some(j.anchor);
+        let node = SwarmNode::join(cfg, j.cap, j.author).await?;
         // The gate starts with the inviter alone; the swarm's task opens it to the roster once
         // the roster shows this machine.
         let entry = Entry {
             ns: ns.clone(),
-            anchor: anchor.to_string(),
-            folder,
+            anchor: j.anchor.to_string(),
+            folder: j.folder,
             removed: false,
-            name: name.clone(),
-            key: Some(key_id),
+            name: j.name,
+            key: Some(j.key_id),
             leaving: false,
         };
         let started = async {
             shared.remember_peers(&node);
-            node.remember_addr(host);
-            node.set_gate(std::slice::from_ref(&code.host));
-            node.sync_with(std::slice::from_ref(&code.host)).await?;
+            node.remember_addr(j.host);
+            node.set_gate(std::slice::from_ref(&host));
+            node.sync_with(std::slice::from_ref(&host)).await?;
             shared.registry.add(entry.clone())
         }
         .await;
@@ -1177,6 +1257,7 @@ impl Worker {
                     None | Some(Msg::Stop) => break,
                     Some(Msg::Command(cmd)) => self.command(cmd).await,
                     Some(Msg::Identity(id)) => self.set_identity(id).await,
+                    Some(Msg::Joining(change, reply)) => self.joining(change, reply).await,
                 },
                 ev = next_event(&mut self.events) => self.node_event(ev),
                 Some(()) = next_signal(&mut self.watch) => self.soon(Duration::ZERO),
@@ -1527,6 +1608,8 @@ impl Worker {
             | Command::CancelLink { .. }
             | Command::Link { .. }
             | Command::RemoveMachine { .. }
+            | Command::AcceptOffer { .. }
+            | Command::DeclineOffer { .. }
             | Command::Stop => Ok(()),
         };
         if let Err(text) = done {
@@ -1874,6 +1957,57 @@ impl Worker {
         self.deliver(true);
     }
 
+    /// Another machine of yours is joining: writes this person's `AddMachine` for it (or has an
+    /// owner write it), then answers once the roster shows that machine and the gate lets it in,
+    /// with write access when this person has it.
+    async fn joining(&mut self, change: SignedChange, reply: oneshot::Sender<MineReply>) {
+        let refuse = |reason: String| MineReply::Refused { reason };
+        let (Ok(node), Change::AddMachine { machine, .. }) = (self.live_node(), &change.change)
+        else {
+            let _ = reply.send(linking::not_here());
+            return;
+        };
+        let endpoint = machine.endpoint.clone();
+        if node.can_write() {
+            if let Err(e) = node.write_change(&change).await {
+                let _ = reply.send(refuse(format!("{}: {e:#}", self.name)));
+                return;
+            }
+        } else if !self.outbox.iter().any(|c| c.sig == change.sig) {
+            self.outbox.push(change);
+            self.save_outbox();
+            self.deliver(true);
+        }
+        let me = self.person.id();
+        let host = self.my_endpoint.clone();
+        let name = self.name.clone();
+        tokio::spawn(async move {
+            let deadline = Instant::now() + JOINING_WAIT;
+            while Instant::now() < deadline {
+                if let Ok(Some(r)) = node.roster().await
+                    && r.member_by_endpoint(&endpoint).is_some()
+                {
+                    node.set_gate(&r.endpoints());
+                    let write_secret = match r.role_of(&me) {
+                        Some(role) if role >= Role::Writer => {
+                            match node.capability(Role::Writer).await {
+                                Ok(Capability::Write(secret)) => Some(to_hex(&secret.to_bytes())),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    let _ = reply.send(MineReply::Joined { write_secret, host });
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            let _ = reply.send(refuse(format!(
+                "Your machine in {name} couldn't add this one yet. Try again in a moment."
+            )));
+        });
+    }
+
     /// Sends what is owed to connected machines: the write capability to promoted ones, and this
     /// person's queued changes to an owner.
     ///
@@ -2055,6 +2189,14 @@ impl Worker {
             syncing: self.syncing,
             last_change: self.seen.last_change.clone(),
             removed: self.removed,
+            my_other_machines: roster
+                .map(|r| {
+                    r.person_machines(&me)
+                        .iter()
+                        .filter(|x| x.endpoint != self.my_endpoint)
+                        .count()
+                })
+                .unwrap_or(0),
         }
     }
 }

@@ -952,3 +952,11 @@ kept saying "version-2-backend-1840 · Done" after the review ended). Once the l
 is finished, the card goes back to its pipeline's ready state and drops the ticket's link; a
 stopped one stays so someone can look (`pipeline_card::stays_on_card`). Ticket history keeps
 every finished ticket.
+
+## 35. Not needed (added 2026-10-28)
+
+Beside each reason against's **+ Mark must address** there is **Not needed** (Jordan,
+2026-10-28): a concern the person doesn't want acted on. A reason is one or the other, never
+both (`Runs::mark_as`, logged as `not needed`). Marked, its text is struck through and muted;
+the stage's next session (a re-run, a send-back, or **Score again**) is told those concerns are
+not needed and not to count them against its score again (`waived_note`).

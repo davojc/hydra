@@ -69,6 +69,9 @@ pub struct Attempt {
     /// Its reasons against that a person marked **Must address**, by their place in
     /// `rating.reasons`, in the order marked.
     pub must: Vec<usize>,
+    /// Its reasons against that a person marked **Not needed**: concerns they don't want acted
+    /// on, by place in `rating.reasons`.
+    pub waived: Vec<usize>,
 }
 
 /// One stage of a run.
@@ -237,6 +240,14 @@ pub struct Change {
 pub struct Refusal {
     pub why: String,
     pub changes: Vec<Change>,
+}
+
+/// How a person marks a reason against: **Must address** (the stage goes again for it) or
+/// **Not needed** (a concern they don't want acted on).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    Must,
+    NotNeeded,
 }
 
 /// A person's choice for a run (§5.3). Only `Checked` lets a stage through, and only one
@@ -553,6 +564,7 @@ impl Runs {
             rating: None,
             skills: Vec::new(),
             must: Vec::new(),
+            waived: Vec::new(),
         });
         let spec = &r.pipeline.stages[i];
         let feature_env = r.pipeline.feature_env_for(&r.ticket);
@@ -1132,6 +1144,7 @@ impl Runs {
             rating: None,
             skills,
             must: Vec::new(),
+            waived: Vec::new(),
         });
         for later in &mut r.stages[t + 1..] {
             later.status = StageStatus::Waiting;
@@ -1157,6 +1170,19 @@ impl Runs {
     /// A person marks (or unmarks) reason `reason` of stage `stage`'s latest report **Must
     /// address**. Only a reason against, in an open run.
     pub fn mark(&mut self, run: &str, stage: usize, reason: usize, on: bool) -> Result<(), String> {
+        self.mark_as(run, stage, reason, Mark::Must, on)
+    }
+
+    /// A person marks (or unmarks) reason `reason` of stage `stage`'s latest report `mark`:
+    /// **Must address** or **Not needed**, never both. Only a reason against, in an open run.
+    pub fn mark_as(
+        &mut self,
+        run: &str,
+        stage: usize,
+        reason: usize,
+        mark: Mark,
+        on: bool,
+    ) -> Result<(), String> {
         let Some(ri) = self.index(run) else {
             return Err(format!("no run {run}"));
         };
@@ -1179,8 +1205,12 @@ impl Runs {
             return Err("only a reason against can be marked".into());
         }
         a.must.retain(|&i| i != reason);
+        a.waived.retain(|&i| i != reason);
         if on {
-            a.must.push(reason);
+            match mark {
+                Mark::Must => a.must.push(reason),
+                Mark::NotNeeded => a.waived.push(reason),
+            }
         }
         Ok(())
     }
@@ -1463,10 +1493,37 @@ pub fn must_note(a: &Attempt) -> Option<String> {
         .map(|x| x.text.as_str())
         .collect();
     if items.is_empty() {
-        return None;
+        return waived_note(a);
     }
     let mut note = format!(
         "The user marked these reasons against your report ({}) Must address. Deal with each          one, then report again, saying in your reasons how each was dealt with:",
+        a.label
+    );
+    for item in items {
+        note.push_str(&format!("\n- {item}"));
+    }
+    if let Some(waived) = waived_note(a) {
+        note.push_str("\n\n");
+        note.push_str(&waived);
+    }
+    Some(note)
+}
+
+/// What a session is told about the reasons against a person marked **Not needed**.
+pub fn waived_note(a: &Attempt) -> Option<String> {
+    let rating = a.rating.as_ref()?;
+    let items: Vec<&str> = a
+        .waived
+        .iter()
+        .filter_map(|&i| rating.reasons.get(i))
+        .map(|x| x.text.as_str())
+        .collect();
+    if items.is_empty() {
+        return None;
+    }
+    let mut note = format!(
+        "The user marked these reasons against your report ({}) Not needed: don't act on \
+         them, and don't count them against your score again:",
         a.label
     );
     for item in items {
@@ -1490,12 +1547,17 @@ fn rerun_context(previous: Option<&Attempt>) -> String {
         "Your previous attempt ({}) reported {}: {}",
         a.label, rating.score, rating.summary
     );
-    for reason in &rating.reasons {
+    for (i, reason) in rating.reasons.iter().enumerate() {
         let sign = match reason.side {
             Side::For => '+',
             Side::Against => '-',
         };
-        text.push_str(&format!("\n{sign} {}", reason.text));
+        let waived = if a.waived.contains(&i) {
+            " (the user says this isn't needed: don't act on it)"
+        } else {
+            ""
+        };
+        text.push_str(&format!("\n{sign} {}{waived}", reason.text));
     }
     text
 }
@@ -1792,6 +1854,29 @@ mod tests {
         let e = runs.person(&id, checked("fine")).unwrap_err();
         assert!(e.contains("asked a person to check"), "{e}");
         assert_eq!(status(&runs, &id, 1), StageStatus::Stopped);
+    }
+
+    #[test]
+    fn a_concern_marked_not_needed_is_told_to_the_next_session_and_isnt_also_a_must() {
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        runs.mark(&id, 1, 1, true).unwrap();
+        runs.mark_as(&id, 1, 1, Mark::NotNeeded, true).unwrap();
+        let a = runs.run(&id).unwrap().stages[1].latest().unwrap().clone();
+        assert!(a.must.is_empty(), "one mark at a time");
+        assert_eq!(a.waived, [1]);
+        let note = must_note(&a).expect("a note for the not-needed concern");
+        assert!(
+            note.contains("Not needed") && note.contains("\n- q"),
+            "{note}"
+        );
+        assert!(
+            runs.mark_as(&id, 1, 0, Mark::NotNeeded, true).is_err(),
+            "a reason for"
+        );
+        runs.person(&id, retry("again")).unwrap();
+        let s = runs.begin("orch", &id, "b", "", 30).unwrap();
+        assert!(s.prompt.contains("isn't needed"), "{}", s.prompt);
     }
 
     #[test]

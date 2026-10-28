@@ -337,8 +337,17 @@ impl Workspace {
         match done {
             Ok(changes) => {
                 crate::action_log::write(format!("run {run}: the user asked for a new score"));
-                self.pending_wakes
-                    .insert(pane, (run.to_string(), SCORE_AGAIN.to_string()));
+                // Concerns the person marked Not needed go with it, so they aren't scored again.
+                let waived = server::get().and_then(|sv| {
+                    let reg = server::lock(sv.registry());
+                    let a = reg.runs.run(run)?.stages.get(stage)?.latest()?.clone();
+                    crate::runs::waived_note(&a)
+                });
+                let message = match waived {
+                    Some(w) => format!("{SCORE_AGAIN} {w}"),
+                    None => SCORE_AGAIN.to_string(),
+                };
+                self.queue_wake(pane, run.to_string(), message);
                 self.send_wakes(window, cx);
                 self.pipeline_tab_update(orch, cx, |t| {
                     t.selected = None;
@@ -350,28 +359,33 @@ impl Workspace {
         }
     }
 
-    /// **Must address** on reason `reason` of stage `stage`'s latest report, or off.
+    /// **Must address** or **Not needed** on reason `reason` of stage `stage`'s latest report,
+    /// or off.
     fn mark_reason(
         &mut self,
         run: &str,
         stage: usize,
         reason: usize,
-        on: bool,
+        (mark, on): (crate::runs::Mark, bool),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let (event, title) = match mark {
+            crate::runs::Mark::Must => ("marked", "Must address"),
+            crate::runs::Mark::NotNeeded => ("not needed", "Not needed"),
+        };
         let done = run_choice(
             run,
-            "marked",
+            event,
             |runs| {
-                runs.mark(run, stage, reason, on)
+                runs.mark_as(run, stage, reason, mark, on)
                     .map(|()| (Vec::new(), json!({"reason": reason, "on": on})))
             },
             stage,
         );
         match done {
             Ok(_) => cx.notify(),
-            Err(e) => window.push_notification(Notification::error(e).title("Must address"), cx),
+            Err(e) => window.push_notification(Notification::error(e).title(title), cx),
         }
     }
 
@@ -1582,19 +1596,34 @@ impl Workspace {
                     Side::For => ("+", theme::GREEN),
                     Side::Against => ("−", theme::RED),
                 };
+                let waived = marking.as_ref().is_some_and(|m| m.waived.contains(&i));
                 let row = h_flex()
                     .items_start()
                     .gap_2()
                     .child(text(12.5, hex).flex_none().child(sign))
                     // A width it can't grow past, so a long reason wraps inside its column.
                     .child(
-                        text(12.5, theme::TEXT)
-                            .flex_1()
-                            .min_w_0()
-                            .child(x.text.clone()),
+                        text(
+                            12.5,
+                            if waived {
+                                theme::TEXT_MUTED
+                            } else {
+                                theme::TEXT
+                            },
+                        )
+                        .flex_1()
+                        .min_w_0()
+                        .when(waived, |d| d.line_through())
+                        .child(x.text.clone()),
                     );
                 match (&marking, x.side) {
-                    (Some(m), Side::Against) => row.child(must_toggle(m, i, cx)),
+                    (Some(m), Side::Against) => row.child(
+                        h_flex()
+                            .flex_none()
+                            .gap_1()
+                            .child(must_toggle(m, i, cx))
+                            .child(not_needed_toggle(m, i, cx)),
+                    ),
                     _ => row,
                 }
             })
@@ -1984,6 +2013,8 @@ struct Marking {
     stage: usize,
     title: String,
     must: Vec<usize>,
+    /// Reasons against marked **Not needed**.
+    waived: Vec<usize>,
     /// This stage's send-back waits for the stage at work.
     queued: bool,
     /// The stage at work now, by title.
@@ -2010,6 +2041,7 @@ fn marking(orch: PaneId, run: &Run, si: usize, ai: usize) -> Option<Marking> {
         stage: si,
         title: run.pipeline.stages[si].title.clone(),
         must: a.must.clone(),
+        waived: a.waived.clone(),
         queued: run.fix_after.as_ref().is_some_and(|f| f.stage == si),
         at_work: run
             .stages
@@ -2032,11 +2064,38 @@ fn must_toggle(m: &Marking, i: usize, cx: &mut Context<Workspace>) -> AnyElement
         .xsmall()
         .disabled(m.queued)
         .tooltip("Mark it, then Send back: the stage goes again to deal with it")
-        .on_click(
-            cx.listener(move |ws, _, window, cx| ws.mark_reason(&run, stage, i, !on, window, cx)),
-        );
+        .on_click(cx.listener(move |ws, _, window, cx| {
+            ws.mark_reason(&run, stage, i, (crate::runs::Mark::Must, !on), window, cx)
+        }));
     // Outlined, so it reads as a button before it's pressed; red once marked.
     let b = if on { b.danger() } else { b.outline() };
+    div().flex_none().child(b).into_any_element()
+}
+
+/// A reason against's **Not needed** toggle: the person doesn't want that concern acted on.
+fn not_needed_toggle(m: &Marking, i: usize, cx: &mut Context<Workspace>) -> AnyElement {
+    let on = m.waived.contains(&i);
+    let (run, stage) = (m.run.clone(), m.stage);
+    let b = Button::new(SharedString::from(format!("waive-{}-{stage}-{i}", m.run)))
+        .label(if on { "✓ Not needed" } else { "Not needed" })
+        .xsmall()
+        .disabled(m.queued)
+        .tooltip(
+            "This concern doesn't matter: the stage is told not to act on it or count it \
+             against its score",
+        )
+        .on_click(cx.listener(move |ws, _, window, cx| {
+            ws.mark_reason(
+                &run,
+                stage,
+                i,
+                (crate::runs::Mark::NotNeeded, !on),
+                window,
+                cx,
+            )
+        }));
+    // Outlined like Must address; filled grey once marked.
+    let b = if on { b.secondary() } else { b.outline() };
     div().flex_none().child(b).into_any_element()
 }
 

@@ -238,6 +238,14 @@ fn replay(id: &str, pipeline: Pipeline, events: &[Value]) -> Option<Run> {
                 let on = e.get("on").and_then(Value::as_bool).unwrap_or(true);
                 runs.mark(id, i, reason, on).ok()?;
             }
+            // A person marked a reason against Not needed.
+            "not needed" => {
+                let i = stage_index(&runs, id, text(e, "stage"))?;
+                let reason = e.get("reason").and_then(Value::as_u64)? as usize;
+                let on = e.get("on").and_then(Value::as_bool).unwrap_or(true);
+                runs.mark_as(id, i, reason, crate::runs::Mark::NotNeeded, on)
+                    .ok()?;
+            }
             // A person worked in the stopped stage's session and asked it to score again.
             "scoring again" => {
                 let i = stage_index(&runs, id, text(e, "stage"))?;

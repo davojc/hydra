@@ -1,5 +1,14 @@
 name: ci
-on: [push, pull_request]
+# Branches are checked through their pull request, so each change runs once.
+on:
+  push:
+    branches: [main]
+  pull_request:
+# Pushes to main run one at a time, so two releases can't pick the same version. A run still
+# waiting when a newer one queues is dropped; the newer one releases its commits too.
+concurrency:
+  group: ${{ github.event_name == 'push' && 'release' || format('ci-{0}', github.run_id) }}
+  cancel-in-progress: false
 jobs:
   test:
     strategy:
@@ -7,34 +16,35 @@ jobs:
       matrix:
         os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      # Enough for backtraces, and keeps the cached target folder small.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      # Dependencies come from the cache; only the workspace's crates rebuild.
+      # Dependencies come from the cache; only the workspace's crates rebuild. Only main saves
+      # one: pull requests can read main's caches, but a cache a pull request saves serves only
+      # that pull request, and fills the repo's 10 GB until main's are pushed out.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
 
-  release:
+  version:
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: windows-latest
-    permissions:
-      contents: write
+    runs-on: ubuntu-latest
     outputs:
       release: ${{ steps.decide.outputs.release }}
       version: ${{ steps.decide.outputs.version }}
-    concurrency:
-      group: release
-      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
       - name: Decide the version
         id: decide
         shell: bash
@@ -48,17 +58,26 @@ jobs:
             echo "version=$next" >> "$GITHUB_OUTPUT"
             echo "release=true" >> "$GITHUB_OUTPUT"
           fi
-      # Only runs that release build anything, so only they restore or save the cache.
+
+  # Windows and macOS build side by side. Windows publishes the release.
+  release:
+    needs: version
+    if: needs.version.outputs.release == 'true'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-        if: steps.decide.outputs.release == 'true'
       - name: Build
-        if: steps.decide.outputs.release == 'true'
         shell: bash
         env:
-          HYDRA_VERSION: ${{ steps.decide.outputs.version }}
+          HYDRA_VERSION: ${{ env.VERSION }}
         run: cargo build --release -p hydra-cli -p hydraui -p hydra-setup
       - name: Package
-        if: steps.decide.outputs.release == 'true'
         shell: bash
         run: |
           mkdir -p dist
@@ -77,10 +96,7 @@ jobs:
           sha256sum hydra-setup.exe | awk '{print tolower($1) "  hydra-setup.exe"}' > hydra-setup.exe.sha256
           cat hydra-setup.exe.sha256
       - name: Check the version
-        if: steps.decide.outputs.release == 'true'
         shell: bash
-        env:
-          VERSION: ${{ steps.decide.outputs.version }}
         run: |
           got="$(dist/hydra-x86_64-pc-windows-msvc.exe --version | tr -d '\r')"
           echo "$got"
@@ -89,10 +105,7 @@ jobs:
             exit 1
           fi
       - name: Check hydraui's version
-        if: steps.decide.outputs.release == 'true'
         shell: pwsh
-        env:
-          VERSION: ${{ steps.decide.outputs.version }}
         run: |
           $got = (Get-Item dist/hydraui-x86_64-pc-windows-msvc.exe).VersionInfo.ProductVersion
           Write-Host "hydraui $got"
@@ -101,34 +114,30 @@ jobs:
             exit 1
           }
       - name: Test the installer
-        if: steps.decide.outputs.release == 'true'
         shell: pwsh
-        env:
-          VERSION: ${{ steps.decide.outputs.version }}
         run: ./scripts/test-setup.ps1 -Setup dist/hydra-setup.exe -From dist -Version $env:VERSION
       - name: Publish the release
-        if: steps.decide.outputs.release == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.decide.outputs.version }}
         run: gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" --title "hydra $VERSION" --generate-notes
 
-  # The macOS builds join the release the Windows job published. A separate job, so a
-  # shortage of macOS runners delays only these assets, never the release itself.
+  # macOS builds beside Windows and hands its assets to the next job, which adds them to the
+  # release once Windows has published it. A shortage of macOS runners delays only these
+  # assets, never the release itself.
   release-macos:
-    needs: release
-    if: needs.release.outputs.release == 'true'
+    needs: version
+    if: needs.version.outputs.release == 'true'
     runs-on: macos-latest
-    permissions:
-      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build
         env:
-          HYDRA_VERSION: ${{ needs.release.outputs.version }}
+          HYDRA_VERSION: ${{ env.VERSION }}
         run: cargo build --release -p hydra-cli -p hydraui
       - name: Package
         run: |
@@ -139,8 +148,6 @@ jobs:
             (cd dist && shasum -a 256 "$asset" > "$asset.sha256" && cat "$asset.sha256")
           done
       - name: Check the version
-        env:
-          VERSION: ${{ needs.release.outputs.version }}
         run: |
           got="$(dist/hydra-aarch64-apple-darwin --version)"
           echo "$got"
@@ -148,8 +155,24 @@ jobs:
             echo "expected 'hydra $VERSION', got '$got'" >&2
             exit 1
           fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-assets
+          path: dist/
+          retention-days: 1
+
+  release-macos-upload:
+    needs: [version, release, release-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-assets
+          path: dist
       - name: Add them to the release
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.release.outputs.version }}
-        run: gh release upload "v$VERSION" dist/*
+          VERSION: ${{ needs.version.outputs.version }}
+        run: gh release upload "v$VERSION" dist/* --repo "$GITHUB_REPOSITORY"

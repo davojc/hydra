@@ -270,7 +270,10 @@ fn replay(id: &str, pipeline: Pipeline, events: &[Value]) -> Option<Run> {
                 let asked = crate::run_history::ago(text(e, "at"), &crate::action_log::now())
                     .and_then(|d| now.checked_sub(d))
                     .unwrap_or(now);
-                runs.ask(&token, text(e, "question"), link, asked).ok()?;
+                // Logs from before `who` are product questions.
+                let whom = crate::runs::Whom::parse(text(e, "who")).unwrap_or_default();
+                runs.ask(&token, text(e, "question"), link, asked, whom)
+                    .ok()?;
             }
             "answered" => {
                 runs.answered(id, text(e, "answer")).ok()?;

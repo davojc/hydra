@@ -45,6 +45,10 @@ impl Workspace {
                             return None;
                         };
                         let r = reg.runs.run(&c.run)?;
+                        // Waiting on a pull request's author isn't the user's to act on.
+                        if r.asking.as_ref()?.whom == crate::runs::Whom::Author {
+                            return None;
+                        }
                         let at =
                             r.pipeline.product_channel.as_deref().map_or(
                                 " Answer it with Answer… on the card.".to_string(),
@@ -79,6 +83,7 @@ impl Workspace {
                         question,
                         link,
                         since,
+                        whom,
                         ..
                     } = r.asking.as_ref()?;
                     let link = link.as_deref()?;
@@ -90,7 +95,7 @@ impl Workspace {
                     Some((
                         pane,
                         r.id.clone(),
-                        crate::asking::check_prompt(question, link),
+                        crate::asking::check_prompt_for(*whom, question, link),
                     ))
                 })
                 .collect()
@@ -253,7 +258,14 @@ impl Workspace {
                         .text_xs()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(color(theme::AMBER))
-                        .child(format!("⏸ Waiting for product · {waited}m")),
+                        .child(match ask.whom {
+                            crate::runs::Whom::Product => {
+                                format!("⏸ Waiting for product · {waited}m")
+                            }
+                            crate::runs::Whom::Author => {
+                                format!("⏸ Waiting on the author · {waited}m")
+                            }
+                        }),
                 )
                 // Never cut off: the line opens the question.
                 .child(
@@ -297,7 +309,10 @@ impl Workspace {
             let (ws, run, link) = (ws.clone(), run.clone(), ask.link.clone());
             let (ws2, run2) = (ws.clone(), run.clone());
             dialog
-                .title("Waiting for product")
+                .title(match ask.whom {
+                    crate::runs::Whom::Product => "Waiting for product",
+                    crate::runs::Whom::Author => "Waiting on the author",
+                })
                 .child(
                     v_flex()
                         .gap_2()

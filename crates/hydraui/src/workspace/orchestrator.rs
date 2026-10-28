@@ -144,11 +144,24 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
              moves it on."
         )
     } else if let Some((i, question)) = asked {
-        format!(
-            "Run {id}: stage {} asked product a question, and the ticket waits for the answer: \
-             {question} Do nothing meanwhile: hydraui tells you when it's answered.",
-            stage(i)
-        )
+        let author = run
+            .asking
+            .as_ref()
+            .is_some_and(|a| a.whom == crate::runs::Whom::Author);
+        if author {
+            format!(
+                "Run {id}: stage {} waits on the pull request's author: {question} Do nothing \
+                 meanwhile: hydraui has the stage look again every 5 minutes and tells you when \
+                 it moves on.",
+                stage(i)
+            )
+        } else {
+            format!(
+                "Run {id}: stage {} asked product a question, and the ticket waits for the \
+                 answer: {question} Do nothing meanwhile: hydraui tells you when it's answered.",
+                stage(i)
+            )
+        }
     } else if let Some(i) = answered {
         format!(
             "Run {id}: stage {} has its answer and carries on. Wait: hydraui tells you when it \
@@ -1808,6 +1821,8 @@ pub(super) fn pill_colors(state: CardState, accent: u32) -> (gpui::Hsla, gpui::H
     match state {
         CardState::Working | CardState::Done => (color(accent), color(accent).opacity(0.16)),
         CardState::Ready | CardState::Stopped => pair(theme::TEXT_SECONDARY, theme::RAISED),
+        // Someone else's move: calm, not a call for the user.
+        CardState::Waiting => (color(accent), color(accent).opacity(0.16)),
         CardState::NeedsYou => pair(theme::RED, theme::RED_TINT),
         CardState::Asking | CardState::Checking | CardState::Paused => {
             pair(theme::AMBER, theme::AMBER_TINT)
@@ -1865,7 +1880,13 @@ mod tests {
         let s = runs.begin("orch", &id, "a", "", 30).unwrap();
         runs.link(&id, s.stage, "t1", "t1");
         let asked = runs
-            .ask("t1", "Remove it?", None, std::time::SystemTime::now())
+            .ask(
+                "t1",
+                "Remove it?",
+                None,
+                std::time::SystemTime::now(),
+                crate::runs::Whom::Product,
+            )
             .unwrap();
         let m = wake_message(runs.run(&id).unwrap(), &asked).unwrap();
         assert!(

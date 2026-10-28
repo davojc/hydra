@@ -156,17 +156,21 @@ pub fn schemas() -> Vec<Value> {
         }),
         json!({
             "name": "stage_ask",
-            "description": "Stage session: a decision isn't yours to make (product: a change \
-                beyond the ticket that alters what users see or do). Ask it, once you've posted \
-                it where your stage note says, and the ticket waits for the answer. Then stop \
-                and wait: hydraui tells you when to look for the answer, or gives it to you. \
-                Don't make the change meanwhile.",
+            "description": "Stage session: your stage waits on someone. who \"product\" (the \
+                default): a decision isn't yours to make (a change beyond the ticket that alters \
+                what users see or do); ask it, once you've posted it where your stage note says. \
+                who \"author\": you asked a pull request's author for changes and wait for them \
+                to push or reply; give the pull request's link. Either way the ticket waits, \
+                not marked as needing the user. Then stop: hydraui tells you when to look again, \
+                or gives you the answer. Don't make the change meanwhile.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "question": string("The decision needed, in a sentence or two: what you'd \
                         change, the options and your recommendation."),
-                    "link": string("The Slack message you asked in (optional)."),
+                    "link": string("The Slack message you asked in (optional), or the pull \
+                        request's link for who \"author\" (required)."),
+                    "who": string("\"product\" (default) or \"author\"."),
                 },
                 "required": ["question"],
             },
@@ -222,7 +226,14 @@ pub fn call(
         "stage_start" => stage_start(reg, &root, token, &arg("run"), &arg("stage"), &arg("brief")),
         "run_status" => (run_status(reg, token, &arg("run")), None),
         "stage_brief" => (stage_brief(reg, token), None),
-        "stage_ask" => stage_ask(reg, &root, token, &arg("question"), &arg("link")),
+        "stage_ask" => stage_ask(
+            reg,
+            &root,
+            token,
+            &arg("question"),
+            &arg("link"),
+            &arg("who"),
+        ),
         "stage_answer" => stage_answer(reg, &root, token, &arg("answer")),
         _ => stage_report(reg, &root, token, args),
     })
@@ -420,11 +431,18 @@ fn stage_ask(
     token: &str,
     question: &str,
     link: &str,
+    who: &str,
 ) -> (Outcome, Option<McpEvent>) {
     let link = (!link.is_empty()).then_some(link);
+    let Some(whom) = crate::runs::Whom::parse(who) else {
+        return (
+            Outcome::err(format!("who {who:?} must be \"product\" or \"author\"")),
+            None,
+        );
+    };
     let changes = match reg
         .runs
-        .ask(token, question, link, std::time::SystemTime::now())
+        .ask(token, question, link, std::time::SystemTime::now(), whom)
     {
         Ok(changes) => changes,
         Err(e) => return (Outcome::err(e), None),

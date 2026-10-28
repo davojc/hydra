@@ -32,6 +32,22 @@ pub fn check_prompt(question: &str, link: &str) -> String {
     )
 }
 
+/// Typed to a session waiting on `whom`, to have it look again at `link`.
+pub fn check_prompt_for(whom: crate::runs::Whom, question: &str, link: &str) -> String {
+    match whom {
+        crate::runs::Whom::Product => check_prompt(question, link),
+        crate::runs::Whom::Author => format!(
+            "Look at the pull request {link} again: you're waiting on its author ({question}). \
+             If they pushed commits or replied since your review, review what changed and answer \
+             their comments. If it's now safe to approve, approve it, post in its Slack thread \
+             as your prompt says, call stage_answer with what changed, then carry on and report. \
+             If more changes are needed, ask for them on the pull request, say in one line that \
+             you're still waiting, and stop. If nothing is new, say so in one line and stop: \
+             you'll be asked again."
+        ),
+    }
+}
+
 /// Typed to the waiting session when the user answers in hydraui.
 pub fn answer_prompt(answer: &str) -> String {
     format!(
@@ -71,6 +87,20 @@ mod tests {
             "{check}"
         );
         assert!(check.contains("reply to them in that thread"), "{check}");
+        let author = check_prompt_for(
+            crate::runs::Whom::Author,
+            "fix the null check",
+            "https://g/p/1",
+        );
+        assert!(
+            author.contains("https://g/p/1") && author.contains("approve it"),
+            "{author}"
+        );
+        assert!(author.contains("call stage_answer"), "{author}");
+        assert_eq!(
+            check_prompt_for(crate::runs::Whom::Product, "Remove?", "https://s/t/1"),
+            check_prompt("Remove?", "https://s/t/1")
+        );
         let answer = answer_prompt("Keep it");
         assert!(answer.contains("Keep it") && answer.contains("don't call stage_answer"));
     }

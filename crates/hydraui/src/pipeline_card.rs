@@ -13,6 +13,9 @@ pub enum CardState {
     NeedsYou,
     /// A stage asked product a question; the ticket waits for the answer.
     Asking,
+    /// A review asked a pull request's author for changes and waits for them: nothing for the
+    /// user to do (core spec §42).
+    Waiting,
     /// A stage asked a person to check something by hand; it didn't fail.
     Checking,
     Paused,
@@ -27,6 +30,7 @@ impl CardState {
             CardState::Working => "Working",
             CardState::NeedsYou => "Needs you",
             CardState::Asking => "Asked product",
+            CardState::Waiting => "Waiting on author",
             CardState::Checking => "Check it",
             CardState::Paused => "Paused",
             CardState::Done => "Done",
@@ -95,6 +99,14 @@ pub fn card(run: &Run) -> Card {
     let state = match &run.state {
         RunState::Finished => CardState::Done,
         RunState::Stopped(_) => CardState::Stopped,
+        RunState::NeedsYou(_)
+            if run
+                .asking
+                .as_ref()
+                .is_some_and(|a| a.whom == crate::runs::Whom::Author) =>
+        {
+            CardState::Waiting
+        }
         RunState::NeedsYou(_) if run.asking.is_some() => CardState::Asking,
         RunState::NeedsYou(_) if run.stages.iter().any(wants_check) => CardState::Checking,
         RunState::NeedsYou(_) => CardState::NeedsYou,
@@ -129,10 +141,10 @@ pub fn card(run: &Run) -> Card {
             StageStatus::Waiting => Segment::Pending,
         })
         .collect();
-    let paused_for = if state == CardState::Asking {
-        " · paused for product"
-    } else {
-        ""
+    let paused_for = match state {
+        CardState::Asking => " · paused for product",
+        CardState::Waiting => " · waiting on the author",
+        _ => "",
     };
     Card {
         name: run.pipeline.name.clone(),
@@ -162,6 +174,7 @@ pub fn group_card(runs: &[&Card]) -> Card {
     let rank = |s: CardState| match s {
         CardState::NeedsYou => 0,
         CardState::Asking | CardState::Checking => 1,
+        CardState::Waiting => 3,
         CardState::Working => 2,
         CardState::Paused => 3,
         CardState::Stopped => 4,
@@ -174,6 +187,7 @@ pub fn group_card(runs: &[&Card]) -> Card {
             CardState::Working
                 | CardState::NeedsYou
                 | CardState::Asking
+                | CardState::Waiting
                 | CardState::Checking
                 | CardState::Paused
         )
@@ -432,11 +446,50 @@ mod tests {
     }
 
     #[test]
+    fn a_review_waiting_on_the_author_says_so_not_needs_you() {
+        let (mut runs, id) = runs_of(&STAGES);
+        start(&mut runs, &id, "replicate", "t1");
+        let now = std::time::SystemTime::now();
+        assert!(
+            runs.ask(
+                "t1",
+                "Fix the null check",
+                None,
+                now,
+                crate::runs::Whom::Author
+            )
+            .unwrap_err()
+            .contains("link"),
+            "an author wait needs the pull request to look at"
+        );
+        runs.ask(
+            "t1",
+            "Fix the null check",
+            Some("https://github.com/o/r/pull/1"),
+            now,
+            crate::runs::Whom::Author,
+        )
+        .unwrap();
+        let c = card(runs.run(&id).unwrap());
+        assert_eq!(
+            (c.state, c.state.word()),
+            (CardState::Waiting, "Waiting on author")
+        );
+        assert_eq!(c.line, "INTH-482 · Understand · waiting on the author");
+    }
+
+    #[test]
     fn a_ticket_waiting_on_product_says_so_not_needs_you() {
         let (mut runs, id) = runs_of(&STAGES);
         start(&mut runs, &id, "replicate", "t1");
-        runs.ask("t1", "Remove it?", None, std::time::SystemTime::now())
-            .unwrap();
+        runs.ask(
+            "t1",
+            "Remove it?",
+            None,
+            std::time::SystemTime::now(),
+            crate::runs::Whom::Product,
+        )
+        .unwrap();
         let c = card(runs.run(&id).unwrap());
         assert_eq!(
             (c.state, c.state.word()),

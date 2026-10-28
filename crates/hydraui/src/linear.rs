@@ -49,6 +49,8 @@ pub struct Ticket {
     pub priority: u8,
     /// When it was made, RFC 3339.
     pub created_at: String,
+    /// Its labels' names.
+    pub labels: Vec<String>,
 }
 
 /// What the orchestrator asks of Linear, so the watcher can be tested with a fake.
@@ -71,7 +73,7 @@ pub trait LinearApi {
 }
 
 const TICKET_FIELDS: &str = "id identifier title url slaBreachesAt slaHighRiskAt priority createdAt assignee { id } \
-     state { name }";
+     state { name } labels { nodes { name } }";
 
 pub fn viewer_request() -> Value {
     json!({"query": "query { viewer { id } }"})
@@ -171,6 +173,14 @@ fn read_one_ticket(t: &Value) -> Option<Ticket> {
         state: t["state"]["name"].as_str().unwrap_or_default().to_string(),
         priority: t["priority"].as_u64().map_or(0, |p| p.min(4) as u8),
         created_at: text("createdAt").unwrap_or_default(),
+        labels: t["labels"]["nodes"]
+            .as_array()
+            .map(|ls| {
+                ls.iter()
+                    .filter_map(|l| l["name"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
@@ -317,6 +327,7 @@ mod tests {
             "state": {"name": "Ready for Investigation"},
             "priority": 2,
             "createdAt": "2026-10-01T00:00:00Z",
+            "labels": {"nodes": [{"name": "Bug"}, {"name": "Frontend"}]},
         })
     }
 
@@ -368,6 +379,13 @@ mod tests {
         );
         assert_eq!(got[0].url, "https://linear.app/iov42/issue/INTH-170");
         assert_eq!(got[0].state, "Ready for Investigation");
+        assert_eq!(got[0].labels, ["Bug", "Frontend"]);
+        assert!(
+            pickable_request("INTH", "s1", true)["query"]
+                .as_str()
+                .unwrap()
+                .contains("labels { nodes { name } }")
+        );
     }
 
     #[test]

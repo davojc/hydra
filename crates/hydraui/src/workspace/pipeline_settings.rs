@@ -114,6 +114,8 @@ struct LinearDraft {
     claim: Entity<InputState>,
     passed: Entity<InputState>,
     every: Entity<InputState>,
+    /// Comma-separated; empty: any label.
+    labels: Entity<InputState>,
 }
 
 impl LinearDraft {
@@ -133,6 +135,9 @@ impl LinearDraft {
             every_minutes: text(&self.every).parse().unwrap_or(0),
             watch: self.watch,
             sla_only: !self.no_sla,
+            labels: pipeline::clean_labels(
+                self.labels.read(cx).value().split(',').map(str::to_string),
+            ),
         })
     }
 }
@@ -327,6 +332,10 @@ impl Workspace {
                     &pipeline::DEFAULT_EVERY_MINUTES.to_string(),
                 ),
                 "5",
+            ),
+            labels: input(
+                field(|l| l.labels.join(", "), ""),
+                "Any label; or e.g. Bug, Frontend",
             ),
         };
         let sl = saved.slack.clone();
@@ -529,6 +538,7 @@ impl Workspace {
             body = body
                 .child(row("Team", &l.team))
                 .child(row("Pick tickets in", &l.pick))
+                .child(row("With one of the labels", &l.labels))
                 .child(
                     h_flex()
                         .gap_3()

@@ -82,6 +82,8 @@ pub struct LinearSettings {
     /// Only tickets with an SLA running are picked (the default). Off: tickets without one
     /// too, after those with one, by priority then age.
     pub sla_only: bool,
+    /// Only tickets with one of these labels (any case) are picked; none: any ticket.
+    pub labels: Vec<String>,
 }
 
 /// Which tickets in the `pick` state a pipeline takes.
@@ -325,6 +327,7 @@ struct FileLinear {
     every_minutes: Option<u32>,
     watch: Option<bool>,
     sla_only: Option<bool>,
+    labels: Option<Vec<String>>,
 }
 
 /// The `[linear]` defaults (phase 2 spec §2).
@@ -366,7 +369,20 @@ fn linear_settings(f: FileLinear) -> Result<LinearSettings, String> {
         every_minutes,
         watch: f.watch.unwrap_or(false),
         sla_only: f.sla_only.unwrap_or(true),
+        labels: clean_labels(f.labels.unwrap_or_default()),
     })
+}
+
+/// Labels trimmed, blanks and repeats (any case) dropped, in their order.
+pub fn clean_labels(labels: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for l in labels {
+        let l = l.trim();
+        if !l.is_empty() && !out.iter().any(|o| o.eq_ignore_ascii_case(l)) {
+            out.push(l.to_string());
+        }
+    }
+    out
 }
 
 #[derive(Deserialize)]
@@ -692,6 +708,14 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
                 t["sla_only"] = value(false);
             } else if let Some(t) = t.as_table_mut() {
                 t.remove("sla_only");
+            }
+            let labels = clean_labels(l.labels.iter().cloned());
+            if labels.is_empty() {
+                if let Some(t) = t.as_table_mut() {
+                    t.remove("labels");
+                }
+            } else {
+                t["labels"] = value(labels.into_iter().collect::<toml_edit::Array>());
             }
         }
         None => {
@@ -1100,6 +1124,7 @@ mod tests {
             every_minutes: 5,
             watch: false,
             sla_only: true,
+            labels: Vec::new(),
         });
         assert_eq!(
             validate(&both),
@@ -1489,8 +1514,18 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
                 every_minutes: 5,
                 watch: false,
                 sla_only: true,
+                labels: Vec::new(),
             })
         );
+    }
+
+    #[test]
+    fn a_pipeline_can_pick_by_label() {
+        let p = parse(&format!(
+            "{ONE_STAGE}[linear]\nteam = \"PRE\"\nlabels = [\"Bug\", \" frontend \", \"BUG\"]\n"
+        ))
+        .unwrap();
+        assert_eq!(p.linear.unwrap().labels, ["Bug", "frontend"]);
     }
 
     #[test]
@@ -1549,6 +1584,23 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
             ("Ready for Review", Assignee::Any, false)
         );
         assert!(text.contains("sla_only = false"), "{text}");
+        assert!(!text.contains("labels"), "no labels, no key: {text}");
+        // Labels: trimmed, a repeat in another case dropped, their order kept.
+        let mut l = edit.linear.clone().unwrap();
+        l.labels = vec![" Bug ".into(), "bug".into(), "Frontend".into(), " ".into()];
+        edit.linear = Some(l);
+        save(d.path(), "t", &edit).unwrap();
+        let l = load(d.path(), "t").unwrap().linear.unwrap();
+        assert_eq!(l.labels, ["Bug", "Frontend"]);
+        let mut l = edit.linear.clone().unwrap();
+        l.labels.clear();
+        edit.linear = Some(l);
+        save(d.path(), "t", &edit).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            !text.contains("labels"),
+            "cleared labels drop the key: {text}"
+        );
         edit.linear = None;
         save(d.path(), "t", &edit).unwrap();
         assert_eq!(load(d.path(), "t").unwrap().linear, None);

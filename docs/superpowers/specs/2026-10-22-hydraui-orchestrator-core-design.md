@@ -970,3 +970,7 @@ true, so existing pipelines are unchanged) set to false also takes tickets witho
 with one still first, by breach; then by priority, Urgent first and no priority last; then the
 oldest. Linear's `priority` and `createdAt` are now read with each ticket. Pipeline settings show
 it as **Which tickets: With an SLA · All, by priority**.
+
+## 37. Labels (added 2026-10-28)
+
+A Linear trigger can be narrowed to labels: `labels = ["Bug", "Frontend"]` in `[linear]`, or "With one of the labels" in Pipeline settings (comma-separated). A ticket is picked only when it carries at least one of them, in any case; no labels means any ticket, as before. Labels are trimmed and a repeat in another case is dropped when read and saved. The check right before a claim asks again, so a ticket whose label was taken off since the list is passed over.

@@ -135,6 +135,7 @@ fn read(hydra_root: &Path, file: &Path, alive: &impl Fn(u32) -> bool) -> Option<
             state: String::new(),
             priority: 0,
             created_at: String::new(),
+            labels: Vec::new(),
         });
     Some(Interrupted {
         ticket,

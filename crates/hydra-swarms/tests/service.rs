@@ -1175,6 +1175,18 @@ async fn leaving_on_one_machine_keeps_the_person_in() {
     );
     let v = olive.views.iter().find(|v| v.id == ns).unwrap();
     assert_eq!(v.my_role, Role::Owner);
+    // Olive offers its swarms again (a new one makes it); Notes isn't offered back to olive2.
+    let other = olive.create("Other", &[]).await;
+    olive2.offer(&other.id).await;
+    olive2.drain_for(Duration::from_secs(1)).await;
+    let offers = &olive2.machines.as_ref().unwrap().offers;
+    assert!(offers.iter().all(|o| o.ns != ns), "{offers:?}");
+    assert!(
+        !olive2
+            .toasts
+            .iter()
+            .any(|t| t.contains("offered you Notes"))
+    );
     for s in [&mut olive, &mut olive2, &mut wren] {
         s.stop().await;
     }
@@ -1312,4 +1324,112 @@ async fn you_cannot_remove_the_machine_you_are_on() {
     });
     olive.failure("That isn't one of your machines.").await;
     olive.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_removed_machine_cannot_link_again() {
+    let _slot = slot();
+    let book = DirectPeers::new();
+    let mut olive = Svc::new("olive", &book);
+    let mut olive2 = Svc::new("olive2", &book);
+    let code = olive.link_code().await;
+    olive2.link(code, 2).await;
+    olive
+        .until("olive2 listed", |s| {
+            (s.machines.as_ref()?.devices.len() == 2).then_some(())
+        })
+        .await;
+    let gone = device_named(&olive, "olive2");
+    olive.send(Command::RemoveMachine { device: gone });
+    olive
+        .toast("olive2-pc was removed from your machines.")
+        .await;
+    // Its state wiped, but its device key kept: it is still the machine that was removed.
+    olive2.stop().await;
+    std::fs::remove_file(olive2.root.join("mine.json")).unwrap();
+    olive2.restart();
+    let code = olive.link_code().await;
+    olive2.send(Command::Link { code });
+    olive2
+        .failure("This machine was removed from your machines.")
+        .await;
+    assert_ne!(olive2.person(), olive.person());
+    olive
+        .until("the code still pending", |s| {
+            (s.machines.as_ref()?.links.len() == 1).then_some(())
+        })
+        .await;
+    olive.stop().await;
+    olive2.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_new_key_reaches_a_machine_that_was_away_through_any_other() {
+    let _slot = slot();
+    let book = DirectPeers::new();
+    let mut a = Svc::new("a", &book);
+    let mut b = Svc::new("b", &book);
+    let mut c = Svc::new("c", &book);
+    let mut d = Svc::new("d", &book);
+    for (other, n) in [(&mut b, 2), (&mut c, 3), (&mut d, 4)] {
+        let code = a.link_code().await;
+        other.link(code, n).await;
+    }
+    for s in [&mut a, &mut b, &mut c] {
+        let what = format!("all four listed on {}", s.identity.machine_name);
+        s.until(&what, |s| {
+            let n = s.machines.as_ref()?.devices.len();
+            (n == 4).then_some(())
+        })
+        .await;
+    }
+    c.stop().await;
+    let gone = device_named(&a, "d");
+    a.send(Command::RemoveMachine { device: gone });
+    a.toast("d-pc was removed from your machines.").await;
+    let new = a.person();
+    b.until("b holds the new key", |s| (s.person() == new).then_some(()))
+        .await;
+    // The machine that removed d is gone; c gets the key from b.
+    a.stop().await;
+    c.restart();
+    c.until("c holds the new key", |s| (s.person() == new).then_some(()))
+        .await;
+    for s in [&mut b, &mut c, &mut d] {
+        s.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_removal_that_cannot_be_saved_changes_nothing() {
+    let _slot = slot();
+    let book = DirectPeers::new();
+    let mut olive = Svc::new("olive", &book);
+    let mut olive2 = Svc::new("olive2", &book);
+    let code = olive.link_code().await;
+    olive2.link(code, 2).await;
+    olive
+        .until("olive2 listed", |s| {
+            (s.machines.as_ref()?.devices.len() == 2).then_some(())
+        })
+        .await;
+    let before = olive.person();
+    // mine.json can't be written: a folder stands where its temporary file goes.
+    std::fs::create_dir_all(olive.root.join("mine.json.tmp")).unwrap();
+    let gone = device_named(&olive, "olive2");
+    olive.send(Command::RemoveMachine { device: gone });
+    olive
+        .until("the removal refused", |s| {
+            s.failures
+                .iter()
+                .any(|f| f.starts_with("Couldn't remove olive2-pc:"))
+                .then_some(())
+        })
+        .await;
+    olive.drain_for(Duration::from_secs(1)).await;
+    assert_eq!(olive.person(), before);
+    assert_eq!(olive.machines.as_ref().unwrap().devices.len(), 2);
+    assert_eq!(olive2.person(), before);
+    olive.stop().await;
+    olive2.stop().await;
 }

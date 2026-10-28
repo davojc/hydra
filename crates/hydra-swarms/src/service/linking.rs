@@ -31,6 +31,11 @@ use crate::wire::{MineReply, MineRequest, Offer};
 const OFFERS_FILE: &str = "offers.json";
 /// Your machines still owed your new personal key.
 const KEY_OWED_FILE: &str = "key_owed.json";
+/// How long a sync waits on each of your other machines.
+const SYNC_WAIT: Duration = Duration::from_secs(30);
+/// How long the sync before removing a machine waits on each of your other machines: one that's
+/// off mustn't hold the removal up.
+pub(super) const BEFORE_REMOVAL: Duration = Duration::from_secs(5);
 /// How long a machine taking an offer waits on each of your other machines.
 const ACCEPT_WAIT: Duration = Duration::from_secs(25);
 
@@ -104,7 +109,18 @@ impl DeviceHandler for Handler {
         async move {
             match machines {
                 Some(m) => {
+                    // A machine of yours behind on your keys gets the current one as it asks.
+                    let behind = matches!(&req, MineRequest::Sync { mine } if m.behind(mine));
                     let reply = m.answer(from.clone(), req).await;
+                    if behind && matches!(reply, MineReply::Synced { .. }) {
+                        let (m, from) = (Arc::clone(&m), from.clone());
+                        tokio::spawn(async move { m.send_key(&from).await });
+                    }
+                    // Your other machines hear of a newly linked one from here at once; until
+                    // then they'd take it for a stranger.
+                    if matches!(reply, MineReply::Linked { .. }) {
+                        tokio::spawn(Arc::clone(&m).sync_all());
+                    }
                     // A machine of yours that was away gets your new key as soon as it asks.
                     if lock(&m.key_owed).contains(&from) {
                         tokio::spawn(async move { m.hand_key_to(&from).await });
@@ -317,14 +333,26 @@ impl Machines {
         };
         let old = PersonKey::from_bytes(*lock(&self.person));
         let new = PersonKey::generate();
-        self.store_person(new.to_bytes()).await?;
-        let others: Vec<String> = {
-            let mut mine = lock(&self.mine);
-            mine.chain.push(RekeyCert::new(&old, new.id()));
-            mine.remove(device);
-            self.save_mine(&mine);
-            mine.linked(&self.me).iter().map(|d| d.id.clone()).collect()
-        };
+        // Saved first, then the key kept, and only then told to anyone: a removal that can't
+        // be saved or kept changes nothing.
+        let cant = |e: String| format!("Couldn't remove {name}: {e}");
+        let before = lock(&self.mine).clone();
+        let mut after = before.clone();
+        after.chain.push(RekeyCert::new(&old, new.id()));
+        after.remove(device);
+        after
+            .save(&self.shared.root)
+            .map_err(|e| cant(format!("{e:#}")))?;
+        if let Err(e) = self.store_person(new.to_bytes()).await {
+            let _ = before.save(&self.shared.root);
+            return Err(cant(e));
+        }
+        let others: Vec<String> = after
+            .linked(&self.me)
+            .iter()
+            .map(|d| d.id.clone())
+            .collect();
+        *lock(&self.mine) = after;
         {
             let mut owed = lock(&self.key_owed);
             *owed = others;
@@ -350,6 +378,17 @@ impl Machines {
         if !lock(&self.key_owed).iter().any(|d| d == id) {
             return;
         }
+        self.send_key(id).await;
+    }
+
+    /// Whether `theirs` is behind on your keys: its chain is a start of this machine's.
+    fn behind(&self, theirs: &Mine) -> bool {
+        let ours = &lock(&self.mine).chain;
+        theirs.chain.len() < ours.len() && ours.starts_with(&theirs.chain)
+    }
+
+    /// Gives your machine `id` your current personal key, and the chain vouching for it.
+    async fn send_key(&self, id: &str) {
         let req = MineRequest::NewKey {
             secret: to_hex(&*lock(&self.person)),
             chain: lock(&self.mine).chain.clone(),
@@ -491,6 +530,11 @@ impl Machines {
     /// Asks each of your other machines what it holds, and takes it in, and offers each the
     /// swarms on this machine (it ignores the ones it has, or said no to).
     pub(super) async fn sync_all(self: Arc<Self>) {
+        self.sync_within(SYNC_WAIT).await;
+    }
+
+    /// `sync_all`, giving up on a machine of yours that hasn't answered within `limit`.
+    pub(super) async fn sync_within(&self, limit: Duration) {
         let (devices, ours) = {
             let mine = lock(&self.mine);
             let ids: Vec<String> = mine.linked(&self.me).iter().map(|d| d.id.clone()).collect();
@@ -501,27 +545,39 @@ impl Machines {
         }
         self.remember_peers();
         let offers = self.offers_here();
-        for id in devices {
-            let req = MineRequest::Sync { mine: ours.clone() };
-            let mine = match self.node().ask(&id, &req).await {
-                Ok(MineReply::Synced { mine }) => mine,
-                Ok(MineReply::Refused { reason }) if reason == CUT_OFF => {
-                    self.cut_off();
-                    return;
-                }
-                _ => continue,
-            };
-            self.heard_from(&id);
-            self.take_in(&mine);
-            self.hand_key_to(&id).await;
-            for offer in &offers {
-                let req = MineRequest::Offer {
-                    offer: offer.clone(),
-                };
-                let _ = self.node().ask(&id, &req).await;
-            }
-        }
+        // All at once: one of your machines being off mustn't hold up the rest.
+        let each = devices
+            .iter()
+            .map(|id| self.sync_one(id, &ours, &offers, limit));
+        futures::future::join_all(each).await;
         self.publish();
+    }
+
+    async fn sync_one(&self, id: &str, ours: &Mine, offers: &[Offer], limit: Duration) {
+        let req = MineRequest::Sync { mine: ours.clone() };
+        let theirs = match self.node().ask_within(id, &req, limit).await {
+            Ok(MineReply::Synced { mine }) => mine,
+            Ok(MineReply::Refused { reason }) if reason == CUT_OFF => {
+                self.cut_off();
+                return;
+            }
+            _ => return,
+        };
+        self.heard_from(id);
+        self.take_in(&theirs);
+        // Any machine of yours with your current key passes it on, not only the one that
+        // removed a machine.
+        if self.behind(&theirs) {
+            self.send_key(id).await;
+        } else {
+            self.hand_key_to(id).await;
+        }
+        for offer in offers {
+            let req = MineRequest::Offer {
+                offer: offer.clone(),
+            };
+            let _ = self.node().ask(id, &req).await;
+        }
     }
 
     /// The swarms offered here that this machine isn't in.
@@ -765,6 +821,11 @@ impl Machines {
     }
 
     fn on_link(&self, from: String, token: &str, name: &str) -> MineReply {
+        // A machine removed from yours stays removed, whatever it has forgotten; checked before
+        // the code is spent.
+        if lock(&self.mine).removed.contains(&from) {
+            return refused(CUT_OFF);
+        }
         if !crate::roster::name_fits(name) {
             return refused("Your machine's name can't be blank or too long.");
         }

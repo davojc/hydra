@@ -178,9 +178,9 @@ impl Workspace {
     ) {
         self.swarms_confirm(
             format!("Remove {name}?"),
-            "It's shut out of every swarm you're in, and your other machines get a new key for \
-             you. It keeps the files it already has. This can't be undone; to use it again, link \
-             it again from scratch."
+            "It's shut out of the swarms your other machines are in too, and they get a new key \
+             for you. A swarm only it is in keeps it until an owner there removes it. It keeps \
+             the files it already has. This can't be undone: it can't be linked to you again."
                 .into(),
             "Remove",
             true,

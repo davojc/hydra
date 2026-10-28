@@ -361,6 +361,7 @@ impl SwarmsService {
         fmpsc::UnboundedReceiver<ServiceEvent>,
     )> {
         let (cmd_tx, cmd_rx) = fmpsc::unbounded();
+        let (left_tx, left_rx) = mpsc::unbounded_channel();
         let (ev_tx, ev_rx) = fmpsc::unbounded();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -388,11 +389,12 @@ impl SwarmsService {
                     dirty: Notify::new(),
                     swarm_key: Mutex::new(cfg.swarm_key),
                     keys: Mutex::default(),
+                    left: left_tx,
                 });
                 if let Some(text) = damaged {
                     shared.failed(text);
                 }
-                rt.block_on(run(shared, cfg.identity, cfg.set_person, cmd_rx));
+                rt.block_on(run(shared, cfg.identity, cfg.set_person, cmd_rx, left_rx));
             })?;
         Ok((cmd_tx, ev_rx))
     }
@@ -535,6 +537,8 @@ struct Shared {
     /// What each swarm needs to move this person to their current key: the chain of personal
     /// keys, and the endpoints of the machines removed from yours.
     keys: Mutex<KeyState>,
+    /// Swarms this machine has left or forgotten, so they aren't offered to it again.
+    left: mpsc::UnboundedSender<String>,
 }
 
 #[derive(Clone, Default)]
@@ -648,6 +652,7 @@ async fn run(
     mut identity: Identity,
     set_person: PersonKeyFn,
     mut commands: fmpsc::UnboundedReceiver<Command>,
+    mut left: mpsc::UnboundedReceiver<String>,
 ) {
     let (up_tx, mut up) = mpsc::unbounded_channel();
     let machines = match start_machines(&shared, &identity, set_person, up_tx).await {
@@ -756,13 +761,19 @@ async fn run(
                     None => shared.failed(NO_DEVICE),
                 },
                 Some(Command::RemoveMachine { device }) => match &machines {
-                    Some(m) => match m.remove_machine(&device).await {
-                        // Your other machines get the new key now.
-                        Ok(()) => {
-                            tokio::spawn(Arc::clone(m).sync_all());
-                        }
-                        Err(text) => shared.failed(text),
-                    },
+                    Some(m) => {
+                        let (m, shared) = (Arc::clone(m), Arc::clone(&shared));
+                        tokio::spawn(async move {
+                            // Up to date with your other machines first, so a removal made on
+                            // one of them is built on rather than forked from.
+                            m.sync_within(linking::BEFORE_REMOVAL).await;
+                            match m.remove_machine(&device).await {
+                                // Your other machines get the new key now.
+                                Ok(()) => m.sync_all().await,
+                                Err(text) => shared.failed(text),
+                            }
+                        });
+                    }
                     None => shared.failed(NO_DEVICE),
                 },
                 Some(Command::AcceptOffer { swarm, folder }) => match &machines {
@@ -779,6 +790,12 @@ async fn run(
                 }
                 Some(cmd) => to_swarm(&shared, &mut swarms, cmd),
             },
+            Some(ns) = left.recv() => {
+                // Left here: not offered back by your other machines.
+                if let Some(m) = &machines {
+                    m.decline(&ns);
+                }
+            }
             _ = tick.tick() => {
                 if let Some(m) = &machines {
                     tokio::spawn(Arc::clone(m).sync_all());
@@ -2005,6 +2022,7 @@ impl Worker {
         }
         self.shared.drop_view(&self.ns);
         let _ = fs::remove_dir_all(&self.dir);
+        let _ = self.shared.left.send(self.ns.clone());
         self.finished = true;
     }
 

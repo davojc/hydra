@@ -5,6 +5,7 @@ pub mod decide;
 pub mod folder;
 pub mod ids;
 pub mod invites;
+pub mod mine;
 pub mod node;
 pub mod paths;
 pub mod roster;

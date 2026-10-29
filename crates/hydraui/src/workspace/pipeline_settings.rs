@@ -1024,11 +1024,26 @@ impl Workspace {
                             .py(px(28.))
                             .gap(px(28.))
                             .child(
-                                h_flex().justify_between().child(
-                                    text(20., theme::TEXT)
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child("Pipeline settings"),
-                                ),
+                                h_flex()
+                                    .justify_between()
+                                    .child(
+                                        text(20., theme::TEXT)
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child("Pipeline settings"),
+                                    )
+                                    .child({
+                                        let file = draft.file.clone();
+                                        Button::new(SharedString::from(format!("export-{orch}")))
+                                            .label("Export…")
+                                            .ghost()
+                                            .tooltip(
+                                                "Save this pipeline as a file to send someone. \
+                                                 Saved settings only; it holds no secrets.",
+                                            )
+                                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                                ws.export_pipeline(file.clone(), window, cx)
+                                            }))
+                                    }),
                             )
                             // 1. What it's called and how it looks in the sidebar.
                             .child(

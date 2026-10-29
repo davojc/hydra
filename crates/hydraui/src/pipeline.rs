@@ -966,7 +966,7 @@ prompt = "Work on ticket {ticket}."
 /// and returns its file name. A copy doesn't watch Linear or start at launch until those are
 /// turned on in its settings, so it never takes tickets its original takes.
 pub fn create(hydra_root: &Path, title: &str, from: Option<&str>) -> Result<String, String> {
-    use toml_edit::{DocumentMut, Item, value};
+    use toml_edit::{DocumentMut, value};
     let title = title.trim();
     let name = file_name_for(title);
     if name.is_empty() {
@@ -991,15 +991,66 @@ pub fn create(hydra_root: &Path, title: &str, from: Option<&str>) -> Result<Stri
         .parse()
         .map_err(|e| format!("pipeline {from:?}: {e}"))?;
     doc["name"] = value(title);
+    takes_nothing(&mut doc);
+    let text = doc.to_string();
+    parse(&text).map_err(|e| format!("the new pipeline: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(&file, text).map_err(|e| format!("can't write {}: {e}", file.display()))?;
+    Ok(name)
+}
+
+/// A new pipeline made from another's file doesn't start at launch, and its trigger is off, so
+/// it never takes tickets the original takes until it's turned on in its settings.
+fn takes_nothing(doc: &mut toml_edit::DocumentMut) {
+    use toml_edit::{Item, value};
     doc.remove("autostart");
     for trigger in ["linear", "slack"] {
         if let Some(t) = doc.get_mut(trigger).and_then(Item::as_table_mut) {
             t["watch"] = value(false);
         }
     }
+}
+
+/// **Export…** (core spec §44): pipeline `name`'s file as someone else imports it, comments
+/// and all, without `[autostart]`, whose environment is this machine's. It holds no secrets:
+/// those stay in each environment.
+pub fn export(hydra_root: &Path, name: &str) -> Result<String, String> {
+    load(hydra_root, name)?;
+    let path = folder(hydra_root).join(format!("{name}.toml"));
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("can't read {name}: {e}"))?;
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("{name}: {e}"))?;
+    doc.remove("autostart");
+    Ok(doc.to_string())
+}
+
+/// **Import pipeline…** (core spec §44): writes an exported pipeline as a new one and returns
+/// its file name. Like a copy it takes nothing until turned on; a name already taken here gets
+/// a number (`INTH 2`, `inth-2`).
+pub fn import(hydra_root: &Path, text: &str) -> Result<String, String> {
+    use toml_edit::{DocumentMut, value};
+    let not_one = |e: String| format!("that file isn't a hydraui pipeline: {e}");
+    let mut doc: DocumentMut = text.parse().map_err(|e| not_one(format!("{e}")))?;
+    let title = parse(text).map_err(not_one)?.name.trim().to_string();
+    let base = file_name_for(&title);
+    if base.is_empty() {
+        return Err(format!(
+            "the pipeline's name {title:?} needs a letter or digit in it"
+        ));
+    }
+    let dir = folder(hydra_root);
+    let (mut name, mut shown) = (base.clone(), title.clone());
+    for n in 2.. {
+        if !dir.join(format!("{name}.toml")).exists() {
+            break;
+        }
+        (name, shown) = (format!("{base}-{n}"), format!("{title} {n}"));
+    }
+    doc["name"] = value(shown);
+    takes_nothing(&mut doc);
     let text = doc.to_string();
-    parse(&text).map_err(|e| format!("the new pipeline: {e}"))?;
+    parse(&text).map_err(not_one)?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let file = dir.join(format!("{name}.toml"));
     std::fs::write(&file, text).map_err(|e| format!("can't write {}: {e}", file.display()))?;
     Ok(name)
 }
@@ -1292,6 +1343,78 @@ mod tests {
             "the original unchanged"
         );
         assert!(create(d.path(), "x", Some("nope")).is_err());
+    }
+
+    const SHARED: &str = "# INTH tickets\nname = \"INTH\"\nbar = 85\n[linear]\nteam = \"INTH\"\nwatch = true\n\
+         [autostart]\nenv = \"iov42\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\nprompt = \"do {ticket}\"\n";
+
+    fn with_inth() -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(folder(d.path()).join("inth.toml"), SHARED).unwrap();
+        d
+    }
+
+    #[test]
+    fn an_export_is_the_whole_file_but_this_machines_environment() {
+        let d = with_inth();
+        let text = export(d.path(), "inth").unwrap();
+        assert!(
+            !text.contains("autostart") && !text.contains("iov42"),
+            "{text}"
+        );
+        assert!(text.starts_with("# INTH tickets"), "comments kept: {text}");
+        let p = parse(&text).unwrap();
+        assert_eq!((p.name.as_str(), p.bar, p.stages.len()), ("INTH", 85, 1));
+        assert!(
+            p.linear.unwrap().watch,
+            "an export says what the original does"
+        );
+        assert!(export(d.path(), "nope").is_err());
+    }
+
+    #[test]
+    fn an_import_is_a_new_pipeline_that_takes_nothing_until_turned_on() {
+        let text = export(with_inth().path(), "inth").unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let name = import(other.path(), &text).unwrap();
+        assert_eq!(name, "inth");
+        let p = load(other.path(), &name).unwrap();
+        assert_eq!((p.name.as_str(), p.bar), ("INTH", 85));
+        assert_eq!(p.stages[0].prompt, "do {ticket}");
+        assert_eq!(p.autostart, None);
+        assert!(!p.linear.unwrap().watch);
+    }
+
+    #[test]
+    fn importing_a_name_already_taken_numbers_the_new_one() {
+        let d = with_inth();
+        let text = export(d.path(), "inth").unwrap();
+        assert_eq!(import(d.path(), &text).unwrap(), "inth-2");
+        assert_eq!(import(d.path(), &text).unwrap(), "inth-3");
+        assert_eq!(load(d.path(), "inth-2").unwrap().name, "INTH 2");
+        assert!(
+            load(d.path(), "inth").unwrap().linear.unwrap().watch,
+            "the original unchanged"
+        );
+    }
+
+    #[test]
+    fn a_file_that_isnt_a_pipeline_is_refused_and_nothing_is_written() {
+        let d = tempfile::tempdir().unwrap();
+        for (text, says) in [
+            ("hello", "pipeline"),
+            ("bar = 80\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n", "name"),
+            ("name = \"x\"\n", "no stages"),
+            (
+                "name = \"!!\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n",
+                "name",
+            ),
+        ] {
+            let e = import(d.path(), text).unwrap_err();
+            assert!(e.contains(says), "{text:?}: {e}");
+        }
+        assert_eq!(names(d.path()), Vec::<String>::new());
     }
 
     use super::*;

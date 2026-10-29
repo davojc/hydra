@@ -347,6 +347,16 @@ impl Runs {
             .collect()
     }
 
+    /// The runs of `orchestrator` that count against `runs_at_once`: open ones not waiting on
+    /// someone's answer (product's, or a pull request's author). A waiting run idles, so it
+    /// leaves its place to another ticket.
+    pub fn busy_of(&self, orchestrator: &str) -> Vec<&Run> {
+        self.open_of(orchestrator)
+            .into_iter()
+            .filter(|r| r.asking.is_none())
+            .collect()
+    }
+
     /// The latest run `orchestrator` started.
     pub fn current(&self, orchestrator: &str) -> Option<&Run> {
         self.runs
@@ -411,7 +421,7 @@ impl Runs {
             return Err("a stage session can't start a run".into());
         }
         let open: Vec<&str> = self
-            .open_of(orchestrator)
+            .busy_of(orchestrator)
             .into_iter()
             .map(|r| r.id.as_str())
             .collect();
@@ -1987,6 +1997,32 @@ mod tests {
         runs.report("t2", rated(90)).unwrap();
         assert_eq!(runs.open_of("orch").len(), 1);
         assert!(runs.start_run("orch", p, "PR-3", "z").is_ok());
+    }
+
+    #[test]
+    fn a_ticket_waiting_on_an_answer_leaves_its_place_to_another() {
+        let mut runs = Runs::default();
+        let p = pipeline(&["a"]);
+        let first = runs
+            .start_run("orch", p.clone(), "PR-1", "x")
+            .unwrap()
+            .id
+            .clone();
+        started(&mut runs, &first, "a", "t1");
+        let now = SystemTime::now();
+        runs.ask(
+            "t1",
+            "The fixes I asked for",
+            Some("https://github.com/o/r/pull/1"),
+            now,
+            Whom::Author,
+        )
+        .unwrap();
+        assert_eq!(runs.busy_of("orch").len(), 0);
+        assert!(runs.start_run("orch", p.clone(), "PR-2", "y").is_ok());
+        let e = runs.start_run("orch", p, "PR-3", "z").unwrap_err();
+        assert!(e.contains("PR-2-1"), "{e}");
+        assert_eq!(runs.open_of("orch").len(), 2);
     }
 
     #[test]

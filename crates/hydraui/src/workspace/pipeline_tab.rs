@@ -956,7 +956,7 @@ impl Workspace {
             Some(Trigger::Follower(text)) => {
                 return self.render_quiet("Nothing in progress", &text);
             }
-            Some(Trigger::Lead(t)) => t,
+            Some(Trigger::Lead(t)) => *t,
         };
         let TriggerView {
             line,

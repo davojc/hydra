@@ -64,16 +64,19 @@ pub struct Card {
 
 /// A collapsed pipeline's one line in the sidebar: how many sessions it has open, and how its
 /// trigger is set (`Automatic`, `Manual`, `Stopped`), when it has one.
-pub fn collapsed_line(sessions: usize, mode: Option<&str>) -> String {
-    let sessions = match sessions {
+pub fn collapsed_line(sessions: usize, mode: Option<&str>, waiting: usize) -> String {
+    let mut line = match sessions {
         0 => "No sessions".to_string(),
         1 => "1 session".to_string(),
         n => format!("{n} sessions"),
     };
-    match mode {
-        Some(m) => format!("{sessions} · {m}"),
-        None => sessions,
+    if let Some(m) = mode {
+        line = format!("{line} · {m}");
     }
+    if waiting > 0 {
+        line = format!("{line} · {waiting} waiting");
+    }
+    line
 }
 
 /// `pipeline`'s accent on its card.
@@ -315,12 +318,17 @@ mod tests {
     #[test]
     fn a_collapsed_pipeline_says_its_sessions_and_mode() {
         use super::collapsed_line;
-        assert_eq!(collapsed_line(0, None), "No sessions");
-        assert_eq!(collapsed_line(1, Some("Manual")), "1 session · Manual");
+        assert_eq!(collapsed_line(0, None, 0), "No sessions");
+        assert_eq!(collapsed_line(1, Some("Manual"), 0), "1 session · Manual");
         assert_eq!(
-            collapsed_line(4, Some("Automatic")),
+            collapsed_line(4, Some("Automatic"), 0),
             "4 sessions · Automatic"
         );
+        assert_eq!(
+            collapsed_line(6, Some("Automatic"), 1),
+            "6 sessions · Automatic · 1 waiting"
+        );
+        assert_eq!(collapsed_line(6, None, 4), "6 sessions · 4 waiting");
     }
 
     #[test]

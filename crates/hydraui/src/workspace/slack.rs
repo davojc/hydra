@@ -153,11 +153,13 @@ impl Workspace {
         let Some((pipeline, settings, env)) = self.slack_of(orch, cx) else {
             return;
         };
-        let queued: Vec<String> = self
+        // Handed to an orchestrator and not started yet counts as waiting too.
+        let mut queued: Vec<String> = self
             .slack_queue(&pipeline.file)
             .iter()
             .map(|q| q.ticket.clone())
             .collect();
+        queued.extend(self.slack_inflight.values().map(|q| q.ticket.clone()));
         let passed_over: Vec<String> = self.slack_mine.iter().cloned().collect();
         let exe = crate::mcp::server::get()
             .and_then(|sv| crate::mcp::server::lock(sv.registry()).hydra_exe.clone());
@@ -176,8 +178,11 @@ impl Workspace {
                     let token = hydra.slack_token(&env)?;
                     // Only a run still open holds its pull request: one posted again after its
                     // review ended is reviewed again (core spec §40).
-                    let mut ran =
-                        slack_watch::still_open(&crate::run_history::read(hydra.paths.root(), &[]));
+                    let history = crate::run_history::read(hydra.paths.root(), &[]);
+                    let mut ran = slack_watch::still_open(&history);
+                    let mut reviewed = slack_watch::reviewed(&history);
+                    // Ones the person watching opened are never reviewed; they don't hold a tick.
+                    reviewed.extend(passed_over.iter().cloned());
                     ran.extend(passed_over);
                     // Pull requests the person watching opened are theirs: GitHub won't let
                     // them approve their own, so they're left alone. Asked of GitHub as the
@@ -209,6 +214,7 @@ impl Workspace {
                         SystemTime::now(),
                         &ran,
                         &queued,
+                        &reviewed,
                         &mine,
                     )
                 })
@@ -244,6 +250,22 @@ impl Workspace {
                 f.mine.join(", ")
             ));
             self.slack_mine.extend(f.mine.iter().cloned());
+        }
+        if let Ok(f) = &found {
+            if !f.ticked.is_empty() {
+                crate::action_log::write(format!(
+                    "slack: {}: marked {} message(s) done with :{}:",
+                    pipeline.file,
+                    f.ticked.len(),
+                    settings.done_reaction
+                ));
+            }
+            if let Some(e) = &f.tick_failed {
+                crate::action_log::write(format!(
+                    "slack: {}: can't mark a message done: {e}",
+                    pipeline.file
+                ));
+            }
         }
         let Some(w) = self.linear_watch.get_mut(&orch) else {
             return;

@@ -60,6 +60,9 @@ pub struct SlackSettings {
     /// The reaction that marks a message taken, by name (`eyes` is 👀). A message that already
     /// has it, from anyone, is someone else's.
     pub reaction: String,
+    /// The reaction put on a taken message once every pull request in it was reviewed to the
+    /// end (`white_check_mark` is ✅); empty: none.
+    pub done_reaction: String,
     pub every_minutes: u32,
     /// How far back a look goes, so switching on doesn't take the channel's whole history.
     pub lookback_hours: u32,
@@ -254,6 +257,7 @@ struct FileSlack {
     channel: String,
     label: Option<String>,
     reaction: Option<String>,
+    done_reaction: Option<String>,
     every_minutes: Option<u32>,
     lookback_hours: Option<u32>,
     watch: Option<bool>,
@@ -299,6 +303,10 @@ fn slack_settings(f: FileSlack) -> Result<SlackSettings, String> {
             .unwrap_or_else(|| channel.clone()),
         channel,
         reaction,
+        done_reaction: f
+            .done_reaction
+            .map(|r| r.trim().trim_matches(':').to_string())
+            .unwrap_or_default(),
         every_minutes,
         lookback_hours: f.lookback_hours.unwrap_or(DEFAULT_LOOKBACK_HOURS).max(1),
         watch: f.watch.unwrap_or(false),
@@ -627,6 +635,10 @@ pub fn validate(edit: &Edit) -> Result<(), &'static str> {
         if sl.reaction.trim().trim_matches(':').is_empty() {
             return Err("Name the reaction that marks a message taken, e.g. eyes");
         }
+        let done = sl.done_reaction.trim().trim_matches(':');
+        if done.eq_ignore_ascii_case(sl.reaction.trim().trim_matches(':')) {
+            return Err("The done reaction must differ from the one that marks a message taken");
+        }
     }
     Ok(())
 }
@@ -793,6 +805,14 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
                 t["label"] = value(label);
             }
             t["reaction"] = value(sl.reaction.trim().trim_matches(':'));
+            match sl.done_reaction.trim().trim_matches(':') {
+                "" => {
+                    if let Some(t) = t.as_table_mut() {
+                        t.remove("done_reaction");
+                    }
+                }
+                done => t["done_reaction"] = value(done),
+            }
             t["every_minutes"] = value(i64::from(sl.every_minutes));
             t["lookback_hours"] = value(i64::from(sl.lookback_hours));
             t["watch"] = value(sl.watch);
@@ -1110,6 +1130,10 @@ mod tests {
         sl.every_minutes = 7;
         sl.lookback_hours = 48;
         sl.reaction = ":robot_face:".into();
+        sl.done_reaction = "robot_face".into();
+        assert!(validate(&edit).is_err(), "done differs from taken");
+        let sl = edit.slack.as_mut().unwrap();
+        sl.done_reaction = ":white_check_mark:".into();
         assert_eq!(validate(&edit), Ok(()));
         save(d.path(), "prs", &edit).unwrap();
         let text = std::fs::read_to_string(folder(d.path()).join("prs.toml")).unwrap();
@@ -1123,9 +1147,20 @@ mod tests {
                 back.every_minutes,
                 back.lookback_hours,
                 back.reaction.as_str(),
+                back.done_reaction.as_str(),
                 back.watch
             ),
-            (7, 48, "robot_face", true)
+            (7, 48, "robot_face", "white_check_mark", true)
+        );
+        // Cleared, the key goes.
+        let mut off = edit.clone();
+        off.slack.as_mut().unwrap().done_reaction = String::new();
+        save(d.path(), "prs", &off).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("prs.toml")).unwrap();
+        assert!(!text.contains("done_reaction"), "{text}");
+        assert_eq!(
+            load(d.path(), "prs").unwrap().slack.unwrap().done_reaction,
+            ""
         );
         assert_eq!(back.label, "#pull-requests");
 

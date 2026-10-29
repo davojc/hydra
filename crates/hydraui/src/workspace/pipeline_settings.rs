@@ -86,6 +86,7 @@ struct SlackDraft {
     every: Entity<InputState>,
     lookback: Entity<InputState>,
     reaction: Entity<InputState>,
+    done_reaction: Entity<InputState>,
 }
 
 impl SlackDraft {
@@ -95,6 +96,7 @@ impl SlackDraft {
             channel: text(&self.channel),
             label: text(&self.label),
             reaction: text(&self.reaction).trim_matches(':').to_string(),
+            done_reaction: text(&self.done_reaction).trim_matches(':').to_string(),
             // Not a number: 0, which validation names.
             every_minutes: text(&self.every).parse().unwrap_or(0),
             lookback_hours: text(&self.lookback).parse().unwrap_or(0),
@@ -372,6 +374,10 @@ impl Workspace {
                 sfield(|s| s.reaction.clone(), pipeline::DEFAULT_REACTION),
                 "eyes (👀)",
             ),
+            done_reaction: input(
+                sfield(|s| s.done_reaction.clone(), ""),
+                "white_check_mark (✅); empty for none",
+            ),
         };
         let chosen = if saved.slack.is_some() {
             2
@@ -605,6 +611,7 @@ impl Workspace {
                 .child(row("Channel name", &sl.label))
                 .child(row("Channel ID", &sl.channel))
                 .child(row("Mark taken with", &sl.reaction))
+                .child(row("Mark done with", &sl.done_reaction))
                 .child(row("Check every (minutes)", &sl.every))
                 .child(row("Look back (hours)", &sl.lookback));
         }

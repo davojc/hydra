@@ -73,6 +73,8 @@ pub(super) struct Source {
     pub(super) every_minutes: u32,
     pub(super) noun: &'static str,
     pub(super) waiting: usize,
+    /// The pull requests waiting their turn, named (`slack_watch::waiting_line`).
+    pub(super) waiting_line: Option<String>,
     pub(super) tooltip: String,
     pub(super) pick: &'static str,
     pub(super) pick_tooltip: String,
@@ -83,7 +85,7 @@ pub(super) struct Source {
 /// A trigger's state for one orchestrator (`Workspace::trigger_view`).
 pub(super) enum Trigger {
     /// The first orchestrator: its trigger.
-    Lead(TriggerView),
+    Lead(Box<TriggerView>),
     /// A later one of several at once: it takes work from the first; what to say.
     Follower(String),
 }
@@ -198,7 +200,7 @@ impl Workspace {
     pub(super) fn free_slot(&self, orch: PaneId, cx: &gpui::App) -> Option<PaneId> {
         let most = self.max_runs(orch);
         self.slots(orch, cx).into_iter().find(|s| {
-            self.open_runs_of(*s, cx).len() < most
+            self.busy_runs_of(*s, cx) < most
                 && !self.pending_wakes.contains_key(s)
                 && self
                     .linear_watch
@@ -246,6 +248,18 @@ impl Workspace {
                 .map(|r| r.ticket.clone())
                 .collect(),
             _ => Vec::new(),
+        }
+    }
+
+    /// How many of `orch`'s runs count against `runs_at_once` (`Runs::busy_of`).
+    fn busy_runs_of(&self, orch: PaneId, cx: &gpui::App) -> usize {
+        let token = self
+            .panes
+            .get(&orch)
+            .and_then(|v| v.read(cx).mcp_token().map(str::to_string));
+        match (token, server::get()) {
+            (Some(token), Some(sv)) => server::lock(sv.registry()).runs.busy_of(&token).len(),
+            _ => 0,
         }
     }
 
@@ -864,6 +878,7 @@ impl Workspace {
                 every_minutes: s.every_minutes,
                 noun: "ticket",
                 waiting: 0,
+                waiting_line: None,
                 tooltip: linear_watch::trigger_tooltip(&s),
                 env: None,
                 pick: "Pick next ticket",
@@ -879,6 +894,10 @@ impl Workspace {
                 every_minutes: s.every_minutes,
                 noun: "PR",
                 waiting: self.slack_waiting(&p.file),
+                waiting_line: self
+                    .slack_queues
+                    .get(&p.file)
+                    .and_then(crate::slack_watch::waiting_line),
                 tooltip: crate::slack_watch::tooltip(&s),
                 pick: "Take next PR",
                 pick_tooltip: format!(
@@ -905,13 +924,15 @@ impl Workspace {
         }
         let w = self.linear_watch.get(&orch);
         // With several runs at once, the next waits only while every one is busy.
-        let open_run = if self.max_runs(orch) == 1 && slots.len() == 1 {
+        // A run waiting on someone's answer leaves its place (`Runs::busy_of`), so the card says
+        // only the runs that fill it.
+        let open_run = if self.free_slot(orch, cx).is_some() {
+            None
+        } else if self.max_runs(orch) == 1 && slots.len() == 1 {
             self.open_run_ticket(orch, cx)
         } else {
-            self.free_slot(orch, cx).is_none().then(|| {
-                let open: usize = slots.iter().map(|s| self.open_runs_of(*s, cx).len()).sum();
-                format!("all {open} running")
-            })
+            let busy: usize = slots.iter().map(|s| self.busy_runs_of(*s, cx)).sum();
+            Some(format!("all {busy} running"))
         };
         let (mode, line) = linear_watch::trigger(&linear_watch::TriggerFacts {
             on: w.is_some_and(|w| w.on),
@@ -943,7 +964,7 @@ impl Workspace {
                 .unwrap_or(0.0)
             }
         });
-        Some(Trigger::Lead(TriggerView {
+        Some(Trigger::Lead(Box::new(TriggerView {
             mode,
             line,
             progress,
@@ -951,7 +972,7 @@ impl Workspace {
             open_run,
             checking,
             source,
-        }))
+        })))
     }
 
     /// The trigger row under a pipeline's card: Automatic's switch and pill, what it's doing,
@@ -975,7 +996,7 @@ impl Workspace {
                         .into_any_element(),
                 );
             }
-            Trigger::Lead(t) => t,
+            Trigger::Lead(t) => *t,
         };
         let TriggerView {
             mode,
@@ -1035,6 +1056,23 @@ impl Workspace {
                         }))
                         .child(line),
                 )
+                .when_some(source.waiting_line.clone(), |d, waiting| {
+                    d.child(
+                        div()
+                            .id(SharedString::from(format!("waiting-{orch}")))
+                            .truncate()
+                            .text_xs()
+                            .text_color(color(theme::TEXT_MUTED))
+                            .tooltip({
+                                let waiting = waiting.clone();
+                                move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(waiting.clone())
+                                        .build(window, cx)
+                                }
+                            })
+                            .child(waiting),
+                    )
+                })
                 .when_some(progress, |d, p| {
                     d.child(look_bar(
                         SharedString::from(format!("look-bar-{orch}")),

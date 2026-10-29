@@ -375,6 +375,9 @@ impl Workspace {
             .map(|(o, _, panes)| panes.iter().filter(|p| *p != o).count())
             .sum();
         let mode = self.trigger_mode(lead, cx).map(|m| m.label());
+        let waiting = self
+            .slack_of(lead, cx)
+            .map_or(0, |(p, _, _)| self.slack_waiting(&p.file));
         let active = members
             .iter()
             .any(|(_, _, panes)| panes.iter().any(|p| Some(*p) == shown));
@@ -425,7 +428,9 @@ impl Workspace {
                     .truncate()
                     .text_xs()
                     .text_color(color(crate::orchestrator_theme::TEXT_SECONDARY))
-                    .child(crate::pipeline_card::collapsed_line(sessions, mode)),
+                    .child(crate::pipeline_card::collapsed_line(
+                        sessions, mode, waiting,
+                    )),
             )
             .into_any_element()
     }

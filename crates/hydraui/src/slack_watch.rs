@@ -64,24 +64,60 @@ pub fn pick<'a>(
         .collect()
 }
 
-/// What a look found: the pull requests to run, and the ones passed over because the person
-/// watching opened them (GitHub won't let an author approve their own).
+/// The pull requests a look leaves alone because a run of them is still open, from the runs
+/// hydraui has logged. One whose run ended (done or stopped) is taken again when someone posts
+/// it afresh: an unmarked message is a new ask, e.g. a re-review after new commits.
+pub fn still_open(runs: &[crate::run_history::Entry]) -> Vec<String> {
+    runs.iter()
+        .filter(|e| !e.ended)
+        .map(|e| e.ticket.clone())
+        .collect()
+}
+
+/// The pull requests reviewed to the end: their latest run ended done. One stopped, or being
+/// reviewed again, isn't.
+pub fn reviewed(runs: &[crate::run_history::Entry]) -> Vec<String> {
+    // Newest first (`run_history::read`), so a ticket's first entry is its latest run.
+    let mut seen: Vec<&str> = Vec::new();
+    let mut out = Vec::new();
+    for e in runs {
+        if seen.iter().any(|t| t.eq_ignore_ascii_case(&e.ticket)) {
+            continue;
+        }
+        seen.push(&e.ticket);
+        if e.ended && e.outcome == crate::run_history::Outcome::Done {
+            out.push(e.ticket.clone());
+        }
+    }
+    out
+}
+
+/// What a look found: the pull requests to run, the ones passed over because the person
+/// watching opened them (GitHub won't let an author approve their own), and the messages it
+/// ticked done.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Found {
     pub queued: Vec<Queued>,
     pub mine: Vec<String>,
+    /// The messages given the done reaction, by `ts`.
+    pub ticked: Vec<String>,
+    /// Why a tick failed, if one did; the next look tries again.
+    pub tick_failed: Option<String>,
 }
 
 /// One look: the channel's messages from the last `lookback_hours`, each one to take marked
-/// with the reaction, and their pull requests in order. `ran` are tickets hydraui has run
-/// before or passed over; `queued` are waiting already. `mine` says whether the person watching
+/// with the reaction, and their pull requests in order. `ran` are tickets with a run still
+/// open, or passed over; `queued` are waiting already. `mine` says whether the person watching
 /// opened a pull request: theirs are left alone, and a message with only theirs isn't marked.
+/// With a done reaction set, a taken message is given it once every pull request in it is in
+/// `reviewed` (or passed over as theirs) and none waits in `queued` (core spec §43).
 pub fn find_and_mark(
     api: &dyn SlackApi,
     settings: &SlackSettings,
     now: SystemTime,
     ran: &[String],
     queued: &[String],
+    reviewed: &[String],
     mine: &dyn Fn(&Pr) -> Result<bool, LinearError>,
 ) -> Result<Found, LinearError> {
     let since = now
@@ -119,7 +155,47 @@ pub fn find_and_mark(
             q
         }));
     }
+    let done = settings.done_reaction.as_str();
+    if !done.is_empty() {
+        let is = |list: &[String], t: &str| list.iter().any(|r| r.eq_ignore_ascii_case(t));
+        let finished = messages.iter().filter(|m| {
+            let prs = pr_links(&m.text);
+            m.reactions.iter().any(|r| r == &settings.reaction)
+                && !m.reactions.iter().any(|r| r == done)
+                && !prs.is_empty()
+                && prs.iter().all(|p| {
+                    let t = p.ticket();
+                    (is(reviewed, &t) || is(&found.mine, &t)) && !is(queued, &t)
+                })
+        });
+        for m in finished {
+            match api.react(&settings.channel, &m.ts, done) {
+                Ok(()) => found.ticked.push(m.ts.clone()),
+                Err(e) => {
+                    found.tick_failed = Some(e.to_string());
+                    break;
+                }
+            }
+        }
+    }
     Ok(found)
+}
+
+/// The card's line naming the pull requests waiting their turn, in the order they start, the
+/// repo said once for a run of the same repo: `Waiting: iov42-lingo-app #52, #54, svc-usage #80`.
+pub fn waiting_line(queue: &VecDeque<Queued>) -> Option<String> {
+    let mut names: Vec<String> = Vec::new();
+    let mut repo_before: Option<&str> = None;
+    for q in queue {
+        let (repo, number) = q.title.rsplit_once(" #").unwrap_or((q.title.as_str(), ""));
+        names.push(if repo_before == Some(repo) && !number.is_empty() {
+            format!("#{number}")
+        } else {
+            q.title.clone()
+        });
+        repo_before = Some(repo);
+    }
+    (!names.is_empty()).then(|| format!("Waiting: {}", names.join(", ")))
 }
 
 /// What the orchestrator is told to start the next pull request.
@@ -190,6 +266,87 @@ pub fn save_queue(path: &Path, queue: &VecDeque<Queued>) -> std::io::Result<()> 
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_pull_request_is_held_only_while_its_run_is_open() {
+        let d = tempfile::tempdir().unwrap();
+        let runs = d.path().join("hydraui").join("runs");
+        std::fs::create_dir_all(&runs).unwrap();
+        let started = |t: &str| {
+            format!(
+                "{{\"at\":\"2026-10-28 13:21:30.110\",\"event\":\"run started\",\"ticket\":\"{t}\",\"summary\":\"{t}\",\"pipeline\":\"review-pr-s\"}}\n"
+            )
+        };
+        // Reviewed and ended this morning; posted again after new commits.
+        std::fs::write(
+            runs.join("version2-frontend-5550-1.jsonl"),
+            started("version2-frontend-5550")
+                + "{\"at\":\"2026-10-28 13:27:32.875\",\"event\":\"run ended\",\"outcome\":\"done\"}\n",
+        )
+        .unwrap();
+        // Still being reviewed.
+        std::fs::write(
+            runs.join("version2-frontend-5557-1.jsonl"),
+            started("version2-frontend-5557"),
+        )
+        .unwrap();
+        let open = still_open(&crate::run_history::read(d.path(), &[]));
+        assert_eq!(open, ["version2-frontend-5557"]);
+    }
+
+    #[test]
+    fn a_pull_request_counts_reviewed_when_its_latest_run_ended_done() {
+        let d = tempfile::tempdir().unwrap();
+        let runs = d.path().join("hydraui").join("runs");
+        std::fs::create_dir_all(&runs).unwrap();
+        let run = |id: &str, ticket: &str, at: &str, end: Option<&str>| {
+            let mut text = format!(
+                "{{\"at\":\"{at}\",\"event\":\"run started\",\"ticket\":\"{ticket}\",\"summary\":\"x\",\"pipeline\":\"review-pr-s\"}}\n"
+            );
+            if let Some(outcome) = end {
+                text += &format!(
+                    "{{\"at\":\"{at}\",\"event\":\"run ended\",\"outcome\":\"{outcome}\"}}\n"
+                );
+            }
+            std::fs::write(runs.join(format!("{id}.jsonl")), text).unwrap();
+        };
+        run(
+            "lingo-50-1",
+            "lingo-50",
+            "2026-10-29 09:00:00.000",
+            Some("done"),
+        );
+        run(
+            "lingo-51-1",
+            "lingo-51",
+            "2026-10-29 09:00:00.000",
+            Some("stopped"),
+        );
+        // Reviewed once, then posted again and being reviewed now.
+        run(
+            "lingo-52-1",
+            "lingo-52",
+            "2026-10-28 09:00:00.000",
+            Some("done"),
+        );
+        run("lingo-52-2", "lingo-52", "2026-10-29 09:00:00.000", None);
+        // Stopped once, then reviewed again to the end.
+        run(
+            "lingo-53-1",
+            "lingo-53",
+            "2026-10-28 09:00:00.000",
+            Some("stopped"),
+        );
+        run(
+            "lingo-53-2",
+            "lingo-53",
+            "2026-10-29 09:00:00.000",
+            Some("done"),
+        );
+        let mut got = reviewed(&crate::run_history::read(d.path(), &[]));
+        got.sort();
+        assert_eq!(got, ["lingo-50", "lingo-53"]);
+    }
     use std::cell::RefCell;
 
     use super::*;
@@ -208,6 +365,7 @@ mod tests {
             channel: "C0C217CER6G".into(),
             label: "#pull-requests".into(),
             reaction: "eyes".into(),
+            done_reaction: String::new(),
             every_minutes: 2,
             lookback_hours: 24,
             watch: true,
@@ -234,6 +392,63 @@ mod tests {
     }
 
     const PR: &str = "<https://github.com/iov42/svc-usage/pull/";
+
+    #[test]
+    fn a_taken_message_is_ticked_once_every_pull_request_in_it_was_reviewed() {
+        let api = Fake {
+            messages: vec![
+                // Every one reviewed: ticked.
+                msg("1", &format!("{PR}50|a> {PR}51|b>"), &["eyes"]),
+                // One still waiting its turn: not yet.
+                msg("2", &format!("{PR}52|a> {PR}53|b>"), &["eyes"]),
+                // Ticked already, or never taken: left alone.
+                msg("3", &format!("{PR}54|a>"), &["eyes", "white_check_mark"]),
+                msg("4", &format!("{PR}55|a>"), &["thumbsup"]),
+            ],
+            reacted: RefCell::default(),
+            fail_react: false,
+        };
+        let reviewed: Vec<String> = [
+            "svc-usage-50",
+            "svc-usage-51",
+            "svc-usage-52",
+            "svc-usage-54",
+        ]
+        .map(String::from)
+        .into();
+        let mut s = settings();
+        s.done_reaction = "white_check_mark".into();
+        let found = find_and_mark(
+            &api,
+            &s,
+            SystemTime::now(),
+            &["svc-usage-55".into()],
+            &["svc-usage-53".into()],
+            &reviewed,
+            &|_| Ok(false),
+        )
+        .unwrap();
+        assert_eq!(*api.reacted.borrow(), ["1:white_check_mark"]);
+        assert_eq!(found.ticked, ["1"]);
+
+        // With no done reaction set, nothing is ticked.
+        let api = Fake {
+            messages: api.messages.clone(),
+            reacted: RefCell::default(),
+            fail_react: false,
+        };
+        find_and_mark(
+            &api,
+            &settings(),
+            SystemTime::now(),
+            &["svc-usage-55".into()],
+            &[],
+            &reviewed,
+            &|_| Ok(false),
+        )
+        .unwrap();
+        assert!(api.reacted.borrow().is_empty());
+    }
 
     #[test]
     fn messages_someone_took_or_without_a_pr_are_left_alone() {
@@ -272,6 +487,7 @@ mod tests {
             SystemTime::now(),
             &["svc-usage-60".into()],
             &["svc-usage-63".into()],
+            &[],
             &|_| Ok(false),
         )
         .unwrap()
@@ -308,7 +524,8 @@ mod tests {
             fail_react: false,
         };
         let mine = |p: &Pr| Ok(p.number != 72);
-        let found = find_and_mark(&api, &settings(), SystemTime::now(), &[], &[], &mine).unwrap();
+        let found =
+            find_and_mark(&api, &settings(), SystemTime::now(), &[], &[], &[], &mine).unwrap();
         assert_eq!(
             found
                 .queued
@@ -324,7 +541,7 @@ mod tests {
             "a message of only mine isn't marked"
         );
         let down = |_: &Pr| Err(LinearError::Failed("gh down".into()));
-        assert!(find_and_mark(&api, &settings(), SystemTime::now(), &[], &[], &down).is_err());
+        assert!(find_and_mark(&api, &settings(), SystemTime::now(), &[], &[], &[], &down).is_err());
     }
 
     #[test]
@@ -335,9 +552,15 @@ mod tests {
             fail_react: true,
         };
         assert!(
-            find_and_mark(&api, &settings(), SystemTime::now(), &[], &[], &|_| Ok(
-                false
-            ))
+            find_and_mark(
+                &api,
+                &settings(),
+                SystemTime::now(),
+                &[],
+                &[],
+                &[],
+                &|_| Ok(false)
+            )
             .is_err()
         );
     }
@@ -376,6 +599,30 @@ mod tests {
         assert!(
             text.contains("same message as https://github.com/iov42/svc-usage/pull/63"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn the_waiting_pull_requests_are_named_in_turn_one_repo_at_a_time() {
+        let q = |title: &str| Queued {
+            url: String::new(),
+            ticket: String::new(),
+            title: title.into(),
+            by: String::new(),
+            tries: 0,
+            with: Vec::new(),
+        };
+        assert_eq!(waiting_line(&VecDeque::new()), None);
+        let queue: VecDeque<Queued> = [
+            q("iov42-lingo-app #52"),
+            q("iov42-lingo-app #54"),
+            q("svc-usage #80"),
+            q("iov42-lingo-app #55"),
+        ]
+        .into();
+        assert_eq!(
+            waiting_line(&queue).as_deref(),
+            Some("Waiting: iov42-lingo-app #52, #54, svc-usage #80, iov42-lingo-app #55")
         );
     }
 

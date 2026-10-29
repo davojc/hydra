@@ -48,6 +48,8 @@ pub struct Entry {
     pub sla: Option<bool>,
     /// The ticket in Linear.
     pub link: Option<String>,
+    /// Its log has its end: done or stopped. Not yet: running, or interrupted to be resumed.
+    pub ended: bool,
     /// When it started, as the log writes times (sortable).
     started: String,
 }
@@ -212,6 +214,7 @@ fn entry(run: &str, text: &str, live: bool) -> Option<Entry> {
         notes,
         sla,
         link,
+        ended: end_outcome.is_some(),
         started,
     })
 }

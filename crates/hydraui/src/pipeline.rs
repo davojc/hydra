@@ -34,6 +34,10 @@ pub struct Pipeline {
     /// How a stage writes the questions it asks product (`[product] style`), e.g. short and
     /// plain, or technical with data; `None`: as the stage sees fit.
     pub product_style: Option<String>,
+    /// Its stages are told that a change beyond the ticket altering what users see or do is
+    /// product's call, and ask (`[product] ask`, on unless `false`). Off: no such rule, and
+    /// `stage_ask` is refused (core spec §41).
+    pub product_asks: bool,
     /// How many tickets it runs at once (`runs_at_once`, 1 to `MAX_RUNS_AT_ONCE`): each has
     /// its own orchestrator and card, and the trigger hands work to whichever is free.
     pub runs_at_once: u8,
@@ -56,6 +60,9 @@ pub struct SlackSettings {
     /// The reaction that marks a message taken, by name (`eyes` is 👀). A message that already
     /// has it, from anyone, is someone else's.
     pub reaction: String,
+    /// The reaction put on a taken message once every pull request in it was reviewed to the
+    /// end (`white_check_mark` is ✅); empty: none.
+    pub done_reaction: String,
     pub every_minutes: u32,
     /// How far back a look goes, so switching on doesn't take the channel's whole history.
     pub lookback_hours: u32,
@@ -82,6 +89,8 @@ pub struct LinearSettings {
     /// Only tickets with an SLA running are picked (the default). Off: tickets without one
     /// too, after those with one, by priority then age.
     pub sla_only: bool,
+    /// Only tickets with one of these labels (any case) are picked; none: any ticket.
+    pub labels: Vec<String>,
 }
 
 /// Which tickets in the `pick` state a pipeline takes.
@@ -157,7 +166,7 @@ impl Pipeline {
     /// when the pipeline asks product in a channel.
     pub fn stage_claude(&self) -> Vec<String> {
         let mut argv = vec!["claude".to_string()];
-        if self.product_channel.is_some() {
+        if self.product_asks && self.product_channel.is_some() {
             // One word: the flag takes a list, and would take the prompt after it too.
             argv.push(format!("--allowedTools={PRODUCT_TOOLS}"));
         }
@@ -248,6 +257,7 @@ struct FileSlack {
     channel: String,
     label: Option<String>,
     reaction: Option<String>,
+    done_reaction: Option<String>,
     every_minutes: Option<u32>,
     lookback_hours: Option<u32>,
     watch: Option<bool>,
@@ -293,6 +303,10 @@ fn slack_settings(f: FileSlack) -> Result<SlackSettings, String> {
             .unwrap_or_else(|| channel.clone()),
         channel,
         reaction,
+        done_reaction: f
+            .done_reaction
+            .map(|r| r.trim().trim_matches(':').to_string())
+            .unwrap_or_default(),
         every_minutes,
         lookback_hours: f.lookback_hours.unwrap_or(DEFAULT_LOOKBACK_HOURS).max(1),
         watch: f.watch.unwrap_or(false),
@@ -312,6 +326,8 @@ struct FileProduct {
     channel: Option<String>,
     #[serde(default)]
     style: Option<String>,
+    #[serde(default)]
+    ask: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -325,6 +341,7 @@ struct FileLinear {
     every_minutes: Option<u32>,
     watch: Option<bool>,
     sla_only: Option<bool>,
+    labels: Option<Vec<String>>,
 }
 
 /// The `[linear]` defaults (phase 2 spec §2).
@@ -366,7 +383,20 @@ fn linear_settings(f: FileLinear) -> Result<LinearSettings, String> {
         every_minutes,
         watch: f.watch.unwrap_or(false),
         sla_only: f.sla_only.unwrap_or(true),
+        labels: clean_labels(f.labels.unwrap_or_default()),
     })
+}
+
+/// Labels trimmed, blanks and repeats (any case) dropped, in their order.
+pub fn clean_labels(labels: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for l in labels {
+        let l = l.trim();
+        if !l.is_empty() && !out.iter().any(|o| o.eq_ignore_ascii_case(l)) {
+            out.push(l.to_string());
+        }
+    }
+    out
 }
 
 #[derive(Deserialize)]
@@ -472,6 +502,7 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
             Some(c) => Some(c.trim().to_string()),
             None => None,
         },
+        product_asks: file.product.as_ref().and_then(|p| p.ask).unwrap_or(true),
         product_style: file
             .product
             .as_ref()
@@ -509,6 +540,7 @@ pub struct Edit {
     pub autostart: Option<String>,
     pub product_channel: Option<String>,
     pub product_style: Option<String>,
+    pub product_asks: bool,
     pub color: Option<u32>,
     pub slack: Option<SlackSettings>,
     pub runs_at_once: u8,
@@ -551,6 +583,7 @@ impl From<&Pipeline> for Edit {
             autostart: p.autostart.clone(),
             product_channel: p.product_channel.clone(),
             product_style: p.product_style.clone(),
+            product_asks: p.product_asks,
             color: p.color,
             slack: p.slack.clone(),
             runs_at_once: p.runs_at_once,
@@ -601,6 +634,10 @@ pub fn validate(edit: &Edit) -> Result<(), &'static str> {
         }
         if sl.reaction.trim().trim_matches(':').is_empty() {
             return Err("Name the reaction that marks a message taken, e.g. eyes");
+        }
+        let done = sl.done_reaction.trim().trim_matches(':');
+        if done.eq_ignore_ascii_case(sl.reaction.trim().trim_matches(':')) {
+            return Err("The done reaction must differ from the one that marks a message taken");
         }
     }
     Ok(())
@@ -693,6 +730,14 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
             } else if let Some(t) = t.as_table_mut() {
                 t.remove("sla_only");
             }
+            let labels = clean_labels(l.labels.iter().cloned());
+            if labels.is_empty() {
+                if let Some(t) = t.as_table_mut() {
+                    t.remove("labels");
+                }
+            } else {
+                t["labels"] = value(labels.into_iter().collect::<toml_edit::Array>());
+            }
         }
         None => {
             doc.remove("linear");
@@ -719,7 +764,7 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
         ("style", edit.product_style.as_deref()),
     ]
     .map(|(k, v)| (k, v.map(str::trim).filter(|v| !v.is_empty())));
-    if product.iter().all(|(_, v)| v.is_none()) {
+    if product.iter().all(|(_, v)| v.is_none()) && edit.product_asks {
         doc.remove("product");
     } else {
         if !doc.get("product").is_some_and(Item::is_table) {
@@ -735,6 +780,12 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
                     table.remove(k);
                 }
             }
+        }
+        // On is the default, so only off is written.
+        if edit.product_asks {
+            table.remove("ask");
+        } else {
+            table["ask"] = value(false);
         }
     }
     match &edit.slack {
@@ -754,6 +805,14 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
                 t["label"] = value(label);
             }
             t["reaction"] = value(sl.reaction.trim().trim_matches(':'));
+            match sl.done_reaction.trim().trim_matches(':') {
+                "" => {
+                    if let Some(t) = t.as_table_mut() {
+                        t.remove("done_reaction");
+                    }
+                }
+                done => t["done_reaction"] = value(done),
+            }
             t["every_minutes"] = value(i64::from(sl.every_minutes));
             t["lookback_hours"] = value(i64::from(sl.lookback_hours));
             t["watch"] = value(sl.watch);
@@ -907,7 +966,7 @@ prompt = "Work on ticket {ticket}."
 /// and returns its file name. A copy doesn't watch Linear or start at launch until those are
 /// turned on in its settings, so it never takes tickets its original takes.
 pub fn create(hydra_root: &Path, title: &str, from: Option<&str>) -> Result<String, String> {
-    use toml_edit::{DocumentMut, Item, value};
+    use toml_edit::{DocumentMut, value};
     let title = title.trim();
     let name = file_name_for(title);
     if name.is_empty() {
@@ -932,15 +991,66 @@ pub fn create(hydra_root: &Path, title: &str, from: Option<&str>) -> Result<Stri
         .parse()
         .map_err(|e| format!("pipeline {from:?}: {e}"))?;
     doc["name"] = value(title);
+    takes_nothing(&mut doc);
+    let text = doc.to_string();
+    parse(&text).map_err(|e| format!("the new pipeline: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(&file, text).map_err(|e| format!("can't write {}: {e}", file.display()))?;
+    Ok(name)
+}
+
+/// A new pipeline made from another's file doesn't start at launch, and its trigger is off, so
+/// it never takes tickets the original takes until it's turned on in its settings.
+fn takes_nothing(doc: &mut toml_edit::DocumentMut) {
+    use toml_edit::{Item, value};
     doc.remove("autostart");
     for trigger in ["linear", "slack"] {
         if let Some(t) = doc.get_mut(trigger).and_then(Item::as_table_mut) {
             t["watch"] = value(false);
         }
     }
+}
+
+/// **Export…** (core spec §44): pipeline `name`'s file as someone else imports it, comments
+/// and all, without `[autostart]`, whose environment is this machine's. It holds no secrets:
+/// those stay in each environment.
+pub fn export(hydra_root: &Path, name: &str) -> Result<String, String> {
+    load(hydra_root, name)?;
+    let path = folder(hydra_root).join(format!("{name}.toml"));
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("can't read {name}: {e}"))?;
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("{name}: {e}"))?;
+    doc.remove("autostart");
+    Ok(doc.to_string())
+}
+
+/// **Import pipeline…** (core spec §44): writes an exported pipeline as a new one and returns
+/// its file name. Like a copy it takes nothing until turned on; a name already taken here gets
+/// a number (`INTH 2`, `inth-2`).
+pub fn import(hydra_root: &Path, text: &str) -> Result<String, String> {
+    use toml_edit::{DocumentMut, value};
+    let not_one = |e: String| format!("that file isn't a hydraui pipeline: {e}");
+    let mut doc: DocumentMut = text.parse().map_err(|e| not_one(format!("{e}")))?;
+    let title = parse(text).map_err(not_one)?.name.trim().to_string();
+    let base = file_name_for(&title);
+    if base.is_empty() {
+        return Err(format!(
+            "the pipeline's name {title:?} needs a letter or digit in it"
+        ));
+    }
+    let dir = folder(hydra_root);
+    let (mut name, mut shown) = (base.clone(), title.clone());
+    for n in 2.. {
+        if !dir.join(format!("{name}.toml")).exists() {
+            break;
+        }
+        (name, shown) = (format!("{base}-{n}"), format!("{title} {n}"));
+    }
+    doc["name"] = value(shown);
+    takes_nothing(&mut doc);
     let text = doc.to_string();
-    parse(&text).map_err(|e| format!("the new pipeline: {e}"))?;
+    parse(&text).map_err(not_one)?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let file = dir.join(format!("{name}.toml"));
     std::fs::write(&file, text).map_err(|e| format!("can't write {}: {e}", file.display()))?;
     Ok(name)
 }
@@ -1071,6 +1181,10 @@ mod tests {
         sl.every_minutes = 7;
         sl.lookback_hours = 48;
         sl.reaction = ":robot_face:".into();
+        sl.done_reaction = "robot_face".into();
+        assert!(validate(&edit).is_err(), "done differs from taken");
+        let sl = edit.slack.as_mut().unwrap();
+        sl.done_reaction = ":white_check_mark:".into();
         assert_eq!(validate(&edit), Ok(()));
         save(d.path(), "prs", &edit).unwrap();
         let text = std::fs::read_to_string(folder(d.path()).join("prs.toml")).unwrap();
@@ -1084,9 +1198,20 @@ mod tests {
                 back.every_minutes,
                 back.lookback_hours,
                 back.reaction.as_str(),
+                back.done_reaction.as_str(),
                 back.watch
             ),
-            (7, 48, "robot_face", true)
+            (7, 48, "robot_face", "white_check_mark", true)
+        );
+        // Cleared, the key goes.
+        let mut off = edit.clone();
+        off.slack.as_mut().unwrap().done_reaction = String::new();
+        save(d.path(), "prs", &off).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("prs.toml")).unwrap();
+        assert!(!text.contains("done_reaction"), "{text}");
+        assert_eq!(
+            load(d.path(), "prs").unwrap().slack.unwrap().done_reaction,
+            ""
         );
         assert_eq!(back.label, "#pull-requests");
 
@@ -1100,6 +1225,7 @@ mod tests {
             every_minutes: 5,
             watch: false,
             sla_only: true,
+            labels: Vec::new(),
         });
         assert_eq!(
             validate(&both),
@@ -1217,6 +1343,78 @@ mod tests {
             "the original unchanged"
         );
         assert!(create(d.path(), "x", Some("nope")).is_err());
+    }
+
+    const SHARED: &str = "# INTH tickets\nname = \"INTH\"\nbar = 85\n[linear]\nteam = \"INTH\"\nwatch = true\n\
+         [autostart]\nenv = \"iov42\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\nprompt = \"do {ticket}\"\n";
+
+    fn with_inth() -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(folder(d.path()).join("inth.toml"), SHARED).unwrap();
+        d
+    }
+
+    #[test]
+    fn an_export_is_the_whole_file_but_this_machines_environment() {
+        let d = with_inth();
+        let text = export(d.path(), "inth").unwrap();
+        assert!(
+            !text.contains("autostart") && !text.contains("iov42"),
+            "{text}"
+        );
+        assert!(text.starts_with("# INTH tickets"), "comments kept: {text}");
+        let p = parse(&text).unwrap();
+        assert_eq!((p.name.as_str(), p.bar, p.stages.len()), ("INTH", 85, 1));
+        assert!(
+            p.linear.unwrap().watch,
+            "an export says what the original does"
+        );
+        assert!(export(d.path(), "nope").is_err());
+    }
+
+    #[test]
+    fn an_import_is_a_new_pipeline_that_takes_nothing_until_turned_on() {
+        let text = export(with_inth().path(), "inth").unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let name = import(other.path(), &text).unwrap();
+        assert_eq!(name, "inth");
+        let p = load(other.path(), &name).unwrap();
+        assert_eq!((p.name.as_str(), p.bar), ("INTH", 85));
+        assert_eq!(p.stages[0].prompt, "do {ticket}");
+        assert_eq!(p.autostart, None);
+        assert!(!p.linear.unwrap().watch);
+    }
+
+    #[test]
+    fn importing_a_name_already_taken_numbers_the_new_one() {
+        let d = with_inth();
+        let text = export(d.path(), "inth").unwrap();
+        assert_eq!(import(d.path(), &text).unwrap(), "inth-2");
+        assert_eq!(import(d.path(), &text).unwrap(), "inth-3");
+        assert_eq!(load(d.path(), "inth-2").unwrap().name, "INTH 2");
+        assert!(
+            load(d.path(), "inth").unwrap().linear.unwrap().watch,
+            "the original unchanged"
+        );
+    }
+
+    #[test]
+    fn a_file_that_isnt_a_pipeline_is_refused_and_nothing_is_written() {
+        let d = tempfile::tempdir().unwrap();
+        for (text, says) in [
+            ("hello", "pipeline"),
+            ("bar = 80\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n", "name"),
+            ("name = \"x\"\n", "no stages"),
+            (
+                "name = \"!!\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n",
+                "name",
+            ),
+        ] {
+            let e = import(d.path(), text).unwrap_err();
+            assert!(e.contains(says), "{text:?}: {e}");
+        }
+        assert_eq!(names(d.path()), Vec::<String>::new());
     }
 
     use super::*;
@@ -1447,6 +1645,20 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
         save(d.path(), "t", &edit).unwrap();
         let text = std::fs::read_to_string(folder(d.path()).join("t.toml")).unwrap();
         assert!(!text.contains("[product]"), "{text}");
+        assert!(
+            load(d.path(), "t").unwrap().product_asks,
+            "asking is on by default"
+        );
+        // Off is kept, even with nothing else in [product]; on again drops the key.
+        edit.product_asks = false;
+        save(d.path(), "t", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("t.toml")).unwrap();
+        assert!(text.contains("ask = false"), "{text}");
+        assert!(!load(d.path(), "t").unwrap().product_asks);
+        edit.product_asks = true;
+        save(d.path(), "t", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("t.toml")).unwrap();
+        assert!(!text.contains("[product]"), "{text}");
     }
 
     #[test]
@@ -1489,8 +1701,18 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
                 every_minutes: 5,
                 watch: false,
                 sla_only: true,
+                labels: Vec::new(),
             })
         );
+    }
+
+    #[test]
+    fn a_pipeline_can_pick_by_label() {
+        let p = parse(&format!(
+            "{ONE_STAGE}[linear]\nteam = \"PRE\"\nlabels = [\"Bug\", \" frontend \", \"BUG\"]\n"
+        ))
+        .unwrap();
+        assert_eq!(p.linear.unwrap().labels, ["Bug", "frontend"]);
     }
 
     #[test]
@@ -1549,6 +1771,23 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
             ("Ready for Review", Assignee::Any, false)
         );
         assert!(text.contains("sla_only = false"), "{text}");
+        assert!(!text.contains("labels"), "no labels, no key: {text}");
+        // Labels: trimmed, a repeat in another case dropped, their order kept.
+        let mut l = edit.linear.clone().unwrap();
+        l.labels = vec![" Bug ".into(), "bug".into(), "Frontend".into(), " ".into()];
+        edit.linear = Some(l);
+        save(d.path(), "t", &edit).unwrap();
+        let l = load(d.path(), "t").unwrap().linear.unwrap();
+        assert_eq!(l.labels, ["Bug", "Frontend"]);
+        let mut l = edit.linear.clone().unwrap();
+        l.labels.clear();
+        edit.linear = Some(l);
+        save(d.path(), "t", &edit).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            !text.contains("labels"),
+            "cleared labels drop the key: {text}"
+        );
         edit.linear = None;
         save(d.path(), "t", &edit).unwrap();
         assert_eq!(load(d.path(), "t").unwrap().linear, None);

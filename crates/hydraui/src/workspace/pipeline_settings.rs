@@ -11,7 +11,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandItem, CommandState};
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::notification::Notification;
 use gpui_component::select::{Select, SelectEvent, SelectState};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
@@ -39,7 +39,7 @@ struct DraftStage {
     /// The bar is the stage's own, not the pipeline's.
     own: bool,
     /// What its session is asked, before hydraui's note.
-    prompt: Entity<InputState>,
+    prompt: Entity<TextareaState>,
 }
 
 /// The settings being edited for one orchestrator's pipeline file.
@@ -52,7 +52,9 @@ pub(super) struct SettingsDraft {
     /// The Slack channel for product questions; empty: stages ask the user in hydraui.
     product: Entity<InputState>,
     /// How steps write product questions; empty: as each sees fit.
-    product_style: Entity<InputState>,
+    product_style: Entity<TextareaState>,
+    /// Steps ask product before a change beyond the ticket (`[product] ask`).
+    product_asks: bool,
     /// The card's accent; `None`: the default teal.
     color: Option<u32>,
     /// Tickets run at once, each with its own orchestrator.
@@ -84,6 +86,7 @@ struct SlackDraft {
     every: Entity<InputState>,
     lookback: Entity<InputState>,
     reaction: Entity<InputState>,
+    done_reaction: Entity<InputState>,
 }
 
 impl SlackDraft {
@@ -93,6 +96,7 @@ impl SlackDraft {
             channel: text(&self.channel),
             label: text(&self.label),
             reaction: text(&self.reaction).trim_matches(':').to_string(),
+            done_reaction: text(&self.done_reaction).trim_matches(':').to_string(),
             // Not a number: 0, which validation names.
             every_minutes: text(&self.every).parse().unwrap_or(0),
             lookback_hours: text(&self.lookback).parse().unwrap_or(0),
@@ -114,6 +118,8 @@ struct LinearDraft {
     claim: Entity<InputState>,
     passed: Entity<InputState>,
     every: Entity<InputState>,
+    /// Comma-separated; empty: any label.
+    labels: Entity<InputState>,
 }
 
 impl LinearDraft {
@@ -133,6 +139,9 @@ impl LinearDraft {
             every_minutes: text(&self.every).parse().unwrap_or(0),
             watch: self.watch,
             sla_only: !self.no_sla,
+            labels: pipeline::clean_labels(
+                self.labels.read(cx).value().split(',').map(str::to_string),
+            ),
         })
     }
 }
@@ -169,6 +178,7 @@ impl SettingsDraft {
                 .filter(|c| !c.is_empty()),
             product_style: Some(self.product_style.read(cx).value().trim().to_string())
                 .filter(|c| !c.is_empty()),
+            product_asks: self.product_asks,
             color: self.color,
             runs_at_once: self.runs,
             bar: slider_value(&self.bar, cx),
@@ -274,7 +284,8 @@ impl Workspace {
                 .default_value(saved.product_channel.clone().unwrap_or_default())
         });
         let product_style = cx.new(|cx| {
-            InputState::new(window, cx)
+            TextareaState::new(window, cx)
+                .auto_grow(2, 10)
                 .placeholder("Or say how, e.g. one line on why it matters, then the options")
                 .default_value(saved.product_style.clone().unwrap_or_default())
         });
@@ -328,6 +339,10 @@ impl Workspace {
                 ),
                 "5",
             ),
+            labels: input(
+                field(|l| l.labels.join(", "), ""),
+                "Any label; or e.g. Bug, Frontend",
+            ),
         };
         let sl = saved.slack.clone();
         let sfield = |f: fn(&SlackSettings) -> String, default: &str| {
@@ -358,6 +373,10 @@ impl Workspace {
             reaction: input(
                 sfield(|s| s.reaction.clone(), pipeline::DEFAULT_REACTION),
                 "eyes (👀)",
+            ),
+            done_reaction: input(
+                sfield(|s| s.done_reaction.clone(), ""),
+                "white_check_mark (✅); empty for none",
             ),
         };
         let chosen = if saved.slack.is_some() {
@@ -397,6 +416,7 @@ impl Workspace {
             branch,
             product,
             product_style,
+            product_asks: saved.product_asks,
             color: saved.color,
             runs: saved.runs_at_once,
             advanced: false,
@@ -437,8 +457,10 @@ impl Workspace {
         });
         let bar = slider(s.bar.unwrap_or(default), cx);
         subs.push(cx.subscribe_in(&title, window, |_, _, _: &InputEvent, _, cx| cx.notify()));
+        // A prompt is read whole: the box grows with it (a long one scrolls past 14 lines).
         let prompt = cx.new(|cx| {
-            InputState::new(window, cx)
+            TextareaState::new(window, cx)
+                .auto_grow(3, 14)
                 .placeholder("e.g. replicate {ticket}")
                 .default_value(s.prompt.clone())
         });
@@ -529,6 +551,7 @@ impl Workspace {
             body = body
                 .child(row("Team", &l.team))
                 .child(row("Pick tickets in", &l.pick))
+                .child(row("With one of the labels", &l.labels))
                 .child(
                     h_flex()
                         .gap_3()
@@ -588,6 +611,7 @@ impl Workspace {
                 .child(row("Channel name", &sl.label))
                 .child(row("Channel ID", &sl.channel))
                 .child(row("Mark taken with", &sl.reaction))
+                .child(row("Mark done with", &sl.done_reaction))
                 .child(row("Check every (minutes)", &sl.every))
                 .child(row("Look back (hours)", &sl.lookback));
         }
@@ -939,9 +963,10 @@ impl Workspace {
                     .child(
                         // Lined up under the title: past the number, the arrows and their gaps.
                         div().pl(px(24. + 10. + ARROWS_W + 10.)).child(
-                            Input::new(&s.prompt)
-                                .small()
-                                .prefix(text(11.5, theme::TEXT_MUTED).pr(px(6.)).child("Prompt")),
+                            v_flex()
+                                .gap_1()
+                                .child(text(11.5, theme::TEXT_MUTED).child("Prompt"))
+                                .child(Textarea::new(&s.prompt)),
                         ),
                     ),
             );
@@ -999,11 +1024,26 @@ impl Workspace {
                             .py(px(28.))
                             .gap(px(28.))
                             .child(
-                                h_flex().justify_between().child(
-                                    text(20., theme::TEXT)
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child("Pipeline settings"),
-                                ),
+                                h_flex()
+                                    .justify_between()
+                                    .child(
+                                        text(20., theme::TEXT)
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child("Pipeline settings"),
+                                    )
+                                    .child({
+                                        let file = draft.file.clone();
+                                        Button::new(SharedString::from(format!("export-{orch}")))
+                                            .label("Export…")
+                                            .ghost()
+                                            .tooltip(
+                                                "Save this pipeline as a file to send someone. \
+                                                 Saved settings only; it holds no secrets.",
+                                            )
+                                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                                ws.export_pipeline(file.clone(), window, cx)
+                                            }))
+                                    }),
                             )
                             // 1. What it's called and how it looks in the sidebar.
                             .child(
@@ -1243,27 +1283,69 @@ impl Workspace {
                         }
                     }),
             );
-        v_flex()
+        let asks = draft.product_asks;
+        let ask = |on: bool, label: &'static str| {
+            let b = Button::new(SharedString::from(format!("product-asks-{on}-{orch}")))
+                .label(label)
+                .xsmall()
+                .on_click(cx.listener(move |ws, _, _, cx| {
+                    ws.with_draft(orch, cx, |d| d.product_asks = on)
+                }));
+            if asks == on { b.primary() } else { b.ghost() }
+        };
+        let rule = if asks {
+            "Every step is told: a change beyond the ticket that alters what users see or do \
+             (a feature, copy or a flow) is product's call, so it asks before making it and the \
+             ticket waits for the answer."
+        } else {
+            "Steps aren't told to ask product and can't: they decide within their own prompt. \
+             Right for reviews, where the PR's author owns the change."
+        };
+        let mut body = v_flex()
             .gap_2()
             .child(section_tip(
                 "Product questions",
-                "When a step meets a product decision it asks instead of deciding. Choose how \
-                 it writes the question, and the Slack channel it goes to (empty: it asks you \
-                 here).",
+                "Whether steps ask product before a change beyond the ticket, how they write the \
+                 question, and the Slack channel it goes to (empty: they ask you here).",
             ))
+            .child(
+                h_flex()
+                    .gap_3()
+                    .child(
+                        text(12.5, theme::TEXT_SECONDARY)
+                            .w(px(170.))
+                            .flex_none()
+                            .child("Steps ask product"),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(ask(true, "On"))
+                            .child(ask(false, "Off")),
+                    ),
+            )
+            .child(
+                div()
+                    .max_w(px(640.))
+                    .child(text(12., theme::TEXT_MUTED).child(rule)),
+            );
+        if !asks {
+            return body.into_any_element();
+        }
+        body = body
             .child(presets)
             .child(
                 div()
                     .max_w(px(640.))
-                    .child(Input::new(&draft.product_style)),
+                    .child(Textarea::new(&draft.product_style)),
             )
             .child(
                 div().max_w(px(480.)).child(
                     Input::new(&draft.product)
                         .prefix(text(11.5, theme::TEXT_MUTED).pr(px(6.)).child("Channel")),
                 ),
-            )
-            .into_any_element()
+            );
+        body.into_any_element()
     }
 }
 

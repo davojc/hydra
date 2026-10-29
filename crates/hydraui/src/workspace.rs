@@ -257,6 +257,11 @@ pub struct Workspace {
     pr_checking: bool,
     /// Each orchestrator's Linear watcher (orchestrator phase 2 §3).
     linear_watch: HashMap<PaneId, linear::Watch>,
+    /// The open pipelines as last saved for the next launch (core spec §38); `None` until
+    /// launch has opened the saved ones again, so nothing is saved over them first.
+    open_pipelines: Option<Vec<crate::open_pipelines::OpenPipeline>>,
+    /// Pipelines folded to one line in the sidebar, by file name.
+    collapsed_pipelines: std::collections::HashSet<String>,
     /// Pull requests a `[slack]` pipeline took and hasn't started yet, by pipeline file.
     slack_queues: HashMap<String, std::collections::VecDeque<crate::slack_watch::Queued>>,
     /// Pull requests a Slack watcher passed over because their author is the person watching,
@@ -523,6 +528,8 @@ impl Workspace {
             pr_checked: None,
             pr_checking: false,
             linear_watch: HashMap::new(),
+            open_pipelines: None,
+            collapsed_pipelines: std::collections::HashSet::new(),
             slack_queues: HashMap::new(),
             slack_mine: std::collections::HashSet::new(),
             slack_inflight: HashMap::new(),

@@ -79,6 +79,7 @@ pub fn record(hydra_root: &Path, runs: &Runs, changes: &[Change]) {
                     "stage": stage,
                     "question": question,
                     "link": run.asking.as_ref().and_then(|a| a.link.clone()),
+                    "who": run.asking.as_ref().map_or("product", |a| a.whom.word()),
                 }),
             ),
             Decided::Answered(answer) => ("answered", json!({"stage": stage, "answer": answer})),

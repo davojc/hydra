@@ -134,10 +134,41 @@ pub struct Fix {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ask {
     pub stage: usize,
+    /// Who the ticket waits on: product to decide, or the pull request's author to act.
+    pub whom: Whom,
     pub question: String,
     /// Where it was asked, a Slack thread, when the stage gave one.
     pub link: Option<String>,
     pub since: SystemTime,
+}
+
+/// Who a waiting stage waits on (core spec §15, §42).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Whom {
+    /// A product decision beyond the ticket.
+    #[default]
+    Product,
+    /// The pull request's author (or whoever owns the change) to push fixes or reply: a review
+    /// that asked for changes waits on them, which isn't a person in hydraui being needed.
+    Author,
+}
+
+impl Whom {
+    /// As `stage_ask`'s `who` and the log write it.
+    pub fn parse(word: &str) -> Option<Whom> {
+        match word.trim().to_ascii_lowercase().as_str() {
+            "" | "product" => Some(Whom::Product),
+            "author" => Some(Whom::Author),
+            _ => None,
+        }
+    }
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Whom::Product => "product",
+            Whom::Author => "author",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -316,6 +347,16 @@ impl Runs {
             .collect()
     }
 
+    /// The runs of `orchestrator` that count against `runs_at_once`: open ones not waiting on
+    /// someone's answer (product's, or a pull request's author). A waiting run idles, so it
+    /// leaves its place to another ticket.
+    pub fn busy_of(&self, orchestrator: &str) -> Vec<&Run> {
+        self.open_of(orchestrator)
+            .into_iter()
+            .filter(|r| r.asking.is_none())
+            .collect()
+    }
+
     /// The latest run `orchestrator` started.
     pub fn current(&self, orchestrator: &str) -> Option<&Run> {
         self.runs
@@ -380,7 +421,7 @@ impl Runs {
             return Err("a stage session can't start a run".into());
         }
         let open: Vec<&str> = self
-            .open_of(orchestrator)
+            .busy_of(orchestrator)
             .into_iter()
             .map(|r| r.id.as_str())
             .collect();
@@ -747,6 +788,18 @@ impl Runs {
                 ));
             }
         }
+        // Nothing new from the author yet isn't a stop for a person (§45): the stage stays
+        // waiting and is woken to look again.
+        if rating.outcome == crate::rating::Outcome::Blocked
+            && r.asking.as_ref().is_some_and(|a| a.whom == Whom::Author)
+        {
+            return Err(
+                "Not recorded: you're waiting on the author, so this isn't blocked. \
+                 Don't report; end your turn. hydraui wakes you every 5 minutes to look at the \
+                 pull request again; report done once it's safe to approve."
+                    .into(),
+            );
+        }
         // A stage that reports without waiting for its answer has decided after all.
         if r.asking.take().is_some() {
             r.state = RunState::Running;
@@ -925,6 +978,7 @@ impl Runs {
         question: &str,
         link: Option<&str>,
         now: SystemTime,
+        whom: Whom,
     ) -> Result<Vec<Change>, String> {
         let Some((ri, si)) = self.stage_of(token) else {
             return Err("only a running stage's own session asks".into());
@@ -936,23 +990,38 @@ impl Runs {
         if r.asking.is_some() {
             return Err("this run is already waiting for an answer".into());
         }
+        if whom == Whom::Product && !r.pipeline.product_asks {
+            return Err(
+                "this pipeline doesn't ask product: decide it within your stage, and \
+                        name it in your report's reasons against if it matters"
+                    .into(),
+            );
+        }
+        let link = link.map(str::trim).filter(|l| !l.is_empty());
+        if whom == Whom::Author && link.is_none() {
+            return Err("give the pull request's link, so hydraui can have you look again".into());
+        }
         let question = question.trim();
         if question.is_empty() {
             return Err("the question is empty".into());
         }
         r.asking = Some(Ask {
             stage: si,
+            whom,
             question: question.to_string(),
-            link: link
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(str::to_string),
+            link: link.map(str::to_string),
             since: now,
         });
-        r.state = RunState::NeedsYou(format!(
-            "{} is waiting for an answer: {question}",
-            r.pipeline.stages[si].title
-        ));
+        r.state = RunState::NeedsYou(match whom {
+            Whom::Product => format!(
+                "{} is waiting for an answer: {question}",
+                r.pipeline.stages[si].title
+            ),
+            Whom::Author => format!(
+                "{} is waiting on the author: {question}",
+                r.pipeline.stages[si].title
+            ),
+        });
         Ok(vec![Change {
             run: r.id.clone(),
             stage: Some(si),
@@ -1470,6 +1539,17 @@ fn stage_note(run: &Run, i: usize) -> String {
         Some(style) => format!("{product} How to write a product question: {style}"),
         None => product,
     };
+    // A pipeline can leave product out (`[product] ask = false`), e.g. reviews.
+    let product = if run.pipeline.product_asks {
+        product
+    } else {
+        String::new()
+    };
+    // Waiting on someone outside the run isn't blocked (a review that requested changes).
+    let product = format!(
+        "{product}\nWaiting on a PR's author to make the changes you asked for isn't blocked: \
+         call stage_ask with who \"author\", what you wait for and the PR's link, then stop."
+    );
     format!(
         "---\nhydraui pipeline \"{}\" · {} · stage {} of {}: {}{skill}.\n{around}Do only this \
          stage. When it's done, call stage_report (score, evidence, reasons for and against, \
@@ -1663,14 +1743,18 @@ mod tests {
         let id = run(&mut runs, &["a", "b"]);
         started(&mut runs, &id, "a", "s1");
         let now = SystemTime::now();
-        assert!(runs.ask("nobody", "Remove it?", None, now).is_err());
-        assert!(runs.ask("s1", "  ", None, now).is_err());
+        assert!(
+            runs.ask("nobody", "Remove it?", None, now, Whom::Product)
+                .is_err()
+        );
+        assert!(runs.ask("s1", "  ", None, now, Whom::Product).is_err());
         let changes = runs
             .ask(
                 "s1",
                 "Remove auto-translate?",
                 Some("https://x.slack.com/t/1"),
                 now,
+                Whom::Product,
             )
             .unwrap();
         assert_eq!(
@@ -1686,7 +1770,7 @@ mod tests {
             Some("https://x.slack.com/t/1")
         );
         assert!(
-            runs.ask("s1", "Again?", None, now).is_err(),
+            runs.ask("s1", "Again?", None, now, Whom::Product).is_err(),
             "one question at a time"
         );
         // A person's re-run or go-back would lose the question; only stopping is allowed.
@@ -1708,17 +1792,46 @@ mod tests {
         let mut runs = Runs::default();
         let id = run(&mut runs, &["a", "b"]);
         started(&mut runs, &id, "a", "s1");
-        runs.ask("s1", "Q?", None, SystemTime::now()).unwrap();
+        runs.ask("s1", "Q?", None, SystemTime::now(), Whom::Product)
+            .unwrap();
         runs.report("s1", rated(90)).unwrap();
         let r = runs.run(&id).unwrap();
         assert!(r.asking.is_none());
         assert_eq!(r.state, RunState::Running);
         started(&mut runs, &id, "b", "s2");
-        runs.ask("s2", "Q2?", None, SystemTime::now()).unwrap();
+        runs.ask("s2", "Q2?", None, SystemTime::now(), Whom::Product)
+            .unwrap();
         runs.session_gone("s2");
         let r = runs.run(&id).unwrap();
         assert!(r.asking.is_none());
         assert_eq!(r.state, RunState::Running);
+    }
+
+    #[test]
+    fn a_stage_waiting_on_the_author_cant_report_blocked_and_keeps_waiting() {
+        // iov42-lingo-app-53-1: the stage asked to wait on James, then reported blocked
+        // because nothing had changed yet, and the run showed Needs you.
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a"]);
+        started(&mut runs, &id, "a", "s1");
+        runs.ask(
+            "s1",
+            "Waiting on James",
+            Some("https://github.com/o/r/pull/53"),
+            SystemTime::now(),
+            Whom::Author,
+        )
+        .unwrap();
+        let mut blocked = rated(20);
+        blocked.outcome = rating::Outcome::Blocked;
+        let e = runs.report("s1", blocked).unwrap_err();
+        assert!(e.contains("waiting on the author"), "{e}");
+        let r = runs.run(&id).unwrap();
+        assert!(r.asking.is_some(), "still waiting");
+        assert_eq!(status(&runs, &id, 0), StageStatus::Running);
+        // Approving after all is a report like any other.
+        runs.report("s1", rated(95)).unwrap();
+        assert_eq!(runs.run(&id).unwrap().state, RunState::Finished);
     }
 
     #[test]
@@ -1923,6 +2036,32 @@ mod tests {
         runs.report("t2", rated(90)).unwrap();
         assert_eq!(runs.open_of("orch").len(), 1);
         assert!(runs.start_run("orch", p, "PR-3", "z").is_ok());
+    }
+
+    #[test]
+    fn a_ticket_waiting_on_an_answer_leaves_its_place_to_another() {
+        let mut runs = Runs::default();
+        let p = pipeline(&["a"]);
+        let first = runs
+            .start_run("orch", p.clone(), "PR-1", "x")
+            .unwrap()
+            .id
+            .clone();
+        started(&mut runs, &first, "a", "t1");
+        let now = SystemTime::now();
+        runs.ask(
+            "t1",
+            "The fixes I asked for",
+            Some("https://github.com/o/r/pull/1"),
+            now,
+            Whom::Author,
+        )
+        .unwrap();
+        assert_eq!(runs.busy_of("orch").len(), 0);
+        assert!(runs.start_run("orch", p.clone(), "PR-2", "y").is_ok());
+        let e = runs.start_run("orch", p, "PR-3", "z").unwrap_err();
+        assert!(e.contains("PR-2-1"), "{e}");
+        assert_eq!(runs.open_of("orch").len(), 2);
     }
 
     #[test]
@@ -2169,14 +2308,16 @@ mod tests {
         // The pipeline's own words first, as the user would type them.
         assert!(p.starts_with("do develop. after 88"), "{p}");
         let note = &p[p.find("\n\n---\n").expect("a note after the prompt")..];
-        // Short beside the pipeline's own words, though the product rule is in every note.
-        assert!(note.len() < 800, "{} chars: {note}", note.len());
+        // Short beside the pipeline's own words, though the product rule and how to wait on a
+        // PR's author are in every note.
+        assert!(note.len() < 1000, "{} chars: {note}", note.len());
         for says in [
             "stage 2 of 3: develop",
             "Earlier: 1. replicate passed (88)",
             "Later: 3. verify",
             "stage_report",
             "stage_brief",
+            "who \"author\"",
         ] {
             assert!(note.contains(says), "{says}: {note}");
         }
@@ -2234,6 +2375,20 @@ mod tests {
             p.contains("How to write a product question: Keep it short."),
             "{p}"
         );
+
+        // A pipeline that leaves product out: no rule, no pre-approved tools, no stage_ask.
+        let mut runs = Runs::default();
+        let mut pipe = pipeline(&["review"]);
+        pipe.product_channel = Some("#product-".into());
+        pipe.product_asks = false;
+        let id = runs
+            .start_run("orch", pipe, "version2-frontend-5536", "x")
+            .unwrap()
+            .id
+            .clone();
+        let s = runs.begin("orch", &id, "review", "tok", 30).unwrap();
+        assert!(!s.prompt.contains("product decision"), "{}", s.prompt);
+        assert_eq!(s.claude, ["claude"]);
     }
 
     #[test]

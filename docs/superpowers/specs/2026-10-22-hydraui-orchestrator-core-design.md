@@ -970,3 +970,51 @@ true, so existing pipelines are unchanged) set to false also takes tickets witho
 with one still first, by breach; then by priority, Urgent first and no priority last; then the
 oldest. Linear's `priority` and `createdAt` are now read with each ticket. Pipeline settings show
 it as **Which tickets: With an SLA · All, by priority**.
+
+## 37. Labels (added 2026-10-28)
+
+A Linear trigger can be narrowed to labels: `labels = ["Bug", "Frontend"]` in `[linear]`, or "With one of the labels" in Pipeline settings (comma-separated). A ticket is picked only when it carries at least one of them, in any case; no labels means any ticket, as before. Labels are trimmed and a repeat in another case is dropped when read and saved. The check right before a claim asks again, so a ticket whose label was taken off since the list is passed over.
+
+## 38. Open pipelines stay open across a restart (added 2026-10-28)
+
+hydraui saves the pipelines that are open (`~/.hydra/hydraui/open-pipelines.toml`: each one's name, the environment of its first orchestrator, and whether that orchestrator is in Automatic) whenever the set changes, checked each second. At launch each saved pipeline opens again, Automatic or Manual as it was, and its interrupted runs carry on, as an `[autostart]` pipeline's do; `[autostart]` pipelines that weren't open start as before. End pipeline (or closing its orchestrator) takes a pipeline off the list. Nothing is saved before launch has reopened the saved ones, nor while the window is closing, so a quit or a crash both leave the list as it was. `HYDRAUI_NO_AUTOSTART` turns reopening off too.
+
+## 39. Folding pipelines; prompts read whole (added 2026-10-28)
+
+Each pipeline's card in the sidebar has an outlined chevron button beside its name that folds it to one line: the pipeline's name, its state pill and the button (Needs you, Asked product, Check it, Working, Stopped, …), then how many sessions it has open and how its trigger is set (Automatic, Manual or Stopped). The button unfolds it; clicking the rest opens the pipeline, as the card does. A pipeline running several tickets folds as a whole, its pill the most urgent of them. Folding is kept with the open pipelines (§38, `collapsed`), so it lasts across a restart.
+
+In Pipeline settings each stage's prompt, and the product-question style, is a box that grows with what's written (prompts 3 to 14 lines, the style 2 to 10), wrapping instead of running off the edge.
+
+## 40. A pull request posted again is reviewed again (added 2026-10-28)
+
+A Slack look used to pass over any pull request hydraui had ever run, so a re-post asking for a re-review (new commits dismissed the approval) was never picked up: version2-frontend#5550, reviewed at 13:21, posted again by its author at 16:53. Now only a run that hasn't ended (running, or interrupted and waiting to resume) holds its pull request, with the queue and the person's own pull requests as before. A message without the reaction is a new ask, so a pull request whose earlier run ended (done or stopped) starts a new run (`<ticket>-2`, …) and the message is marked.
+
+## 41. Asking product is a setting (added 2026-10-28)
+
+The "a change beyond the ticket that alters what users see or do is product's call: ask" rule (§15) went into every stage of every pipeline, from hydraui's own stage note, where Pipeline settings never showed it. A PR review took it as a reason to ask product about a line in someone else's PR (version2-frontend#5536). It is now `[product] ask` (on unless `false`) and **Steps ask product · On | Off** under Product questions, which says the rule in words. Off: the note leaves the rule out, no Slack tools are pre-approved for it, and `stage_ask` is refused ("decide it within your stage"). The style and channel fields show only when it's on. A run takes its pipeline as it was when it started, so a run already waiting on product keeps waiting.
+
+## 42. Waiting on a pull request's author (added 2026-10-28)
+
+A review that requested changes had only `blocked` to report, which stops the stage and shows **Needs you** (version2-frontend#5418), though nothing was the user's to do. `stage_ask` now takes `who`: `"product"` (the default, §15) or `"author"`, with the pull request's link (required). An author wait is never refused by `[product] ask = false`. The card reads **Waiting on author** in the pipeline's own colour (not amber, not red), the line says "· waiting on the author", the sidebar shows "⏸ Waiting on the author · Nm", and no toast is raised. Every 5 minutes hydraui has the stage look at the pull request again: re-review what changed, answer comments, and when it's safe to approve, approve, post in the Slack thread, `stage_answer` with what changed, and report; otherwise ask for more and stop. Every stage note says to wait this way rather than report blocked. Logs carry `who`, and older logs resume as product questions.
+
+## 43. Waiting PRs shown, waiting runs free their place, a done reaction (added 2026-10-29)
+
+A message with six pull requests (iov42-lingo-app #50–#55) queued all six, but the pipeline was full: runs waiting on an author or on product held 2 of its 6 places, and the queue showed only as a count on a line that appears when every place is taken. So four looked dropped.
+
+- **Waiting PRs are named.** The trigger row under the card says `Waiting: iov42-lingo-app #52, #54, svc-usage #80` in the order they'll start, the repo said once for a run of the same repo (full list in its tooltip). A folded pipeline adds `· 4 waiting`.
+- **A run waiting on someone's answer leaves its place.** `Runs::busy_of` is the open runs not asking (product or author, §15/§42). Only those count against `runs_at_once`, in `start_run` and in choosing an orchestrator with room, and "all N running" counts them. A one-run pipeline takes its next ticket while the first waits on an answer. When the answer comes, the run carries on, so for a while more than `runs_at_once` may run.
+- **A done reaction.** `[slack] done_reaction` (Pipeline settings: **Mark done with**; empty or absent: none). Each look, a message with the taken reaction and without the done one, whose every pull request's latest run ended **done** (or was passed over as the watcher's own) and none is queued or on its way to an orchestrator, gets the done reaction. A stopped run holds the tick back, so an unticked message shows something wasn't reviewed to the end. Only messages within `lookback_hours` are ticked. It must differ from the taken reaction.
+
+## 44. Sharing a pipeline: export and import (added 2026-10-29)
+
+A pipeline is one TOML file holding no secrets (those stay in each environment), so sharing one is sending that file.
+
+- **Export.** **Export…** at the top of Pipeline settings, or **Export pipeline…** in the launcher (pick the pipeline), opens the Save panel in Downloads with `<file>.toml` filled in (`.toml` added when no extension is typed). The file is the pipeline as last saved, comments and all, without `[autostart]`, whose environment is the exporter's own. Unsaved changes in Pipeline settings aren't in it.
+- **Import.** **Import pipeline…** in the launcher, or **Import from a file…** at the end of New pipeline's list, opens a file. It must parse as a pipeline (a mistake is named: "that file isn't a hydraui pipeline: …"), and is written as a new pipeline under its own name. A name already taken gets a number (`INTH 2`, `inth-2.toml`), so nothing is overwritten. Like a copy (New pipeline), it doesn't start at launch and its trigger's `watch` is off, so it takes no tickets until turned on. Its orchestrator then starts (an environment picked as for a new pipeline) with its settings open, to check folders and skills that may not exist on this machine before turning the trigger on.
+
+## 45. A wait on the author can't turn into Needs you; runs keep their pipeline (added 2026-10-29)
+
+iov42-lingo-app #53 showed **Needs you** from 10:05 until the PR merged at 15:28 and after. Two faults:
+
+- **Blocked while waiting on the author.** A Check reply stage asked to wait on the author (§42) and, seven seconds later, reported `blocked` ("nothing new since the review"). A report used to drop the question and stop the run for a person. Now `stage_report` with outcome `blocked` is refused while the stage waits on the author ("you're waiting on the author, so this isn't blocked … end your turn"). The stage stays waiting and is woken every 5 minutes as before. A `done` report still ends the wait, and so does a `blocked` report while waiting on product.
+- **A run outlived its pipeline's stages.** The Check reply stage was added to Review PR's at 09:08 and removed at 10:01. At the 13:24 restart the run was rebuilt against the file as it was then. That file had no `check-reply` stage, so the rebuild failed silently: the run was neither resumed nor ended. Its history said Needs you, and the merged-PR check (which looks at loaded runs) never saw it. `run started` now logs `pipeline_text`, the pipeline file as the run started with it, and a resume rebuilds from that (a log without it uses the current file, as before). That matches §41: a run takes its pipeline as it was when it started.

@@ -13,12 +13,18 @@ pub const MAX_FAILURES: u32 = 3;
 /// The ticket to take from `tickets` (§3), unassigned only when `unassigned_only`: the one
 /// whose SLA breaches soonest; with `sla_only` off, tickets without an SLA come after those
 /// with one, most urgent priority first (no priority last), then oldest.
-pub fn pick(tickets: &[Ticket], unassigned_only: bool, sla_only: bool) -> Option<&Ticket> {
+pub fn pick<'t>(
+    tickets: &'t [Ticket],
+    unassigned_only: bool,
+    sla_only: bool,
+    labels: &[String],
+) -> Option<&'t Ticket> {
     let urgency = |p: u8| if p == 0 { 5 } else { p };
     tickets
         .iter()
         .filter(|t| !unassigned_only || t.assignee.is_none())
         .filter(|t| !sla_only || t.sla_breaches_at.is_some())
+        .filter(|t| has_a_label(t, labels))
         // RFC 3339 times in UTC sort as text; a ticket with an SLA before one without.
         .min_by(|a, b| {
             (a.sla_breaches_at.is_none(), &a.sla_breaches_at)
@@ -26,6 +32,14 @@ pub fn pick(tickets: &[Ticket], unassigned_only: bool, sla_only: bool) -> Option
                 .then(urgency(a.priority).cmp(&urgency(b.priority)))
                 .then(a.created_at.cmp(&b.created_at))
         })
+}
+
+/// Whether `t` carries one of `labels` (any case); no labels: every ticket does.
+pub fn has_a_label(t: &Ticket, labels: &[String]) -> bool {
+    labels.is_empty()
+        || labels
+            .iter()
+            .any(|want| t.labels.iter().any(|l| l.eq_ignore_ascii_case(want.trim())))
 }
 
 /// Whether a check is due: watching, no open run, and `every` since the last one (or none yet).
@@ -395,7 +409,12 @@ pub fn find_and_claim(
             }
         }
         tickets.retain(|t| !ran(&t.identifier));
-        let Some(next) = pick(&tickets, unassigned_only, settings.sla_only) else {
+        let Some(next) = pick(
+            &tickets,
+            unassigned_only,
+            settings.sla_only,
+            &settings.labels,
+        ) else {
             return Ok(Check {
                 claimed: None,
                 skipped,
@@ -405,6 +424,7 @@ pub fn find_and_claim(
         let still = api.ticket(&next.identifier)?.filter(|t| {
             t.state.eq_ignore_ascii_case(settings.pick.trim())
                 && (!unassigned_only || t.assignee.is_none())
+                && has_a_label(t, &settings.labels)
         });
         let Some(ticket) = still else {
             passed_over.push(next.identifier.clone());
@@ -568,6 +588,7 @@ mod tests {
             state: "Ready for Investigation".into(),
             priority: 0,
             created_at: String::new(),
+            labels: Vec::new(),
         }
     }
 
@@ -578,16 +599,22 @@ mod tests {
             t("INTH-2", "2026-11-01T09:00:00.000Z", Some("u-9")),
             t("INTH-3", "2026-11-02T09:00:00.000Z", None),
         ];
-        assert_eq!(pick(&tickets, true, true).unwrap().identifier, "INTH-3");
-        assert_eq!(pick(&tickets, false, true).unwrap().identifier, "INTH-2");
-        assert_eq!(pick(&[], true, true), None);
+        assert_eq!(
+            pick(&tickets, true, true, &[]).unwrap().identifier,
+            "INTH-3"
+        );
+        assert_eq!(
+            pick(&tickets, false, true, &[]).unwrap().identifier,
+            "INTH-2"
+        );
+        assert_eq!(pick(&[], true, true, &[]), None);
         // Taken meanwhile: the claim found it assigned, so it's left out and the next one goes.
         let rest: Vec<Ticket> = tickets
             .iter()
             .filter(|x| x.identifier != "INTH-3")
             .cloned()
             .collect();
-        assert_eq!(pick(&rest, true, true).unwrap().identifier, "INTH-1");
+        assert_eq!(pick(&rest, true, true, &[]).unwrap().identifier, "INTH-1");
     }
 
     #[test]
@@ -604,18 +631,60 @@ mod tests {
             none("PRE-2005", 3, "2026-10-20T00:00:00Z"),
             none("PRE-1363", 3, "2026-08-01T00:00:00Z"),
         ];
-        assert_eq!(pick(&tickets, true, true), None, "SLA only: none of them");
-        assert_eq!(pick(&tickets, true, false).unwrap().identifier, "PRE-1363");
+        assert_eq!(
+            pick(&tickets, true, true, &[]),
+            None,
+            "SLA only: none of them"
+        );
+        assert_eq!(
+            pick(&tickets, true, false, &[]).unwrap().identifier,
+            "PRE-1363"
+        );
         // One with an SLA still goes first.
         let mut with_sla = tickets.to_vec();
         with_sla.push(t("PRE-9", "2026-12-01T00:00:00.000Z", None));
-        assert_eq!(pick(&with_sla, true, false).unwrap().identifier, "PRE-9");
+        assert_eq!(
+            pick(&with_sla, true, false, &[]).unwrap().identifier,
+            "PRE-9"
+        );
         // No priority comes after Low.
         let low_or_none = [tickets[0].clone(), tickets[1].clone()];
         assert_eq!(
-            pick(&low_or_none, true, false).unwrap().identifier,
+            pick(&low_or_none, true, false, &[]).unwrap().identifier,
             "PRE-1482"
         );
+    }
+
+    #[test]
+    fn with_labels_only_a_ticket_carrying_one_of_them_is_taken() {
+        let labelled = |id: &str, sla: &str, labels: &[&str]| Ticket {
+            labels: labels.iter().map(|l| l.to_string()).collect(),
+            ..t(id, sla, None)
+        };
+        let tickets = [
+            labelled("INTH-1", "2026-11-01T00:00:00.000Z", &[]),
+            labelled("INTH-2", "2026-11-02T00:00:00.000Z", &["Backend"]),
+            labelled("INTH-3", "2026-11-03T00:00:00.000Z", &["Frontend", "Bug"]),
+        ];
+        let want = |ls: &[&str]| ls.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            pick(&tickets, true, true, &[]).unwrap().identifier,
+            "INTH-1"
+        );
+        // Any one of them, in any case.
+        assert_eq!(
+            pick(&tickets, true, true, &want(&["frontend", "Backend"]))
+                .unwrap()
+                .identifier,
+            "INTH-2"
+        );
+        assert_eq!(
+            pick(&tickets, true, true, &want(&[" bug "]))
+                .unwrap()
+                .identifier,
+            "INTH-3"
+        );
+        assert_eq!(pick(&tickets, true, true, &want(&["Design"])), None);
     }
 
     fn inth() -> LinearSettings {
@@ -628,6 +697,7 @@ mod tests {
             every_minutes: 5,
             watch: true,
             sla_only: true,
+            labels: Vec::new(),
         }
     }
 

@@ -211,10 +211,20 @@ impl Workspace {
             // running several tickets at once has several orchestrators in its one block.
             for (orch, card, panes) in &cards {
                 let slots = self.slots(*orch, cx);
+                if slots[0] != *orch {
+                    continue;
+                }
+                // Folded: one line, enough to see whether it needs anything.
+                if self
+                    .orchestrators
+                    .get(orch)
+                    .is_some_and(|name| self.collapsed_pipelines.contains(name))
+                {
+                    list = list.child(self.render_collapsed_pipeline(&slots, &cards, shown, cx));
+                    continue;
+                }
                 if slots.len() > 1 {
-                    if slots[0] == *orch {
-                        list = list.child(self.render_pipeline_group(&slots, &cards, shown, cx));
-                    }
+                    list = list.child(self.render_pipeline_group(&slots, &cards, shown, cx));
                     continue;
                 }
                 let active = panes.iter().any(|p| Some(*p) == shown);
@@ -339,6 +349,123 @@ impl Workspace {
         panel
             .child(list)
             .children(meter.map(|m| div().flex_none().p_1().pb_3().child(m)))
+    }
+
+    /// A folded pipeline (orchestrators `slots`): its name and state pill, then how many sessions
+    /// it has open and how its trigger is set. Its arrow unfolds it; the rest opens it.
+    fn render_collapsed_pipeline(
+        &self,
+        slots: &[PaneId],
+        cards: &[(PaneId, crate::pipeline_card::Card, Vec<PaneId>)],
+        shown: Option<PaneId>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let members: Vec<&(PaneId, crate::pipeline_card::Card, Vec<PaneId>)> = slots
+            .iter()
+            .filter_map(|s| cards.iter().find(|(o, _, _)| o == s))
+            .collect();
+        let lead = slots[0];
+        let c = if members.len() == 1 {
+            members[0].1.clone()
+        } else {
+            crate::pipeline_card::group_card(&members.iter().map(|(_, c, _)| c).collect::<Vec<_>>())
+        };
+        let sessions = members
+            .iter()
+            .map(|(o, _, panes)| panes.iter().filter(|p| *p != o).count())
+            .sum();
+        let mode = self.trigger_mode(lead, cx).map(|m| m.label());
+        let waiting = self
+            .slack_of(lead, cx)
+            .map_or(0, |(p, _, _)| self.slack_waiting(&p.file));
+        let active = members
+            .iter()
+            .any(|(_, _, panes)| panes.iter().any(|p| Some(*p) == shown));
+        let (fg, bg) = super::orchestrator::pill_colors(c.state, c.accent);
+        v_flex()
+            .id(SharedString::from(format!("pipeline-folded-{lead}")))
+            .mx_1()
+            .my_1()
+            .px(px(10.))
+            .py(px(7.))
+            .gap(px(3.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(color(c.accent).opacity(if active { 0.55 } else { 0.3 }))
+            .bg(color(crate::orchestrator_theme::SURFACE))
+            .cursor_pointer()
+            .on_click(cx.listener(move |ws, _, window, cx| ws.open_pipeline(lead, window, cx)))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().text_xs().text_color(color(c.accent)).child("◆"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(color(crate::orchestrator_theme::TEXT))
+                            .child(c.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .px(px(6.))
+                            .py(px(1.))
+                            .rounded(px(4.))
+                            .text_xs()
+                            .bg(bg)
+                            .text_color(fg)
+                            .child(c.state.word()),
+                    )
+                    .child(self.collapse_toggle(lead, true, cx)),
+            )
+            .child(
+                div()
+                    .pl(px(18.))
+                    .truncate()
+                    .text_xs()
+                    .text_color(color(crate::orchestrator_theme::TEXT_SECONDARY))
+                    .child(crate::pipeline_card::collapsed_line(
+                        sessions, mode, waiting,
+                    )),
+            )
+            .into_any_element()
+    }
+
+    /// The arrow that folds or unfolds orchestrator `orch`'s pipeline in the sidebar.
+    pub(super) fn collapse_toggle(
+        &self,
+        orch: PaneId,
+        collapsed: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        Button::new(SharedString::from(format!("pipeline-fold-{orch}")))
+            .icon(if collapsed {
+                gpui_component::IconName::ChevronRight
+            } else {
+                gpui_component::IconName::ChevronDown
+            })
+            .outline()
+            .xsmall()
+            .tooltip(if collapsed {
+                "Expand: show its sessions"
+            } else {
+                "Collapse to one line"
+            })
+            .on_click(cx.listener(move |ws, _, _, cx| {
+                // The card under it opens the pipeline; the arrow only folds.
+                cx.stop_propagation();
+                if let Some(name) = ws.orchestrators.get(&orch).cloned()
+                    && !ws.collapsed_pipelines.remove(&name)
+                {
+                    ws.collapsed_pipelines.insert(name);
+                }
+                cx.notify();
+            }))
+            .into_any_element()
     }
 
     /// The block of a pipeline running several tickets at once: one card for the pipeline, its

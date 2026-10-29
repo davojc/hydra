@@ -30,6 +30,7 @@ pub mod linear_watch;
 pub mod link;
 pub mod mcp;
 pub mod open_files;
+pub mod open_pipelines;
 pub mod openapi;
 pub mod openapi_view;
 pub mod orchestrator_theme;

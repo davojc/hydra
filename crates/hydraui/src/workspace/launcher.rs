@@ -109,6 +109,8 @@ impl Workspace {
             }
             Action::StartOrchestrator => self.start_orchestrator(window, cx),
             Action::NewPipeline => self.new_pipeline(None, window, cx),
+            Action::ExportPipeline => self.choose_pipeline_to_export(window, cx),
+            Action::ImportPipeline => self.import_pipeline(None, window, cx),
             Action::ConnectSlack => {
                 let envs = self.hydra.env_names();
                 self.choose_env_from(envs, "Connect Slack for", window, cx, |ws, env, w, cx| {
@@ -476,6 +478,7 @@ impl Workspace {
                 .into_iter()
                 .map(|l| format!("Copy of {l}")),
         );
+        labels.push("Import from a file…".into());
         let state = cx.new(|cx| CommandState::new(window, cx));
         let workspace = cx.entity();
         let first = Cell::new(true);
@@ -490,11 +493,132 @@ impl Workspace {
                     .placeholder("Blank, or a pipeline to copy")
                     .on_confirm(move |ix, window, cx| {
                         window.close_dialog(cx);
-                        let from = ix.row.checked_sub(1).and_then(|i| names.get(i).cloned());
                         let env = env.clone();
+                        if ix.row == names.len() + 1 {
+                            workspace.update(cx, |ws, cx| ws.import_pipeline(env, window, cx));
+                            return;
+                        }
+                        let from = ix.row.checked_sub(1).and_then(|i| names.get(i).cloned());
                         workspace.update(cx, |ws, cx| ws.name_pipeline(from, env, window, cx));
                     }),
             )
+        });
+    }
+
+    /// **Export pipeline…**: picks the pipeline, then where to save it.
+    fn choose_pipeline_to_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.hydra.paths.root().to_path_buf();
+        let names = crate::pipeline::names(&root);
+        let labels = pipeline_labels(&root, &names);
+        let state = cx.new(|cx| CommandState::new(window, cx));
+        let workspace = cx.entity();
+        let first = Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first.replace(false) {
+                state.update(cx, |s, cx| s.focus(window, cx));
+            }
+            let (names, workspace) = (names.clone(), workspace.clone());
+            dialog.title("Export pipeline").child(
+                Command::new(&state)
+                    .items(labels.iter().map(|l| CommandItem::new().label(l.clone())))
+                    .placeholder("Pipeline")
+                    .on_confirm(move |ix, window, cx| {
+                        window.close_dialog(cx);
+                        if let Some(name) = names.get(ix.row).cloned() {
+                            workspace.update(cx, |ws, cx| ws.export_pipeline(name, window, cx));
+                        }
+                    }),
+            )
+        });
+    }
+
+    /// Saves pipeline `name` as a file to send someone (core spec §44): the Save panel starts
+    /// in Downloads with `<name>.toml` filled in.
+    pub(super) fn export_pipeline(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let root = self.hydra.paths.root().to_path_buf();
+        let text = match crate::pipeline::export(&root, &name) {
+            Ok(t) => t,
+            Err(e) => {
+                window.push_notification(Notification::error(e).title("Export pipeline"), cx);
+                return;
+            }
+        };
+        let dir = dirs::download_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_default();
+        let rx = cx.prompt_for_new_path(&dir, Some(&format!("{name}.toml")));
+        cx.spawn_in(window, async move |this, cx| {
+            let note = match rx.await {
+                Ok(Ok(Some(path))) => {
+                    let path = if path.extension().is_some() {
+                        path
+                    } else {
+                        path.with_extension("toml")
+                    };
+                    match std::fs::write(&path, text) {
+                        Ok(()) => {
+                            crate::action_log::write(format!(
+                                "exported pipeline {name} to {}",
+                                path.display()
+                            ));
+                            Notification::success(format!(
+                                "Saved to {}. Send it on; they add it with Import pipeline…",
+                                path.display()
+                            ))
+                        }
+                        Err(e) => {
+                            Notification::error(format!("can't save {}: {e}", path.display()))
+                        }
+                    }
+                }
+                Ok(Err(e)) => Notification::error(e.to_string()),
+                _ => return,
+            };
+            let _ = this.update_in(cx, |_, window, cx| {
+                window.push_notification(note.title("Export pipeline"), cx)
+            });
+        })
+        .detach();
+    }
+
+    /// **Import pipeline…** (core spec §44): picks a pipeline file, adds it as a new pipeline
+    /// that takes nothing until turned on, then starts its orchestrator (in `env`, else one
+    /// picked) with its settings open to check.
+    fn import_pipeline(
+        &mut self,
+        env: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_dialog_path(false, window, cx, move |ws, path, window, cx| {
+            let root = ws.hydra.paths.root().to_path_buf();
+            let added = std::fs::read_to_string(&path)
+                .map_err(|e| format!("can't read {}: {e}", path.display()))
+                .and_then(|text| crate::pipeline::import(&root, &text));
+            match added {
+                Ok(name) => {
+                    crate::action_log::write(format!(
+                        "imported pipeline {name} from {}",
+                        path.display()
+                    ));
+                    window.push_notification(
+                        Notification::success(
+                            "Added. Check its folders and skills, then turn its trigger on.",
+                        )
+                        .title(format!("Imported {name}")),
+                        cx,
+                    );
+                    ws.start_new_pipeline(name, env, window, cx);
+                }
+                Err(e) => {
+                    window.push_notification(Notification::warning(e).title("Import pipeline"), cx)
+                }
+            }
         });
     }
 
@@ -692,22 +816,85 @@ impl Workspace {
         id
     }
 
-    /// At launch: each pipeline with `[autostart] env` gets its orchestrator in that
-    /// environment, once (the first piece of roadmap phase 3, "start what you need at
-    /// launch"). `HYDRAUI_NO_AUTOSTART` turns it off, for test windows.
+    /// The pipelines open now, each by its first orchestrator: its environment and whether it
+    /// is in Automatic (core spec §38).
+    fn open_pipelines_now(&self, cx: &gpui::App) -> Vec<crate::open_pipelines::OpenPipeline> {
+        let mut firsts: Vec<(crate::envs::PaneId, &String)> = self
+            .orchestrators
+            .iter()
+            .filter(|(id, _)| self.panes.contains_key(id))
+            .map(|(id, f)| (*id, f))
+            .collect();
+        firsts.sort();
+        let mut open: Vec<crate::open_pipelines::OpenPipeline> = Vec::new();
+        for (id, name) in firsts {
+            if open.iter().any(|o| &o.name == name) {
+                continue;
+            }
+            open.push(crate::open_pipelines::OpenPipeline {
+                name: name.clone(),
+                env: self.panes[&id].read(cx).env().to_string(),
+                watch: self.linear_watch.get(&id).is_some_and(|w| w.on),
+                collapsed: self.collapsed_pipelines.contains(name),
+            });
+        }
+        open.sort();
+        open
+    }
+
+    /// Saves the open pipelines when they changed, so a restart opens them again; never before
+    /// launch has opened the saved ones (core spec §38).
+    pub(super) fn remember_open_pipelines(&mut self, cx: &gpui::App) {
+        // A closing window takes its terminals down: what was open stays saved.
+        let closing = crate::mcp::server::get()
+            .is_some_and(|sv| crate::mcp::server::lock(sv.registry()).closing);
+        if self.open_pipelines.is_none() || closing {
+            return;
+        }
+        let now = self.open_pipelines_now(cx);
+        if self.open_pipelines.as_ref() == Some(&now) {
+            return;
+        }
+        if let Err(e) = crate::open_pipelines::save(self.hydra.paths.root(), &now) {
+            crate::action_log::write(format!("open pipelines: {e}"));
+        }
+        self.open_pipelines = Some(now);
+    }
+
+    /// At launch: each pipeline that was open when hydraui last ran opens again, Automatic or
+    /// Manual as it was (core spec §38), and each pipeline with `[autostart] env` gets its
+    /// orchestrator in that environment, once (the first piece of roadmap phase 3, "start what
+    /// you need at launch"). `HYDRAUI_NO_AUTOSTART` turns both off, for test windows.
     pub(super) fn autostart_pipelines(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if std::env::var_os("HYDRAUI_NO_AUTOSTART").is_some() {
             return;
         }
         let root = self.hydra.paths.root().to_path_buf();
         let envs = self.hydra.env_names();
-        for name in crate::pipeline::names(&root) {
-            let Some(env) = crate::pipeline::load(&root, &name)
+        let names = crate::pipeline::names(&root);
+        // What was open, then what starts itself; a pipeline once, as it was left.
+        let saved = crate::open_pipelines::load(&root);
+        self.collapsed_pipelines
+            .extend(saved.iter().filter(|o| o.collapsed).map(|o| o.name.clone()));
+        let mut starts: Vec<(String, String, Option<bool>)> = saved
+            .into_iter()
+            .filter(|o| names.contains(&o.name))
+            .map(|o| (o.name, o.env, Some(o.watch)))
+            .collect();
+        for name in &names {
+            if starts.iter().any(|(n, _, _)| n == name) {
+                continue;
+            }
+            if let Some(env) = crate::pipeline::load(&root, name)
                 .ok()
                 .and_then(|p| p.autostart)
-            else {
-                continue;
-            };
+            {
+                starts.push((name.clone(), env, None));
+            }
+        }
+        // From here on, what's open is saved for the next launch.
+        self.open_pipelines = Some(Vec::new());
+        for (name, env, was_watching) in starts {
             if !envs.contains(&env) {
                 crate::action_log::write(format!(
                     "autostart: pipeline {name} names environment {env}, which doesn't exist"
@@ -728,7 +915,10 @@ impl Workspace {
                 .iter()
                 .position(|i| i.run.pipeline.file == name && i.env == env);
             let Some(idx) = left else {
-                self.open_orchestrator_slot(&env, &name, window, cx);
+                let orch = self.open_orchestrator_slot(&env, &name, window, cx);
+                if let Some(on) = was_watching {
+                    self.linear_watch.entry(orch).or_default().on = on;
+                }
                 continue;
             };
             self.resume_run(idx, window, cx);
@@ -740,7 +930,8 @@ impl Workspace {
             {
                 self.resume_run(idx, window, cx);
             }
-            let watch = crate::pipeline::load(&root, &name).is_ok_and(|p| p.watches());
+            let watch = was_watching
+                .unwrap_or_else(|| crate::pipeline::load(&root, &name).is_ok_and(|p| p.watches()));
             // The first orchestrator holds the trigger.
             let orch = self
                 .orchestrators
@@ -748,9 +939,9 @@ impl Workspace {
                 .filter(|(_, f)| **f == name)
                 .map(|(id, _)| *id)
                 .min();
-            if let (true, Some(orch)) = (watch, orch) {
-                let w = self.linear_watch.entry(orch).or_default();
-                w.on = true;
+            // Automatic or Manual as it was left; one that starts itself watches when it asks to.
+            if let Some(orch) = orch.filter(|_| watch || was_watching.is_some()) {
+                self.linear_watch.entry(orch).or_default().on = watch;
             }
             crate::action_log::write(format!(
                 "autostart: {name} resumed the run hydraui closed on{}",

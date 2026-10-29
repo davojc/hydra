@@ -833,6 +833,10 @@ mod tests {
                 "{event}: {log}"
             );
         }
+        // The pipeline as it started, for a restart to resume it with (core spec §45).
+        let started: Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+        let text = started["pipeline_text"].as_str().unwrap();
+        assert_eq!(crate::pipeline::parse(text).unwrap().stages.len(), 2);
     }
 
     #[test]

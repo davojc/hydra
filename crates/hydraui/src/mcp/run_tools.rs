@@ -302,11 +302,16 @@ fn run_start(
         }
     };
     reg.runs.set_link(&id, link);
+    // The pipeline as it is now, so a restart resumes the run with it though it's edited
+    // meanwhile (core spec §45).
+    let pipeline_text =
+        std::fs::read_to_string(pipeline::folder(root).join(format!("{pipeline_name}.toml"))).ok();
     log(
         root,
         &id,
         "run started",
-        json!({"ticket": ticket, "summary": summary, "pipeline": pipeline_name, "link": link}),
+        json!({"ticket": ticket, "summary": summary, "pipeline": pipeline_name, "link": link,
+               "pipeline_text": pipeline_text}),
     );
     let started = Change {
         run: id,

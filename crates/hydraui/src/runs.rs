@@ -788,6 +788,18 @@ impl Runs {
                 ));
             }
         }
+        // Nothing new from the author yet isn't a stop for a person (§45): the stage stays
+        // waiting and is woken to look again.
+        if rating.outcome == crate::rating::Outcome::Blocked
+            && r.asking.as_ref().is_some_and(|a| a.whom == Whom::Author)
+        {
+            return Err(
+                "Not recorded: you're waiting on the author, so this isn't blocked. \
+                 Don't report; end your turn. hydraui wakes you every 5 minutes to look at the \
+                 pull request again; report done once it's safe to approve."
+                    .into(),
+            );
+        }
         // A stage that reports without waiting for its answer has decided after all.
         if r.asking.take().is_some() {
             r.state = RunState::Running;
@@ -1793,6 +1805,33 @@ mod tests {
         let r = runs.run(&id).unwrap();
         assert!(r.asking.is_none());
         assert_eq!(r.state, RunState::Running);
+    }
+
+    #[test]
+    fn a_stage_waiting_on_the_author_cant_report_blocked_and_keeps_waiting() {
+        // iov42-lingo-app-53-1: the stage asked to wait on James, then reported blocked
+        // because nothing had changed yet, and the run showed Needs you.
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a"]);
+        started(&mut runs, &id, "a", "s1");
+        runs.ask(
+            "s1",
+            "Waiting on James",
+            Some("https://github.com/o/r/pull/53"),
+            SystemTime::now(),
+            Whom::Author,
+        )
+        .unwrap();
+        let mut blocked = rated(20);
+        blocked.outcome = rating::Outcome::Blocked;
+        let e = runs.report("s1", blocked).unwrap_err();
+        assert!(e.contains("waiting on the author"), "{e}");
+        let r = runs.run(&id).unwrap();
+        assert!(r.asking.is_some(), "still waiting");
+        assert_eq!(status(&runs, &id, 0), StageStatus::Running);
+        // Approving after all is a report like any other.
+        runs.report("s1", rated(95)).unwrap();
+        assert_eq!(runs.run(&id).unwrap().state, RunState::Finished);
     }
 
     #[test]

@@ -104,7 +104,16 @@ fn read(hydra_root: &Path, file: &Path, alive: &impl Fn(u32) -> bool) -> Option<
         .map(|e| text(e, "id"))
         .filter(|c| !c.is_empty())?;
     let started = events.iter().find(|e| event(e) == "run started")?;
-    let pipeline = crate::pipeline::load(hydra_root, text(started, "pipeline")).ok()?;
+    // The pipeline as the run started with it (core spec §45), since edited or not; a log from
+    // before that was kept has only the file as it is now.
+    let file = text(started, "pipeline");
+    let pipeline = match started.get("pipeline_text").and_then(Value::as_str) {
+        Some(t) => crate::pipeline::parse(t).ok().map(|mut p| {
+            p.file = file.to_string();
+            p
+        }),
+        None => crate::pipeline::load(hydra_root, file).ok(),
+    }?;
     let run = replay(id, pipeline, &events)?;
     let mut stages: HashMap<String, (Option<PathBuf>, Option<String>)> = HashMap::new();
     for e in &events {
@@ -385,6 +394,35 @@ mod tests {
             i.stages.get("s-02"),
             Some(&(Some(PathBuf::from("/w/dev")), Some("b-c".to_string())))
         );
+    }
+
+    #[test]
+    fn a_run_resumes_with_its_pipeline_as_it_started_though_a_stage_was_since_removed() {
+        // iov42-lingo-app-53-1 ran Review PR's with a Check reply stage that was removed an
+        // hour later; at the next restart it couldn't be rebuilt, and showed Needs you forever.
+        let two = "name = \"Two\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\nskill = \"qa\"\n\
+                   [[stage]]\nid = \"b\"\ntitle = \"B\"\n";
+        let mut log = mid_run();
+        log[0] = line(
+            "run started",
+            &format!(
+                r#","ticket":"INTH-7","summary":"Export","pipeline":"two","pipeline_text":{}"#,
+                serde_json::to_string(two).unwrap()
+            ),
+        );
+        let home = home_with(&log);
+        let one = "name = \"Two\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\nskill = \"qa\"\n";
+        std::fs::write(crate::pipeline::folder(home.path()).join("two.toml"), one).unwrap();
+        let found = interrupted(home.path(), |_| false);
+        assert_eq!(found.len(), 1);
+        let r = &found[0].run;
+        assert_eq!(r.pipeline.file, "two");
+        assert_eq!(r.pipeline.stages.len(), 2);
+        assert_eq!(r.stages[1].status, StageStatus::Running);
+        // Logged before the pipeline was: the file as it is now, which no longer fits.
+        let home = home_with(&mid_run());
+        std::fs::write(crate::pipeline::folder(home.path()).join("two.toml"), one).unwrap();
+        assert!(interrupted(home.path(), |_| false).is_empty());
     }
 
     #[test]

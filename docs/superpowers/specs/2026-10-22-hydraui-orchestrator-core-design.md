@@ -1031,3 +1031,9 @@ Now, under the orchestrator's row, a guide line runs down to one box per open ti
 - A box's edge is red when it needs you and amber while waiting on product or a check. Otherwise it's quiet: waiting on an author stays calm, per §42.
 
 A pipeline running tickets in several orchestrators boxes each orchestrator's ticket the same way. A single ticket under one orchestrator is drawn as before, since the card already names it.
+
+## 47. Pipelines on one Linear team, picking differently (added 2026-10-30)
+
+Turning Automatic on was refused when another orchestrator already watched the same Linear team. That kept hydra-triage off: it picks unassigned PRE tickets in Next up, while PRE tickets picks `hydra-xs`/`hydra-s` tickets in the same state, whoever they're assigned to. Since labels and assignee rules exist, one team can feed several pipelines.
+
+The one-watcher rule now compares `linear_watch::pick_key`: team, pick state, assignee rule, `sla_only` and labels, ignoring case and order. Only an identical key is refused ("Another orchestrator already picks PRE tickets in Next up the same way"). A Slack trigger still compares its channel. Where two pipelines' picks overlap (an unassigned `hydra-xs` ticket), a ticket with a run open or waiting to resume in any pipeline is passed over, so it is never run twice at once.

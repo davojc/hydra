@@ -79,6 +79,21 @@ pub fn collapsed_line(sessions: usize, mode: Option<&str>, waiting: usize) -> St
     line
 }
 
+/// How a ticket is named in its box in the sidebar: a pull request as its repository and number
+/// (`svc-requirements #83`), anything else by its key.
+pub fn ticket_title(ticket: &str, link: Option<&str>) -> String {
+    let pr = link.and_then(|l| {
+        let mut parts = l.split('/').skip_while(|p| *p != "pull");
+        parts.next()?;
+        let number = parts
+            .next()
+            .filter(|n| n.chars().all(|c| c.is_ascii_digit()))?;
+        let repo = l.split("/pull/").next()?.rsplit('/').next()?;
+        Some(format!("{repo} #{number}"))
+    });
+    pr.unwrap_or_else(|| ticket.to_string())
+}
+
 /// `pipeline`'s accent on its card.
 pub fn accent(pipeline: &crate::pipeline::Pipeline) -> u32 {
     pipeline.color.unwrap_or(crate::orchestrator_theme::TEAL)
@@ -329,6 +344,25 @@ mod tests {
             "6 sessions · Automatic · 1 waiting"
         );
         assert_eq!(collapsed_line(6, None, 4), "6 sessions · 4 waiting");
+    }
+
+    #[test]
+    fn a_pull_requests_ticket_reads_as_its_repo_and_number() {
+        let pr = Some("https://github.com/iov42/svc-requirements/pull/83");
+        assert_eq!(
+            ticket_title("svc-requirements-83", pr),
+            "svc-requirements #83"
+        );
+        assert_eq!(
+            ticket_title("x", Some("https://github.com/o/r/pull/7/files")),
+            "r #7"
+        );
+        // A Linear ticket, or a link that isn't a pull request, keeps its key.
+        assert_eq!(ticket_title("INTH-170", None), "INTH-170");
+        assert_eq!(
+            ticket_title("INTH-170", Some("https://linear.app/x/issue/INTH-170")),
+            "INTH-170"
+        );
     }
 
     #[test]

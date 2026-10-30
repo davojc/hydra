@@ -1018,3 +1018,16 @@ iov42-lingo-app #53 showed **Needs you** from 10:05 until the PR merged at 15:28
 
 - **Blocked while waiting on the author.** A Check reply stage asked to wait on the author (§42) and, seven seconds later, reported `blocked` ("nothing new since the review"). A report used to drop the question and stop the run for a person. Now `stage_report` with outcome `blocked` is refused while the stage waits on the author ("you're waiting on the author, so this isn't blocked … end your turn"). The stage stays waiting and is woken every 5 minutes as before. A `done` report still ends the wait, and so does a `blocked` report while waiting on product.
 - **A run outlived its pipeline's stages.** The Check reply stage was added to Review PR's at 09:08 and removed at 10:01. At the 13:24 restart the run was rebuilt against the file as it was then. That file had no `check-reply` stage, so the rebuild failed silently: the run was neither resumed nor ended. Its history said Needs you, and the merged-PR check (which looks at loaded runs) never saw it. `run started` now logs `pipeline_text`, the pipeline file as the run started with it, and a resume rebuilds from that (a log without it uses the current file, as before). That matches §41: a run takes its pipeline as it was when it started.
+
+## 46. Each ticket is a box under its orchestrator (added 2026-10-30)
+
+With several reviews under one orchestrator, the sidebar listed each ticket's line ("svc-requirements-83 · Review PR") and then its sessions in an indented rule. Nothing grouped the line with its sessions, so it was unclear whether a line named the session above or below it. The orchestrator sat directly above the first ticket, so it looked like it ran that one. And the "Waiting on the author" banner at the top didn't say which ticket it meant.
+
+Now, under the orchestrator's row, a guide line runs down to one box per open ticket:
+
+- When there's more than one ticket, a muted line above the boxes says "Coordinating 3 pull requests" (or "3 tickets" when any isn't a PR).
+- Each box's header is the ticket's name, with a pull request as `repo #N` (`pipeline_card::ticket_title`), and its state pill. Clicking the header opens that run in the Pipeline tab.
+- Under the header come that ticket's own "Waiting on…" line (`render_question` per run, whose dialog is about that run), its Linear link and PRs (not repeated for a PR ticket), and the sessions working on it.
+- A box's edge is red when it needs you and amber while waiting on product or a check. Otherwise it's quiet: waiting on an author stays calm, per §42.
+
+A pipeline running tickets in several orchestrators boxes each orchestrator's ticket the same way. A single ticket under one orchestrator is drawn as before, since the card already names it.

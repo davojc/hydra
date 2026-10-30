@@ -228,6 +228,7 @@ impl Workspace {
                     continue;
                 }
                 let active = panes.iter().any(|p| Some(*p) == shown);
+                let lanes = self.lanes(*orch, cx);
                 let mut block = v_flex()
                     .id(SharedString::from(format!("pipeline-block-{orch}")))
                     .mx_1()
@@ -239,7 +240,13 @@ impl Workspace {
                     // The pipeline's own colour, so pipelines are told apart at a glance.
                     .border_color(color(card.accent).opacity(if active { 0.55 } else { 0.3 }))
                     .child(self.render_pipeline_card(*orch, card, active, true, cx))
-                    .children(self.render_question(*orch, cx))
+                    // With several tickets, each one's question is in its own box.
+                    .children(
+                        lanes
+                            .is_empty()
+                            .then(|| self.render_question(*orch, None, cx))
+                            .flatten(),
+                    )
                     .children(self.render_linear_row(*orch, card.accent, cx));
                 let orch = *orch;
                 if let Some(row) = self.terminal_row(
@@ -251,39 +258,17 @@ impl Workspace {
                 ) {
                     block = block.child(row);
                 }
-                // Several tickets under the one orchestrator: each ticket's line, then its own
-                // sessions, so related reviews sit together under the orchestrator that sees them.
-                let lanes = self.lanes(orch, cx);
-                for (run, lane, lane_panes) in &lanes {
-                    block = block.child(self.render_run_line(orch, lane, Some(run), cx));
-                    let rows: Vec<_> = lane_panes
-                        .iter()
-                        .filter_map(|id| {
-                            self.terminal_row(
-                                *id,
-                                shown == Some(*id),
-                                color(card.accent),
-                                Nest::Stage,
-                                cx,
-                            )
-                        })
-                        .collect();
-                    if !rows.is_empty() {
-                        block = block.child(
-                            v_flex()
-                                .ml(px(18.))
-                                .mr_1()
-                                .pl(px(6.))
-                                .gap_0p5()
-                                .border_l_2()
-                                .border_color(color(card.accent).opacity(0.45))
-                                .children(rows),
-                        );
-                    }
+                // Several tickets under the one orchestrator: each is a box holding its own
+                // sessions, hanging off the orchestrator's guide line, so it's plain which
+                // sessions work on which ticket and that the orchestrator oversees them all.
+                let several = !lanes.is_empty();
+                if several {
+                    block =
+                        block.child(self.render_lanes(orch, lanes, shown, color(card.accent), cx));
                 }
                 let stage_rows: Vec<_> = panes
                     .iter()
-                    .filter(|id| **id != orch && lanes.is_empty())
+                    .filter(|id| **id != orch && !several)
                     .filter_map(|id| {
                         self.terminal_row(
                             *id,
@@ -501,18 +486,19 @@ impl Workspace {
             .border_color(accent.opacity(if active { 0.55 } else { 0.3 }))
             .child(self.render_pipeline_card(lead, &group, active, false, cx))
             .children(self.render_linear_row(lead, group.accent, cx));
-        for (orch, card, panes) in members {
+        for (orch, _, panes) in members {
             let orch = *orch;
             if let Some(row) =
                 self.terminal_row(orch, shown == Some(orch), accent, Nest::Orchestrator, cx)
             {
                 block = block.child(row);
             }
-            // Its ticket, when it has one.
-            if card.state != crate::pipeline_card::CardState::Ready {
-                block = block.child(self.render_run_line(orch, card, None, cx));
+            // Its tickets, each a box holding its sessions.
+            let lanes = self.open_lanes(orch, cx);
+            if !lanes.is_empty() {
+                block = block.child(self.render_lanes(orch, lanes, shown, accent, cx));
+                continue;
             }
-            block = block.children(self.render_question(orch, cx));
             let stage_rows: Vec<_> = panes
                 .iter()
                 .filter(|id| **id != orch)
@@ -534,6 +520,54 @@ impl Workspace {
             }
         }
         block.into_any_element()
+    }
+
+    /// The ticket boxes under an orchestrator (core spec §46): a guide line down from it, a
+    /// muted line saying how many it coordinates when more than one, then one box per ticket
+    /// with its sessions inside.
+    fn render_lanes(
+        &self,
+        orch: PaneId,
+        lanes: Vec<super::orchestrator::Lane>,
+        shown: Option<PaneId>,
+        accent: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let count = lanes.len();
+        let all_prs = lanes
+            .iter()
+            .all(|(r, _, _)| r.link.as_deref().is_some_and(|l| l.contains("/pull/")));
+        let mut boxes = Vec::new();
+        for (run, lane, panes) in &lanes {
+            let rows: Vec<_> = panes
+                .iter()
+                .filter_map(|id| {
+                    self.terminal_row(*id, shown == Some(*id), accent, Nest::Stage, cx)
+                })
+                .collect();
+            boxes.push(self.render_lane(orch, run, lane, rows, cx));
+        }
+        v_flex()
+            .ml(px(16.))
+            .pl(px(8.))
+            .pb_1()
+            .border_l_2()
+            .border_color(accent.opacity(0.45))
+            .when(count > 1, |d| {
+                d.child(
+                    div()
+                        .text_xs()
+                        .text_color(crate::orchestrator_theme::color(
+                            crate::orchestrator_theme::TEXT_MUTED,
+                        ))
+                        .child(format!(
+                            "Coordinating {count} {}",
+                            if all_prs { "pull requests" } else { "tickets" }
+                        )),
+                )
+            })
+            .children(boxes)
+            .into_any_element()
     }
 
     /// Switches the list to the tab terminal `id` sits under once its environment shows, so a

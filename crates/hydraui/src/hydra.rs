@@ -26,6 +26,7 @@ use hydraui_term::{GridSize, Pane, SpawnSpec, TermEvent};
 use hydra_providers::claude::is_session_marker;
 
 use crate::accounts::{AddChoice, add_choices};
+use crate::linear::LinearError;
 use crate::palette::env_tint;
 
 /// Where an environment's logins come from: the tools it borrows (tool -> owner), and for
@@ -607,6 +608,48 @@ impl Hydra {
         }
     }
 
+    /// `env`'s Linear API key, read from the secret its `[linear]` table names (orchestrator
+    /// phase 2 §1). Says what to set up when there is none (`Rejected`); a store that can't be
+    /// read just now, such as a keychain that can't show its prompt, only `Failed`. Reads the
+    /// store, so call it off the UI thread.
+    pub fn linear_key(&self, env: &str) -> Result<String, LinearError> {
+        let rejected = |e: String| LinearError::Rejected(e);
+        let name = EnvName::parse(env).map_err(|e| rejected(e.to_string()))?;
+        let cfg = load_env(&self.paths, &name).map_err(|e| rejected(e.to_string()))?;
+        let missing = || {
+            rejected(format!(
+                "{env} has no Linear API key: Set up linear… or hydra add linear"
+            ))
+        };
+        let raw = cfg.linear.map(|l| l.api_key).ok_or_else(missing)?;
+        let r = SecretRef::parse_value(&raw)
+            .map_err(|e| rejected(e.to_string()))?
+            .ok_or_else(missing)?;
+        self.store
+            .get(&r)
+            .map_err(|e| LinearError::Failed(e.to_string()))?
+            .filter(|k| !k.trim().is_empty())
+            .ok_or_else(missing)
+    }
+
+    /// The Slack token a `[slack]` pipeline in `env` reads its channel and reacts with: the
+    /// secret `<env>/slack` (Set secret: other… in the launcher). A user token's reactions show
+    /// as that person. Reads the store, so call it off the UI thread.
+    pub fn slack_token(&self, env: &str) -> Result<String, LinearError> {
+        let path = format!("{env}/slack");
+        let missing = || {
+            LinearError::Rejected(format!(
+                "Slack isn't connected for {env}: press Connect Slack"
+            ))
+        };
+        let r = SecretRef::parse_path(&path).map_err(|e| LinearError::Rejected(e.to_string()))?;
+        self.store
+            .get(&r)
+            .map_err(|e| LinearError::Failed(e.to_string()))?
+            .filter(|t| !t.trim().is_empty())
+            .ok_or_else(missing)
+    }
+
     /// Stores a secret through hydra's store, which also keeps secrets.toml's index. The
     /// value is kept exactly as typed; an empty or blank one is refused.
     pub fn set_secret(&self, path: &str, value: &str) -> Result<(), String> {
@@ -1029,6 +1072,62 @@ mod tests {
         );
         let req = PaneRequest::new("work", f.free.clone(), ShellKind::Pwsh);
         assert!(f.hydra.prepare(&req).is_ok());
+    }
+
+    #[test]
+    fn an_environments_linear_key_is_read_from_its_secret() {
+        let f = fx("");
+        let none = f.hydra.linear_key("work").unwrap_err().to_string();
+        assert!(none.contains("Set up linear"), "{none}");
+        f.hydra
+            .add_api_key("work", "linear", "lin_api_test")
+            .unwrap();
+        assert_eq!(f.hydra.linear_key("work").unwrap(), "lin_api_test");
+        assert!(f.hydra.linear_key("nowhere").is_err());
+    }
+
+    /// A store that can't be read, as when the keychain can't show its prompt.
+    struct BrokenStore;
+
+    impl SecretStore for BrokenStore {
+        fn get(&self, _: &SecretRef) -> Result<Option<String>, hydra_core::secret::StoreError> {
+            Err(hydra_core::secret::StoreError::Backend(
+                "In dark wake, no UI possible".to_string(),
+            ))
+        }
+        fn set(&self, _: &SecretRef, _: &str) -> Result<(), hydra_core::secret::StoreError> {
+            unreachable!()
+        }
+        fn delete(&self, _: &SecretRef) -> Result<bool, hydra_core::secret::StoreError> {
+            unreachable!()
+        }
+        fn list(&self, _: &EnvName) -> Result<Vec<String>, hydra_core::secret::StoreError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn a_missing_linear_key_is_rejected_but_an_unreadable_store_only_failed() {
+        let f = fx("");
+        assert!(matches!(
+            f.hydra.linear_key("work"),
+            Err(LinearError::Rejected(_))
+        ));
+        let n = EnvName::parse("work").unwrap();
+        std::fs::write(
+            f.hydra.paths.env_file(&n),
+            "[linear]\napi_key = \"secret:work/linear\"\n",
+        )
+        .unwrap();
+        let (broken, _) = Hydra::new(
+            f.hydra.paths.clone(),
+            f.hydra.user_home.clone(),
+            Box::new(BrokenStore),
+        );
+        match broken.linear_key("work") {
+            Err(LinearError::Failed(why)) => assert!(why.contains("dark wake"), "{why}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

@@ -1,6 +1,8 @@
 //! The phone link's saved state: its key in the OS credential store, and the paired phone and
 //! on/off setting in config.toml.
 use hydra_core::paths::HydraPaths;
+#[cfg(target_os = "macos")]
+use hydra_platform::macos_keychain::Keychain;
 
 use crate::config;
 
@@ -12,6 +14,7 @@ pub struct LinkKey {
     service: String,
 }
 
+#[cfg(not(target_os = "macos"))]
 fn failed(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
@@ -38,17 +41,58 @@ impl LinkKey {
     /// The stored key, made and stored first when there is none. An entry that isn't 32 bytes
     /// of hex is an error, never silently replaced: that would change the link's identity.
     pub fn get_or_create(&self) -> Result<[u8; 32], String> {
-        let entry = keyring::Entry::new(&self.service, USER).map_err(failed)?;
-        match entry.get_password() {
-            Ok(hex) => from_hex(hex.trim()).ok_or_else(|| "the stored link key is damaged".into()),
-            Err(keyring::Error::NoEntry) => {
+        match self.read()? {
+            Some(hex) => {
+                from_hex(hex.trim()).ok_or_else(|| "the stored link key is damaged".into())
+            }
+            None => {
                 let mut key = [0u8; 32];
                 getrandom::fill(&mut key).map_err(|e| format!("random key: {e}"))?;
-                entry.set_password(&to_hex(&key)).map_err(failed)?;
+                self.write(&to_hex(&key))?;
                 Ok(key)
             }
+        }
+    }
+
+    /// The stored hex, or `None` when there is none. macOS goes through /usr/bin/security, so
+    /// Always Allow lasts across builds (hydra-platform's macos_keychain).
+    #[cfg(target_os = "macos")]
+    fn read(&self) -> Result<Option<String>, String> {
+        Keychain::user().get(&self.service, USER)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn read(&self) -> Result<Option<String>, String> {
+        match keyring::Entry::new(&self.service, USER)
+            .map_err(failed)?
+            .get_password()
+        {
+            Ok(hex) => Ok(Some(hex)),
+            Err(keyring::Error::NoEntry) => Ok(None),
             Err(e) => Err(failed(e)),
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn write(&self, hex: &str) -> Result<(), String> {
+        Keychain::user().set(&self.service, USER, hex)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn write(&self, hex: &str) -> Result<(), String> {
+        keyring::Entry::new(&self.service, USER)
+            .map_err(failed)?
+            .set_password(hex)
+            .map_err(failed)
+    }
+
+    /// Forgets the stored key, if any.
+    #[cfg(test)]
+    fn forget(&self) {
+        #[cfg(target_os = "macos")]
+        let _ = Keychain::user().delete(&self.service, USER);
+        #[cfg(not(target_os = "macos"))]
+        let _ = keyring::Entry::new(&self.service, USER).and_then(|e| e.delete_credential());
     }
 }
 
@@ -93,7 +137,7 @@ mod tests {
         };
         assert_eq!(k.get_or_create().unwrap(), first);
         assert_ne!(first, [0u8; 32]);
-        let _ = keyring::Entry::new(&k.service, USER).and_then(|e| e.delete_credential());
+        k.forget();
     }
 
     #[test]

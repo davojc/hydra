@@ -68,10 +68,27 @@ pub fn record(hydra_root: &Path, runs: &Runs, changes: &[Change]) {
             Decided::Stopped(why) => ("stage stopped", json!({"stage": stage, "reason": why})),
             Decided::Failed(why) => ("stage failed", json!({"stage": stage, "reason": why})),
             Decided::Retrying => ("re-run", json!({"stage": stage})),
+            Decided::Reopened => ("went back", json!({"stage": stage})),
+            Decided::Rescoring => ("scoring again", json!({"stage": stage})),
+            Decided::Checked(note) => ("checked", json!({"stage": stage, "note": note})),
             Decided::Paused => ("paused", json!({})),
             Decided::Resumed => ("resumed", json!({})),
+            Decided::Asked(question) => (
+                "asked",
+                json!({
+                    "stage": stage,
+                    "question": question,
+                    "link": run.asking.as_ref().and_then(|a| a.link.clone()),
+                    "who": run.asking.as_ref().map_or("product", |a| a.whom.word()),
+                }),
+            ),
+            Decided::Answered(answer) => ("answered", json!({"stage": stage, "answer": answer})),
             Decided::RunNeedsYou(why) => ("needs you", json!({"reason": why})),
             Decided::RunFinished => ("run ended", json!({"outcome": "done", "scores": scores()})),
+            Decided::RunSettled(why) => (
+                "run ended",
+                json!({"outcome": "done", "reason": why, "scores": scores()}),
+            ),
             Decided::RunStopped(why) => (
                 "run ended",
                 json!({"outcome": "stopped", "reason": why, "scores": scores()}),

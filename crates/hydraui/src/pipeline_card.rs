@@ -11,6 +11,13 @@ pub enum CardState {
     Ready,
     Working,
     NeedsYou,
+    /// A stage asked product a question; the ticket waits for the answer.
+    Asking,
+    /// A review asked a pull request's author for changes and waits for them: nothing for the
+    /// user to do (core spec §42).
+    Waiting,
+    /// A stage asked a person to check something by hand; it didn't fail.
+    Checking,
     Paused,
     Done,
     Stopped,
@@ -22,6 +29,9 @@ impl CardState {
             CardState::Ready => "Ready",
             CardState::Working => "Working",
             CardState::NeedsYou => "Needs you",
+            CardState::Asking => "Asked product",
+            CardState::Waiting => "Waiting on author",
+            CardState::Checking => "Check it",
             CardState::Paused => "Paused",
             CardState::Done => "Done",
             CardState::Stopped => "Stopped",
@@ -35,6 +45,8 @@ pub enum Segment {
     Passed,
     Running,
     Stopped,
+    /// Waiting for a person's check by hand: not a failure.
+    Checking,
     Pending,
 }
 
@@ -46,6 +58,58 @@ pub struct Card {
     pub line: String,
     pub state: CardState,
     pub segments: Vec<Segment>,
+    /// Its pipeline's colour (`color`), else the default teal.
+    pub accent: u32,
+}
+
+/// A collapsed pipeline's one line in the sidebar: how many sessions it has open, and how its
+/// trigger is set (`Automatic`, `Manual`, `Stopped`), when it has one.
+pub fn collapsed_line(sessions: usize, mode: Option<&str>, waiting: usize) -> String {
+    let mut line = match sessions {
+        0 => "No sessions".to_string(),
+        1 => "1 session".to_string(),
+        n => format!("{n} sessions"),
+    };
+    if let Some(m) = mode {
+        line = format!("{line} · {m}");
+    }
+    if waiting > 0 {
+        line = format!("{line} · {waiting} waiting");
+    }
+    line
+}
+
+/// How a ticket is named in its box in the sidebar: a pull request as its repository and number
+/// (`svc-requirements #83`), anything else by its key.
+pub fn ticket_title(ticket: &str, link: Option<&str>) -> String {
+    let pr = link.and_then(|l| {
+        let mut parts = l.split('/').skip_while(|p| *p != "pull");
+        parts.next()?;
+        let number = parts
+            .next()
+            .filter(|n| n.chars().all(|c| c.is_ascii_digit()))?;
+        let repo = l.split("/pull/").next()?.rsplit('/').next()?;
+        Some(format!("{repo} #{number}"))
+    });
+    pr.unwrap_or_else(|| ticket.to_string())
+}
+
+/// `pipeline`'s accent on its card.
+pub fn accent(pipeline: &crate::pipeline::Pipeline) -> u32 {
+    pipeline.color.unwrap_or(crate::orchestrator_theme::TEAL)
+}
+
+/// Whether stage `s` stopped asking a person to check something by hand.
+fn wants_check(s: &crate::runs::StageRun) -> bool {
+    s.status == StageStatus::Stopped
+        && s.rating()
+            .is_some_and(|r| r.outcome == crate::rating::Outcome::Check)
+}
+
+/// Whether `run` stays on its orchestrator's card once it's the last one there: open or
+/// stopped yes (someone may want to look); finished, no: the card goes back to ready.
+pub fn stays_on_card(run: &Run) -> bool {
+    run.state != RunState::Finished
 }
 
 /// What the card says about `run`.
@@ -53,6 +117,16 @@ pub fn card(run: &Run) -> Card {
     let state = match &run.state {
         RunState::Finished => CardState::Done,
         RunState::Stopped(_) => CardState::Stopped,
+        RunState::NeedsYou(_)
+            if run
+                .asking
+                .as_ref()
+                .is_some_and(|a| a.whom == crate::runs::Whom::Author) =>
+        {
+            CardState::Waiting
+        }
+        RunState::NeedsYou(_) if run.asking.is_some() => CardState::Asking,
+        RunState::NeedsYou(_) if run.stages.iter().any(wants_check) => CardState::Checking,
         RunState::NeedsYou(_) => CardState::NeedsYou,
         RunState::Running if run.paused => CardState::Paused,
         RunState::Running => CardState::Working,
@@ -80,15 +154,22 @@ pub fn card(run: &Run) -> Card {
         .map(|s| match s.status {
             StageStatus::Passed => Segment::Passed,
             StageStatus::Starting | StageStatus::Running => Segment::Running,
+            _ if wants_check(s) => Segment::Checking,
             StageStatus::Stopped | StageStatus::Failed => Segment::Stopped,
             StageStatus::Waiting => Segment::Pending,
         })
         .collect();
+    let paused_for = match state {
+        CardState::Asking => " · paused for product",
+        CardState::Waiting => " · waiting on the author",
+        _ => "",
+    };
     Card {
         name: run.pipeline.name.clone(),
-        line: format!("{} · {stage}", run.ticket),
+        line: format!("{} · {stage}{paused_for}", run.ticket),
         state,
         segments,
+        accent: accent(&run.pipeline),
     }
 }
 
@@ -100,6 +181,56 @@ pub fn ready_card(pipeline: &crate::pipeline::Pipeline) -> Card {
         line: "No ticket yet".into(),
         state: CardState::Ready,
         segments: vec![Segment::Pending; pipeline.stages.len()],
+        accent: accent(pipeline),
+    }
+}
+
+/// The one card of a pipeline running several tickets at once (`runs_at_once`): its name, how
+/// many are running, and the most urgent state among them; no progress bar (each orchestrator
+/// under it shows its own ticket).
+pub fn group_card(runs: &[&Card]) -> Card {
+    let rank = |s: CardState| match s {
+        CardState::NeedsYou => 0,
+        CardState::Asking | CardState::Checking => 1,
+        CardState::Waiting => 3,
+        CardState::Working => 2,
+        CardState::Paused => 3,
+        CardState::Stopped => 4,
+        CardState::Done => 5,
+        CardState::Ready => 6,
+    };
+    let busy = |s: CardState| {
+        matches!(
+            s,
+            CardState::Working
+                | CardState::NeedsYou
+                | CardState::Asking
+                | CardState::Waiting
+                | CardState::Checking
+                | CardState::Paused
+        )
+    };
+    let running = runs.iter().filter(|c| busy(c.state)).count();
+    let state = runs
+        .iter()
+        .map(|c| c.state)
+        .min_by_key(|s| rank(*s))
+        .unwrap_or(CardState::Ready);
+    Card {
+        name: runs.first().map(|c| c.name.clone()).unwrap_or_default(),
+        line: match running {
+            0 => "No ticket yet".into(),
+            n => format!("{n} of {} running", runs.len()),
+        },
+        state: if running == 0 {
+            CardState::Ready
+        } else {
+            state
+        },
+        segments: Vec::new(),
+        accent: runs
+            .first()
+            .map_or(crate::orchestrator_theme::TEAL, |c| c.accent),
     }
 }
 
@@ -113,6 +244,15 @@ pub fn card_tokens(run: &Run) -> Vec<String> {
                 .flat_map(|s| &s.attempts)
                 .filter_map(|a| a.session.clone()),
         )
+        .collect()
+}
+
+/// The stage sessions a finished run leaves (every attempt's, not its orchestrator's): they
+/// close, since nothing more is asked of them.
+pub fn stage_tokens(run: &Run) -> Vec<String> {
+    card_tokens(run)
+        .into_iter()
+        .filter(|t| *t != run.orchestrator)
         .collect()
 }
 
@@ -190,6 +330,74 @@ pub fn meter(week_used: Option<f64>, floor: u8) -> Option<Meter> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_collapsed_pipeline_says_its_sessions_and_mode() {
+        use super::collapsed_line;
+        assert_eq!(collapsed_line(0, None, 0), "No sessions");
+        assert_eq!(collapsed_line(1, Some("Manual"), 0), "1 session · Manual");
+        assert_eq!(
+            collapsed_line(4, Some("Automatic"), 0),
+            "4 sessions · Automatic"
+        );
+        assert_eq!(
+            collapsed_line(6, Some("Automatic"), 1),
+            "6 sessions · Automatic · 1 waiting"
+        );
+        assert_eq!(collapsed_line(6, None, 4), "6 sessions · 4 waiting");
+    }
+
+    #[test]
+    fn a_pull_requests_ticket_reads_as_its_repo_and_number() {
+        let pr = Some("https://github.com/iov42/svc-requirements/pull/83");
+        assert_eq!(
+            ticket_title("svc-requirements-83", pr),
+            "svc-requirements #83"
+        );
+        assert_eq!(
+            ticket_title("x", Some("https://github.com/o/r/pull/7/files")),
+            "r #7"
+        );
+        // A Linear ticket, or a link that isn't a pull request, keeps its key.
+        assert_eq!(ticket_title("INTH-170", None), "INTH-170");
+        assert_eq!(
+            ticket_title("INTH-170", Some("https://linear.app/x/issue/INTH-170")),
+            "INTH-170"
+        );
+    }
+
+    #[test]
+    fn a_pipelines_runs_share_one_card_with_the_most_urgent_state() {
+        let c = |state| Card {
+            name: "Review PR's".into(),
+            line: String::new(),
+            state,
+            segments: vec![Segment::Pending],
+            accent: 0x123456,
+        };
+        let (ready, working, needs) = (
+            c(CardState::Ready),
+            c(CardState::Working),
+            c(CardState::NeedsYou),
+        );
+        let g = group_card(&[&ready, &ready]);
+        assert_eq!(
+            (g.line.as_str(), g.state),
+            ("No ticket yet", CardState::Ready)
+        );
+        let g = group_card(&[&working, &ready]);
+        assert_eq!(
+            (g.line.as_str(), g.state),
+            ("1 of 2 running", CardState::Working)
+        );
+        let g = group_card(&[&working, &needs]);
+        assert_eq!(
+            (g.line.as_str(), g.state),
+            ("2 of 2 running", CardState::NeedsYou)
+        );
+        assert!(g.segments.is_empty());
+        assert_eq!((g.name.as_str(), g.accent), ("Review PR's", 0x123456));
+    }
+
     use serde_json::json;
 
     use super::*;
@@ -253,6 +461,88 @@ mod tests {
     }
 
     #[test]
+    fn a_stage_asking_for_a_check_by_hand_reads_check_it_in_amber_not_failed() {
+        let (mut runs, id) = runs_of(&STAGES);
+        start(&mut runs, &id, "replicate", "t1");
+        let mut r = rated(86);
+        r.outcome = crate::rating::Outcome::Check;
+        r.check = "Try the + path.".into();
+        runs.report("t1", r).unwrap();
+        let c = card(runs.run(&id).unwrap());
+        assert_eq!(c.state, CardState::Checking);
+        assert_eq!(c.state.word(), "Check it");
+        assert_eq!(c.segments[0], Segment::Checking);
+    }
+
+    #[test]
+    fn a_finished_ticket_leaves_the_card_and_a_stopped_one_stays() {
+        let (mut runs, id) = runs_of(&[("only", "Only")]);
+        start(&mut runs, &id, "only", "t1");
+        assert!(stays_on_card(runs.run(&id).unwrap()), "open");
+        runs.report("t1", rated(99)).unwrap();
+        assert!(!stays_on_card(runs.run(&id).unwrap()), "finished");
+        let (mut runs, id) = runs_of(&STAGES);
+        start(&mut runs, &id, "replicate", "t1");
+        runs.person(&id, crate::runs::Choice::Stop).unwrap();
+        assert!(stays_on_card(runs.run(&id).unwrap()), "stopped");
+    }
+
+    #[test]
+    fn a_review_waiting_on_the_author_says_so_not_needs_you() {
+        let (mut runs, id) = runs_of(&STAGES);
+        start(&mut runs, &id, "replicate", "t1");
+        let now = std::time::SystemTime::now();
+        assert!(
+            runs.ask(
+                "t1",
+                "Fix the null check",
+                None,
+                now,
+                crate::runs::Whom::Author
+            )
+            .unwrap_err()
+            .contains("link"),
+            "an author wait needs the pull request to look at"
+        );
+        runs.ask(
+            "t1",
+            "Fix the null check",
+            Some("https://github.com/o/r/pull/1"),
+            now,
+            crate::runs::Whom::Author,
+        )
+        .unwrap();
+        let c = card(runs.run(&id).unwrap());
+        assert_eq!(
+            (c.state, c.state.word()),
+            (CardState::Waiting, "Waiting on author")
+        );
+        assert_eq!(c.line, "INTH-482 · Understand · waiting on the author");
+    }
+
+    #[test]
+    fn a_ticket_waiting_on_product_says_so_not_needs_you() {
+        let (mut runs, id) = runs_of(&STAGES);
+        start(&mut runs, &id, "replicate", "t1");
+        runs.ask(
+            "t1",
+            "Remove it?",
+            None,
+            std::time::SystemTime::now(),
+            crate::runs::Whom::Product,
+        )
+        .unwrap();
+        let c = card(runs.run(&id).unwrap());
+        assert_eq!(
+            (c.state, c.state.word()),
+            (CardState::Asking, "Asked product")
+        );
+        assert_eq!(c.line, "INTH-482 · Understand · paused for product");
+        runs.answered(&id, "No").unwrap();
+        assert_eq!(card(runs.run(&id).unwrap()).state, CardState::Working);
+    }
+
+    #[test]
     fn an_orchestrator_without_a_ticket_is_ready() {
         let p = crate::pipeline::parse(
             "name = \"INTH SLA tickets\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n\
@@ -311,6 +601,7 @@ mod tests {
         // Not linked yet: no token to show.
         runs.begin("orch", &id, "develop", "", 30).unwrap();
         assert_eq!(card_tokens(runs.run(&id).unwrap()), ["orch", "t1", "t2"]);
+        assert_eq!(stage_tokens(runs.run(&id).unwrap()), ["t1", "t2"]);
     }
 
     #[test]

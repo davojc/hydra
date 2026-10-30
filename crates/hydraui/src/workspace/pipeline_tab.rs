@@ -4,14 +4,18 @@
 //! in `crate::pipeline_view`; this is the drawing and the wiring.
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::SystemTime;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Div, FontWeight, SharedString, Window, div, px, relative};
+use gpui::{
+    AnimationExt, AnyElement, App, Context, Div, FontWeight, SharedString, Window, div, px,
+    relative,
+};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_component::notification::Notification;
-use gpui_component::{Sizable, WindowExt, h_flex, v_flex};
+use gpui_component::{Disableable, Sizable, WindowExt, h_flex, v_flex};
 use serde_json::json;
 
 use super::Workspace;
@@ -47,6 +51,8 @@ pub(super) struct PipelineTab {
     pub stepped_in: bool,
     /// **Stop this ticket** is asking to be confirmed.
     pub confirm_stop: bool,
+    /// The run this tab shows, when its orchestrator holds several; `None` follows its latest.
+    pub run: Option<String>,
 }
 
 /// What the tab draws, copied out of the registry so its lock isn't held while drawing.
@@ -75,6 +81,32 @@ fn text(size: f32, hex: u32) -> Div {
     div().text_size(px(size)).text_color(color(hex))
 }
 
+/// What **Score again** types into the stopped stage's session.
+const SCORE_AGAIN: &str = "A person has worked on this stage in this session since you reported. \
+     Look at the stage's work as it is now, check it again the way the stage asks, then call \
+     stage_report again: a fresh score, evidence, and reasons for and against.";
+
+/// The note a person started an attempt with (Re-run or Go back), under its panel's header.
+fn note_strip(note: Option<&str>) -> Option<AnyElement> {
+    let note = note.map(str::trim).filter(|n| !n.is_empty())?;
+    Some(
+        v_flex()
+            .px(px(16.))
+            .py(px(8.))
+            .gap_0p5()
+            .bg(color(theme::RAISED))
+            .border_b_1()
+            .border_color(color(theme::BORDER_SUBTLE))
+            .child(text(11., theme::TEXT_MUTED).child("STARTED WITH YOUR NOTE"))
+            .child(
+                text(12.5, theme::TEXT)
+                    .line_height(relative(1.4))
+                    .child(note.to_string()),
+            )
+            .into_any_element(),
+    )
+}
+
 impl Workspace {
     /// Whether terminal `id` shows its Pipeline tab.
     pub(super) fn pipeline_shown(&self, id: PaneId) -> bool {
@@ -100,9 +132,27 @@ impl Workspace {
         if let Some(tasks) = self.tasks_tabs.get_mut(&orch) {
             *tasks = false;
         }
+        // The other orchestrators of its pipeline get theirs too, behind it.
+        if self.orchestrators.contains_key(&orch) {
+            for other in self.slots(orch, cx) {
+                self.pipeline_tabs.entry(other).or_default();
+            }
+        }
         self.sync_boards(window, cx);
         self.focus_active(window, cx);
         cx.notify();
+    }
+
+    /// Opens orchestrator `orch`'s Pipeline tab on run `run`, one of the tickets it holds.
+    pub(super) fn open_pipeline_run(
+        &mut self,
+        orch: PaneId,
+        run: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_pipeline(orch, window, cx);
+        self.pipeline_tab_update(orch, cx, |t| t.run = Some(run));
     }
 
     /// Shows orchestrator `orch`'s Pipeline tab at `view`, opening the tab when it has none.
@@ -181,7 +231,13 @@ impl Workspace {
             };
         };
         let reg = server::lock(sv.registry());
-        let run = reg.runs.current(&token).cloned();
+        let chosen = self
+            .pipeline_tabs
+            .get(&orch)
+            .and_then(|t| t.run.as_deref())
+            .and_then(|id| reg.runs.run(id))
+            .filter(|r| r.orchestrator == token);
+        let run = chosen.or_else(|| reg.runs.current(&token)).cloned();
         let live = run
             .iter()
             .flat_map(|r| r.stages.iter().flat_map(|s| &s.attempts))
@@ -214,7 +270,7 @@ impl Workspace {
 
     /// A person's choice for run `run` (§5.3): applied under the registry's lock, written to the
     /// run's log with the note, then told to the app and the orchestrator.
-    fn person_choice(
+    pub(super) fn person_choice(
         &mut self,
         orch: PaneId,
         run: &str,
@@ -222,9 +278,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (word, note) = match &choice {
-            Choice::Retry { note } => ("re-run", Some(note.trim().to_string())),
-            Choice::Stop => ("stop", None),
+        let (word, note, stage) = match &choice {
+            Choice::Retry { note } => ("re-run", Some(note.trim().to_string()), None),
+            Choice::Stop => ("stop", None, None),
+            Choice::Checked { note } => ("checked", Some(note.trim().to_string()), None),
+            Choice::Back { stage, note } => {
+                ("back", Some(note.trim().to_string()), Some(stage.clone()))
+            }
         };
         let Some(sv) = server::get() else {
             return;
@@ -234,9 +294,11 @@ impl Workspace {
             let done = reg.runs.person(run, choice);
             if let (Ok(_), Some(root)) = (&done, &reg.hydra_root) {
                 let file = crate::run_log::file_for(root, run);
-                if let Err(e) =
-                    crate::run_log::append(&file, "person", json!({"choice": word, "note": note}))
-                {
+                if let Err(e) = crate::run_log::append(
+                    &file,
+                    "person",
+                    json!({"choice": word, "note": note, "stage": stage}),
+                ) {
                     crate::action_log::write(format!("run log {run}: {e}"));
                 }
             }
@@ -254,6 +316,126 @@ impl Workspace {
                 tell(changes);
             }
             Err(e) => window.push_notification(Notification::error(e).title("Pipeline"), cx),
+        }
+    }
+
+    /// **Score again**: the stopped stage's own session, which the person has worked in since
+    /// its report, is asked to look again and report a new score.
+    fn score_again(
+        &mut self,
+        orch: PaneId,
+        run: &str,
+        stage: usize,
+        pane: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sv) = server::get() else {
+            return;
+        };
+        let done = server::lock(sv.registry()).runs.rescore(run, stage);
+        match done {
+            Ok(changes) => {
+                crate::action_log::write(format!("run {run}: the user asked for a new score"));
+                // Concerns the person marked Not needed go with it, so they aren't scored again.
+                let waived = server::get().and_then(|sv| {
+                    let reg = server::lock(sv.registry());
+                    let a = reg.runs.run(run)?.stages.get(stage)?.latest()?.clone();
+                    crate::runs::waived_note(&a)
+                });
+                let message = match waived {
+                    Some(w) => format!("{SCORE_AGAIN} {w}"),
+                    None => SCORE_AGAIN.to_string(),
+                };
+                self.queue_wake(pane, run.to_string(), message);
+                self.send_wakes(window, cx);
+                self.pipeline_tab_update(orch, cx, |t| {
+                    t.selected = None;
+                    t.stepped_in = false;
+                });
+                tell(changes);
+            }
+            Err(e) => window.push_notification(Notification::error(e).title("Score again"), cx),
+        }
+    }
+
+    /// **Must address** or **Not needed** on reason `reason` of stage `stage`'s latest report,
+    /// or off.
+    fn mark_reason(
+        &mut self,
+        run: &str,
+        stage: usize,
+        reason: usize,
+        (mark, on): (crate::runs::Mark, bool),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (event, title) = match mark {
+            crate::runs::Mark::Must => ("marked", "Must address"),
+            crate::runs::Mark::NotNeeded => ("not needed", "Not needed"),
+        };
+        let done = run_choice(
+            run,
+            event,
+            |runs| {
+                runs.mark_as(run, stage, reason, mark, on)
+                    .map(|()| (Vec::new(), json!({"reason": reason, "on": on})))
+            },
+            stage,
+        );
+        match done {
+            Ok(_) => cx.notify(),
+            Err(e) => window.push_notification(Notification::error(e).title(title), cx),
+        }
+    }
+
+    /// **Send back**: the stage goes again to deal with what was marked **Must address**.
+    fn send_back(
+        &mut self,
+        orch: PaneId,
+        run: &str,
+        stage: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let done = run_choice(
+            run,
+            "sent back",
+            |runs| runs.send_back(run, stage).map(|c| (c, json!({}))),
+            stage,
+        );
+        match done {
+            Ok(changes) => {
+                crate::action_log::write(format!("run {run}: the user sent stage {stage} back"));
+                if !changes.is_empty() {
+                    self.pipeline_tab_update(orch, cx, |t| {
+                        t.selected = None;
+                        t.stepped_in = false;
+                    });
+                }
+                cx.notify();
+                tell(changes);
+            }
+            Err(e) => window.push_notification(Notification::error(e).title("Send back"), cx),
+        }
+    }
+
+    fn cancel_send_back(&mut self, run: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let stage = server::get()
+            .and_then(|sv| {
+                let reg = server::lock(sv.registry());
+                Some(reg.runs.run(run)?.fix_after.as_ref()?.stage)
+            })
+            .unwrap_or_default();
+        let done = run_choice(
+            run,
+            "send-back cancelled",
+            |runs| runs.cancel_fix(run).map(|()| (Vec::new(), json!({}))),
+            stage,
+        );
+        match done {
+            Ok(_) => cx.notify(),
+            Err(e) => window.push_notification(Notification::error(e).title("Send back"), cx),
         }
     }
 
@@ -327,6 +509,194 @@ impl Workspace {
         });
     }
 
+    /// **I checked it, it works**: the stage asked a person to check something by hand. An
+    /// optional note says what they saw; the stage passes and the ticket goes on.
+    fn checked_dialog(
+        &mut self,
+        orch: PaneId,
+        run: String,
+        title: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("What did you see? (optional)"));
+        let ws = cx.entity();
+        let first = Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first.replace(false) {
+                input.update(cx, |s, cx| s.focus(window, cx));
+            }
+            let submit = {
+                let (ws, input, run) = (ws.clone(), input.clone(), run.clone());
+                move |window: &mut Window, cx: &mut App| {
+                    let note = input.read(cx).value().trim().to_string();
+                    window.close_dialog(cx);
+                    let run = run.clone();
+                    ws.update(cx, |ws, cx| {
+                        ws.person_choice(orch, &run, Choice::Checked { note }, window, cx)
+                    });
+                }
+            };
+            let on_ok = submit.clone();
+            dialog
+                .title(format!("{title} works?"))
+                .on_ok(move |_, window, cx| {
+                    on_ok(window, cx);
+                    false
+                })
+                .child(v_flex().gap_2().child(Input::new(&input)).child(
+                    text(12.5, theme::TEXT_SECONDARY).child(format!(
+                        "{title} passes on your word and the next stage starts. If it doesn't \
+                         work, cancel and re-run {title} with a note instead."
+                    )),
+                ))
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("checked-cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("checked-go")
+                                .label(format!("Pass {title}"))
+                                .primary()
+                                .on_click(move |_, window, cx| submit(window, cx)),
+                        ),
+                )
+        });
+    }
+
+    /// **Go back…** (Go back): pick an earlier stage that passed and write a note; its own
+    /// session reopens with it, and the stages after it run again with fresh tries.
+    fn back_dialog(
+        &mut self,
+        orch: PaneId,
+        run: String,
+        preselect: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let stages: Vec<(String, String)> = server::get()
+            .and_then(|sv| {
+                let reg = server::lock(sv.registry());
+                let r = reg.runs.run(&run)?;
+                Some(
+                    r.pipeline
+                        .stages
+                        .iter()
+                        .zip(&r.stages)
+                        .take_while(|(_, s)| s.status == StageStatus::Passed)
+                        .map(|(spec, _)| (spec.id.clone(), spec.title.clone()))
+                        .collect(),
+                )
+            })
+            .unwrap_or_default();
+        if stages.is_empty() {
+            window.push_notification(
+                Notification::info("No earlier stage has passed yet: re-run the waiting one.")
+                    .title("Go back"),
+                cx,
+            );
+            return;
+        }
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(
+                "What should it fix? e.g. Rename the branch to INTH-166 and reopen the PR",
+            )
+        });
+        // The stage just before the waiting one, unless another is picked.
+        let picked = Rc::new(Cell::new(
+            preselect
+                .filter(|p| *p < stages.len())
+                .unwrap_or(stages.len() - 1),
+        ));
+        let ws = cx.entity();
+        let first = Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first.replace(false) {
+                input.update(cx, |s, cx| s.focus(window, cx));
+            }
+            let submit = {
+                let (ws, input, run, stages, picked) = (
+                    ws.clone(),
+                    input.clone(),
+                    run.clone(),
+                    stages.clone(),
+                    picked.clone(),
+                );
+                move |window: &mut Window, cx: &mut App| {
+                    let note = input.read(cx).value().trim().to_string();
+                    if note.is_empty() {
+                        window.push_notification(
+                            Notification::warning(
+                                "Going back needs a note for that stage's session.",
+                            )
+                            .title("Go back"),
+                            cx,
+                        );
+                        return;
+                    }
+                    window.close_dialog(cx);
+                    let stage = stages[picked.get()].0.clone();
+                    let run = run.clone();
+                    ws.update(cx, |ws, cx| {
+                        ws.person_choice(orch, &run, Choice::Back { stage, note }, window, cx)
+                    });
+                }
+            };
+            let on_ok = submit.clone();
+            let choices = stages.iter().enumerate().map(|(i, (_, title))| {
+                let picked = picked.clone();
+                Button::new(SharedString::from(format!("back-to-{i}")))
+                    .label(format!("{}. {title}", i + 1))
+                    .when(picked.get() == i, |b| b.primary())
+                    .when(picked.get() != i, |b| b.outline())
+                    .small()
+                    .on_click(move |_, window, _| {
+                        picked.set(i);
+                        window.refresh();
+                    })
+            });
+            dialog
+                .title("Go back to an earlier stage")
+                .on_ok(move |_, window, cx| {
+                    on_ok(window, cx);
+                    false
+                })
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(h_flex().gap_1().flex_wrap().children(choices))
+                        .child(Input::new(&input))
+                        .child(text(12.5, theme::TEXT_SECONDARY).child(
+                            "That stage's own session reopens with your note and reports again; \
+                             it still has to clear its bar. The stages after it run again, with \
+                             fresh tries.",
+                        )),
+                )
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("back-cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("back-go")
+                                .label("Go back")
+                                .primary()
+                                .on_click(move |_, window, cx| submit(window, cx)),
+                        ),
+                )
+        });
+    }
+
     /// **Start next ticket** on a finished run: the orchestrator is asked to start one.
     fn start_next_ticket(
         &mut self,
@@ -338,26 +708,223 @@ impl Workspace {
         let message = "The user wants the next ticket. Ask them which one if they haven't said, \
                        then start it with run_start."
             .to_string();
-        self.pending_wakes.insert(orch, (run, message));
+        self.queue_wake(orch, run, message);
         self.send_wakes(window, cx);
     }
 
-    /// The Pipeline tab's content for orchestrator `orch`.
+    /// The Pipeline tab for orchestrator `orch`: its views' bar over the one shown.
     pub(super) fn render_pipeline(&self, orch: PaneId, cx: &mut Context<Self>) -> AnyElement {
-        let snap = self.pipeline_snapshot(orch, cx);
         let tab = self.pipeline_tabs.get(&orch).cloned().unwrap_or_default();
-        if tab.view == TabView::Settings && self.pipeline_settings.contains_key(&orch) {
+        let view = match tab.view {
+            TabView::Settings if !self.pipeline_settings.contains_key(&orch) => TabView::Pipeline,
+            v => v,
+        };
+        v_flex()
+            .size_full()
+            .bg(color(theme::PANEL))
+            .child(self.render_view_bar(orch, view, self.accent_of(orch, cx), cx))
+            .children(
+                (view == TabView::Pipeline)
+                    .then(|| self.render_ticket_tabs(orch, &tab, cx))
+                    .flatten(),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.render_pipeline_view(orch, &tab, view, cx)),
+            )
+            .into_any_element()
+    }
+
+    /// The tickets the pipeline holds, across its orchestrators: (orchestrator, run, ticket,
+    /// state), oldest orchestrator first.
+    fn pipeline_tickets(
+        &self,
+        orch: PaneId,
+        cx: &App,
+    ) -> Vec<(PaneId, String, String, crate::pipeline_card::CardState)> {
+        let members = if self.orchestrators.contains_key(&orch) {
+            self.slots(orch, cx)
+        } else {
+            vec![orch]
+        };
+        let mut out = Vec::new();
+        for m in members {
+            let lanes = self.lanes(m, cx);
+            if lanes.is_empty() {
+                let snap = self.pipeline_snapshot_latest(m, cx);
+                if let Some(r) = snap {
+                    let state = crate::pipeline_card::card(&r).state;
+                    out.push((m, r.id, r.ticket, state));
+                }
+            } else {
+                out.extend(
+                    lanes
+                        .into_iter()
+                        .map(|(r, c, _)| (m, r.id, r.ticket, c.state)),
+                );
+            }
+        }
+        out
+    }
+
+    /// Orchestrator `m`'s latest run.
+    fn pipeline_snapshot_latest(&self, m: PaneId, cx: &App) -> Option<Run> {
+        let token = self.panes.get(&m)?.read(cx).mcp_token()?.to_string();
+        let sv = server::get()?;
+        server::lock(sv.registry()).runs.current(&token).cloned()
+    }
+
+    /// Inside the Pipeline tab, when the pipeline holds more than one ticket: a tab for each,
+    /// by ticket, with its state; clicking one shows it here.
+    fn render_ticket_tabs(
+        &self,
+        orch: PaneId,
+        tab: &PipelineTab,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let tickets = self.pipeline_tickets(orch, cx);
+        if tickets.len() < 2 {
+            return None;
+        }
+        let accent = self.accent_of(orch, cx);
+        let shown = self
+            .pipeline_snapshot(orch, cx)
+            .run
+            .map(|r| r.id)
+            .or_else(|| tab.run.clone());
+        let mut row = h_flex()
+            .px_3()
+            .py_1()
+            .gap_1()
+            .border_b_1()
+            .border_color(color(theme::BORDER_SUBTLE));
+        for (m, run, ticket, state) in tickets {
+            let on = m == orch && shown.as_deref() == Some(run.as_str());
+            let (fg, _) = super::orchestrator::pill_colors(state, accent);
+            row = row.child(
+                h_flex()
+                    .id(SharedString::from(format!("ticket-tab-{run}")))
+                    .gap_1p5()
+                    .px_2()
+                    .py(px(3.))
+                    .rounded(px(5.))
+                    .text_size(px(12.5))
+                    .cursor_pointer()
+                    .when(on, |d| {
+                        d.bg(color(theme::tint_of(accent)))
+                            .text_color(color(theme::TEXT))
+                    })
+                    .when(!on, |d| {
+                        d.text_color(color(theme::TEXT_SECONDARY))
+                            .hover(|d| d.bg(color(theme::RAISED)))
+                    })
+                    .child(div().size(px(6.)).rounded_full().bg(fg))
+                    .child(ticket)
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        if m != orch {
+                            ws.show_terminal(m, window, cx);
+                        }
+                        ws.open_pipeline_run(m, run.clone(), window, cx)
+                    })),
+            );
+        }
+        Some(row)
+    }
+
+    /// Orchestrator `orch`'s pipeline colour: its run's pipeline, or the one it was started on.
+    pub(super) fn accent_of(&self, orch: PaneId, cx: &App) -> u32 {
+        let token = self
+            .panes
+            .get(&orch)
+            .and_then(|v| v.read(cx).mcp_token().map(str::to_string));
+        let from_run = token.zip(server::get()).and_then(|(token, sv)| {
+            let reg = server::lock(sv.registry());
+            reg.runs
+                .current(&token)
+                .map(|r| crate::pipeline_card::accent(&r.pipeline))
+        });
+        from_run
+            .or_else(|| {
+                let file = self.orchestrators.get(&orch)?;
+                let p = crate::pipeline::load(self.hydra.paths.root(), file).ok()?;
+                Some(crate::pipeline_card::accent(&p))
+            })
+            .unwrap_or(theme::TEAL)
+    }
+
+    fn render_view_bar(
+        &self,
+        orch: PaneId,
+        current: TabView,
+        accent: u32,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let item = |id: &str, label: &'static str, view: TabView| {
+            let on = view == current;
+            div()
+                .id(SharedString::from(format!("pipeline-view-{id}-{orch}")))
+                .px_2()
+                .py(px(3.))
+                .rounded(px(5.))
+                .text_size(px(12.5))
+                .cursor_pointer()
+                .when(on, |d| {
+                    d.bg(color(theme::tint_of(accent)))
+                        .text_color(color(theme::TEXT))
+                })
+                .when(!on, |d| {
+                    d.text_color(color(theme::TEXT_SECONDARY))
+                        .hover(|d| d.bg(color(theme::RAISED)))
+                })
+                .child(label)
+                .on_click(cx.listener(move |ws, _, window, cx| match view {
+                    TabView::Settings => ws.open_pipeline_settings(orch, window, cx),
+                    v => ws.show_pipeline_view(orch, v, window, cx),
+                }))
+        };
+        h_flex()
+            .px_3()
+            .py_1p5()
+            .gap_1()
+            .border_b_1()
+            .border_color(color(theme::BORDER_SUBTLE))
+            .child(item("ticket", "Ticket", TabView::Pipeline))
+            .child(item("history", "History", TabView::History))
+            .child(item("settings", "Settings", TabView::Settings))
+            .child(div().flex_1())
+            .child(
+                Button::new(SharedString::from(format!("end-pipeline-{orch}")))
+                    .label("■  End pipeline")
+                    .danger()
+                    .outline()
+                    .small()
+                    .tooltip(
+                        "Stop its tickets in progress and close its orchestrators and sessions",
+                    )
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.end_pipeline_dialog(orch, window, cx)
+                    })),
+            )
+    }
+
+    fn render_pipeline_view(
+        &self,
+        orch: PaneId,
+        tab: &PipelineTab,
+        view: TabView,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let snap = self.pipeline_snapshot(orch, cx);
+        if view == TabView::Settings {
             return self.render_pipeline_settings(orch, cx);
         }
-        if tab.view == TabView::History {
+        if view == TabView::History {
             return self.render_history(orch, cx);
         }
         let Some(run) = snap.run.as_ref() else {
-            return self.render_quiet(
-                "No ticket in progress",
-                "Start one by asking the \
-                orchestrator for a ticket; its stages show here as they run.",
-            );
+            return self.render_waiting_for_work(orch, cx);
         };
         let panel = panel_for(Some(run), tab.selected.as_deref());
         let now = SystemTime::now();
@@ -370,7 +937,65 @@ impl Workspace {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .child(self.render_panel(orch, run, &snap, &tab, panel, now, cx)),
+                    .child(self.render_panel(orch, run, &snap, tab, panel, now, cx)),
+            )
+            .into_any_element()
+    }
+
+    /// No ticket in progress: for a pipeline that finds its own work, what its trigger is doing
+    /// and the wait for its next look, counting down, as under its card.
+    fn render_waiting_for_work(&self, orch: PaneId, cx: &mut Context<Self>) -> AnyElement {
+        use super::linear::{Trigger, TriggerView, look_bar};
+        let t = match self.trigger_view(orch, cx) {
+            None => {
+                return self.render_quiet(
+                    "No ticket in progress",
+                    "Give the orchestrator a ticket; its stages show here as they run.",
+                );
+            }
+            Some(Trigger::Follower(text)) => {
+                return self.render_quiet("Nothing in progress", &text);
+            }
+            Some(Trigger::Lead(t)) => *t,
+        };
+        let TriggerView {
+            line,
+            progress,
+            last,
+            checking,
+            source,
+            ..
+        } = t;
+        let accent = self.accent_of(orch, cx);
+        v_flex()
+            .size_full()
+            .bg(color(theme::PANEL))
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .child(text(16., theme::TEXT).child(format!("No {} in progress", source.noun)))
+            .child(text(12.5, theme::TEXT_SECONDARY).child(line))
+            .children(progress.map(|p| {
+                div().w(px(320.)).child(look_bar(
+                    SharedString::from(format!("look-bar-tab-{orch}")),
+                    p,
+                    last,
+                    source.every_minutes,
+                    checking,
+                    accent,
+                ))
+            }))
+            .child(
+                text(12., theme::TEXT_MUTED)
+                    .max_w(px(420.))
+                    .text_center()
+                    .child(if source.noun == "PR" {
+                        "To start one now, give the Orchestrator a pull request link in its tab. \
+                         Otherwise it keeps looking."
+                    } else {
+                        "To start one now, give the Orchestrator a ticket number or link in its \
+                         tab. Otherwise it keeps looking."
+                    }),
             )
             .into_any_element()
     }
@@ -412,12 +1037,14 @@ impl Workspace {
         });
         let mut rows = v_flex().px(px(22.)).py(px(18.));
         let count = run.stages.len();
+        let accent = crate::pipeline_card::accent(&run.pipeline);
         for (i, s) in run.stages.iter().enumerate() {
             let spec = &run.pipeline.stages[i];
             let bar = run.pipeline.bar_for(i);
             let (badge, tone) = gate_badge(s.rating(), bar, s.status);
             let (title_hex, badge_hex) = match (s.status, tone) {
-                (st, _) if st.busy() => (theme::TEAL, theme::TEXT_MUTED),
+                (st, _) if st.busy() => (accent, theme::TEXT_MUTED),
+                (_, Tone::Check) => (theme::AMBER, theme::AMBER),
                 (StageStatus::Stopped | StageStatus::Failed, _) => (theme::RED, theme::RED),
                 (StageStatus::Passed, _) => (theme::TEXT, theme::GREEN),
                 (_, Tone::Muted) => (theme::TEXT_SECONDARY, theme::TEXT_MUTED),
@@ -438,8 +1065,12 @@ impl Workspace {
                         .child("✓"),
                     st if st.busy() => d
                         .border_2()
-                        .border_color(color(theme::TEAL))
-                        .child(div().size(px(7.)).rounded_full().bg(color(theme::TEAL))),
+                        .border_color(color(accent))
+                        .child(div().size(px(7.)).rounded_full().bg(color(accent))),
+                    _ if tone == Tone::Check => d
+                        .bg(color(theme::AMBER_TINT))
+                        .text_color(color(theme::AMBER))
+                        .child("?"),
                     StageStatus::Stopped | StageStatus::Failed => d
                         .bg(color(theme::RED_TINT))
                         .text_color(color(theme::RED))
@@ -452,7 +1083,7 @@ impl Workspace {
                 });
             let connector = div().w(px(1.)).flex_1().min_h(px(14.)).bg(color(
                 if s.status == StageStatus::Passed {
-                    theme::TEAL
+                    accent
                 } else {
                     theme::BORDER
                 },
@@ -464,7 +1095,7 @@ impl Workspace {
                 let line = session_line(run, i, ai, live, now);
                 let latest = ai + 1 == s.attempts.len();
                 let (dot, tint, edge) = if latest && s.status.busy() {
-                    (theme::TEAL, theme::TEAL_TINT, theme::TEAL_BORDER)
+                    (accent, theme::tint_of(accent), theme::edge_of(accent))
                 } else if latest && s.status == StageStatus::Stopped {
                     (theme::RED, theme::WAITING_TINT, theme::RED_BORDER)
                 } else {
@@ -472,14 +1103,20 @@ impl Workspace {
                 };
                 let is_selected = selected == Some((i, ai));
                 let label = a.label.clone();
+                // The note a person started this try with (Re-run or Go back), kept in view.
+                let note = a
+                    .note
+                    .clone()
+                    .map(|n| n.trim().to_string())
+                    .filter(|n| !n.is_empty());
                 sessions = sessions.child(
-                    h_flex()
+                    v_flex()
                         .id(SharedString::from(format!(
                             "pipeline-session-{orch}-{label}"
                         )))
                         .px(px(10.))
                         .py(px(7.))
-                        .gap_2()
+                        .gap_1()
                         .rounded(px(6.))
                         .border_1()
                         .border_color(if is_selected {
@@ -498,15 +1135,45 @@ impl Workspace {
                                 t.confirm_stop = false;
                             });
                         }))
-                        .child(div().size(px(6.)).flex_none().rounded_full().bg(color(dot)))
                         .child(
-                            text(12., theme::TEXT)
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .child(format!("Try {} · {skill}", ai + 1)),
+                            h_flex()
+                                .gap_2()
+                                .child(div().size(px(6.)).flex_none().rounded_full().bg(color(dot)))
+                                .child(
+                                    text(12., theme::TEXT)
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .child(format!("Try {} · {skill}", ai + 1)),
+                                )
+                                .child(text(11.5, theme::TEXT_MUTED).flex_none().child(line)),
                         )
-                        .child(text(11.5, theme::TEXT_MUTED).flex_none().child(line)),
+                        .children(note.map(|n| {
+                            text(11.5, theme::TEXT_SECONDARY)
+                                .pl(px(14.))
+                                .line_height(relative(1.35))
+                                .child(format!("↩ Your note: {n}"))
+                        })),
+                );
+            }
+            // While the run waits for a person, a stage that passed can be gone back to.
+            let can_go_back = matches!(run.state, RunState::NeedsYou(_))
+                && s.status == StageStatus::Passed
+                && stopped_at.is_none_or(|at| i < at);
+            if can_go_back {
+                let back_run = run.id.clone();
+                sessions = sessions.child(
+                    div()
+                        .id(SharedString::from(format!("pipeline-back-here-{orch}-{i}")))
+                        .pl(px(10.))
+                        .text_size(px(11.5))
+                        .text_color(color(accent))
+                        .cursor_pointer()
+                        .hover(|d| d.underline())
+                        .child("↩ Go back here")
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.back_dialog(orch, back_run.clone(), Some(i), window, cx)
+                        })),
                 );
             }
             let dim = stopped_at.is_some_and(|at| i > at);
@@ -532,13 +1199,29 @@ impl Workspace {
                                 h_flex()
                                     .justify_between()
                                     .gap_2()
-                                    .child(
-                                        text(13.5, title_hex)
+                                    .child({
+                                        let title = text(13.5, title_hex)
                                             .when(title_hex != theme::TEXT, |d| {
                                                 d.font_weight(FontWeight::MEDIUM)
                                             })
-                                            .child(spec.title.clone()),
-                                    )
+                                            .child(spec.title.clone());
+                                        // The stage at work breathes in the pipeline's colour.
+                                        if s.status.busy() {
+                                            title
+                                                .with_animation(
+                                                    SharedString::from(format!(
+                                                        "stage-title-{orch}-{i}"
+                                                    )),
+                                                    super::busy::pulse(),
+                                                    move |d, a| {
+                                                        d.text_color(color(accent).opacity(a))
+                                                    },
+                                                )
+                                                .into_any_element()
+                                        } else {
+                                            title.into_any_element()
+                                        }
+                                    })
                                     .child(text(11.5, badge_hex).flex_none().child(badge)),
                             )
                             .children(
@@ -599,6 +1282,11 @@ impl Workspace {
                     .border_b_1()
                     .border_color(color(theme::BORDER_SUBTLE))
                     .child(text(12.5, theme::TEXT_SECONDARY).child(run.ticket.clone()))
+                    .children(self.render_ticket_link(
+                        &run.ticket,
+                        &crate::linear_watch::pr_links(run),
+                        crate::pipeline_card::accent(&run.pipeline),
+                    ))
                     .child(
                         text(16., theme::TEXT)
                             .font_weight(FontWeight::MEDIUM)
@@ -668,7 +1356,7 @@ impl Workspace {
                 v_flex()
                     .size_full()
                     .child(self.panel_header(
-                        theme::TEAL,
+                        crate::pipeline_card::accent(&run.pipeline),
                         session_name(si, &spec.title, ai),
                         format!(
                             "{} · {}",
@@ -676,6 +1364,7 @@ impl Workspace {
                             session_line(run, si, ai, live, now)
                         ),
                     ))
+                    .children(note_strip(a.note.as_deref()))
                     .child(terminal(si, ai))
                     .child(
                         v_flex()
@@ -716,6 +1405,7 @@ impl Workspace {
                 let spec = &run.pipeline.stages[si];
                 let a = &run.stages[si].attempts[ai];
                 let bar = run.pipeline.bar_for(si);
+                let term = terminal(si, ai);
                 let body = match &a.rating {
                     Some(r) => {
                         let passed = r.outcome == Outcome::Done && r.score >= bar;
@@ -726,10 +1416,12 @@ impl Workspace {
                             }
                         } else if r.outcome == Outcome::Blocked {
                             "Blocked".to_string()
+                        } else if r.outcome == Outcome::Check {
+                            "Needs a person to check it by hand".to_string()
                         } else {
                             format!("Below the {bar}% bar")
                         };
-                        self.rating_report(r, passed, verdict, true)
+                        self.rating_report(r, passed, verdict, true, marking(orch, run, si, ai), cx)
                     }
                     None => v_flex()
                         .px(px(28.))
@@ -748,8 +1440,9 @@ impl Workspace {
                         session_name(si, &spec.title, ai),
                         session_line(run, si, ai, None, now),
                     ))
+                    .children(note_strip(a.note.as_deref()))
                     .child(body)
-                    .child(terminal(si, ai))
+                    .child(term)
                     .into_any_element()
             }
             Panel::Stopped(si, ai) if tab.stepped_in => {
@@ -883,30 +1576,62 @@ impl Workspace {
 
     /// A rating as the design's report shows it: the score, the verdict, Reasons and Evidence.
     /// `summary` is false where the summary already shows (the stopped banner's headline).
+    /// With `marking`, each reason against can be marked **Must address** and the stage sent
+    /// back to deal with them.
     fn rating_report(
         &self,
         r: &Rating,
         passed: bool,
         verdict: String,
         summary: bool,
+        marking: Option<Marking>,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
-        let reasons = r.reasons.iter().map(|x| {
-            let (sign, hex) = match x.side {
-                Side::For => ("+", theme::GREEN),
-                Side::Against => ("−", theme::RED),
-            };
-            h_flex()
-                .items_start()
-                .gap_2()
-                .child(text(12.5, hex).flex_none().child(sign))
-                // A width it can't grow past, so a long reason wraps inside its column.
-                .child(
-                    text(12.5, theme::TEXT)
+        let reasons: Vec<Div> = r
+            .reasons
+            .iter()
+            .enumerate()
+            .map(|(i, x)| {
+                let (sign, hex) = match x.side {
+                    Side::For => ("+", theme::GREEN),
+                    Side::Against => ("−", theme::RED),
+                };
+                let waived = marking.as_ref().is_some_and(|m| m.waived.contains(&i));
+                let row = h_flex()
+                    .items_start()
+                    .gap_2()
+                    .child(text(12.5, hex).flex_none().child(sign))
+                    // A width it can't grow past, so a long reason wraps inside its column.
+                    .child(
+                        text(
+                            12.5,
+                            if waived {
+                                theme::TEXT_MUTED
+                            } else {
+                                theme::TEXT
+                            },
+                        )
                         .flex_1()
                         .min_w_0()
+                        .when(waived, |d| d.line_through())
                         .child(x.text.clone()),
-                )
-        });
+                    );
+                match (&marking, x.side) {
+                    (Some(m), Side::Against) => row.child(
+                        h_flex()
+                            .flex_none()
+                            .gap_1()
+                            .child(must_toggle(m, i, cx))
+                            .child(not_needed_toggle(m, i, cx)),
+                    ),
+                    _ => row,
+                }
+            })
+            .collect();
+        let send_back = marking
+            .as_ref()
+            .filter(|m| !m.must.is_empty())
+            .map(|m| send_back_row(m, cx));
         let evidence = r.evidence.iter().map(|e| {
             h_flex()
                 .px(px(12.))
@@ -965,7 +1690,7 @@ impl Workspace {
                     .items_start()
                     .flex_wrap()
                     .gap_6()
-                    .child(column("Reasons").children(reasons))
+                    .child(column("Reasons").children(reasons).children(send_back))
                     .child(column("Evidence").children(evidence)),
             )
             .into_any_element()
@@ -993,7 +1718,67 @@ impl Workspace {
             .and_then(|ai| s.attempts.get(ai))
             .and_then(|a| a.rating.as_ref())
             .filter(|_| s.status == StageStatus::Stopped);
+        let check = rating
+            .filter(|r| r.outcome == Outcome::Check)
+            .map(|r| r.check.clone());
+        // What the stage captured for the person to look at, kept beside the run's log.
+        let shots: Vec<std::path::PathBuf> = rating
+            .map(|r| {
+                r.screenshots
+                    .iter()
+                    .map(std::path::PathBuf::from)
+                    .filter(|p| p.is_file())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let shot_row = (!shots.is_empty()).then(|| {
+            let mut row = h_flex().gap_2().flex_wrap().pt_1();
+            for (n, path) in shots.iter().enumerate() {
+                let open = path.clone();
+                row = row.child(
+                    div()
+                        .id(SharedString::from(format!("shot-{}-{n}", run.id)))
+                        .h(px(150.))
+                        .max_w(px(280.))
+                        .rounded(px(6.))
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(color(theme::BORDER_STRONG))
+                        .cursor_pointer()
+                        .hover(|d| d.border_color(color(theme::AMBER)))
+                        .child(
+                            gpui::img(path.clone())
+                                .h_full()
+                                .object_fit(gpui::ObjectFit::Contain),
+                        )
+                        .tooltip(|window, cx| {
+                            gpui_component::tooltip::Tooltip::new("Click to see it full size")
+                                .build(window, cx)
+                        })
+                        .on_click(cx.listener(move |_, _, window, cx| {
+                            let path = open.clone();
+                            window.open_dialog(cx, move |dialog, _, _| {
+                                dialog.w(px(1100.)).child(
+                                    div().h(px(700.)).child(
+                                        gpui::img(path.clone())
+                                            .size_full()
+                                            .object_fit(gpui::ObjectFit::Contain),
+                                    ),
+                                )
+                            });
+                        })),
+                );
+            }
+            row
+        });
         let (overline, headline) = match (ai, rating) {
+            (_, Some(r)) if r.outcome == Outcome::Check => (
+                format!(
+                    "{} needs you to check it by hand · {}%",
+                    spec.title, r.score
+                ),
+                r.summary.clone(),
+            ),
             (_, Some(r)) if r.outcome == Outcome::Blocked => (
                 format!("Blocked at the {} gate", spec.title),
                 r.summary.clone(),
@@ -1017,7 +1802,9 @@ impl Workspace {
         let label = ai.map(|ai| session_name(si, &spec.title, ai));
         let can_step_in = ai.is_some_and(|ai| self.pane_of_session(run, si, ai, cx).is_some());
         let (run_id, title) = (run.id.clone(), spec.title.clone());
-        let rerun_label = if ai.is_some() {
+        let rerun_label = if check.is_some() {
+            format!("Doesn't work: re-run {} with a note", spec.title)
+        } else if ai.is_some() {
             format!("Re-run {} with a note", spec.title)
         } else {
             format!("Resume at {} with a note", spec.title)
@@ -1054,14 +1841,41 @@ impl Workspace {
                         })),
                 );
         } else {
+            if check.is_some() {
+                let (ok_run, ok_title) = (run_id.clone(), title.clone());
+                actions = actions.child(
+                    Button::new("pipeline-checked")
+                        .label("✓  I checked it, it works")
+                        .primary()
+                        .tooltip(format!("{ok_title} passes and the ticket goes on"))
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.checked_dialog(orch, ok_run.clone(), ok_title.clone(), window, cx)
+                        })),
+                );
+            }
             if let (true, Some(label)) = (can_step_in, label.clone()) {
                 actions = actions.child(
                     Button::new("pipeline-step-in")
                         .label(format!("Step into {label}"))
-                        .primary()
+                        .when(check.is_none(), |b| b.primary())
                         .on_click(cx.listener(move |ws, _, window, cx| {
                             ws.pipeline_tab_update(orch, cx, |t| t.stepped_in = true);
                             ws.focus_active(window, cx);
+                        })),
+                );
+            }
+            let pane = ai.and_then(|ai| self.pane_of_session(run, si, ai, cx));
+            if let (Some(_), Some(pane)) = (rating, pane) {
+                let again_run = run_id.clone();
+                actions = actions.child(
+                    Button::new("pipeline-score-again")
+                        .label("Score again")
+                        .tooltip(
+                            "Fixed it in the session? It checks its work again and reports a \
+                             new score",
+                        )
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.score_again(orch, &again_run, si, pane, window, cx)
                         })),
                 );
             }
@@ -1074,6 +1888,15 @@ impl Workspace {
                             ws.rerun_dialog(orch, rr_run.clone(), rr_title.clone(), bar, window, cx)
                         })),
                 )
+                .child({
+                    let back_run = run_id.clone();
+                    Button::new("pipeline-back")
+                        .label("Go back…")
+                        .tooltip("Reopen an earlier stage's own session to fix its work")
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.back_dialog(orch, back_run.clone(), None, window, cx)
+                        }))
+                })
                 .child(
                     Button::new("pipeline-stop")
                         .label("Stop this ticket")
@@ -1083,7 +1906,11 @@ impl Workspace {
                         })),
                 )
                 .child(div().flex_1())
-                .child(text(11.5, theme::TEXT_MUTED).child("Gates can't be skipped"));
+                .child(text(11.5, theme::TEXT_MUTED).child(if check.is_some() {
+                    "Only a person's check passes this gate"
+                } else {
+                    "Gates can't be skipped"
+                }));
         }
         v_flex()
             .size_full()
@@ -1093,12 +1920,36 @@ impl Workspace {
                     .px(px(28.))
                     .py(px(22.))
                     .gap_2()
-                    .child(text(12., theme::RED).child(overline.to_uppercase()))
+                    .child(
+                        text(
+                            12.,
+                            if check.is_some() {
+                                theme::AMBER
+                            } else {
+                                theme::RED
+                            },
+                        )
+                        .child(overline.to_uppercase()),
+                    )
                     .child(
                         text(20., theme::TEXT)
                             .font_weight(FontWeight::MEDIUM)
                             .child(headline),
                     )
+                    .when_some(check.clone(), |el, check| {
+                        el.child(
+                            v_flex()
+                                .mt_1()
+                                .gap_1()
+                                .px(px(14.))
+                                .py(px(10.))
+                                .rounded(px(6.))
+                                .bg(color(theme::AMBER_TINT))
+                                .child(text(11.5, theme::AMBER).child("WHAT TO CHECK"))
+                                .child(text(13.5, theme::TEXT).child(check))
+                                .children(shot_row),
+                        )
+                    })
                     .child(text(12.5, theme::TEXT_SECONDARY).child(
                         "You were notified in hydraui. Nothing downstream starts until you act.",
                     )),
@@ -1110,10 +1961,207 @@ impl Workspace {
                     .min_h_0()
                     .overflow_y_scroll()
                     .children(rating.map(|r| {
-                        self.rating_report(r, false, format!("Below the {bar}% bar"), false)
+                        let marking = ai.and_then(|ai| marking(orch, run, si, ai));
+                        self.rating_report(
+                            r,
+                            false,
+                            format!("Below the {bar}% bar"),
+                            false,
+                            marking,
+                            cx,
+                        )
                     })),
             )
             .child(actions)
             .into_any_element()
     }
+}
+
+/// Applies `act` to the runs and, when it works, logs `event` with stage `stage` and its fields
+/// to the run's log, for a restart to replay.
+fn run_choice(
+    run: &str,
+    event: &str,
+    act: impl FnOnce(
+        &mut crate::runs::Runs,
+    ) -> Result<(Vec<crate::runs::Change>, serde_json::Value), String>,
+    stage: usize,
+) -> Result<Vec<crate::runs::Change>, String> {
+    let sv = server::get().ok_or("hydraui's MCP server isn't running")?;
+    let mut reg = server::lock(sv.registry());
+    let (changes, mut fields) = act(&mut reg.runs)?;
+    let id = reg
+        .runs
+        .run(run)
+        .and_then(|r| r.pipeline.stages.get(stage))
+        .map(|s| s.id.clone());
+    if let (Some(root), Some(obj)) = (&reg.hydra_root, fields.as_object_mut()) {
+        obj.insert("stage".into(), json!(id));
+        let file = crate::run_log::file_for(root, run);
+        if let Err(e) = crate::run_log::append(&file, event, fields) {
+            crate::action_log::write(format!("run log {run}: {e}"));
+        }
+    }
+    Ok(changes)
+}
+
+/// What a report needs so a person can mark its reasons against **Must address** and send its
+/// stage back.
+struct Marking {
+    orch: PaneId,
+    run: String,
+    stage: usize,
+    title: String,
+    must: Vec<usize>,
+    /// Reasons against marked **Not needed**.
+    waived: Vec<usize>,
+    /// This stage's send-back waits for the stage at work.
+    queued: bool,
+    /// The stage at work now, by title.
+    at_work: Option<String>,
+}
+
+/// Only the stage's latest report with a reason against, in a run still open and not waiting on
+/// a product answer, can be marked.
+fn marking(orch: PaneId, run: &Run, si: usize, ai: usize) -> Option<Marking> {
+    let s = run.stages.get(si)?;
+    let a = s.attempts.get(ai).filter(|_| ai + 1 == s.attempts.len())?;
+    let against = a
+        .rating
+        .as_ref()?
+        .reasons
+        .iter()
+        .any(|x| x.side == Side::Against);
+    if !against || !run.state.open() || run.asking.is_some() {
+        return None;
+    }
+    Some(Marking {
+        orch,
+        run: run.id.clone(),
+        stage: si,
+        title: run.pipeline.stages[si].title.clone(),
+        must: a.must.clone(),
+        waived: a.waived.clone(),
+        queued: run.fix_after.as_ref().is_some_and(|f| f.stage == si),
+        at_work: run
+            .stages
+            .iter()
+            .position(|s| s.status.busy())
+            .map(|i| run.pipeline.stages[i].title.clone()),
+    })
+}
+
+/// A reason against's **Must address** toggle.
+fn must_toggle(m: &Marking, i: usize, cx: &mut Context<Workspace>) -> AnyElement {
+    let on = m.must.contains(&i);
+    let (run, stage) = (m.run.clone(), m.stage);
+    let b = Button::new(SharedString::from(format!("must-{}-{stage}-{i}", m.run)))
+        .label(if on {
+            "✓ Marked: must address"
+        } else {
+            "+ Mark must address"
+        })
+        .xsmall()
+        .disabled(m.queued)
+        .tooltip("Mark it, then Send back: the stage goes again to deal with it")
+        .on_click(cx.listener(move |ws, _, window, cx| {
+            ws.mark_reason(&run, stage, i, (crate::runs::Mark::Must, !on), window, cx)
+        }));
+    // Outlined, so it reads as a button before it's pressed; red once marked.
+    let b = if on { b.danger() } else { b.outline() };
+    div().flex_none().child(b).into_any_element()
+}
+
+/// A reason against's **Not needed** toggle: the person doesn't want that concern acted on.
+fn not_needed_toggle(m: &Marking, i: usize, cx: &mut Context<Workspace>) -> AnyElement {
+    let on = m.waived.contains(&i);
+    let (run, stage) = (m.run.clone(), m.stage);
+    let b = Button::new(SharedString::from(format!("waive-{}-{stage}-{i}", m.run)))
+        .label(if on { "✓ Not needed" } else { "Not needed" })
+        .xsmall()
+        .disabled(m.queued)
+        .tooltip(
+            "This concern doesn't matter: the stage is told not to act on it or count it \
+             against its score",
+        )
+        .on_click(cx.listener(move |ws, _, window, cx| {
+            ws.mark_reason(
+                &run,
+                stage,
+                i,
+                (crate::runs::Mark::NotNeeded, !on),
+                window,
+                cx,
+            )
+        }));
+    // Outlined like Must address; filled grey once marked.
+    let b = if on { b.secondary() } else { b.outline() };
+    div().flex_none().child(b).into_any_element()
+}
+
+/// Under the reasons once one is marked: **Send back**, or the send-back waiting for the stage
+/// at work, with **Cancel**.
+fn send_back_row(m: &Marking, cx: &mut Context<Workspace>) -> AnyElement {
+    let n = m.must.len();
+    let what = if n == 1 {
+        "1 reason".to_string()
+    } else {
+        format!("{n} reasons")
+    };
+    let run = m.run.clone();
+    let row = v_flex()
+        .mt_2()
+        .p_2()
+        .gap_1()
+        .rounded(px(6.))
+        .bg(color(theme::RED_TINT));
+    if m.queued {
+        let at = m
+            .at_work
+            .clone()
+            .unwrap_or_else(|| "the stage at work".into());
+        return row
+            .child(text(12., theme::TEXT).child(format!(
+                "↩ Going back to {} to fix {what} once {at} reports.",
+                m.title
+            )))
+            .child(
+                div().child(
+                    Button::new(SharedString::from(format!("send-back-cancel-{run}")))
+                        .label("Cancel send back")
+                        .ghost()
+                        .xsmall()
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.cancel_send_back(&run, window, cx)
+                        })),
+                ),
+            )
+            .into_any_element();
+    }
+    let when = match &m.at_work {
+        Some(at) => format!(
+            "It goes once {at} reports: {}'s session works on them, then the stages after it \
+             run again.",
+            m.title
+        ),
+        None => format!(
+            "{}'s session goes again told to fix them and say how; the stages after it run \
+             again.",
+            m.title
+        ),
+    };
+    let (stage, orch) = (m.stage, m.orch);
+    row.child(
+        div().child(
+            Button::new(SharedString::from(format!("send-back-{run}-{stage}")))
+                .label(format!("Send back to {} · fix {what}", m.title))
+                .danger()
+                .small()
+                .on_click(cx.listener(move |ws, _, window, cx| {
+                    ws.send_back(orch, &run, stage, window, cx)
+                })),
+        ),
+    )
+    .child(text(11.5, theme::TEXT_SECONDARY).child(when))
+    .into_any_element()
 }

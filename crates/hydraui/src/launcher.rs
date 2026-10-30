@@ -52,6 +52,15 @@ pub enum Action {
     /// A Claude terminal that orchestrates a pipeline (orchestrator spec §3.0): an environment
     /// with Claude and a pipeline, picked in the dialogs.
     StartOrchestrator,
+    /// A pipeline of its own, blank or copied from another, then its orchestrator and settings.
+    NewPipeline,
+    /// A pipeline's file to send someone, saved where you pick (core spec §44).
+    ExportPipeline,
+    /// A pipeline file someone sent, added as a new pipeline that takes nothing until turned on.
+    ImportPipeline,
+    /// The selected environment's Slack, for pipelines that watch a channel: signed in through
+    /// the team's Canopy.
+    ConnectSlack,
     /// The pipelines folder, opened by the system (the example written first if it is empty).
     EditPipelines,
 }
@@ -107,6 +116,10 @@ pub fn entries(
     add("Check for updates".into(), Action::CheckForUpdates);
     add("Tasks: all projects".into(), Action::AllBoards);
     add("Start orchestrator…".into(), Action::StartOrchestrator);
+    add("New pipeline…".into(), Action::NewPipeline);
+    add("Export pipeline…".into(), Action::ExportPipeline);
+    add("Import pipeline…".into(), Action::ImportPipeline);
+    add("Connect Slack…".into(), Action::ConnectSlack);
     add("Edit pipelines".into(), Action::EditPipelines);
     add("Keyboard shortcuts".into(), Action::Shortcuts);
     add("Settings".into(), Action::Settings);
@@ -153,6 +166,10 @@ mod tests {
                 "Check for updates",
                 "Tasks: all projects",
                 "Start orchestrator…",
+                "New pipeline…",
+                "Export pipeline…",
+                "Import pipeline…",
+                "Connect Slack…",
                 "Edit pipelines",
                 "Keyboard shortcuts",
                 "Settings",
@@ -187,6 +204,7 @@ mod tests {
             Some(&Action::StartOrchestrator)
         );
         assert_eq!(action("Edit pipelines"), Some(&Action::EditPipelines));
+        assert_eq!(action("New pipeline…"), Some(&Action::NewPipeline));
     }
 
     #[test]
@@ -211,6 +229,10 @@ mod tests {
                 "Check for updates",
                 "Tasks: all projects",
                 "Start orchestrator…",
+                "New pipeline…",
+                "Export pipeline…",
+                "Import pipeline…",
+                "Connect Slack…",
                 "Edit pipelines",
                 "Keyboard shortcuts",
                 "Settings",
@@ -222,8 +244,12 @@ mod tests {
         assert_eq!(got[12].action, Action::CheckForUpdates);
         assert_eq!(got[13].action, Action::AllBoards);
         assert_eq!(got[14].action, Action::StartOrchestrator);
-        assert_eq!(got[15].action, Action::EditPipelines);
-        assert_eq!(got[16].action, Action::Shortcuts);
+        assert_eq!(got[15].action, Action::NewPipeline);
+        assert_eq!(got[16].action, Action::ExportPipeline);
+        assert_eq!(got[17].action, Action::ImportPipeline);
+        assert_eq!(got[18].action, Action::ConnectSlack);
+        assert_eq!(got[19].action, Action::EditPipelines);
+        assert_eq!(got[20].action, Action::Shortcuts);
         assert_eq!(got[0].action, Action::OpenFile);
         assert_eq!(got[1].action, Action::SearchFiles);
         assert_eq!(got[4].action, Action::StartPage);

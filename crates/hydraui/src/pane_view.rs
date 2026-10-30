@@ -358,6 +358,11 @@ impl PaneView {
 
     /// Whether the session's input may hold a draft. A draft that may have been cleared
     /// (Esc Esc, Ctrl+C) is settled by reading the input line on screen.
+    /// A prompt hydraui typed here didn't take (`Readiness::prompt_not_taken`).
+    pub fn prompt_not_taken(&mut self) {
+        self.readiness.prompt_not_taken();
+    }
+
     pub fn check_draft(&mut self) -> bool {
         if self.readiness.draft == Draft::MaybeCleared
             && let Slot::Running(pane) = &self.slot

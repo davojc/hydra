@@ -186,8 +186,40 @@ fn run_call(
     let name = params.get("name")?.as_str()?;
     let empty = json!({});
     let args = params.get("arguments").unwrap_or(&empty);
+    // The pipeline's branch rule, checked against GitHub before the report is recorded and
+    // outside the lock (it asks gh).
+    if name == "stage_report"
+        && let Some(why) = branch_gate(registry, token, args)
+    {
+        let out = Outcome::err(format!("Not recorded: {why}"));
+        return Some((ok(id, tool_result(&out)), None));
+    }
     let (out, event) = super::run_tools::call(&mut lock(registry), token, name, args)?;
     Some((ok(id, tool_result(&out)), event))
+}
+
+/// Why a stage's report breaks its pipeline's branch rule, if it does: a pull request in it on
+/// another branch, or one whose branch can't be read.
+fn branch_gate(registry: &Mutex<Registry>, token: &str, args: &Value) -> Option<String> {
+    let (expected, env, lookup, exe) = {
+        let reg = lock(registry);
+        let crate::runs::Role::Stage(run, _) = reg.runs.role(token) else {
+            return None;
+        };
+        let expected = run.pipeline.branch_for(&run.ticket)?;
+        let env = reg.get(token).and_then(|t| t.env).unwrap_or_default();
+        (expected, env, reg.branch_lookup, reg.hydra_exe.clone())
+    };
+    let prs = crate::branch_rule::report_prs(args);
+    if prs.is_empty() {
+        return None;
+    }
+    crate::branch_rule::check(&expected, &prs, |url| match (lookup, &exe) {
+        (Some(f), _) => f(&env, url),
+        (None, Some(hydra)) => crate::branch_rule::gh_branch_of(hydra, &env, url),
+        (None, None) => Err("hydraui can't find hydra to ask GitHub".into()),
+    })
+    .err()
 }
 
 fn tool_result(out: &Outcome) -> Value {
@@ -353,6 +385,11 @@ impl Server {
     /// `<HYDRA_HOME>`, for the run tools' pipelines and logs.
     pub fn set_hydra_root(&self, root: PathBuf) {
         lock(&self.registry).hydra_root = Some(root);
+    }
+
+    /// The `hydra` the branch rule asks GitHub through.
+    pub fn set_hydra_exe(&self, exe: Option<PathBuf>) {
+        lock(&self.registry).hydra_exe = exe;
     }
 
     /// Sends `event` to every subscriber still listening.
@@ -796,6 +833,10 @@ mod tests {
                 "{event}: {log}"
             );
         }
+        // The pipeline as it started, for a restart to resume it with (core spec §45).
+        let started: Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+        let text = started["pipeline_text"].as_str().unwrap();
+        assert_eq!(crate::pipeline::parse(text).unwrap().stages.len(), 2);
     }
 
     #[test]
@@ -821,6 +862,42 @@ mod tests {
         assert_eq!(lines.len(), 2, "{log}");
         assert!(lines[0].contains("\"who\":\"orchestrator\"") && lines[0].contains("orch-1"));
         assert!(lines[1].contains("\"who\":\"s-01\"") && lines[1].contains("stage-1"));
+    }
+
+    #[test]
+    fn a_report_whose_pr_is_on_another_branch_is_refused() {
+        let (home, reg, orch) = with_pipeline();
+        // The pipeline's rule: every branch is the ticket.
+        let file = crate::pipeline::folder(home.path()).join("two.toml");
+        let text = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(&file, format!("branch = \"{{ticket}}\"\n{text}")).unwrap();
+        fn on_github(_env: &str, url: &str) -> Result<String, String> {
+            Ok(if url.ends_with("/9") {
+                "jordan/inth-7-export"
+            } else {
+                "INTH-7"
+            }
+            .into())
+        }
+        reg.lock().unwrap().branch_lookup = Some(on_github);
+        let stage = first_stage_open(&reg, &orch);
+        let with_pr = |n: u32| {
+            let mut r = report(95);
+            r["summary"] = json!(format!("Opened https://github.com/iov42/fe/pull/{n}."));
+            r
+        };
+        let (text, err, event) = call(&reg, &stage, "stage_report", with_pr(9));
+        assert!(err, "{text}");
+        assert!(
+            text.contains("Not recorded") && text.contains("jordan/inth-7-export"),
+            "{text}"
+        );
+        assert_eq!(event, None);
+        let st: Value =
+            serde_json::from_str(&call(&reg, &orch, "run_status", json!({})).0).unwrap();
+        assert_eq!(st["stages"][0]["status"], "running", "nothing recorded");
+        let (text, err, _) = call(&reg, &stage, "stage_report", with_pr(1));
+        assert!(!err, "{text}");
     }
 
     #[test]
@@ -891,6 +968,45 @@ mod tests {
         assert!(
             matches!(&event, Some(McpEvent::RunChanged(c)) if c.iter().any(|c| matches!(c.what, Decided::RunNeedsYou(_))))
         );
+    }
+
+    #[test]
+    fn a_stage_asks_product_and_records_the_answer() {
+        use crate::runs::Decided;
+        let (home, reg, orch) = with_pipeline();
+        let stage = first_stage_open(&reg, &orch);
+        let ask = json!({"question": "Remove auto-translate?", "link": "https://s/t/1"});
+        assert!(
+            call(&reg, &orch, "stage_ask", ask.clone()).1,
+            "not the orchestrator's"
+        );
+        let (text, err, event) = call(&reg, &stage, "stage_ask", ask);
+        assert!(!err && text.contains("waits"), "{text}");
+        assert!(
+            matches!(&event, Some(McpEvent::RunChanged(c)) if matches!(&c[0].what, Decided::Asked(q) if q == "Remove auto-translate?"))
+        );
+        let st: Value =
+            serde_json::from_str(&call(&reg, &orch, "run_status", json!({})).0).unwrap();
+        assert_eq!(st["state"], "needs_you");
+        let log =
+            std::fs::read_to_string(crate::run_log::file_for(home.path(), "INTH-7-1")).unwrap();
+        assert!(
+            log.contains(r#""event":"asked""#) && log.contains("https://s/t/1"),
+            "{log}"
+        );
+
+        assert!(call(&reg, &orch, "stage_answer", json!({"answer": "x"})).1);
+        let (text, err, _) = call(
+            &reg,
+            &stage,
+            "stage_answer",
+            json!({"answer": "Keep it (Ana)"}),
+        );
+        assert!(!err, "{text}");
+        let st: Value =
+            serde_json::from_str(&call(&reg, &orch, "run_status", json!({})).0).unwrap();
+        assert_eq!(st["state"], "running");
+        assert!(call(&reg, &stage, "stage_answer", json!({"answer": "again"})).1);
     }
 
     #[test]
@@ -1050,7 +1166,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 11);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 13);
         let bad: Value = serde_json::from_str(&rpc(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"tasks_delete","arguments":{}}}"#).body.unwrap()).unwrap();
         assert_eq!(bad["error"]["code"], -32602);
         let junk: Value = serde_json::from_str(&rpc("{not json").body.unwrap()).unwrap();

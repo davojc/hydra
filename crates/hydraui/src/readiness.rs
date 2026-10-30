@@ -109,6 +109,15 @@ impl Readiness {
         self.draft = Draft::Typed;
     }
 
+    /// A prompt hydraui typed didn't start the session working (a Claude Code dialog took the
+    /// keys, or it sits unsent): the screen decides whether the input still holds it, so one
+    /// lost prompt doesn't keep the session busy for good.
+    pub fn prompt_not_taken(&mut self) {
+        if self.draft == Draft::Typed {
+            self.draft = Draft::MaybeCleared;
+        }
+    }
+
     /// The session moved a card to Verify: its turn is clearly finished.
     pub fn verified(&mut self) {
         self.finished = true;
@@ -190,6 +199,21 @@ pub fn claude_input_empty(rows: &[Vec<(char, bool)>]) -> Option<bool> {
 mod tests {
     use super::*;
     use SessionState::{Idle, Working};
+
+    #[test]
+    fn a_prompt_that_didnt_take_lets_the_screen_decide() {
+        let mut r = Readiness::default();
+        r.prompt_typed();
+        assert!(r.has_draft());
+        r.prompt_not_taken();
+        assert_eq!(r.draft, Draft::MaybeCleared);
+        r.screen_says_empty(Some(true));
+        assert!(!r.has_draft(), "the input is empty: free again");
+        r.prompt_typed();
+        r.prompt_not_taken();
+        r.screen_says_empty(Some(false));
+        assert!(r.has_draft(), "still in the input: still a draft");
+    }
 
     fn typed() -> Readiness {
         let mut r = Readiness::default();

@@ -39,10 +39,19 @@ confidence rating (the Pipeline view in hydraui).
 and never do a stage's work yourself: run_start, then stage_start for each stage in order. Wait \
 to be told a stage reported (hydraui types it into your prompt), or check run_status. A stage \
 starts only after the one before it cleared its bar. When a run needs a person, tell the user \
-why and wait: nothing you can call moves it on.
+why and wait: nothing you can call moves it on. A pipeline may give you several tickets at once \
+(its runs_at_once): each is its own run with its own stages, hydraui's messages name the run, \
+and you pass that run's id to stage_start. Look across them: related tickets should hear about \
+each other through their stage briefs.
 - As a stage session (your first prompt says so) do only that stage: stage_brief says what it \
 is and what the previous stage handed over. End with stage_report, once, with honest evidence \
-and reasons for and against; report blocked rather than guess.";
+and reasons for and against; report blocked rather than guess. Your score is your confidence \
+in the stage's outcome, and the stage's bar (in stage_brief) is what that confidence must reach: \
+take nothing outside hydraui that can't be taken back, like approving or merging a pull \
+request, unless you will report at or above the bar. Below it, report first and leave that \
+action to the person, saying what's left. When the last proof needs a person's eyes, report \
+check with what to look at, and attach screenshots of it whenever you can capture them, so they \
+can decide in hydraui.";
 
 /// The `tools` array of `tools/list`.
 pub fn list() -> Value {
@@ -474,7 +483,9 @@ mod tests {
                 "stage_start",
                 "run_status",
                 "stage_brief",
-                "stage_report"
+                "stage_report",
+                "stage_ask",
+                "stage_answer"
             ]
         );
         assert_eq!(names, hydra_providers::claude_files::HYDRAUI_TOOLS);

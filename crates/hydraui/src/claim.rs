@@ -80,10 +80,10 @@ fn try_lock(layout: &Path) -> Option<std::fs::File> {
 pub struct Claim {
     #[cfg(windows)]
     handle: isize,
-    /// Locked while the claim lives; closing it unlocks. The file itself is left in place,
-    /// so a claim racing this one can't lock a file that is about to be deleted.
+    /// Locked while the claim lives; dropping the claim unlocks it. The file itself is left
+    /// in place, so a claim racing this one can't lock a file that is about to be deleted.
     #[cfg(unix)]
-    _lock: std::fs::File,
+    lock: std::fs::File,
     path: PathBuf,
     record: PathBuf,
 }
@@ -101,6 +101,10 @@ impl Drop for Claim {
         unsafe {
             CloseHandle(self.handle as _)
         };
+        // Unlock rather than only close: a child forked in this moment holds a copy of the
+        // file until it execs, and the lock lives as long as any copy does.
+        #[cfg(unix)]
+        let _ = self.lock.unlock();
         let _ = std::fs::remove_file(&self.record);
     }
 }
@@ -142,7 +146,7 @@ pub fn take(running: &Path, layout: &Path, hwnd: isize) -> Taken {
     };
     let record = write_record(running, layout, hwnd);
     Taken::Mine(Claim {
-        _lock: lock,
+        lock,
         path: layout.to_path_buf(),
         record,
     })

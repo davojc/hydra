@@ -16,9 +16,99 @@ pub struct Pipeline {
     /// in, e.g. `https://fev2-solutions-{ticket_lower}.dev.iov42.net` (a branch deploy). Prompts
     /// use it as `{feature_env}`.
     pub feature_env: Option<String>,
+    /// The branch every repository's work for a ticket must be on, as a pattern (`{ticket}`,
+    /// `{ticket_lower}`), e.g. `{ticket}` → `INTH-166`; a stage's report is refused while a PR
+    /// in it is on another branch.
+    pub branch: Option<String>,
     /// The bar every stage must clear unless it sets its own, 0 to 100.
     pub bar: u8,
     pub stages: Vec<Stage>,
+    /// Where its tickets come from in Linear (phase 2 spec §2); `None`: named by hand.
+    pub linear: Option<LinearSettings>,
+    /// The environment its orchestrator starts in when hydraui launches (`[autostart] env`);
+    /// `None`: started from the launcher.
+    pub autostart: Option<String>,
+    /// The Slack channel a stage asks a product question in, rather than deciding it
+    /// (`[product] channel`); `None`: it asks the user in hydraui.
+    pub product_channel: Option<String>,
+    /// How a stage writes the questions it asks product (`[product] style`), e.g. short and
+    /// plain, or technical with data; `None`: as the stage sees fit.
+    pub product_style: Option<String>,
+    /// Its stages are told that a change beyond the ticket altering what users see or do is
+    /// product's call, and ask (`[product] ask`, on unless `false`). Off: no such rule, and
+    /// `stage_ask` is refused (core spec §41).
+    pub product_asks: bool,
+    /// How many tickets it runs at once (`runs_at_once`, 1 to `MAX_RUNS_AT_ONCE`): each has
+    /// its own orchestrator and card, and the trigger hands work to whichever is free.
+    pub runs_at_once: u8,
+    /// Its accent on the card and the frame round its sessions (`color = "#rrggbb"`), so
+    /// pipelines are told apart at a glance; `None`: the default teal.
+    pub color: Option<u32>,
+    /// Where its work comes from in Slack instead (`[slack]`): pull requests posted in a
+    /// channel. A pipeline has one trigger, this or `linear`.
+    pub slack: Option<SlackSettings>,
+}
+
+/// A pipeline's `[slack]` table: each message in `channel` with a GitHub pull request link and
+/// no `reaction` yet gets that reaction, and each of its pull requests is run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlackSettings {
+    /// The channel's id (`C0C217CER6G`), as Slack's API wants it.
+    pub channel: String,
+    /// How the channel shows on the card, e.g. `#pull-requests`.
+    pub label: String,
+    /// The reaction that marks a message taken, by name (`eyes` is 👀). A message that already
+    /// has it, from anyone, is someone else's.
+    pub reaction: String,
+    /// The reaction put on a taken message once every pull request in it was reviewed to the
+    /// end (`white_check_mark` is ✅); empty: none.
+    pub done_reaction: String,
+    pub every_minutes: u32,
+    /// How far back a look goes, so switching on doesn't take the channel's whole history.
+    pub lookback_hours: u32,
+    /// Its orchestrator starts in Automatic.
+    pub watch: bool,
+}
+
+/// A pipeline's `[linear]` table (phase 2 spec §2): which tickets it takes, and the states it
+/// moves them through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinearSettings {
+    /// The team's key, e.g. `INTH`.
+    pub team: String,
+    /// The state that triggers a pickup.
+    pub pick: String,
+    pub assignee: Assignee,
+    /// The state a picked ticket moves to.
+    pub claim: String,
+    /// The state a ticket moves to when every stage passed.
+    pub passed: String,
+    pub every_minutes: u32,
+    /// Its orchestrator starts in Automatic (the card's switch on).
+    pub watch: bool,
+    /// Only tickets with an SLA running are picked (the default). Off: tickets without one
+    /// too, after those with one, by priority then age.
+    pub sla_only: bool,
+    /// Only tickets with one of these labels (any case) are picked; none: any ticket.
+    pub labels: Vec<String>,
+}
+
+/// Which tickets in the `pick` state a pipeline takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Assignee {
+    /// Only tickets nobody is assigned (the default).
+    Unassigned,
+    /// Whoever they're assigned to.
+    Any,
+}
+
+impl Assignee {
+    pub fn word(self) -> &'static str {
+        match self {
+            Assignee::Unassigned => "unassigned",
+            Assignee::Any => "any",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,7 +129,58 @@ pub struct Stage {
     pub prompt: String,
 }
 
+/// The ready-made ways to write product questions, as Pipeline settings offers them: a label
+/// and what the stage is told.
+pub const PRODUCT_STYLES: [(&str, &str); 2] = [
+    (
+        "Short and plain",
+        "Keep it short and casual, in plain words with no technical terms. Lead with why it \
+         matters to users and what you need decided.",
+    ),
+    (
+        "Technical, with data",
+        "Be precise and technical. Give the data behind it: what you measured or found, the \
+         code and flows it touches, and the trade-offs of each option.",
+    ),
+];
+
+/// What a stage may do without asking when its pipeline has a product channel (core spec §15):
+/// post its product question in Slack and read the replies, so asking product never waits on
+/// the user's approval.
+pub const PRODUCT_TOOLS: &str =
+    "mcp__claude_ai_Slack__slack_send_message,mcp__claude_ai_Slack__slack_read_thread";
+
 impl Pipeline {
+    /// Whether its orchestrator starts in Automatic (`watch` in `[linear]` or `[slack]`).
+    pub fn watches(&self) -> bool {
+        self.linear.as_ref().is_some_and(|l| l.watch)
+            || self.slack.as_ref().is_some_and(|s| s.watch)
+    }
+
+    /// Whether work reaches it by itself, from Linear or Slack.
+    pub fn has_trigger(&self) -> bool {
+        self.linear.is_some() || self.slack.is_some()
+    }
+
+    /// How a stage's Claude starts, before its own arguments: with [`PRODUCT_TOOLS`] allowed
+    /// when the pipeline asks product in a channel.
+    pub fn stage_claude(&self) -> Vec<String> {
+        let mut argv = vec!["claude".to_string()];
+        if self.product_asks && self.product_channel.is_some() {
+            // One word: the flag takes a list, and would take the prompt after it too.
+            argv.push(format!("--allowedTools={PRODUCT_TOOLS}"));
+        }
+        argv
+    }
+
+    /// The branch for `ticket`; `None` when the pipeline names no branch rule.
+    pub fn branch_for(&self, ticket: &str) -> Option<String> {
+        self.branch.as_ref().map(|b| {
+            b.replace("{ticket}", ticket)
+                .replace("{ticket_lower}", &ticket.to_lowercase())
+        })
+    }
+
     /// `feature_env` for `ticket`; empty when the pipeline names none.
     pub fn feature_env_for(&self, ticket: &str) -> String {
         self.feature_env
@@ -69,8 +210,193 @@ struct File {
     name: String,
     bar: Option<u8>,
     feature_env: Option<String>,
+    branch: Option<String>,
     #[serde(default, rename = "stage")]
     stages: Vec<FileStage>,
+    linear: Option<FileLinear>,
+    autostart: Option<FileAutostart>,
+    product: Option<FileProduct>,
+    slack: Option<FileSlack>,
+    color: Option<String>,
+    runs_at_once: Option<u8>,
+}
+
+/// The most tickets one pipeline runs at once: each is a Claude orchestrator plus its stage's
+/// session, and they share the environment's Claude week.
+pub const MAX_RUNS_AT_ONCE: u8 = 6;
+
+/// The colours Pipeline settings offers, by name: distinct from each other and from the card's
+/// state colours' meanings, and readable on the dark sidebar.
+pub const COLORS: [(&str, u32); 8] = [
+    ("Teal", 0x3fbfa6),
+    ("Blue", 0x5b9cf0),
+    ("Violet", 0x9b7cf0),
+    ("Pink", 0xe27bb8),
+    ("Orange", 0xe8935a),
+    ("Yellow", 0xd8c35a),
+    ("Green", 0x7cc46a),
+    ("Slate", 0x8fa1b3),
+];
+
+/// `#rrggbb` as a number.
+pub fn parse_color(text: &str) -> Result<u32, String> {
+    let hex = text.trim().strip_prefix('#').unwrap_or("");
+    if hex.len() != 6 {
+        return Err(format!("color {text:?} must be #rrggbb, e.g. \"#5b9cf0\""));
+    }
+    u32::from_str_radix(hex, 16).map_err(|_| format!("color {text:?} must be #rrggbb"))
+}
+
+pub fn color_text(c: u32) -> String {
+    format!("#{c:06x}")
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileSlack {
+    channel: String,
+    label: Option<String>,
+    reaction: Option<String>,
+    done_reaction: Option<String>,
+    every_minutes: Option<u32>,
+    lookback_hours: Option<u32>,
+    watch: Option<bool>,
+}
+
+/// The `[slack]` defaults.
+pub const DEFAULT_REACTION: &str = "eyes";
+pub const DEFAULT_SLACK_EVERY_MINUTES: u32 = 2;
+pub const DEFAULT_LOOKBACK_HOURS: u32 = 24;
+
+/// A Slack channel id, e.g. `C0C217CER6G`.
+pub fn is_channel_id(s: &str) -> bool {
+    s.len() >= 9
+        && s.starts_with(['C', 'G'])
+        && s.chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+}
+
+/// The `[slack]` table, its defaults filled in.
+fn slack_settings(f: FileSlack) -> Result<SlackSettings, String> {
+    let channel = f.channel.trim().to_string();
+    // Names can be renamed and need another scope to look up: the id is what's stored.
+    if !is_channel_id(&channel) {
+        return Err(format!(
+            "[slack] channel {channel:?} must be the channel's id, e.g. \"C0C217CER6G\" (in \
+             Slack: the channel's name → About → Channel ID)"
+        ));
+    }
+    let every_minutes = f.every_minutes.unwrap_or(DEFAULT_SLACK_EVERY_MINUTES);
+    if every_minutes == 0 {
+        return Err("[slack] every_minutes must be at least 1".into());
+    }
+    let reaction = f
+        .reaction
+        .map(|r| r.trim().trim_matches(':').to_string())
+        .filter(|r| !r.is_empty())
+        .unwrap_or_else(|| DEFAULT_REACTION.to_string());
+    Ok(SlackSettings {
+        label: f
+            .label
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .unwrap_or_else(|| channel.clone()),
+        channel,
+        reaction,
+        done_reaction: f
+            .done_reaction
+            .map(|r| r.trim().trim_matches(':').to_string())
+            .unwrap_or_default(),
+        every_minutes,
+        lookback_hours: f.lookback_hours.unwrap_or(DEFAULT_LOOKBACK_HOURS).max(1),
+        watch: f.watch.unwrap_or(false),
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileAutostart {
+    env: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileProduct {
+    #[serde(default)]
+    channel: Option<String>,
+    #[serde(default)]
+    style: Option<String>,
+    #[serde(default)]
+    ask: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileLinear {
+    team: Option<String>,
+    pick: Option<String>,
+    assignee: Option<String>,
+    claim: Option<String>,
+    passed: Option<String>,
+    every_minutes: Option<u32>,
+    watch: Option<bool>,
+    sla_only: Option<bool>,
+    labels: Option<Vec<String>>,
+}
+
+/// The `[linear]` defaults (phase 2 spec §2).
+pub const DEFAULT_PICK: &str = "Ready for Investigation";
+pub const DEFAULT_CLAIM: &str = "In Investigation";
+pub const DEFAULT_PASSED: &str = "Ready for Peer Review";
+pub const DEFAULT_EVERY_MINUTES: u32 = 5;
+
+/// The `[linear]` table, its defaults filled in (phase 2 spec §2).
+fn linear_settings(f: FileLinear) -> Result<LinearSettings, String> {
+    let text = |v: Option<String>, default: &str| {
+        v.map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| default.to_string())
+    };
+    let team = text(f.team, "");
+    if team.is_empty() {
+        return Err("[linear] needs the team's key, e.g. team = \"INTH\"".into());
+    }
+    let assignee = match f.assignee.as_deref().map(str::trim) {
+        None | Some("unassigned") => Assignee::Unassigned,
+        Some("any") => Assignee::Any,
+        Some(other) => {
+            return Err(format!(
+                "[linear] assignee {other:?} must be \"unassigned\" or \"any\""
+            ));
+        }
+    };
+    let every_minutes = f.every_minutes.unwrap_or(DEFAULT_EVERY_MINUTES);
+    if every_minutes == 0 {
+        return Err("[linear] every_minutes must be at least 1".into());
+    }
+    Ok(LinearSettings {
+        team,
+        pick: text(f.pick, DEFAULT_PICK),
+        assignee,
+        claim: text(f.claim, DEFAULT_CLAIM),
+        passed: text(f.passed, DEFAULT_PASSED),
+        every_minutes,
+        watch: f.watch.unwrap_or(false),
+        sla_only: f.sla_only.unwrap_or(true),
+        labels: clean_labels(f.labels.unwrap_or_default()),
+    })
+}
+
+/// Labels trimmed, blanks and repeats (any case) dropped, in their order.
+pub fn clean_labels(labels: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for l in labels {
+        let l = l.trim();
+        if !l.is_empty() && !out.iter().any(|o| o.eq_ignore_ascii_case(l)) {
+            out.push(l.to_string());
+        }
+    }
+    out
 }
 
 #[derive(Deserialize)]
@@ -109,6 +435,9 @@ fn check_bar(bar: Option<u8>, what: &str) -> Result<(), String> {
 pub fn parse(text: &str) -> Result<Pipeline, String> {
     let file: File = toml::from_str(text).map_err(|e| e.message().to_string())?;
     check_bar(file.bar, "the pipeline")?;
+    if file.linear.is_some() && file.slack.is_some() {
+        return Err("a pipeline has one trigger: [linear] or [slack], not both".into());
+    }
     if file.stages.is_empty() {
         return Err("the pipeline has no stages: add a [[stage]]".into());
     }
@@ -150,8 +479,47 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
             .feature_env
             .map(|f| f.trim().to_string())
             .filter(|f| !f.is_empty()),
+        branch: file
+            .branch
+            .map(|b| b.trim().to_string())
+            .filter(|b| !b.is_empty()),
         bar: file.bar.unwrap_or(DEFAULT_BAR),
         stages,
+        linear: file.linear.map(linear_settings).transpose()?,
+        autostart: match file.autostart {
+            Some(a) if a.env.trim().is_empty() => {
+                return Err("[autostart] needs the environment, e.g. env = \"work\"".into());
+            }
+            Some(a) => Some(a.env.trim().to_string()),
+            None => None,
+        },
+        product_channel: match file.product.as_ref().and_then(|p| p.channel.as_deref()) {
+            Some(c) if c.trim().is_empty() => {
+                return Err(
+                    "[product] needs the Slack channel, e.g. channel = \"#product\"".into(),
+                );
+            }
+            Some(c) => Some(c.trim().to_string()),
+            None => None,
+        },
+        product_asks: file.product.as_ref().and_then(|p| p.ask).unwrap_or(true),
+        product_style: file
+            .product
+            .as_ref()
+            .and_then(|p| p.style.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        slack: file.slack.map(slack_settings).transpose()?,
+        color: file.color.as_deref().map(parse_color).transpose()?,
+        runs_at_once: match file.runs_at_once.unwrap_or(1) {
+            n @ 1..=MAX_RUNS_AT_ONCE => n,
+            n => {
+                return Err(format!(
+                    "runs_at_once {n} must be between 1 and {MAX_RUNS_AT_ONCE}"
+                ));
+            }
+        },
     })
 }
 
@@ -166,7 +534,16 @@ pub struct Edit {
     pub name: String,
     pub bar: u8,
     pub feature_env: Option<String>,
+    pub branch: Option<String>,
     pub stages: Vec<EditStage>,
+    pub linear: Option<LinearSettings>,
+    pub autostart: Option<String>,
+    pub product_channel: Option<String>,
+    pub product_style: Option<String>,
+    pub product_asks: bool,
+    pub color: Option<u32>,
+    pub slack: Option<SlackSettings>,
+    pub runs_at_once: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,6 +566,7 @@ impl From<&Pipeline> for Edit {
             name: p.name.clone(),
             bar: p.bar,
             feature_env: p.feature_env.clone(),
+            branch: p.branch.clone(),
             stages: p
                 .stages
                 .iter()
@@ -201,6 +579,14 @@ impl From<&Pipeline> for Edit {
                     prompt: s.prompt.clone(),
                 })
                 .collect(),
+            linear: p.linear.clone(),
+            autostart: p.autostart.clone(),
+            product_channel: p.product_channel.clone(),
+            product_style: p.product_style.clone(),
+            product_asks: p.product_asks,
+            color: p.color,
+            slack: p.slack.clone(),
+            runs_at_once: p.runs_at_once,
         }
     }
 }
@@ -215,6 +601,44 @@ pub fn validate(edit: &Edit) -> Result<(), &'static str> {
     }
     if edit.stages.iter().any(|s| s.title.trim().is_empty()) {
         return Err("Every stage needs a name");
+    }
+    if let Some(l) = &edit.linear {
+        if l.team.trim().is_empty() {
+            return Err("Name the Linear team, e.g. INTH");
+        }
+        if [&l.pick, &l.claim, &l.passed]
+            .iter()
+            .any(|s| s.trim().is_empty())
+        {
+            return Err("Name the Linear states");
+        }
+        if l.every_minutes == 0 {
+            return Err("Check Linear every minute or more");
+        }
+    }
+    if !(1..=MAX_RUNS_AT_ONCE).contains(&edit.runs_at_once) {
+        return Err("Run 1 to 6 tickets at once");
+    }
+    if let Some(sl) = &edit.slack {
+        if edit.linear.is_some() {
+            return Err("Take work from Linear or Slack, not both");
+        }
+        if !is_channel_id(sl.channel.trim()) {
+            return Err("Give the Slack channel's id, e.g. C0C217CER6G");
+        }
+        if sl.every_minutes == 0 {
+            return Err("Check Slack every minute or more");
+        }
+        if sl.lookback_hours == 0 {
+            return Err("Look back at least an hour in Slack");
+        }
+        if sl.reaction.trim().trim_matches(':').is_empty() {
+            return Err("Name the reaction that marks a message taken, e.g. eyes");
+        }
+        let done = sl.done_reaction.trim().trim_matches(':');
+        if done.eq_ignore_ascii_case(sl.reaction.trim().trim_matches(':')) {
+            return Err("The done reaction must differ from the one that marks a message taken");
+        }
     }
     Ok(())
 }
@@ -270,6 +694,142 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
         Some(f) => doc["feature_env"] = value(f),
         None => {
             doc.remove("feature_env");
+        }
+    }
+    match edit
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+    {
+        Some(b) => doc["branch"] = value(b),
+        None => {
+            doc.remove("branch");
+        }
+    }
+    match &edit.linear {
+        Some(l) => {
+            // Into the table that's there, so its comments stay.
+            if !doc.get("linear").is_some_and(Item::is_table) {
+                doc["linear"] = Item::Table(Table::new());
+            }
+            let t = &mut doc["linear"];
+            t["team"] = value(l.team.trim());
+            t["pick"] = value(l.pick.trim());
+            t["assignee"] = value(l.assignee.word());
+            t["claim"] = value(l.claim.trim());
+            t["passed"] = value(l.passed.trim());
+            t["every_minutes"] = value(i64::from(l.every_minutes));
+            if l.watch {
+                t["watch"] = value(true);
+            } else if let Some(t) = t.as_table_mut() {
+                t.remove("watch");
+            }
+            if !l.sla_only {
+                t["sla_only"] = value(false);
+            } else if let Some(t) = t.as_table_mut() {
+                t.remove("sla_only");
+            }
+            let labels = clean_labels(l.labels.iter().cloned());
+            if labels.is_empty() {
+                if let Some(t) = t.as_table_mut() {
+                    t.remove("labels");
+                }
+            } else {
+                t["labels"] = value(labels.into_iter().collect::<toml_edit::Array>());
+            }
+        }
+        None => {
+            doc.remove("linear");
+        }
+    }
+    match edit
+        .autostart
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+    {
+        Some(env) => {
+            if !doc.get("autostart").is_some_and(Item::is_table) {
+                doc["autostart"] = Item::Table(Table::new());
+            }
+            doc["autostart"]["env"] = value(env);
+        }
+        None => {
+            doc.remove("autostart");
+        }
+    }
+    let product = [
+        ("channel", edit.product_channel.as_deref()),
+        ("style", edit.product_style.as_deref()),
+    ]
+    .map(|(k, v)| (k, v.map(str::trim).filter(|v| !v.is_empty())));
+    if product.iter().all(|(_, v)| v.is_none()) && edit.product_asks {
+        doc.remove("product");
+    } else {
+        if !doc.get("product").is_some_and(Item::is_table) {
+            doc["product"] = Item::Table(Table::new());
+        }
+        let table = doc["product"].as_table_mut().expect("made a table above");
+        for (k, v) in product {
+            match v {
+                Some(v) => {
+                    table[k] = value(v);
+                }
+                None => {
+                    table.remove(k);
+                }
+            }
+        }
+        // On is the default, so only off is written.
+        if edit.product_asks {
+            table.remove("ask");
+        } else {
+            table["ask"] = value(false);
+        }
+    }
+    match &edit.slack {
+        Some(sl) => {
+            // Into the table that's there, so its comments stay.
+            if !doc.get("slack").is_some_and(Item::is_table) {
+                doc["slack"] = Item::Table(Table::new());
+            }
+            let t = &mut doc["slack"];
+            t["channel"] = value(sl.channel.trim());
+            let label = sl.label.trim();
+            if label.is_empty() || label == sl.channel.trim() {
+                if let Some(t) = t.as_table_mut() {
+                    t.remove("label");
+                }
+            } else {
+                t["label"] = value(label);
+            }
+            t["reaction"] = value(sl.reaction.trim().trim_matches(':'));
+            match sl.done_reaction.trim().trim_matches(':') {
+                "" => {
+                    if let Some(t) = t.as_table_mut() {
+                        t.remove("done_reaction");
+                    }
+                }
+                done => t["done_reaction"] = value(done),
+            }
+            t["every_minutes"] = value(i64::from(sl.every_minutes));
+            t["lookback_hours"] = value(i64::from(sl.lookback_hours));
+            t["watch"] = value(sl.watch);
+        }
+        None => {
+            doc.remove("slack");
+        }
+    }
+    if edit.runs_at_once > 1 {
+        doc["runs_at_once"] = value(i64::from(edit.runs_at_once));
+    } else {
+        doc.remove("runs_at_once");
+    }
+    match edit.color {
+        Some(c) => doc["color"] = value(color_text(c)),
+        None => {
+            doc.remove("color");
         }
     }
     let old: Vec<Table> = doc
@@ -379,6 +939,122 @@ pub fn ensure_example(hydra_root: &Path) -> std::io::Result<()> {
     std::fs::write(dir.join("ticket.toml"), EXAMPLE)
 }
 
+/// The file name for a pipeline called `title`: lowercase letters and digits, words joined by
+/// `-` (`INTH SLA tickets` → `inth-sla-tickets`); empty when nothing is left.
+pub fn file_name_for(title: &str) -> String {
+    let mut out = String::new();
+    for c in title.trim().chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_end_matches('-').to_string()
+}
+
+/// A new pipeline's file when it starts blank: one stage to rename and fill in.
+const BLANK: &str = r#"bar = 80
+
+[[stage]]
+id = "first"
+title = "First stage"
+prompt = "Work on ticket {ticket}."
+"#;
+
+/// **New pipeline…**: writes a pipeline called `title`, blank or a copy of pipeline `from`,
+/// and returns its file name. A copy doesn't watch Linear or start at launch until those are
+/// turned on in its settings, so it never takes tickets its original takes.
+pub fn create(hydra_root: &Path, title: &str, from: Option<&str>) -> Result<String, String> {
+    use toml_edit::{DocumentMut, value};
+    let title = title.trim();
+    let name = file_name_for(title);
+    if name.is_empty() {
+        return Err("give the pipeline a name with a letter or digit in it".into());
+    }
+    let dir = folder(hydra_root);
+    let file = dir.join(format!("{name}.toml"));
+    if file.exists() {
+        return Err(format!("there's already a pipeline file {name}.toml"));
+    }
+    let text = match from {
+        None => BLANK.to_string(),
+        Some(src) => {
+            if !plain_name(src) {
+                return Err(format!("{src:?} isn't a pipeline name"));
+            }
+            let path = dir.join(format!("{src}.toml"));
+            std::fs::read_to_string(&path).map_err(|e| format!("can't read pipeline {src}: {e}"))?
+        }
+    };
+    let mut doc: DocumentMut = text
+        .parse()
+        .map_err(|e| format!("pipeline {from:?}: {e}"))?;
+    doc["name"] = value(title);
+    takes_nothing(&mut doc);
+    let text = doc.to_string();
+    parse(&text).map_err(|e| format!("the new pipeline: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(&file, text).map_err(|e| format!("can't write {}: {e}", file.display()))?;
+    Ok(name)
+}
+
+/// A new pipeline made from another's file doesn't start at launch, and its trigger is off, so
+/// it never takes tickets the original takes until it's turned on in its settings.
+fn takes_nothing(doc: &mut toml_edit::DocumentMut) {
+    use toml_edit::{Item, value};
+    doc.remove("autostart");
+    for trigger in ["linear", "slack"] {
+        if let Some(t) = doc.get_mut(trigger).and_then(Item::as_table_mut) {
+            t["watch"] = value(false);
+        }
+    }
+}
+
+/// **Export…** (core spec §44): pipeline `name`'s file as someone else imports it, comments
+/// and all, without `[autostart]`, whose environment is this machine's. It holds no secrets:
+/// those stay in each environment.
+pub fn export(hydra_root: &Path, name: &str) -> Result<String, String> {
+    load(hydra_root, name)?;
+    let path = folder(hydra_root).join(format!("{name}.toml"));
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("can't read {name}: {e}"))?;
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("{name}: {e}"))?;
+    doc.remove("autostart");
+    Ok(doc.to_string())
+}
+
+/// **Import pipeline…** (core spec §44): writes an exported pipeline as a new one and returns
+/// its file name. Like a copy it takes nothing until turned on; a name already taken here gets
+/// a number (`INTH 2`, `inth-2`).
+pub fn import(hydra_root: &Path, text: &str) -> Result<String, String> {
+    use toml_edit::{DocumentMut, value};
+    let not_one = |e: String| format!("that file isn't a hydraui pipeline: {e}");
+    let mut doc: DocumentMut = text.parse().map_err(|e| not_one(format!("{e}")))?;
+    let title = parse(text).map_err(not_one)?.name.trim().to_string();
+    let base = file_name_for(&title);
+    if base.is_empty() {
+        return Err(format!(
+            "the pipeline's name {title:?} needs a letter or digit in it"
+        ));
+    }
+    let dir = folder(hydra_root);
+    let (mut name, mut shown) = (base.clone(), title.clone());
+    for n in 2.. {
+        if !dir.join(format!("{name}.toml")).exists() {
+            break;
+        }
+        (name, shown) = (format!("{base}-{n}"), format!("{title} {n}"));
+    }
+    doc["name"] = value(shown);
+    takes_nothing(&mut doc);
+    let text = doc.to_string();
+    parse(&text).map_err(not_one)?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let file = dir.join(format!("{name}.toml"));
+    std::fs::write(&file, text).map_err(|e| format!("can't write {}: {e}", file.display()))?;
+    Ok(name)
+}
+
 /// Values a stage prompt's placeholders are filled with.
 pub struct PromptVars<'a> {
     pub ticket: &'a str,
@@ -388,6 +1064,9 @@ pub struct PromptVars<'a> {
     pub handoff: &'a str,
     /// The pipeline's `feature_env` for the ticket; empty without one.
     pub feature_env: &'a str,
+    /// What the run is about, as a link (a Slack-triggered run's pull request); `{pr}` and
+    /// `{link}` in a prompt. Empty without one.
+    pub link: &'a str,
 }
 
 /// The stage session's first prompt as the pipeline writes it: its placeholders filled, then
@@ -401,7 +1080,9 @@ pub fn render(prompt: &str, vars: &PromptVars, brief: &str) -> String {
         .replace("{run}", vars.run)
         .replace("{stage}", vars.stage)
         .replace("{handoff}", vars.handoff)
-        .replace("{feature_env}", vars.feature_env);
+        .replace("{feature_env}", vars.feature_env)
+        .replace("{pr}", vars.link)
+        .replace("{link}", vars.link);
     let brief = brief.trim();
     if !brief.is_empty() {
         text.push_str("\n\n");
@@ -456,6 +1137,286 @@ What the previous stage handed over: {handoff}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn runs_at_once_is_one_unless_set_and_saved_only_above_one() {
+        let base = "name = \"PRs\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n";
+        assert_eq!(parse(base).unwrap().runs_at_once, 1);
+        assert_eq!(
+            parse(&format!("runs_at_once = 3\n{base}"))
+                .unwrap()
+                .runs_at_once,
+            3
+        );
+        for bad in ["0", "7"] {
+            let e = parse(&format!("runs_at_once = {bad}\n{base}")).unwrap_err();
+            assert!(e.contains("between 1 and 6"), "{e}");
+        }
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(folder(d.path()).join("prs.toml"), base).unwrap();
+        let mut edit = Edit::from(&load(d.path(), "prs").unwrap());
+        edit.runs_at_once = 3;
+        save(d.path(), "prs", &edit).unwrap();
+        assert_eq!(load(d.path(), "prs").unwrap().runs_at_once, 3);
+        edit.runs_at_once = 1;
+        save(d.path(), "prs", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("prs.toml")).unwrap();
+        assert!(!text.contains("runs_at_once"), "{text}");
+        edit.runs_at_once = 9;
+        assert!(validate(&edit).is_err());
+    }
+
+    #[test]
+    fn settings_save_a_slack_trigger_and_refuse_two() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(
+            folder(d.path()).join("prs.toml"),
+            "name = \"PRs\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n\
+             # where PRs come from\n[slack]\nchannel = \"C0C217CER6G\"\nlabel = \"#pull-requests\"\nwatch = true\n",
+        )
+        .unwrap();
+        let mut edit = Edit::from(&load(d.path(), "prs").unwrap());
+        let sl = edit.slack.as_mut().unwrap();
+        sl.every_minutes = 7;
+        sl.lookback_hours = 48;
+        sl.reaction = ":robot_face:".into();
+        sl.done_reaction = "robot_face".into();
+        assert!(validate(&edit).is_err(), "done differs from taken");
+        let sl = edit.slack.as_mut().unwrap();
+        sl.done_reaction = ":white_check_mark:".into();
+        assert_eq!(validate(&edit), Ok(()));
+        save(d.path(), "prs", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("prs.toml")).unwrap();
+        assert!(
+            text.contains("# where PRs come from"),
+            "comments kept: {text}"
+        );
+        let back = load(d.path(), "prs").unwrap().slack.unwrap();
+        assert_eq!(
+            (
+                back.every_minutes,
+                back.lookback_hours,
+                back.reaction.as_str(),
+                back.done_reaction.as_str(),
+                back.watch
+            ),
+            (7, 48, "robot_face", "white_check_mark", true)
+        );
+        // Cleared, the key goes.
+        let mut off = edit.clone();
+        off.slack.as_mut().unwrap().done_reaction = String::new();
+        save(d.path(), "prs", &off).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("prs.toml")).unwrap();
+        assert!(!text.contains("done_reaction"), "{text}");
+        assert_eq!(
+            load(d.path(), "prs").unwrap().slack.unwrap().done_reaction,
+            ""
+        );
+        assert_eq!(back.label, "#pull-requests");
+
+        let mut both = edit.clone();
+        both.linear = Some(LinearSettings {
+            team: "INTH".into(),
+            pick: DEFAULT_PICK.into(),
+            assignee: Assignee::Unassigned,
+            claim: DEFAULT_CLAIM.into(),
+            passed: DEFAULT_PASSED.into(),
+            every_minutes: 5,
+            watch: false,
+            sla_only: true,
+            labels: Vec::new(),
+        });
+        assert_eq!(
+            validate(&both),
+            Err("Take work from Linear or Slack, not both")
+        );
+        let mut bad = edit.clone();
+        bad.slack.as_mut().unwrap().channel = "#pull-requests".into();
+        assert!(validate(&bad).unwrap_err().contains("channel's id"));
+        let mut zero = edit.clone();
+        zero.slack.as_mut().unwrap().every_minutes = 0;
+        assert!(validate(&zero).is_err());
+
+        edit.slack = None;
+        save(d.path(), "prs", &edit).unwrap();
+        assert_eq!(load(d.path(), "prs").unwrap().slack, None);
+    }
+
+    #[test]
+    fn a_pipeline_colour_is_read_saved_and_cleared() {
+        let base = "name = \"PRs\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n";
+        assert_eq!(parse(base).unwrap().color, None);
+        let p = parse(&format!("color = \"#5B9CF0\"\n{base}")).unwrap();
+        assert_eq!(p.color, Some(0x5b9cf0));
+        let bad = parse(&format!("color = \"blue\"\n{base}")).unwrap_err();
+        assert!(bad.contains("#rrggbb"), "{bad}");
+
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(folder(d.path()).join("prs.toml"), format!("# mine\n{base}")).unwrap();
+        let mut edit = Edit::from(&load(d.path(), "prs").unwrap());
+        edit.color = Some(COLORS[2].1);
+        save(d.path(), "prs", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("prs.toml")).unwrap();
+        assert!(text.contains("color = \"#9b7cf0\""), "{text}");
+        assert_eq!(load(d.path(), "prs").unwrap().color, Some(0x9b7cf0));
+        edit.color = None;
+        save(d.path(), "prs", &edit).unwrap();
+        assert_eq!(load(d.path(), "prs").unwrap().color, None);
+    }
+
+    #[test]
+    fn a_slack_trigger_is_read_with_its_defaults() {
+        let base =
+            "name = \"PRs\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\nprompt = \"review {pr}\"\n";
+        let p = parse(&format!(
+            "{base}[slack]\nchannel = \"C0C217CER6G\"\nlabel = \"#pull-requests\"\n"
+        ))
+        .unwrap();
+        let s = p.slack.unwrap();
+        assert_eq!(
+            (s.channel.as_str(), s.label.as_str(), s.reaction.as_str()),
+            ("C0C217CER6G", "#pull-requests", "eyes")
+        );
+        assert_eq!((s.every_minutes, s.lookback_hours, s.watch), (2, 24, false));
+        let named = parse(&format!("{base}[slack]\nchannel = \"#pull-requests\"\n")).unwrap_err();
+        assert!(named.contains("channel's id"), "{named}");
+        let both = parse(&format!(
+            "{base}[slack]\nchannel = \"C0C217CER6G\"\n[linear]\nteam = \"INTH\"\n"
+        ))
+        .unwrap_err();
+        assert!(both.contains("one trigger"), "{both}");
+        let colons = parse(&format!(
+            "{base}[slack]\nchannel = \"C0C217CER6G\"\nreaction = \":eyes:\"\n"
+        ))
+        .unwrap();
+        assert_eq!(colons.slack.unwrap().reaction, "eyes");
+    }
+
+    #[test]
+    fn a_pipelines_file_name_comes_from_its_title() {
+        assert_eq!(file_name_for("INTH SLA tickets"), "inth-sla-tickets");
+        assert_eq!(
+            file_name_for("  Release notes — weekly! "),
+            "release-notes-weekly"
+        );
+        assert_eq!(file_name_for("PRE/1"), "pre-1");
+        assert_eq!(file_name_for("—!"), "");
+    }
+
+    #[test]
+    fn a_new_pipeline_starts_blank_with_one_stage() {
+        let d = tempfile::tempdir().unwrap();
+        let name = create(d.path(), "Release \"notes\"", None).unwrap();
+        assert_eq!(name, "release-notes");
+        let p = load(d.path(), &name).unwrap();
+        assert_eq!(p.name, "Release \"notes\"");
+        assert_eq!(p.stages.len(), 1);
+        assert_eq!(p.linear, None);
+        let again = create(d.path(), "release notes", None).unwrap_err();
+        assert!(again.contains("already"), "{again}");
+        assert!(create(d.path(), "!!", None).is_err());
+    }
+
+    #[test]
+    fn a_copy_keeps_its_stages_but_takes_no_tickets_until_turned_on() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(
+            folder(d.path()).join("inth.toml"),
+            "# INTH tickets\nname = \"INTH\"\nbar = 85\n[linear]\nteam = \"INTH\"\nwatch = true\n\
+             [autostart]\nenv = \"iov42\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\nprompt = \"do {ticket}\"\n\
+             [[stage]]\nid = \"b\"\ntitle = \"B\"\nprompt = \"check\"\n",
+        )
+        .unwrap();
+        let name = create(d.path(), "PRE bugs", Some("inth")).unwrap();
+        let p = load(d.path(), &name).unwrap();
+        assert_eq!((p.name.as_str(), p.bar), ("PRE bugs", 85));
+        assert_eq!(p.stages.len(), 2);
+        assert_eq!(p.autostart, None);
+        assert!(!p.linear.unwrap().watch);
+        let text = std::fs::read_to_string(folder(d.path()).join("pre-bugs.toml")).unwrap();
+        assert!(text.starts_with("# INTH tickets"), "comments kept: {text}");
+        assert!(
+            load(d.path(), "inth").unwrap().linear.unwrap().watch,
+            "the original unchanged"
+        );
+        assert!(create(d.path(), "x", Some("nope")).is_err());
+    }
+
+    const SHARED: &str = "# INTH tickets\nname = \"INTH\"\nbar = 85\n[linear]\nteam = \"INTH\"\nwatch = true\n\
+         [autostart]\nenv = \"iov42\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\nprompt = \"do {ticket}\"\n";
+
+    fn with_inth() -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(folder(d.path()).join("inth.toml"), SHARED).unwrap();
+        d
+    }
+
+    #[test]
+    fn an_export_is_the_whole_file_but_this_machines_environment() {
+        let d = with_inth();
+        let text = export(d.path(), "inth").unwrap();
+        assert!(
+            !text.contains("autostart") && !text.contains("iov42"),
+            "{text}"
+        );
+        assert!(text.starts_with("# INTH tickets"), "comments kept: {text}");
+        let p = parse(&text).unwrap();
+        assert_eq!((p.name.as_str(), p.bar, p.stages.len()), ("INTH", 85, 1));
+        assert!(
+            p.linear.unwrap().watch,
+            "an export says what the original does"
+        );
+        assert!(export(d.path(), "nope").is_err());
+    }
+
+    #[test]
+    fn an_import_is_a_new_pipeline_that_takes_nothing_until_turned_on() {
+        let text = export(with_inth().path(), "inth").unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let name = import(other.path(), &text).unwrap();
+        assert_eq!(name, "inth");
+        let p = load(other.path(), &name).unwrap();
+        assert_eq!((p.name.as_str(), p.bar), ("INTH", 85));
+        assert_eq!(p.stages[0].prompt, "do {ticket}");
+        assert_eq!(p.autostart, None);
+        assert!(!p.linear.unwrap().watch);
+    }
+
+    #[test]
+    fn importing_a_name_already_taken_numbers_the_new_one() {
+        let d = with_inth();
+        let text = export(d.path(), "inth").unwrap();
+        assert_eq!(import(d.path(), &text).unwrap(), "inth-2");
+        assert_eq!(import(d.path(), &text).unwrap(), "inth-3");
+        assert_eq!(load(d.path(), "inth-2").unwrap().name, "INTH 2");
+        assert!(
+            load(d.path(), "inth").unwrap().linear.unwrap().watch,
+            "the original unchanged"
+        );
+    }
+
+    #[test]
+    fn a_file_that_isnt_a_pipeline_is_refused_and_nothing_is_written() {
+        let d = tempfile::tempdir().unwrap();
+        for (text, says) in [
+            ("hello", "pipeline"),
+            ("bar = 80\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n", "name"),
+            ("name = \"x\"\n", "no stages"),
+            (
+                "name = \"!!\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n",
+                "name",
+            ),
+        ] {
+            let e = import(d.path(), text).unwrap_err();
+            assert!(e.contains(says), "{text:?}: {e}");
+        }
+        assert_eq!(names(d.path()), Vec::<String>::new());
+    }
+
     use super::*;
 
     const TWO: &str = "name = \"t\"\n[[stage]]\nid = \"replicate\"\ntitle = \"Replicate\"\nprompt = \"Read {ticket} ({run}, {stage}). {handoff}\"\n[[stage]]\nid = \"develop\"\ntitle = \"Develop\"\nbar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
@@ -511,6 +1472,7 @@ mod tests {
             stage: "replicate",
             handoff: "see log",
             feature_env: "",
+            link: "",
         };
         let text = render(&p.stages[0].prompt, &vars, "Focus on the API.");
         assert_eq!(
@@ -518,6 +1480,14 @@ mod tests {
             "Read INTH-1 (INTH-1-1, replicate). see log\n\nFocus on the API."
         );
         assert_eq!(render("Go.", &vars, "  "), "Go.");
+        let pr = PromptVars {
+            link: "https://github.com/iov42/svc-usage/pull/62",
+            ..vars
+        };
+        assert_eq!(
+            render("review {pr}", &pr, ""),
+            "review https://github.com/iov42/svc-usage/pull/62"
+        );
     }
 
     #[test]
@@ -539,6 +1509,7 @@ mod tests {
             stage: "verify",
             handoff: "",
             feature_env: &env,
+            link: "",
         };
         assert_eq!(
             render(&p.stages[0].prompt, &vars, ""),
@@ -598,6 +1569,228 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
 
     fn edit_of(p: &Pipeline) -> Edit {
         Edit::from(p)
+    }
+
+    const ONE_STAGE: &str = "name = \"t\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n";
+
+    #[test]
+    fn a_pipeline_names_the_branch_for_a_ticket() {
+        assert_eq!(parse(ONE_STAGE).unwrap().branch_for("INTH-166"), None);
+        let p = parse(&format!("branch = \"{{ticket}}\"\n{ONE_STAGE}")).unwrap();
+        assert_eq!(p.branch_for("INTH-166").as_deref(), Some("INTH-166"));
+        assert_eq!(p.branch_for("PRE-151").as_deref(), Some("PRE-151"));
+        let lower = parse(&format!("branch = \"fix/{{ticket_lower}}\"\n{ONE_STAGE}")).unwrap();
+        assert_eq!(lower.branch_for("INTH-7").as_deref(), Some("fix/inth-7"));
+        let blank = parse(&format!("branch = \" \"\n{ONE_STAGE}")).unwrap();
+        assert_eq!(blank.branch, None);
+    }
+
+    #[test]
+    fn saving_keeps_or_drops_the_branch() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(folder(d.path()).join("t.toml"), ONE_STAGE).unwrap();
+        let mut edit = edit_of(&load(d.path(), "t").unwrap());
+        assert_eq!(edit.branch, None);
+        edit.branch = Some("{ticket}".into());
+        save(d.path(), "t", &edit).unwrap();
+        assert_eq!(
+            load(d.path(), "t").unwrap().branch.as_deref(),
+            Some("{ticket}")
+        );
+        edit.branch = None;
+        save(d.path(), "t", &edit).unwrap();
+        assert_eq!(load(d.path(), "t").unwrap().branch, None);
+    }
+
+    #[test]
+    fn a_pipeline_can_start_itself_and_watch_linear() {
+        let p = parse(ONE_STAGE).unwrap();
+        assert_eq!(p.autostart, None);
+        let p = parse(&format!(
+            "{ONE_STAGE}[autostart]\nenv = \"iov42\"\n[linear]\nteam = \"INTH\"\nwatch = true\n"
+        ))
+        .unwrap();
+        assert_eq!(p.autostart.as_deref(), Some("iov42"));
+        assert!(p.linear.unwrap().watch);
+        let quiet = parse(&format!("{ONE_STAGE}[linear]\nteam = \"INTH\"\n")).unwrap();
+        assert!(!quiet.linear.unwrap().watch, "off unless asked");
+        assert!(parse(&format!("{ONE_STAGE}[autostart]\nenv = \" \"\n")).is_err());
+    }
+
+    #[test]
+    fn a_pipeline_keeps_how_its_product_questions_are_written() {
+        let p = parse(&format!("{ONE_STAGE}[product]\nstyle = \" Short. \"\n")).unwrap();
+        assert_eq!(p.product_style.as_deref(), Some("Short."));
+        assert_eq!(p.product_channel, None, "a style needs no channel");
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(folder(d.path()).join("t.toml"), ONE_STAGE).unwrap();
+        let mut edit = edit_of(&load(d.path(), "t").unwrap());
+        edit.product_style = Some(PRODUCT_STYLES[1].1.into());
+        edit.product_channel = Some("#product-".into());
+        save(d.path(), "t", &edit).unwrap();
+        let back = load(d.path(), "t").unwrap();
+        assert_eq!(back.product_style.as_deref(), Some(PRODUCT_STYLES[1].1));
+        assert_eq!(back.product_channel.as_deref(), Some("#product-"));
+        edit.product_channel = None;
+        save(d.path(), "t", &edit).unwrap();
+        let back = load(d.path(), "t").unwrap();
+        assert_eq!(back.product_channel, None);
+        assert!(
+            back.product_style.is_some(),
+            "the style stays without the channel"
+        );
+        edit.product_style = Some(" ".into());
+        save(d.path(), "t", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("t.toml")).unwrap();
+        assert!(!text.contains("[product]"), "{text}");
+        assert!(
+            load(d.path(), "t").unwrap().product_asks,
+            "asking is on by default"
+        );
+        // Off is kept, even with nothing else in [product]; on again drops the key.
+        edit.product_asks = false;
+        save(d.path(), "t", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("t.toml")).unwrap();
+        assert!(text.contains("ask = false"), "{text}");
+        assert!(!load(d.path(), "t").unwrap().product_asks);
+        edit.product_asks = true;
+        save(d.path(), "t", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("t.toml")).unwrap();
+        assert!(!text.contains("[product]"), "{text}");
+    }
+
+    #[test]
+    fn a_pipeline_names_the_channel_its_product_questions_go_to() {
+        assert_eq!(parse(ONE_STAGE).unwrap().product_channel, None);
+        let p = parse(&format!(
+            "{ONE_STAGE}[product]\nchannel = \" #product- \"\n"
+        ))
+        .unwrap();
+        assert_eq!(p.product_channel.as_deref(), Some("#product-"));
+        assert!(parse(&format!("{ONE_STAGE}[product]\nchannel = \"\"\n")).is_err());
+
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(folder(d.path()).join("t.toml"), ONE_STAGE).unwrap();
+        let mut edit = Edit::from(&load(d.path(), "t").unwrap());
+        edit.product_channel = Some("#product-".into());
+        save(d.path(), "t", &edit).unwrap();
+        assert_eq!(
+            load(d.path(), "t").unwrap().product_channel.as_deref(),
+            Some("#product-")
+        );
+        edit.product_channel = Some(" ".into());
+        save(d.path(), "t", &edit).unwrap();
+        assert_eq!(load(d.path(), "t").unwrap().product_channel, None);
+    }
+
+    #[test]
+    fn a_linear_table_takes_its_defaults_from_the_team_alone() {
+        assert_eq!(parse(ONE_STAGE).unwrap().linear, None);
+        let p = parse(&format!("{ONE_STAGE}[linear]\nteam = \"INTH\"\n")).unwrap();
+        assert_eq!(
+            p.linear,
+            Some(LinearSettings {
+                team: "INTH".into(),
+                pick: "Ready for Investigation".into(),
+                assignee: Assignee::Unassigned,
+                claim: "In Investigation".into(),
+                passed: "Ready for Peer Review".into(),
+                every_minutes: 5,
+                watch: false,
+                sla_only: true,
+                labels: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_pipeline_can_pick_by_label() {
+        let p = parse(&format!(
+            "{ONE_STAGE}[linear]\nteam = \"PRE\"\nlabels = [\"Bug\", \" frontend \", \"BUG\"]\n"
+        ))
+        .unwrap();
+        assert_eq!(p.linear.unwrap().labels, ["Bug", "frontend"]);
+    }
+
+    #[test]
+    fn a_pipeline_can_trigger_off_another_state_and_any_assignee() {
+        let p = parse(&format!(
+            "{ONE_STAGE}[linear]\nteam = \"INTH\"\npick = \"Ready for Review\"\nassignee = \"any\"\n\
+             claim = \"In Review\"\npassed = \"Done\"\nevery_minutes = 15\n"
+        ))
+        .unwrap();
+        let l = p.linear.unwrap();
+        assert_eq!(l.pick, "Ready for Review");
+        assert_eq!(l.assignee, Assignee::Any);
+        assert_eq!((l.claim.as_str(), l.passed.as_str()), ("In Review", "Done"));
+        assert_eq!(l.every_minutes, 15);
+    }
+
+    #[test]
+    fn linear_mistakes_are_named() {
+        for (table, says) in [
+            ("[linear]\npick = \"X\"\n", "team"),
+            ("[linear]\nteam = \" \"\n", "team"),
+            ("[linear]\nteam = \"INTH\"\nassignee = \"me\"\n", "assignee"),
+            (
+                "[linear]\nteam = \"INTH\"\nevery_minutes = 0\n",
+                "every_minutes",
+            ),
+            ("[linear]\nteam = \"INTH\"\nlabel = \"x\"\n", "label"),
+        ] {
+            let e = parse(&format!("{ONE_STAGE}{table}")).unwrap_err();
+            assert!(e.contains(says), "{says}: {e}");
+        }
+    }
+
+    #[test]
+    fn saving_keeps_or_drops_the_linear_table() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        let file = folder(d.path()).join("t.toml");
+        std::fs::write(
+            &file,
+            format!("{ONE_STAGE}[linear]\n# The INTH queue.\nteam = \"INTH\"\n"),
+        )
+        .unwrap();
+        let mut edit = edit_of(&load(d.path(), "t").unwrap());
+        let mut l = edit.linear.clone().unwrap();
+        l.pick = "Ready for Review".into();
+        l.assignee = Assignee::Any;
+        l.sla_only = false;
+        edit.linear = Some(l);
+        save(d.path(), "t", &edit).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("# The INTH queue."), "{text}");
+        let l = load(d.path(), "t").unwrap().linear.unwrap();
+        assert_eq!(
+            (l.pick.as_str(), l.assignee, l.sla_only),
+            ("Ready for Review", Assignee::Any, false)
+        );
+        assert!(text.contains("sla_only = false"), "{text}");
+        assert!(!text.contains("labels"), "no labels, no key: {text}");
+        // Labels: trimmed, a repeat in another case dropped, their order kept.
+        let mut l = edit.linear.clone().unwrap();
+        l.labels = vec![" Bug ".into(), "bug".into(), "Frontend".into(), " ".into()];
+        edit.linear = Some(l);
+        save(d.path(), "t", &edit).unwrap();
+        let l = load(d.path(), "t").unwrap().linear.unwrap();
+        assert_eq!(l.labels, ["Bug", "Frontend"]);
+        let mut l = edit.linear.clone().unwrap();
+        l.labels.clear();
+        edit.linear = Some(l);
+        save(d.path(), "t", &edit).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            !text.contains("labels"),
+            "cleared labels drop the key: {text}"
+        );
+        edit.linear = None;
+        save(d.path(), "t", &edit).unwrap();
+        assert_eq!(load(d.path(), "t").unwrap().linear, None);
     }
 
     #[test]
@@ -749,6 +1942,24 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
         edit.name = "x".into();
         edit.stages.clear();
         assert_eq!(validate(&edit), Err("Add at least one stage"));
+    }
+
+    #[test]
+    fn linear_settings_are_checked_before_saving() {
+        let mut edit = edit_of(&parse(&format!("{ONE_STAGE}[linear]\nteam = \"INTH\"\n")).unwrap());
+        assert_eq!(validate(&edit), Ok(()));
+        let mut l = edit.linear.clone().unwrap();
+        l.team = " ".into();
+        edit.linear = Some(l.clone());
+        assert_eq!(validate(&edit), Err("Name the Linear team, e.g. INTH"));
+        l.team = "INTH".into();
+        l.pick = "".into();
+        edit.linear = Some(l.clone());
+        assert_eq!(validate(&edit), Err("Name the Linear states"));
+        l.pick = "Ready for Review".into();
+        l.every_minutes = 0;
+        edit.linear = Some(l);
+        assert_eq!(validate(&edit), Err("Check Linear every minute or more"));
     }
 
     #[test]

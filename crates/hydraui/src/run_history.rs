@@ -28,6 +28,8 @@ impl Outcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub run: String,
+    /// The pipeline it ran, by file name (`inth` for `inth.toml`).
+    pub pipeline: String,
     pub ticket: String,
     /// The summary the orchestrator gave: the ticket's title.
     pub title: String,
@@ -38,8 +40,16 @@ pub struct Entry {
     pub took: Option<u64>,
     /// Each stage the log names, in order, with its latest score.
     pub stages: Vec<(String, Option<u8>)>,
-    /// A person's note on it, when they gave one.
+    /// A person's last note on it, when they gave one.
     pub note: Option<String>,
+    /// Every note a person gave (Re-run, Go back), with the stage it was for, in order.
+    pub notes: Vec<(String, String)>,
+    /// Whether it ended inside its ticket's SLA, for a run from Linear (phase 2 §5).
+    pub sla: Option<bool>,
+    /// The ticket in Linear.
+    pub link: Option<String>,
+    /// Its log has its end: done or stopped. Not yet: running, or interrupted to be resumed.
+    pub ended: bool,
     /// When it started, as the log writes times (sortable).
     started: String,
 }
@@ -62,6 +72,13 @@ fn secs(at: &str) -> Option<i64> {
     Some(days * 86_400 + h * 3_600 + min * 60 + s)
 }
 
+/// How long before `now` the log time `at` was (both local log times, `2026-10-22 09:00:00.000`);
+/// `None` when either is unreadable or `at` is later.
+pub fn ago(at: &str, now: &str) -> Option<std::time::Duration> {
+    let d = secs(now)? - secs(at)?;
+    (d >= 0).then(|| std::time::Duration::from_secs(d as u64))
+}
+
 /// How long a run took as the design shows it: `1h 48m`, `9m`; `–` while it runs.
 pub fn took_text(took: Option<u64>) -> String {
     match took {
@@ -73,8 +90,11 @@ pub fn took_text(took: Option<u64>) -> String {
 
 fn entry(run: &str, text: &str, live: bool) -> Option<Entry> {
     let (mut ticket, mut title, mut started) = (String::new(), String::new(), None);
+    let mut pipeline = String::new();
     let (mut ended, mut end_outcome, mut end_reason) = (None, None, None);
     let (mut last_summary, mut needs_you, mut note) = (None, None, None);
+    let (mut sla, mut link) = (None, None);
+    let mut notes: Vec<(String, String)> = Vec::new();
     let mut stages: Vec<(String, Option<u8>)> = Vec::new();
     let mut end_scores: Option<Vec<(String, Option<u8>)>> = None;
     let stage_entry = |stages: &mut Vec<(String, Option<u8>)>, id: &str| -> usize {
@@ -96,6 +116,7 @@ fn entry(run: &str, text: &str, live: bool) -> Option<Entry> {
             Some("run started") => {
                 ticket = s("ticket").unwrap_or_default();
                 title = s("summary").unwrap_or_default();
+                pipeline = s("pipeline").unwrap_or_default();
                 started = at;
             }
             Some("stage started") => {
@@ -118,9 +139,20 @@ fn entry(run: &str, text: &str, live: bool) -> Option<Entry> {
                 }
             }
             Some("needs you") => needs_you = s("reason"),
+            Some("linear ticket") => link = s("url").filter(|u| !u.is_empty()),
+            Some("linear sla") => sla = v.get("inside").and_then(Value::as_bool),
             Some("person") => {
                 if let Some(n) = s("note").filter(|n| !n.trim().is_empty()) {
+                    // A re-run names its stage in the `re-run` line that follows.
+                    notes.push((s("stage").unwrap_or_default(), n.clone()));
                     note = Some(n);
+                }
+            }
+            Some("re-run") => {
+                if let (Some(last), Some(stage)) = (notes.last_mut(), s("stage"))
+                    && last.0.is_empty()
+                {
+                    last.0 = stage;
                 }
             }
             Some("run ended") => {
@@ -171,6 +203,7 @@ fn entry(run: &str, text: &str, live: bool) -> Option<Entry> {
         .map(|(e, s)| (e - s).max(0) as u64);
     Some(Entry {
         run: run.to_string(),
+        pipeline,
         ticket,
         title,
         outcome,
@@ -178,6 +211,10 @@ fn entry(run: &str, text: &str, live: bool) -> Option<Entry> {
         took,
         stages: end_scores.unwrap_or(stages),
         note,
+        notes,
+        sla,
+        link,
+        ended: end_outcome.is_some(),
         started,
     })
 }
@@ -208,6 +245,23 @@ pub fn read(hydra_root: &Path, live: &[String]) -> Vec<Entry> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_log_time_is_read_back_as_how_long_ago() {
+        assert_eq!(
+            ago("2026-10-26 19:50:00.000", "2026-10-26 20:02:30.500"),
+            Some(std::time::Duration::from_secs(750))
+        );
+        assert_eq!(
+            ago("2026-10-26 23:59:00.000", "2026-10-27 00:01:00.000").map(|d| d.as_secs()),
+            Some(120)
+        );
+        assert_eq!(
+            ago("2026-10-26 20:00:00.000", "2026-10-26 19:00:00.000"),
+            None
+        );
+        assert_eq!(ago("nonsense", "2026-10-26 19:00:00.000"), None);
+    }
+
     use super::*;
 
     /// Writes run `run`'s log from `lines`, each `(at, event, fields)`.
@@ -301,6 +355,7 @@ mod tests {
         let h = read(d.path(), &[]);
         let runs: Vec<&str> = h.iter().map(|e| e.run.as_str()).collect();
         assert_eq!(runs, ["INTH-471-1", "INTH-477-1"], "newest first");
+        assert_eq!(h[1].pipeline, "ticket");
         let stopped = &h[0];
         assert_eq!(
             (
@@ -371,5 +426,98 @@ mod tests {
         assert_eq!(h[0].took, None);
         // A missing folder is an empty history.
         assert!(read(&d.path().join("nowhere"), &[]).is_empty());
+    }
+
+    #[test]
+    fn a_linear_run_shows_its_sla_and_link() {
+        let d = tempfile::tempdir().unwrap();
+        log(
+            d.path(),
+            "INTH-170-1",
+            &[
+                (
+                    "2026-10-23 09:00:00.000",
+                    "run started",
+                    serde_json::json!({"ticket": "INTH-170", "summary": "Dutch", "pipeline": "inth"}),
+                ),
+                (
+                    "2026-10-23 09:00:01.000",
+                    "linear ticket",
+                    serde_json::json!({"url": "https://linear.app/iov42/issue/INTH-170",
+                           "sla_breaches_at": "2026-11-04T14:00:00.000Z", "sla_high_risk_at": null}),
+                ),
+                (
+                    "2026-10-23 11:00:00.000",
+                    "linear sla",
+                    serde_json::json!({"inside": false, "breaches_at": "2026-11-04T14:00:00.000Z"}),
+                ),
+                (
+                    "2026-10-23 11:00:00.000",
+                    "run ended",
+                    serde_json::json!({"outcome": "done", "scores": []}),
+                ),
+            ],
+        );
+        log(
+            d.path(),
+            "INTH-9-1",
+            &[(
+                "2026-10-23 08:00:00.000",
+                "run started",
+                serde_json::json!({"ticket": "INTH-9", "summary": "By hand", "pipeline": "inth"}),
+            )],
+        );
+        let all = read(d.path(), &[]);
+        let linear = all.iter().find(|e| e.run == "INTH-170-1").unwrap();
+        assert_eq!(linear.sla, Some(false));
+        assert_eq!(
+            linear.link.as_deref(),
+            Some("https://linear.app/iov42/issue/INTH-170")
+        );
+        let plain = all.iter().find(|e| e.run == "INTH-9-1").unwrap();
+        assert_eq!((plain.sla, plain.link.as_deref()), (None, None));
+    }
+
+    #[test]
+    fn every_note_a_person_gave_is_kept_with_its_stage() {
+        let d = tempfile::tempdir().unwrap();
+        log(
+            d.path(),
+            "INTH-166-1",
+            &[
+                (
+                    "2026-10-23 09:00:00.000",
+                    "run started",
+                    serde_json::json!({"ticket": "INTH-166", "summary": "Dutch", "pipeline": "inth"}),
+                ),
+                (
+                    "2026-10-23 10:00:00.000",
+                    "person",
+                    serde_json::json!({"choice": "re-run", "note": "try again"}),
+                ),
+                (
+                    "2026-10-23 10:00:00.000",
+                    "re-run",
+                    serde_json::json!({"stage": "verify"}),
+                ),
+                (
+                    "2026-10-23 11:00:00.000",
+                    "person",
+                    serde_json::json!({"choice": "back", "note": "rename the branch to INTH-166",
+                                       "stage": "develop"}),
+                ),
+            ],
+        );
+        let e = read(d.path(), &[]).into_iter().next().unwrap();
+        assert_eq!(
+            e.notes,
+            [
+                ("verify".to_string(), "try again".to_string()),
+                (
+                    "develop".to_string(),
+                    "rename the branch to INTH-166".to_string()
+                ),
+            ]
+        );
     }
 }

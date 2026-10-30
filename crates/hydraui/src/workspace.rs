@@ -3,10 +3,12 @@
 //! commands bound to keys.
 mod accounts;
 mod all_tasks;
+mod asking;
 mod busy;
 mod finder;
 mod launcher;
 mod layout_file;
+mod linear;
 mod machines_page;
 mod orchestrator;
 mod phone;
@@ -17,6 +19,7 @@ mod pipeline_settings;
 mod pipeline_tab;
 mod settings_tab;
 mod shortcuts;
+mod slack;
 mod start_page;
 mod swarms;
 mod swarms_page;
@@ -68,7 +71,7 @@ use tree_ops::NameFor;
 
 /// The terminal list's width: it starts at the default, can't be dragged narrower than the
 /// minimum, and always leaves the middle at least `MIN_PANES_WIDTH` beside the tree.
-pub(super) const DEFAULT_LIST_WIDTH: f32 = 200.0;
+pub(super) const DEFAULT_LIST_WIDTH: f32 = 280.0;
 const MIN_LIST_WIDTH: f32 = 120.0;
 /// The divider between the list and the middle.
 const LIST_DIVIDER_WIDTH: f32 = 4.0;
@@ -161,6 +164,8 @@ pub struct Workspace {
     /// The divider between the panes and the tree is being dragged.
     tree_drag: bool,
     list_width: f32,
+    /// The list's tab the user picked; `None` shows Pipelines when any run here, else Sessions.
+    list_tab: Option<terminal_list::ListTab>,
     /// The divider between the terminal list and the middle is being dragged.
     list_drag: bool,
     /// The terminal list is collapsed: the middle takes its room.
@@ -232,8 +237,45 @@ pub struct Workspace {
     /// next hook state, or 30 s (auto-pickup design §6).
     reserved: HashMap<PaneId, Instant>,
     /// Each orchestrator's wake-up waiting to be typed, with its run (orchestrator spec §6): the
-    /// newest only.
+    /// newest for each of its tickets, joined (`join_wake`).
     pending_wakes: HashMap<PaneId, (String, String)>,
+    /// The terminal each resumed orchestrator conversation reopened in, by its Claude session,
+    /// so its other tickets come back under it.
+    resumed_orchestrators: HashMap<String, PaneId>,
+    /// Since when each waiting wake-up has waited, and whether the user was told it can't be
+    /// typed.
+    wake_waiting: HashMap<PaneId, (std::time::Instant, bool)>,
+    /// Wake-ups typed but not yet seen to start the session working: (run, message, when,
+    /// times sent). One that doesn't take (a Claude Code prompt was open) is sent again.
+    sent_wakes: HashMap<PaneId, (String, String, Instant, u8)>,
+    /// Times a wake-up waiting to be sent again was already sent.
+    wake_tries: HashMap<PaneId, u8>,
+    /// When each run waiting on product last had its stage look in the Slack thread.
+    ask_checks: HashMap<String, std::time::SystemTime>,
+    /// When open runs about pull requests were last checked on GitHub, and whether a check is
+    /// out (a merged or closed one ends its run).
+    pr_checked: Option<std::time::Instant>,
+    pr_checking: bool,
+    /// Each orchestrator's Linear watcher (orchestrator phase 2 §3).
+    linear_watch: HashMap<PaneId, linear::Watch>,
+    /// The open pipelines as last saved for the next launch (core spec §38); `None` until
+    /// launch has opened the saved ones again, so nothing is saved over them first.
+    open_pipelines: Option<Vec<crate::open_pipelines::OpenPipeline>>,
+    /// Pipelines folded to one line in the sidebar, by file name.
+    collapsed_pipelines: std::collections::HashSet<String>,
+    /// Pull requests a `[slack]` pipeline took and hasn't started yet, by pipeline file.
+    slack_queues: HashMap<String, std::collections::VecDeque<crate::slack_watch::Queued>>,
+    /// Pull requests a Slack watcher passed over because their author is the person watching,
+    /// so GitHub isn't asked about them again.
+    slack_mine: std::collections::HashSet<String>,
+    /// The pull request each orchestrator was handed and hasn't started yet, to retry once.
+    slack_inflight: HashMap<PaneId, crate::slack_watch::Queued>,
+    /// Orchestrators whose Claude hasn't finished its first turn: a prompt typed then is lost,
+    /// so nothing is handed to them until it has.
+    /// (When it opened: after 90 seconds it counts as ready anyway.)
+    starting_up: HashMap<PaneId, std::time::Instant>,
+    /// Runs' tickets as Linear last said, by identifier: the card's SLA and link (phase 2 §5).
+    linear_tickets: HashMap<String, crate::linear::Ticket>,
     /// Cards being offered or just sent, so one card never goes to two sessions.
     in_flight: crate::pickup::InFlight,
     /// Listens for board files the MCP server's sessions create.
@@ -331,6 +373,12 @@ impl Workspace {
                         ws.sync_shown_lanes(window, cx);
                         // A draft cleared without a hook: a waiting wake-up may go now.
                         ws.send_wakes(window, cx);
+                        // A Linear watcher whose check is due looks (phase 2 §3).
+                        ws.linear_tick(window, cx);
+                        // A stage waiting on product looks in its Slack thread.
+                        ws.asking_tick(window, cx);
+                        // A wake-up that didn't take is sent again.
+                        ws.recheck_wakes(window, cx);
                         // The Pipeline tab's session times tick.
                         if ws
                             .envs
@@ -438,6 +486,7 @@ impl Workspace {
             tree_width: DEFAULT_TREE_WIDTH,
             tree_drag: false,
             list_width: DEFAULT_LIST_WIDTH,
+            list_tab: None,
             list_drag: false,
             list_hidden: false,
             focus: cx.focus_handle(),
@@ -474,6 +523,21 @@ impl Workspace {
             board_events: HashMap::new(),
             reserved: HashMap::new(),
             pending_wakes: HashMap::new(),
+            resumed_orchestrators: HashMap::new(),
+            wake_waiting: HashMap::new(),
+            sent_wakes: HashMap::new(),
+            wake_tries: HashMap::new(),
+            ask_checks: HashMap::new(),
+            pr_checked: None,
+            pr_checking: false,
+            linear_watch: HashMap::new(),
+            open_pipelines: None,
+            collapsed_pipelines: std::collections::HashSet::new(),
+            slack_queues: HashMap::new(),
+            slack_mine: std::collections::HashSet::new(),
+            slack_inflight: HashMap::new(),
+            starting_up: HashMap::new(),
+            linear_tickets: HashMap::new(),
             in_flight: Default::default(),
             _mcp_pump: mcp_pump,
             phone: None,
@@ -527,6 +591,8 @@ impl Workspace {
         if let StartWith::File(path) = start {
             self.open_layout_path(path, window, cx);
         }
+        // Pipelines that start themselves (`[autostart]`), watching Linear when they ask to.
+        self.autostart_pipelines(window, cx);
         self.phone_start(window, cx);
         self.swarms_start(window, cx);
         // Each pane's folder as it is when the window closes.
@@ -548,9 +614,13 @@ impl Workspace {
                 // Unsaved edits: ask first, and close from the dialog (spec §7.8).
                 let all: Vec<PaneId> = ws.files.keys().copied().collect();
                 if ws.unsaved_in(&all, cx).is_empty() {
+                    orchestrator::closing();
                     return true;
                 }
-                ws.confirm_unsaved(all, window, cx, |_, w, _| w.remove_window());
+                ws.confirm_unsaved(all, window, cx, |_, w, _| {
+                    orchestrator::closing();
+                    w.remove_window()
+                });
                 false
             })
             .unwrap_or(true)
@@ -728,6 +798,7 @@ impl Workspace {
             .env_of(id)
             .is_some_and(|env| self.all_tasks.remove(env))
             | self.settings.take().is_some();
+        let left = left | self.reveal_in_list(id, cx);
         if self.envs.show(id) || left {
             self.shown_changed(window, cx);
         }
@@ -1638,7 +1709,13 @@ impl Workspace {
         muted: Hsla,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let tint = self.tint(&tab.env);
+        // A pipeline's terminal (its orchestrator or a stage's session) is framed in the
+        // pipeline's own colour, as its block on the left is.
+        let tint = tab
+            .shown
+            .filter(|_| !self.all_tasks.contains(&tab.env))
+            .and_then(|id| self.pipeline_tint(id, cx))
+            .unwrap_or_else(|| self.tint(&tab.env));
         let terminal = match tab.shown.and_then(|id| Some((id, self.panes.get(&id)?))) {
             _ if self.all_tasks.contains(&tab.env) => {
                 self.render_all_tasks(tint, muted, border, cx)
@@ -1780,7 +1857,13 @@ impl Workspace {
             let env = tab.env.clone();
             let tint = self.tint(&env);
             let busy = self.tab_activity(&tab.terminals);
-            let dot = self.render_tab_dot(busy, tint, cx);
+            let dot = self.render_tab_dot(
+                SharedString::from(format!("env-dot-{env}")),
+                busy,
+                false,
+                tint,
+                cx,
+            );
             let (click_env, close_env) = (env.clone(), env.clone());
             let close_id = SharedString::from(format!("env-close-{env}"));
             strip = strip.child(

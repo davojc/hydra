@@ -66,6 +66,12 @@ pub struct Attempt {
     pub rating: Option<Rating>,
     /// The skills its session invoked (`hydra hook skill`), in order.
     pub skills: Vec<String>,
+    /// Its reasons against that a person marked **Must address**, by their place in
+    /// `rating.reasons`, in the order marked.
+    pub must: Vec<usize>,
+    /// Its reasons against that a person marked **Not needed**: concerns they don't want acted
+    /// on, by place in `rating.reasons`.
+    pub waived: Vec<usize>,
 }
 
 /// One stage of a run.
@@ -75,9 +81,17 @@ pub struct StageRun {
     pub attempts: Vec<Attempt>,
     /// A person's note for the next attempt.
     pub note: Option<String>,
+    /// Attempts before this one don't count toward its tries: the run went back to an earlier
+    /// stage since (a person's choice).
+    pub counted_from: usize,
 }
 
 impl StageRun {
+    /// Its attempts that count toward `MAX_ATTEMPTS`.
+    pub fn tries(&self) -> usize {
+        self.attempts.len().saturating_sub(self.counted_from)
+    }
+
     pub fn latest(&self) -> Option<&Attempt> {
         self.attempts.last()
     }
@@ -107,6 +121,56 @@ impl RunState {
     }
 }
 
+/// A person's send-back waiting for the stage at work to report: the run then goes back to
+/// `stage` with `note` (the reasons against they marked **Must address**).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fix {
+    pub stage: usize,
+    pub note: String,
+}
+
+/// A stage's question for a person, a decision that isn't the stage's to make (product): its
+/// ticket waits for the answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ask {
+    pub stage: usize,
+    /// Who the ticket waits on: product to decide, or the pull request's author to act.
+    pub whom: Whom,
+    pub question: String,
+    /// Where it was asked, a Slack thread, when the stage gave one.
+    pub link: Option<String>,
+    pub since: SystemTime,
+}
+
+/// Who a waiting stage waits on (core spec §15, §42).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Whom {
+    /// A product decision beyond the ticket.
+    #[default]
+    Product,
+    /// The pull request's author (or whoever owns the change) to push fixes or reply: a review
+    /// that asked for changes waits on them, which isn't a person in hydraui being needed.
+    Author,
+}
+
+impl Whom {
+    /// As `stage_ask`'s `who` and the log write it.
+    pub fn parse(word: &str) -> Option<Whom> {
+        match word.trim().to_ascii_lowercase().as_str() {
+            "" | "product" => Some(Whom::Product),
+            "author" => Some(Whom::Author),
+            _ => None,
+        }
+    }
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Whom::Product => "product",
+            Whom::Author => "author",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Run {
     /// `<ticket>-<n>`.
@@ -128,6 +192,12 @@ pub struct Run {
     pub worktree: Option<PathBuf>,
     /// The latest seven-day Claude usage reported by one of its sessions, in percent.
     pub week_used: Option<f64>,
+    /// A stage's question waiting for its answer.
+    pub asking: Option<Ask>,
+    /// A send-back queued until the stage at work reports.
+    pub fix_after: Option<Fix>,
+    /// What it's about, as a link: the pull request a Slack-triggered run reviews (`{pr}`).
+    pub link: Option<String>,
 }
 
 /// What a terminal is to the runs (§3.3).
@@ -154,6 +224,8 @@ pub struct StartStage {
     pub folder: Option<String>,
     pub title: String,
     pub prompt: String,
+    /// How its Claude starts, before the prompt (`Pipeline::stage_claude`).
+    pub claude: Vec<String>,
 }
 
 /// What happened to a run or one of its stages, for the app to show and tell the orchestrator.
@@ -165,10 +237,24 @@ pub enum Decided {
     Failed(String),
     /// A person re-runs it.
     Retrying,
+    /// A person sent the run back to this earlier stage: its own session goes on.
+    Reopened,
+    /// A person worked on this stopped stage in its own session and asked it to score again.
+    Rescoring,
+    /// A stage asked a person to check something by hand, and they say it works: it passes,
+    /// with their note.
+    Checked(String),
     Paused,
     Resumed,
+    /// A stage asked a person a question; the ticket waits.
+    Asked(String),
+    /// Its answer came; the stage goes on.
+    Answered(String),
     RunResumed,
     RunFinished,
+    /// The ticket was settled outside hydraui (its pull request merged or closed): the run is
+    /// done, whatever its gates said.
+    RunSettled(String),
     RunNeedsYou(String),
     RunStopped(String),
 }
@@ -187,12 +273,27 @@ pub struct Refusal {
     pub changes: Vec<Change>,
 }
 
-/// A person's choice for a run (§5.3). There is no choice that lets a stage through.
+/// How a person marks a reason against: **Must address** (the stage goes again for it) or
+/// **Not needed** (a concern they don't want acted on).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    Must,
+    NotNeeded,
+}
+
+/// A person's choice for a run (§5.3). Only `Checked` lets a stage through, and only one
+/// that asked a person to check something by hand.
 pub enum Choice {
     /// Re-run the stage that waits, with a note for its next session.
     Retry { note: String },
     /// Stop the ticket.
     Stop,
+    /// Go back to `stage`, an earlier stage that passed: its own session is reopened with the
+    /// note, and the stages after it wait for it again with fresh tries.
+    Back { stage: String, note: String },
+    /// The waiting stage asked for a check by hand (`Outcome::Check`) and the person did it:
+    /// it works. The stage passes and the run goes on; `note` (may be empty) says what they saw.
+    Checked { note: String },
 }
 
 /// Whether `used`, a skill a session invoked, is `wanted`: the same name, ignoring case, or a
@@ -238,6 +339,24 @@ impl Runs {
         self.runs.iter()
     }
 
+    /// The runs `orchestrator` holds open, oldest first.
+    pub fn open_of(&self, orchestrator: &str) -> Vec<&Run> {
+        self.runs
+            .iter()
+            .filter(|r| r.orchestrator == orchestrator && r.state.open())
+            .collect()
+    }
+
+    /// The runs of `orchestrator` that count against `runs_at_once`: open ones not waiting on
+    /// someone's answer (product's, or a pull request's author). A waiting run idles, so it
+    /// leaves its place to another ticket.
+    pub fn busy_of(&self, orchestrator: &str) -> Vec<&Run> {
+        self.open_of(orchestrator)
+            .into_iter()
+            .filter(|r| r.asking.is_none())
+            .collect()
+    }
+
     /// The latest run `orchestrator` started.
     pub fn current(&self, orchestrator: &str) -> Option<&Run> {
         self.runs
@@ -271,8 +390,9 @@ impl Runs {
         }
     }
 
-    /// Starts a run of `pipeline` for `ticket`, owned by the terminal `orchestrator`. One open
-    /// run per orchestrator (the user's decision: one ticket at a time).
+    /// Starts a run of `pipeline` for `ticket`, owned by the terminal `orchestrator`. One
+    /// orchestrator holds up to the pipeline's `runs_at_once` open runs, each its own ticket
+    /// with its own stage sessions under it (one at a time unless the pipeline says more).
     pub fn start_run(
         &mut self,
         orchestrator: &str,
@@ -300,15 +420,30 @@ impl Runs {
         if self.stage_of(orchestrator).is_some() {
             return Err("a stage session can't start a run".into());
         }
-        if let Some(r) = self
-            .runs
-            .iter()
-            .find(|r| r.orchestrator == orchestrator && r.state.open())
+        let open: Vec<&str> = self
+            .busy_of(orchestrator)
+            .into_iter()
+            .map(|r| r.id.as_str())
+            .collect();
+        if let Some(same) = self
+            .open_of(orchestrator)
+            .into_iter()
+            .find(|r| r.ticket.eq_ignore_ascii_case(ticket))
         {
-            return Err(format!(
-                "run {} isn't finished or stopped: one ticket at a time",
-                r.id
-            ));
+            return Err(format!("{ticket} is already running as {}", same.id));
+        }
+        let most = usize::from(pipeline.runs_at_once.max(1));
+        if open.len() >= most {
+            return Err(match most {
+                1 => format!(
+                    "run {} isn't finished or stopped: one ticket at a time",
+                    open[0]
+                ),
+                n => format!(
+                    "{n} tickets are open already ({}), the most this pipeline runs at once",
+                    open.join(", ")
+                ),
+            });
         }
         let id = (self.runs.iter().filter(|r| r.ticket == ticket).count() + 1..)
             .map(|n| format!("{ticket}-{n}"))
@@ -328,6 +463,9 @@ impl Runs {
             sessions: 0,
             worktree: None,
             week_used: None,
+            asking: None,
+            fix_after: None,
+            link: None,
         });
         Ok(self.runs.last().expect("just pushed"))
     }
@@ -377,7 +515,7 @@ impl Runs {
         let s = &r.stages[i];
         match s.status {
             StageStatus::Waiting => {}
-            StageStatus::Failed if s.attempts.len() < MAX_ATTEMPTS => {}
+            StageStatus::Failed if s.tries() < MAX_ATTEMPTS => {}
             StageStatus::Failed => {
                 return no(format!(
                     "stage {stage} failed {MAX_ATTEMPTS} times: a person decides"
@@ -466,6 +604,8 @@ impl Runs {
             note,
             rating: None,
             skills: Vec::new(),
+            must: Vec::new(),
+            waived: Vec::new(),
         });
         let spec = &r.pipeline.stages[i];
         let feature_env = r.pipeline.feature_env_for(&r.ticket);
@@ -475,6 +615,7 @@ impl Runs {
             stage: &spec.id,
             handoff: &handoff,
             feature_env: &feature_env,
+            link: r.link.as_deref().unwrap_or(""),
         };
         let name = session_name(i, &spec.title, r.stages[i].attempts.len() - 1);
         Ok(StartStage {
@@ -487,6 +628,7 @@ impl Runs {
             skill: spec.skill.clone(),
             folder: spec.folder.clone(),
             title: spec.title.clone(),
+            claude: r.pipeline.stage_claude(),
             prompt: format!(
                 "{}\n\n{}",
                 render(&spec.prompt, &vars, &brief),
@@ -571,6 +713,26 @@ impl Runs {
         }]
     }
 
+    /// Run `run`'s ticket was settled outside hydraui (`why`: its pull request merged or
+    /// closed): nothing it does now changes that, so it ends as done, waiting gates and all.
+    pub fn settle(&mut self, run: &str, why: &str) -> Result<Vec<Change>, String> {
+        let Some(ri) = self.index(run) else {
+            return Err(format!("no run {run}"));
+        };
+        let r = &mut self.runs[ri];
+        if !r.state.open() {
+            return Err(format!("run {run} has already ended"));
+        }
+        r.state = RunState::Finished;
+        r.asking = None;
+        r.fix_after = None;
+        Ok(vec![Change {
+            run: r.id.clone(),
+            stage: None,
+            what: Decided::RunSettled(why.to_string()),
+        }])
+    }
+
     fn end(&mut self, ri: usize, why: String) -> Vec<Change> {
         let r = &mut self.runs[ri];
         r.state = RunState::Stopped(why.clone());
@@ -583,16 +745,21 @@ impl Runs {
 
     fn fail_stage(&mut self, ri: usize, si: usize, why: &str) -> Vec<Change> {
         let r = &mut self.runs[ri];
+        if r.asking.take().is_some() {
+            r.state = RunState::Running;
+        }
         let s = &mut r.stages[si];
         s.status = StageStatus::Failed;
-        let attempts = s.attempts.len();
+        let attempts = s.tries();
         let id = r.pipeline.stages[si].id.clone();
         let mut changes = vec![Change {
             run: r.id.clone(),
             stage: Some(si),
             what: Decided::Failed(why.to_string()),
         }];
-        if attempts >= MAX_ATTEMPTS {
+        if let Some(fix) = self.runs[ri].fix_after.take() {
+            changes.extend(self.reopen(ri, fix.stage, &fix.note));
+        } else if attempts >= MAX_ATTEMPTS {
             changes
                 .extend(self.needs_you(ri, format!("stage {id} failed {attempts} times: {why}")));
         }
@@ -621,11 +788,30 @@ impl Runs {
                 ));
             }
         }
+        // Nothing new from the author yet isn't a stop for a person (§45): the stage stays
+        // waiting and is woken to look again.
+        if rating.outcome == crate::rating::Outcome::Blocked
+            && r.asking.as_ref().is_some_and(|a| a.whom == Whom::Author)
+        {
+            return Err(
+                "Not recorded: you're waiting on the author, so this isn't blocked. \
+                 Don't report; end your turn. hydraui wakes you every 5 minutes to look at the \
+                 pull request again; report done once it's safe to approve."
+                    .into(),
+            );
+        }
+        // A stage that reports without waiting for its answer has decided after all.
+        if r.asking.take().is_some() {
+            r.state = RunState::Running;
+        }
         let bar = r.pipeline.bar_for(si);
         let id = r.pipeline.stages[si].id.clone();
         let passed = passes(&rating, bar);
         let why = match rating.outcome {
             crate::rating::Outcome::Blocked => format!("stage {id} is blocked: {}", rating.summary),
+            crate::rating::Outcome::Check => {
+                format!("stage {id} needs a person to check: {}", rating.check)
+            }
             crate::rating::Outcome::Done => {
                 format!(
                     "stage {id}: {}, bar {bar}. {}",
@@ -638,6 +824,25 @@ impl Runs {
             a.rating = Some(rating);
         }
         let run = r.id.clone();
+        // A person's send-back waited for this report: the run goes back whatever it says.
+        if let Some(fix) = r.fix_after.take() {
+            let mut changes = vec![Change {
+                run,
+                stage: Some(si),
+                what: if passed {
+                    Decided::Passed
+                } else {
+                    Decided::Stopped(why)
+                },
+            }];
+            s.status = if passed {
+                StageStatus::Passed
+            } else {
+                StageStatus::Stopped
+            };
+            changes.extend(self.reopen(ri, fix.stage, &fix.note));
+            return Ok(changes);
+        }
         if passed {
             s.status = StageStatus::Passed;
             let mut changes = vec![Change {
@@ -723,6 +928,10 @@ impl Runs {
         {
             r.pipeline.name = now.name.clone();
             r.pipeline.bar = now.bar;
+            // How it looks and how it asks product follow Save at once too.
+            r.pipeline.color = now.color;
+            r.pipeline.product_channel = now.product_channel.clone();
+            r.pipeline.product_style = now.product_style.clone();
             // A stage's own settings reach it from its next start; only the list (adding,
             // removing, reordering) waits for the next ticket.
             for stage in &mut r.pipeline.stages {
@@ -761,6 +970,87 @@ impl Runs {
     }
 
     /// A person's choice for run `run` (§5.3).
+    /// `token`'s running stage asks a person `question` (asked at `link`, a Slack thread): the
+    /// ticket waits until [`Runs::answered`].
+    pub fn ask(
+        &mut self,
+        token: &str,
+        question: &str,
+        link: Option<&str>,
+        now: SystemTime,
+        whom: Whom,
+    ) -> Result<Vec<Change>, String> {
+        let Some((ri, si)) = self.stage_of(token) else {
+            return Err("only a running stage's own session asks".into());
+        };
+        let r = &mut self.runs[ri];
+        if r.stages[si].status != StageStatus::Running {
+            return Err("this stage isn't running".into());
+        }
+        if r.asking.is_some() {
+            return Err("this run is already waiting for an answer".into());
+        }
+        if whom == Whom::Product && !r.pipeline.product_asks {
+            return Err(
+                "this pipeline doesn't ask product: decide it within your stage, and \
+                        name it in your report's reasons against if it matters"
+                    .into(),
+            );
+        }
+        let link = link.map(str::trim).filter(|l| !l.is_empty());
+        if whom == Whom::Author && link.is_none() {
+            return Err("give the pull request's link, so hydraui can have you look again".into());
+        }
+        let question = question.trim();
+        if question.is_empty() {
+            return Err("the question is empty".into());
+        }
+        r.asking = Some(Ask {
+            stage: si,
+            whom,
+            question: question.to_string(),
+            link: link.map(str::to_string),
+            since: now,
+        });
+        r.state = RunState::NeedsYou(match whom {
+            Whom::Product => format!(
+                "{} is waiting for an answer: {question}",
+                r.pipeline.stages[si].title
+            ),
+            Whom::Author => format!(
+                "{} is waiting on the author: {question}",
+                r.pipeline.stages[si].title
+            ),
+        });
+        Ok(vec![Change {
+            run: r.id.clone(),
+            stage: Some(si),
+            what: Decided::Asked(question.to_string()),
+        }])
+    }
+
+    /// The answer to run `run`'s question came (found by its stage, or given in hydraui): the
+    /// stage goes on.
+    pub fn answered(&mut self, run: &str, answer: &str) -> Result<Vec<Change>, String> {
+        let Some(ri) = self.index(run) else {
+            return Err(format!("no run {run}"));
+        };
+        let answer = answer.trim();
+        if answer.is_empty() {
+            return Err("the answer is empty".into());
+        }
+        let r = &mut self.runs[ri];
+        let Some(ask) = r.asking.take() else {
+            return Err(format!("run {run} isn't waiting for an answer"));
+        };
+        r.state = RunState::Running;
+        Ok(vec![Change {
+            run: r.id.clone(),
+            stage: Some(ask.stage),
+            what: Decided::Answered(answer.to_string()),
+        }])
+    }
+
     pub fn person(&mut self, run: &str, choice: Choice) -> Result<Vec<Change>, String> {
         let Some(ri) = self.index(run) else {
             return Err(format!("no run {run}"));
@@ -778,9 +1068,18 @@ impl Runs {
                 let at = waiting.map_or("the end".to_string(), |si| {
                     r.pipeline.stages[si].title.clone()
                 });
+                self.runs[ri].asking = None;
                 return Ok(self.end(ri, format!("stopped by you at {at}")));
             }
+            _ if r.asking.is_some() => {
+                return Err(format!(
+                    "run {run} is waiting for the answer to its stage's question: answer it, or \
+                     stop the ticket"
+                ));
+            }
             Choice::Retry { note } => note.trim().to_string(),
+            Choice::Back { stage, note } => return self.go_back(ri, &stage, note.trim()),
+            Choice::Checked { note } => return self.checked(ri, note.trim()),
         };
         if !matches!(r.state, RunState::NeedsYou(_)) {
             return Err(format!("run {run} isn't waiting for you"));
@@ -811,6 +1110,303 @@ impl Runs {
             what: Decided::RunResumed,
         });
         Ok(changes)
+    }
+
+    /// A person's **It works**: the stage stopped asking for a check by hand passes, and the
+    /// run finishes or goes on to the next stage.
+    fn checked(&mut self, ri: usize, note: &str) -> Result<Vec<Change>, String> {
+        let r = &mut self.runs[ri];
+        if !matches!(r.state, RunState::NeedsYou(_)) {
+            return Err(format!("run {} isn't waiting for you", r.id));
+        }
+        if r.fix_after.is_some() {
+            return Err(format!("run {} is being sent back", r.id));
+        }
+        let Some(si) = r
+            .stages
+            .iter()
+            .position(|s| s.status != StageStatus::Passed)
+        else {
+            return Err(format!("run {} has nothing left to do", r.id));
+        };
+        let s = &mut r.stages[si];
+        let asked = s.status == StageStatus::Stopped
+            && s.rating()
+                .is_some_and(|x| x.outcome == crate::rating::Outcome::Check);
+        if !asked {
+            return Err(
+                "only a stage that asked a person to check something by hand can pass this way"
+                    .into(),
+            );
+        }
+        s.status = StageStatus::Passed;
+        let id = r.id.clone();
+        let mut changes = vec![Change {
+            run: id.clone(),
+            stage: Some(si),
+            what: Decided::Checked(note.to_string()),
+        }];
+        if si + 1 == r.stages.len() {
+            r.state = RunState::Finished;
+            changes.push(Change {
+                run: id,
+                stage: None,
+                what: Decided::RunFinished,
+            });
+        } else {
+            r.state = RunState::Running;
+            changes.push(Change {
+                run: id,
+                stage: None,
+                what: Decided::RunResumed,
+            });
+        }
+        Ok(changes)
+    }
+
+    /// A person's **Go back** (§5.3): the run returns to `stage`, an earlier stage that passed,
+    /// whose own session goes on as a new attempt (`Starting` until its terminal links); the
+    /// stages after it wait again, their earlier tries no longer counted.
+    fn go_back(&mut self, ri: usize, stage: &str, note: &str) -> Result<Vec<Change>, String> {
+        let r = &self.runs[ri];
+        if !matches!(r.state, RunState::NeedsYou(_)) {
+            return Err(format!("run {} isn't waiting for you", r.id));
+        }
+        if note.is_empty() {
+            return Err("going back needs a note for that stage's session".into());
+        }
+        let Some(t) = r.pipeline.stages.iter().position(|s| s.id == stage) else {
+            return Err(format!("no stage {stage} in pipeline {}", r.pipeline.name));
+        };
+        let waiting = r
+            .stages
+            .iter()
+            .position(|s| s.status != StageStatus::Passed)
+            .unwrap_or(r.stages.len());
+        if t >= waiting {
+            return Err(format!(
+                "stage {stage} isn't an earlier stage that passed: re-run the waiting one instead"
+            ));
+        }
+        Ok(self.reopen(ri, t, note))
+    }
+
+    /// The run goes back to stage `t`, whose own session goes on as a new attempt with `note`
+    /// (`Starting` until its terminal links); the stages after it wait again, their earlier
+    /// tries no longer counted.
+    fn reopen(&mut self, ri: usize, t: usize, note: &str) -> Vec<Change> {
+        let r = &mut self.runs[ri];
+        r.sessions += 1;
+        let label = format!("s-{:02}", r.sessions);
+        let skills = r.stages[t]
+            .latest()
+            .map(|a| a.skills.clone())
+            .unwrap_or_default();
+        let s = &mut r.stages[t];
+        s.status = StageStatus::Starting;
+        s.attempts.push(Attempt {
+            label,
+            session: None,
+            session_name: None,
+            started: SystemTime::now(),
+            note: Some(note.to_string()),
+            rating: None,
+            skills,
+            must: Vec::new(),
+            waived: Vec::new(),
+        });
+        for later in &mut r.stages[t + 1..] {
+            later.status = StageStatus::Waiting;
+            later.note = None;
+            later.counted_from = later.attempts.len();
+        }
+        r.state = RunState::Running;
+        let id = r.id.clone();
+        vec![
+            Change {
+                run: id.clone(),
+                stage: Some(t),
+                what: Decided::Reopened,
+            },
+            Change {
+                run: id,
+                stage: None,
+                what: Decided::RunResumed,
+            },
+        ]
+    }
+
+    /// A person marks (or unmarks) reason `reason` of stage `stage`'s latest report **Must
+    /// address**. Only a reason against, in an open run.
+    pub fn mark(&mut self, run: &str, stage: usize, reason: usize, on: bool) -> Result<(), String> {
+        self.mark_as(run, stage, reason, Mark::Must, on)
+    }
+
+    /// A person marks (or unmarks) reason `reason` of stage `stage`'s latest report `mark`:
+    /// **Must address** or **Not needed**, never both. Only a reason against, in an open run.
+    pub fn mark_as(
+        &mut self,
+        run: &str,
+        stage: usize,
+        reason: usize,
+        mark: Mark,
+        on: bool,
+    ) -> Result<(), String> {
+        let Some(ri) = self.index(run) else {
+            return Err(format!("no run {run}"));
+        };
+        let r = &mut self.runs[ri];
+        if !r.state.open() {
+            return Err(format!("run {run} has ended"));
+        }
+        if r.fix_after.as_ref().is_some_and(|f| f.stage == stage) {
+            return Err("this stage is already being sent back: cancel that first".into());
+        }
+        let Some(a) = r.stages.get_mut(stage).and_then(|s| s.attempts.last_mut()) else {
+            return Err("that stage hasn't run".into());
+        };
+        let against = a
+            .rating
+            .as_ref()
+            .and_then(|x| x.reasons.get(reason))
+            .is_some_and(|x| x.side == Side::Against);
+        if !against {
+            return Err("only a reason against can be marked".into());
+        }
+        a.must.retain(|&i| i != reason);
+        a.waived.retain(|&i| i != reason);
+        if on {
+            match mark {
+                Mark::Must => a.must.push(reason),
+                Mark::NotNeeded => a.waived.push(reason),
+            }
+        }
+        Ok(())
+    }
+
+    /// A person's **Send back**: stage `stage` goes again to deal with the reasons they marked
+    /// **Must address**. A stage that waits for them re-runs, an earlier one reopens; while a
+    /// later stage is at work, it happens once that stage reports (`fix_after`).
+    pub fn send_back(&mut self, run: &str, stage: usize) -> Result<Vec<Change>, String> {
+        let Some(ri) = self.index(run) else {
+            return Err(format!("no run {run}"));
+        };
+        let r = &self.runs[ri];
+        if !r.state.open() {
+            return Err(format!("run {run} has ended"));
+        }
+        if r.asking.is_some() {
+            return Err(format!(
+                "run {run} is waiting for the answer to its stage's question: answer it first"
+            ));
+        }
+        if r.fix_after.is_some() {
+            return Err(format!("run {run} is already being sent back"));
+        }
+        let note = r
+            .stages
+            .get(stage)
+            .and_then(StageRun::latest)
+            .and_then(must_note)
+            .ok_or("mark at least one reason against Must address first")?;
+        let waiting = r
+            .stages
+            .iter()
+            .position(|s| s.status != StageStatus::Passed)
+            .unwrap_or(r.stages.len());
+        if stage > waiting {
+            return Err("that stage hasn't run in this pass".into());
+        }
+        let r = &mut self.runs[ri];
+        if r.stages.iter().any(|s| s.status.busy()) {
+            r.fix_after = Some(Fix { stage, note });
+            return Ok(Vec::new());
+        }
+        if stage < waiting {
+            return Ok(self.reopen(ri, stage, &note));
+        }
+        // The stage that waits: its next attempt gets the note.
+        let id = r.id.clone();
+        let s = &mut r.stages[stage];
+        let mut changes = Vec::new();
+        if matches!(s.status, StageStatus::Stopped | StageStatus::Failed) {
+            s.status = StageStatus::Waiting;
+            changes.push(Change {
+                run: id.clone(),
+                stage: Some(stage),
+                what: Decided::Retrying,
+            });
+        }
+        s.note = Some(note);
+        if matches!(r.state, RunState::NeedsYou(_)) {
+            r.state = RunState::Running;
+            changes.push(Change {
+                run: id,
+                stage: None,
+                what: Decided::RunResumed,
+            });
+        }
+        Ok(changes)
+    }
+
+    /// A person's **Score again**: the stopped stage's own session, which they worked in since
+    /// its report, looks again and reports anew. The same attempt goes back to `Running`, so it
+    /// isn't counted as another try.
+    pub fn rescore(&mut self, run: &str, stage: usize) -> Result<Vec<Change>, String> {
+        let Some(ri) = self.index(run) else {
+            return Err(format!("no run {run}"));
+        };
+        let r = &mut self.runs[ri];
+        if !matches!(r.state, RunState::NeedsYou(_)) {
+            return Err(format!("run {run} isn't waiting for you"));
+        }
+        if r.fix_after.is_some() {
+            return Err(format!("run {run} is being sent back"));
+        }
+        let Some(s) = r.stages.get_mut(stage) else {
+            return Err("no such stage".into());
+        };
+        if s.status != StageStatus::Stopped {
+            return Err("only a stage stopped at its gate can score again".into());
+        }
+        if s.latest().and_then(|a| a.session.as_deref()).is_none() {
+            return Err("that stage's session isn't known".into());
+        }
+        s.status = StageStatus::Running;
+        r.state = RunState::Running;
+        let id = r.id.clone();
+        Ok(vec![
+            Change {
+                run: id.clone(),
+                stage: Some(stage),
+                what: Decided::Rescoring,
+            },
+            Change {
+                run: id,
+                stage: None,
+                what: Decided::RunResumed,
+            },
+        ])
+    }
+
+    /// Sets what run `run` is about, as a link (`{pr}` in its prompts).
+    pub fn set_link(&mut self, run: &str, link: &str) {
+        let link = link.trim();
+        if let Some(r) = self.index(run).map(|ri| &mut self.runs[ri]) {
+            r.link = (!link.is_empty()).then(|| link.to_string());
+        }
+    }
+
+    /// Drops a send-back that waits for the stage at work.
+    pub fn cancel_fix(&mut self, run: &str) -> Result<(), String> {
+        let r = self
+            .index(run)
+            .map(|ri| &mut self.runs[ri])
+            .ok_or(format!("no run {run}"))?;
+        r.fix_after
+            .take()
+            .map(|_| ())
+            .ok_or(format!("run {run} isn't being sent back"))
     }
 
     /// What `run_status` returns: the run's state, each stage's status and attempts (session,
@@ -913,16 +1509,107 @@ fn stage_note(run: &Run, i: usize) -> String {
     if !later.is_empty() {
         around.push_str(&format!("Later: {}. ", later.join(", ")));
     }
+    // The pipeline's branch rule, which the report is held to (hydraui refuses a PR on another
+    // branch).
+    let branch = run.pipeline.branch_for(&run.ticket).map_or(String::new(), |b| {
+        format!(
+            "\nName every branch you create or push exactly {b}, in each repository: no prefix, \
+             no suffix, no other name. Put each pull request's link in your report; one on \
+             another branch is refused."
+        )
+    });
+    // Product decisions aren't a stage's to make (INTH-166 removed browser translation): it
+    // asks, in the pipeline's Slack channel when it has one, and its ticket waits.
+    let ask = match &run.pipeline.product_channel {
+        Some(channel) => format!(
+            "post it in Slack {channel} (the ticket, the options, your pick), then call \
+             stage_ask with the question and the message's link"
+        ),
+        None => "call stage_ask with the question, the options and your pick".to_string(),
+    };
+    let product = format!(
+        "\nNot your call: a change beyond the ticket that alters what users see or do (removing \
+         or changing a feature, copy or a flow) is a product decision. Ask before making it: \
+         {ask}, and wait. Don't ask the user whether to ask: just ask. A product question \
+         already open (in the ticket, a thread, or an earlier run's handoff) counts too: call \
+         stage_ask with it and its link rather than carrying it on as pending or marking its \
+         test @fixme, so the run shows what holds it up."
+    );
+    let product = match &run.pipeline.product_style {
+        Some(style) => format!("{product} How to write a product question: {style}"),
+        None => product,
+    };
+    // A pipeline can leave product out (`[product] ask = false`), e.g. reviews.
+    let product = if run.pipeline.product_asks {
+        product
+    } else {
+        String::new()
+    };
+    // Waiting on someone outside the run isn't blocked (a review that requested changes).
+    let product = format!(
+        "{product}\nWaiting on a PR's author to make the changes you asked for isn't blocked: \
+         call stage_ask with who \"author\", what you wait for and the PR's link, then stop."
+    );
     format!(
         "---\nhydraui pipeline \"{}\" · {} · stage {} of {}: {}{skill}.\n{around}Do only this \
          stage. When it's done, call stage_report (score, evidence, reasons for and against, \
-         handoff); stage_brief has what earlier stages handed over.",
+         handoff); stage_brief has what earlier stages handed over.{branch}{product}",
         run.pipeline.name,
         run.ticket,
         i + 1,
         run.stages.len(),
         spec.title
     )
+}
+
+/// What a stage sent back is told: the reasons against a person marked **Must address** on
+/// attempt `a`; `None` when none are marked.
+pub fn must_note(a: &Attempt) -> Option<String> {
+    let rating = a.rating.as_ref()?;
+    let items: Vec<&str> = a
+        .must
+        .iter()
+        .filter_map(|&i| rating.reasons.get(i))
+        .map(|x| x.text.as_str())
+        .collect();
+    if items.is_empty() {
+        return waived_note(a);
+    }
+    let mut note = format!(
+        "The user marked these reasons against your report ({}) Must address. Deal with each          one, then report again, saying in your reasons how each was dealt with:",
+        a.label
+    );
+    for item in items {
+        note.push_str(&format!("\n- {item}"));
+    }
+    if let Some(waived) = waived_note(a) {
+        note.push_str("\n\n");
+        note.push_str(&waived);
+    }
+    Some(note)
+}
+
+/// What a session is told about the reasons against a person marked **Not needed**.
+pub fn waived_note(a: &Attempt) -> Option<String> {
+    let rating = a.rating.as_ref()?;
+    let items: Vec<&str> = a
+        .waived
+        .iter()
+        .filter_map(|&i| rating.reasons.get(i))
+        .map(|x| x.text.as_str())
+        .collect();
+    if items.is_empty() {
+        return None;
+    }
+    let mut note = format!(
+        "The user marked these reasons against your report ({}) Not needed: don't act on \
+         them, and don't count them against your score again:",
+        a.label
+    );
+    for item in items {
+        note.push_str(&format!("\n- {item}"));
+    }
+    Some(note)
 }
 
 /// What a re-run's session is told about the attempt before it (§5.3).
@@ -940,12 +1627,17 @@ fn rerun_context(previous: Option<&Attempt>) -> String {
         "Your previous attempt ({}) reported {}: {}",
         a.label, rating.score, rating.summary
     );
-    for reason in &rating.reasons {
+    for (i, reason) in rating.reasons.iter().enumerate() {
         let sign = match reason.side {
             Side::For => '+',
             Side::Against => '-',
         };
-        text.push_str(&format!("\n{sign} {}", reason.text));
+        let waived = if a.waived.contains(&i) {
+            " (the user says this isn't needed: don't act on it)"
+        } else {
+            ""
+        };
+        text.push_str(&format!("\n{sign} {}{waived}", reason.text));
     }
     text
 }
@@ -1021,6 +1713,510 @@ mod tests {
         assert!(matches!(runs.role("tok-a"), Role::Stage(r, 0) if r.id == id));
         assert!(matches!(runs.role("orch"), Role::Orchestrator(r) if r.id == id));
         assert!(matches!(runs.role("other"), Role::Other));
+    }
+
+    /// A run of a, b where a passed (session `t1`) and b scored below its bar (session `t2`).
+    fn b_stopped(runs: &mut Runs) -> String {
+        let id = run(runs, &["a", "b"]);
+        started(runs, &id, "a", "t1");
+        runs.skill_used("t1", "qa");
+        runs.report("t1", rated(90)).unwrap();
+        started(runs, &id, "b", "t2");
+        runs.report("t2", rated(40)).unwrap();
+        assert!(matches!(
+            runs.run(&id).unwrap().state,
+            RunState::NeedsYou(_)
+        ));
+        id
+    }
+
+    fn back(stage: &str, note: &str) -> Choice {
+        Choice::Back {
+            stage: stage.to_string(),
+            note: note.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_stage_asks_and_its_ticket_waits_for_the_answer() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b"]);
+        started(&mut runs, &id, "a", "s1");
+        let now = SystemTime::now();
+        assert!(
+            runs.ask("nobody", "Remove it?", None, now, Whom::Product)
+                .is_err()
+        );
+        assert!(runs.ask("s1", "  ", None, now, Whom::Product).is_err());
+        let changes = runs
+            .ask(
+                "s1",
+                "Remove auto-translate?",
+                Some("https://x.slack.com/t/1"),
+                now,
+                Whom::Product,
+            )
+            .unwrap();
+        assert_eq!(
+            changes[0].what,
+            Decided::Asked("Remove auto-translate?".into())
+        );
+        let r = runs.run(&id).unwrap();
+        assert!(
+            matches!(&r.state, RunState::NeedsYou(why) if why.contains("Remove auto-translate?"))
+        );
+        assert_eq!(
+            r.asking.as_ref().unwrap().link.as_deref(),
+            Some("https://x.slack.com/t/1")
+        );
+        assert!(
+            runs.ask("s1", "Again?", None, now, Whom::Product).is_err(),
+            "one question at a time"
+        );
+        // A person's re-run or go-back would lose the question; only stopping is allowed.
+        assert!(runs.person(&id, retry("redo")).is_err());
+        assert!(runs.answered(&id, " ").is_err());
+        let changes = runs.answered(&id, "Keep it, product says").unwrap();
+        assert_eq!(
+            changes[0].what,
+            Decided::Answered("Keep it, product says".into())
+        );
+        let r = runs.run(&id).unwrap();
+        assert_eq!(r.state, RunState::Running);
+        assert!(r.asking.is_none());
+        assert!(runs.answered(&id, "twice").is_err());
+    }
+
+    #[test]
+    fn reporting_or_failing_while_asking_drops_the_question() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b"]);
+        started(&mut runs, &id, "a", "s1");
+        runs.ask("s1", "Q?", None, SystemTime::now(), Whom::Product)
+            .unwrap();
+        runs.report("s1", rated(90)).unwrap();
+        let r = runs.run(&id).unwrap();
+        assert!(r.asking.is_none());
+        assert_eq!(r.state, RunState::Running);
+        started(&mut runs, &id, "b", "s2");
+        runs.ask("s2", "Q2?", None, SystemTime::now(), Whom::Product)
+            .unwrap();
+        runs.session_gone("s2");
+        let r = runs.run(&id).unwrap();
+        assert!(r.asking.is_none());
+        assert_eq!(r.state, RunState::Running);
+    }
+
+    #[test]
+    fn a_stage_waiting_on_the_author_cant_report_blocked_and_keeps_waiting() {
+        // iov42-lingo-app-53-1: the stage asked to wait on James, then reported blocked
+        // because nothing had changed yet, and the run showed Needs you.
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a"]);
+        started(&mut runs, &id, "a", "s1");
+        runs.ask(
+            "s1",
+            "Waiting on James",
+            Some("https://github.com/o/r/pull/53"),
+            SystemTime::now(),
+            Whom::Author,
+        )
+        .unwrap();
+        let mut blocked = rated(20);
+        blocked.outcome = rating::Outcome::Blocked;
+        let e = runs.report("s1", blocked).unwrap_err();
+        assert!(e.contains("waiting on the author"), "{e}");
+        let r = runs.run(&id).unwrap();
+        assert!(r.asking.is_some(), "still waiting");
+        assert_eq!(status(&runs, &id, 0), StageStatus::Running);
+        // Approving after all is a report like any other.
+        runs.report("s1", rated(95)).unwrap();
+        assert_eq!(runs.run(&id).unwrap().state, RunState::Finished);
+    }
+
+    #[test]
+    fn a_person_sends_the_run_back_to_an_earlier_stage() {
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        let changes = runs
+            .person(&id, back("a", "rename the branch to INTH-1"))
+            .unwrap();
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.what == Decided::Reopened && c.stage == Some(0))
+        );
+        let r = runs.run(&id).unwrap();
+        assert_eq!(r.state, RunState::Running);
+        // The earlier stage goes on in its own conversation: a new attempt, starting.
+        assert_eq!(status(&runs, &id, 0), StageStatus::Starting);
+        let a = runs.run(&id).unwrap().stages[0].latest().unwrap().clone();
+        assert_eq!(runs.run(&id).unwrap().stages[0].attempts.len(), 2);
+        assert_eq!(a.note.as_deref(), Some("rename the branch to INTH-1"));
+        assert_eq!(a.label, "s-03");
+        assert_eq!(a.skills, ["qa"], "its conversation already used its skill");
+        // The later stage waits for it, its earlier tries no longer counted.
+        assert_eq!(status(&runs, &id, 1), StageStatus::Waiting);
+        assert_eq!(runs.run(&id).unwrap().stages[1].tries(), 0);
+        // Reopened, it reports and passes; the later stage may start again.
+        runs.link(&id, 0, "t3", "1. a");
+        runs.report("t3", rated(92)).unwrap();
+        assert_eq!(status(&runs, &id, 0), StageStatus::Passed);
+        assert!(runs.begin("orch", &id, "b", "", 30).is_ok());
+    }
+
+    #[test]
+    fn only_a_reason_against_is_marked_must_address() {
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        assert!(runs.mark(&id, 1, 0, true).is_err(), "reason 0 is for");
+        assert!(runs.mark(&id, 1, 5, true).is_err(), "no reason 5");
+        let err = runs.send_back(&id, 1).unwrap_err();
+        assert!(err.contains("Must address"), "{err}");
+        runs.mark(&id, 1, 1, true).unwrap();
+        runs.mark(&id, 1, 1, true).unwrap();
+        assert_eq!(runs.run(&id).unwrap().stages[1].latest().unwrap().must, [1]);
+        runs.mark(&id, 1, 1, false).unwrap();
+        assert!(
+            runs.run(&id).unwrap().stages[1]
+                .latest()
+                .unwrap()
+                .must
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_stopped_stage_sent_back_reruns_told_what_it_must_address() {
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        runs.mark(&id, 1, 1, true).unwrap();
+        let changes = runs.send_back(&id, 1).unwrap();
+        assert!(changes.iter().any(|c| c.what == Decided::Retrying));
+        let r = runs.run(&id).unwrap();
+        assert_eq!(r.state, RunState::Running);
+        assert_eq!(status(&runs, &id, 1), StageStatus::Waiting);
+        let note = r.stages[1].note.clone().unwrap();
+        assert!(
+            note.contains("Must address") && note.contains("\n- q"),
+            "{note}"
+        );
+        let s = runs.begin("orch", &id, "b", "", 30).unwrap();
+        assert!(s.prompt.contains("- q"), "{}", s.prompt);
+    }
+
+    fn wants_check(score: u8) -> Rating {
+        let mut r = rated(score);
+        r.outcome = rating::Outcome::Check;
+        r.check = "Open it in real Chrome.".into();
+        r
+    }
+
+    fn checked(note: &str) -> Choice {
+        Choice::Checked {
+            note: note.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_stage_asking_for_a_check_by_hand_passes_when_a_person_says_it_works() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b", "c"]);
+        started(&mut runs, &id, "a", "t1");
+        runs.skill_used("t1", "qa");
+        runs.report("t1", rated(90)).unwrap();
+        started(&mut runs, &id, "b", "t2");
+        let changes = runs.report("t2", wants_check(95)).unwrap();
+        let RunState::NeedsYou(why) = &runs.run(&id).unwrap().state else {
+            panic!("waits for a person");
+        };
+        assert!(why.contains("needs a person to check: Open it"), "{why}");
+        assert!(
+            changes
+                .iter()
+                .any(|c| matches!(c.what, Decided::Stopped(_)))
+        );
+        let changes = runs.person(&id, checked(" Works in Chrome 155 ")).unwrap();
+        assert!(changes.iter().any(
+            |c| c.stage == Some(1) && c.what == Decided::Checked("Works in Chrome 155".into())
+        ));
+        assert_eq!(status(&runs, &id, 1), StageStatus::Passed);
+        assert_eq!(runs.run(&id).unwrap().state, RunState::Running);
+        assert!(
+            runs.begin("orch", &id, "c", "", 30).is_ok(),
+            "the next stage may start"
+        );
+    }
+
+    #[test]
+    fn the_last_stage_checked_by_hand_finishes_the_run() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a"]);
+        started(&mut runs, &id, "a", "t1");
+        runs.skill_used("t1", "qa");
+        runs.report("t1", wants_check(80)).unwrap();
+        let changes = runs.person(&id, checked("")).unwrap();
+        assert!(changes.iter().any(|c| c.what == Decided::RunFinished));
+        assert_eq!(runs.run(&id).unwrap().state, RunState::Finished);
+    }
+
+    #[test]
+    fn only_a_stage_that_asked_for_a_check_passes_by_a_persons_word() {
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        let e = runs.person(&id, checked("fine")).unwrap_err();
+        assert!(e.contains("asked a person to check"), "{e}");
+        assert_eq!(status(&runs, &id, 1), StageStatus::Stopped);
+    }
+
+    #[test]
+    fn a_concern_marked_not_needed_is_told_to_the_next_session_and_isnt_also_a_must() {
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        runs.mark(&id, 1, 1, true).unwrap();
+        runs.mark_as(&id, 1, 1, Mark::NotNeeded, true).unwrap();
+        let a = runs.run(&id).unwrap().stages[1].latest().unwrap().clone();
+        assert!(a.must.is_empty(), "one mark at a time");
+        assert_eq!(a.waived, [1]);
+        let note = must_note(&a).expect("a note for the not-needed concern");
+        assert!(
+            note.contains("Not needed") && note.contains("\n- q"),
+            "{note}"
+        );
+        assert!(
+            runs.mark_as(&id, 1, 0, Mark::NotNeeded, true).is_err(),
+            "a reason for"
+        );
+        runs.person(&id, retry("again")).unwrap();
+        let s = runs.begin("orch", &id, "b", "", 30).unwrap();
+        assert!(s.prompt.contains("isn't needed"), "{}", s.prompt);
+    }
+
+    #[test]
+    fn a_ticket_settled_outside_ends_its_run_as_done_whatever_its_gate_said() {
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        let changes = runs.settle(&id, "its pull request was merged").unwrap();
+        assert_eq!(
+            changes[0].what,
+            Decided::RunSettled("its pull request was merged".into())
+        );
+        assert_eq!(runs.run(&id).unwrap().state, RunState::Finished);
+        assert!(runs.settle(&id, "again").is_err(), "already ended");
+        assert!(runs.open_of("orch").is_empty());
+    }
+
+    #[test]
+    fn one_orchestrator_holds_up_to_runs_at_once_tickets() {
+        let mut runs = Runs::default();
+        let mut p = pipeline(&["a"]);
+        p.runs_at_once = 2;
+        let first = runs
+            .start_run("orch", p.clone(), "PR-1", "x")
+            .unwrap()
+            .id
+            .clone();
+        let e = runs.start_run("orch", p.clone(), "pr-1", "x").unwrap_err();
+        assert!(e.contains("already running as PR-1-1"), "{e}");
+        let second = runs
+            .start_run("orch", p.clone(), "PR-2", "y")
+            .unwrap()
+            .id
+            .clone();
+        let e = runs.start_run("orch", p.clone(), "PR-3", "z").unwrap_err();
+        assert!(
+            e.contains("2 tickets are open already (PR-1-1, PR-2-1)"),
+            "{e}"
+        );
+        let open: Vec<&str> = runs.open_of("orch").iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(open, [first.as_str(), second.as_str()]);
+        // Each run's stages go on by themselves.
+        started(&mut runs, &first, "a", "t1");
+        started(&mut runs, &second, "a", "t2");
+        runs.report("t2", rated(90)).unwrap();
+        assert_eq!(runs.open_of("orch").len(), 1);
+        assert!(runs.start_run("orch", p, "PR-3", "z").is_ok());
+    }
+
+    #[test]
+    fn a_ticket_waiting_on_an_answer_leaves_its_place_to_another() {
+        let mut runs = Runs::default();
+        let p = pipeline(&["a"]);
+        let first = runs
+            .start_run("orch", p.clone(), "PR-1", "x")
+            .unwrap()
+            .id
+            .clone();
+        started(&mut runs, &first, "a", "t1");
+        let now = SystemTime::now();
+        runs.ask(
+            "t1",
+            "The fixes I asked for",
+            Some("https://github.com/o/r/pull/1"),
+            now,
+            Whom::Author,
+        )
+        .unwrap();
+        assert_eq!(runs.busy_of("orch").len(), 0);
+        assert!(runs.start_run("orch", p.clone(), "PR-2", "y").is_ok());
+        let e = runs.start_run("orch", p, "PR-3", "z").unwrap_err();
+        assert!(e.contains("PR-2-1"), "{e}");
+        assert_eq!(runs.open_of("orch").len(), 2);
+    }
+
+    #[test]
+    fn a_stopped_stage_scores_again_in_its_own_session_without_using_a_try() {
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        assert!(runs.rescore(&id, 0).is_err(), "a passed stage");
+        let changes = runs.rescore(&id, 1).unwrap();
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.what == Decided::Rescoring && c.stage == Some(1))
+        );
+        assert_eq!(runs.run(&id).unwrap().state, RunState::Running);
+        assert_eq!(status(&runs, &id, 1), StageStatus::Running);
+        assert!(runs.rescore(&id, 1).is_err(), "already scoring");
+        // The same session reports again, on the same attempt.
+        runs.report("t2", rated(92)).unwrap();
+        let r = runs.run(&id).unwrap();
+        assert_eq!(r.stages[1].attempts.len(), 1);
+        assert_eq!(r.stages[1].rating().unwrap().score, 92);
+        assert_eq!(r.state, RunState::Finished);
+    }
+
+    #[test]
+    fn an_earlier_stage_sent_back_while_another_runs_goes_once_it_reports() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b"]);
+        started(&mut runs, &id, "a", "t1");
+        runs.report("t1", rated(90)).unwrap();
+        started(&mut runs, &id, "b", "t2");
+        runs.mark(&id, 0, 1, true).unwrap();
+        assert_eq!(runs.send_back(&id, 0).unwrap(), []);
+        assert!(runs.send_back(&id, 0).is_err(), "already queued");
+        assert!(runs.mark(&id, 0, 1, false).is_err(), "cancel first");
+        // b passes, but the run goes back to a rather than finishing.
+        let changes = runs.report("t2", rated(95)).unwrap();
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.what == Decided::Reopened && c.stage == Some(0))
+        );
+        assert!(!changes.iter().any(|c| c.what == Decided::RunFinished));
+        let r = runs.run(&id).unwrap();
+        assert_eq!(r.state, RunState::Running);
+        assert_eq!(r.fix_after, None);
+        assert_eq!(status(&runs, &id, 0), StageStatus::Starting);
+        assert_eq!(status(&runs, &id, 1), StageStatus::Waiting);
+        let note = r.stages[0].latest().unwrap().note.clone().unwrap();
+        assert!(note.contains("- q"), "{note}");
+    }
+
+    #[test]
+    fn a_queued_send_back_goes_when_the_running_stage_fails_or_is_cancelled() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b"]);
+        started(&mut runs, &id, "a", "t1");
+        runs.report("t1", rated(90)).unwrap();
+        started(&mut runs, &id, "b", "t2");
+        runs.mark(&id, 0, 1, true).unwrap();
+        runs.send_back(&id, 0).unwrap();
+        runs.cancel_fix(&id).unwrap();
+        assert!(runs.cancel_fix(&id).is_err());
+        runs.send_back(&id, 0).unwrap();
+        let changes = runs.session_gone("t2");
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.what == Decided::Reopened && c.stage == Some(0))
+        );
+        assert_eq!(status(&runs, &id, 0), StageStatus::Starting);
+    }
+
+    #[test]
+    fn going_back_is_only_to_an_earlier_passed_stage_with_a_note() {
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        assert!(
+            runs.person(&id, back("a", "  "))
+                .unwrap_err()
+                .contains("note")
+        );
+        assert!(
+            runs.person(&id, back("b", "x"))
+                .unwrap_err()
+                .contains("earlier")
+        );
+        assert!(
+            runs.person(&id, back("zz", "x"))
+                .unwrap_err()
+                .contains("zz")
+        );
+        runs.person(&id, back("a", "fix")).unwrap();
+        // Running again: nothing to go back from.
+        assert!(
+            runs.person(&id, back("a", "again"))
+                .unwrap_err()
+                .contains("waiting")
+        );
+    }
+
+    #[test]
+    fn a_later_stage_gets_its_three_tries_again_after_going_back() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b"]);
+        started(&mut runs, &id, "a", "t1");
+        runs.report("t1", rated(90)).unwrap();
+        for tok in ["b1", "b2", "b3"] {
+            started(&mut runs, &id, "b", tok);
+            runs.session_gone(tok);
+        }
+        assert!(matches!(
+            runs.run(&id).unwrap().state,
+            RunState::NeedsYou(_)
+        ));
+        runs.person(&id, back("a", "fix the env")).unwrap();
+        runs.link(&id, 0, "t2", "1. a");
+        runs.report("t2", rated(90)).unwrap();
+        started(&mut runs, &id, "b", "b4");
+        runs.session_gone("b4");
+        assert_eq!(status(&runs, &id, 1), StageStatus::Failed);
+        assert_eq!(
+            runs.run(&id).unwrap().state,
+            RunState::Running,
+            "1 try of 3, not 4"
+        );
+    }
+
+    #[test]
+    fn every_stage_is_told_the_branch_it_must_use() {
+        let mut runs = Runs::default();
+        let mut p = pipeline(&["develop"]);
+        p.branch = Some("{ticket}".into());
+        let id = runs
+            .start_run("orch", p, "PRE-151", "x")
+            .unwrap()
+            .id
+            .clone();
+        let s = runs.begin("orch", &id, "develop", "", 30).unwrap();
+        assert!(
+            s.prompt
+                .contains("Name every branch you create or push exactly PRE-151"),
+            "{}",
+            s.prompt
+        );
+        assert!(s.prompt.contains("pull request's link"), "{}", s.prompt);
+        // No rule, no line.
+        let mut plain = Runs::default();
+        let id = plain
+            .start_run("orch", pipeline(&["develop"]), "PRE-152", "x")
+            .unwrap()
+            .id
+            .clone();
+        let s = plain.begin("orch", &id, "develop", "", 30).unwrap();
+        assert!(!s.prompt.contains("Name every branch"), "{}", s.prompt);
     }
 
     #[test]
@@ -1112,16 +2308,87 @@ mod tests {
         // The pipeline's own words first, as the user would type them.
         assert!(p.starts_with("do develop. after 88"), "{p}");
         let note = &p[p.find("\n\n---\n").expect("a note after the prompt")..];
-        assert!(note.len() < 500, "{} chars: {note}", note.len());
+        // Short beside the pipeline's own words, though the product rule and how to wait on a
+        // PR's author are in every note.
+        assert!(note.len() < 1000, "{} chars: {note}", note.len());
         for says in [
             "stage 2 of 3: develop",
             "Earlier: 1. replicate passed (88)",
             "Later: 3. verify",
             "stage_report",
             "stage_brief",
+            "who \"author\"",
         ] {
             assert!(note.contains(says), "{says}: {note}");
         }
+    }
+
+    #[test]
+    fn every_stage_is_told_to_ask_before_a_product_decision() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["develop"]);
+        let s = runs.begin("orch", &id, "develop", "", 30).unwrap();
+        let p = s.prompt;
+        assert!(p.contains("is a product decision"), "{p}");
+        assert!(p.contains("call stage_ask with the question"), "{p}");
+        assert!(p.contains("Don't ask the user whether to ask"), "{p}");
+        assert!(p.contains("already open"), "{p}");
+        assert!(!p.contains("Slack"), "{p}");
+        assert_eq!(
+            s.claude,
+            ["claude"],
+            "nothing to pre-approve without a channel"
+        );
+
+        let mut runs = Runs::default();
+        let mut pipe = pipeline(&["develop"]);
+        pipe.product_channel = Some("#product-".into());
+        let id = runs
+            .start_run("orch", pipe, "INTH-166", "x")
+            .unwrap()
+            .id
+            .clone();
+        let s = runs.begin("orch", &id, "develop", "", 30).unwrap();
+        assert_eq!(
+            s.claude,
+            [
+                "claude".to_string(),
+                format!("--allowedTools={}", crate::pipeline::PRODUCT_TOOLS)
+            ],
+            "posting the question and reading replies never wait for the user"
+        );
+        let p = s.prompt;
+        assert!(p.contains("post it in Slack #product-"), "{p}");
+        assert!(p.contains("the message's link"), "{p}");
+        assert!(!p.contains("How to write a product question"), "{p}");
+
+        let mut runs = Runs::default();
+        let mut pipe = pipeline(&["develop"]);
+        pipe.product_style = Some("Keep it short.".into());
+        let id = runs
+            .start_run("orch", pipe, "INTH-167", "x")
+            .unwrap()
+            .id
+            .clone();
+        let p = runs.begin("orch", &id, "develop", "", 30).unwrap().prompt;
+        assert!(
+            p.contains("How to write a product question: Keep it short."),
+            "{p}"
+        );
+
+        // A pipeline that leaves product out: no rule, no pre-approved tools, no stage_ask.
+        let mut runs = Runs::default();
+        let mut pipe = pipeline(&["review"]);
+        pipe.product_channel = Some("#product-".into());
+        pipe.product_asks = false;
+        let id = runs
+            .start_run("orch", pipe, "version2-frontend-5536", "x")
+            .unwrap()
+            .id
+            .clone();
+        let s = runs.begin("orch", &id, "review", "tok", 30).unwrap();
+        assert!(!s.prompt.contains("product decision"), "{}", s.prompt);
+        assert_eq!(s.claude, ["claude"]);
     }
 
     #[test]
@@ -1420,9 +2687,16 @@ mod tests {
         let mut now = pipeline(&["b", "a", "c"]);
         now.stages[1].bar = Some(95);
         now.name = "Renamed".into();
+        now.color = Some(0xd8c35a);
+        now.product_style = Some("Keep it short.".into());
         runs.refresh_from_file("t", &now);
-        // A new name shows at once (the design: the card follows Save).
+        // A new name and colour show at once (the design: the card follows Save).
         assert_eq!(runs.run(&id).unwrap().pipeline.name, "Renamed");
+        assert_eq!(runs.run(&id).unwrap().pipeline.color, Some(0xd8c35a));
+        assert_eq!(
+            runs.run(&id).unwrap().pipeline.product_style.as_deref(),
+            Some("Keep it short.")
+        );
         // A stage list change waits for the next run; the bar applies now.
         let r = runs.run(&id).unwrap();
         assert_eq!(r.pipeline.stages[0].id, "a");

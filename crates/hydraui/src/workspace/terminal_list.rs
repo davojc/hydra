@@ -14,6 +14,7 @@ use gpui_component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
 use super::Workspace;
 use crate::activity::Activity;
 use crate::envs::PaneId;
+use crate::orchestrator_theme::color;
 use crate::pane_view::label_for;
 
 /// `terminals` (each with its project) grouped by project: groups in the order their first
@@ -36,6 +37,27 @@ enum Nest {
     Plain,
     Orchestrator,
     Stage,
+}
+
+/// Which of the list's two tabs is shown: the environment's own sessions, or its pipelines
+/// with their orchestrators and the sessions they started.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum ListTab {
+    Sessions,
+    Pipelines,
+}
+
+/// A muted line explaining an empty tab.
+fn list_hint(text: &'static str) -> gpui::Div {
+    div()
+        .px_3()
+        .py_2()
+        .text_xs()
+        .text_color(crate::orchestrator_theme::color(
+            crate::orchestrator_theme::TEXT_MUTED,
+        ))
+        .whitespace_normal()
+        .child(text)
 }
 
 /// The terminal `by` steps from `shown` in `order`, wrapping; the first when `shown` isn't in it.
@@ -98,16 +120,48 @@ impl Workspace {
         list = list
             .child(self.render_all_tasks_entry(tint, cx))
             .child(div().h(px(1.)).mx_2().my_0p5().bg(cx.theme().border));
-        list = list.child(
-            Button::new("list-new-terminal")
-                .label("+ New")
-                .ghost()
-                .small()
-                .tooltip("New terminal (Ctrl+T)")
-                .on_click(cx.listener(move |ws, _, window, cx| {
-                    ws.new_terminal(&env, None, window, cx);
-                })),
-        );
+        // Pipelines start where Claude is set up: their orchestrator is a Claude session.
+        let claude = self.hydra.sign_ins(&env).iter().any(|t| t == "claude");
+        let (start_env, new_env) = (env.clone(), env.clone());
+        let open = Button::new("list-new-terminal")
+            .label("Open session")
+            .outline()
+            .small()
+            .w_full()
+            .tooltip("A new terminal in this environment (Ctrl+T)")
+            .on_click(cx.listener(move |ws, _, window, cx| {
+                ws.new_terminal(&env, None, window, cx);
+            }));
+        // Start pipeline filled: it's what most people come here for; Create pipeline beside it.
+        let pipeline_actions = claude.then(|| {
+            h_flex()
+                .px_2()
+                .pt_1()
+                .pb_1p5()
+                .gap_1p5()
+                .child(
+                    Button::new("list-start-pipeline")
+                        .label("▶  Start pipeline")
+                        .primary()
+                        .small()
+                        .flex_1()
+                        .tooltip("Start an orchestrator on one of your pipelines")
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.choose_pipeline(start_env.clone(), window, cx);
+                        })),
+                )
+                .child(
+                    Button::new("list-new-pipeline")
+                        .label("Create pipeline")
+                        .outline()
+                        .small()
+                        .flex_1()
+                        .tooltip("Make a pipeline, blank or from a copy, and edit its settings")
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.new_pipeline(Some(new_env.clone()), window, cx);
+                        })),
+                )
+        });
         // Terminals in the same project sit together, a line between one project's and the
         // next's.
         let all_tasks = self.all_tasks_shown();
@@ -137,109 +191,139 @@ impl Workspace {
             .filter(|(_, i)| i.env == tab.env)
             .map(|(idx, _)| idx)
             .collect();
-        for idx in interrupted {
-            list = list.child(self.render_interrupted_card(idx, cx));
-        }
-        // Each orchestrator is one framed block: its card, links, its own row, then the sessions
-        // it started nested under it, so several pipelines' sessions never mix.
-        for (orch, card, panes) in &cards {
-            let active = panes.iter().any(|p| Some(*p) == shown);
-            let mut block = v_flex()
-                .id(SharedString::from(format!("pipeline-block-{orch}")))
-                .mx_1()
-                .my_1()
-                .pb_1()
-                .gap_0p5()
-                .rounded(px(10.))
-                .border_1()
-                .border_color(tint.opacity(if active { 0.45 } else { 0.2 }))
-                .child(self.render_pipeline_card(*orch, card, active, cx));
-            let orch = *orch;
-            let history_shown = self.pipeline_shown(orch)
-                && self.pipeline_tabs.get(&orch).map(|t| t.view)
-                    == Some(super::pipeline_tab::TabView::History);
-            block = block.child(
-                div()
-                    .id(SharedString::from(format!("pipeline-history-link-{orch}")))
-                    .ml(px(26.))
-                    .mr_1()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .text_size(px(12.5))
-                    .text_color(cx.theme().muted_foreground)
-                    .when(history_shown, |d| d.bg(tint.opacity(0.2)))
-                    .hover(|d| d.bg(tint.opacity(0.12)))
-                    .cursor_pointer()
-                    .child("Ticket history")
-                    .on_click(cx.listener(move |ws, _, window, cx| {
-                        ws.show_pipeline_view(
-                            orch,
-                            super::pipeline_tab::TabView::History,
-                            window,
+        // Sessions and pipelines are kept apart: two tabs, each with its own actions.
+        let plain = rows.iter().filter(|(_, id)| !carded.contains(id)).count();
+        let tab_now = self
+            .list_tab
+            .unwrap_or(if cards.is_empty() && interrupted.is_empty() {
+                ListTab::Sessions
+            } else {
+                ListTab::Pipelines
+            });
+        list = list.child(self.render_list_tabs(tab_now, plain, cards.len(), tint, cx));
+        if tab_now == ListTab::Pipelines {
+            list = list.children(pipeline_actions);
+            for &idx in &interrupted {
+                list = list.child(self.render_interrupted_card(idx, cx));
+            }
+            // Each pipeline is one framed block: its card, links, then each orchestrator's row with
+            // the sessions it started nested under it, so pipelines' sessions never mix. A pipeline
+            // running several tickets at once has several orchestrators in its one block.
+            for (orch, card, panes) in &cards {
+                let slots = self.slots(*orch, cx);
+                if slots[0] != *orch {
+                    continue;
+                }
+                // Folded: one line, enough to see whether it needs anything.
+                if self
+                    .orchestrators
+                    .get(orch)
+                    .is_some_and(|name| self.collapsed_pipelines.contains(name))
+                {
+                    list = list.child(self.render_collapsed_pipeline(&slots, &cards, shown, cx));
+                    continue;
+                }
+                if slots.len() > 1 {
+                    list = list.child(self.render_pipeline_group(&slots, &cards, shown, cx));
+                    continue;
+                }
+                let active = panes.iter().any(|p| Some(*p) == shown);
+                let lanes = self.lanes(*orch, cx);
+                let mut block = v_flex()
+                    .id(SharedString::from(format!("pipeline-block-{orch}")))
+                    .mx_1()
+                    .my_1()
+                    .pb_1()
+                    .gap_0p5()
+                    .rounded(px(10.))
+                    .border_1()
+                    // The pipeline's own colour, so pipelines are told apart at a glance.
+                    .border_color(color(card.accent).opacity(if active { 0.55 } else { 0.3 }))
+                    .child(self.render_pipeline_card(*orch, card, active, true, cx))
+                    // With several tickets, each one's question is in its own box.
+                    .children(
+                        lanes
+                            .is_empty()
+                            .then(|| self.render_question(*orch, None, cx))
+                            .flatten(),
+                    )
+                    .children(self.render_linear_row(*orch, card.accent, cx));
+                let orch = *orch;
+                if let Some(row) = self.terminal_row(
+                    orch,
+                    shown == Some(orch),
+                    color(card.accent),
+                    Nest::Orchestrator,
+                    cx,
+                ) {
+                    block = block.child(row);
+                }
+                // Several tickets under the one orchestrator: each is a box holding its own
+                // sessions, hanging off the orchestrator's guide line, so it's plain which
+                // sessions work on which ticket and that the orchestrator oversees them all.
+                let several = !lanes.is_empty();
+                if several {
+                    block =
+                        block.child(self.render_lanes(orch, lanes, shown, color(card.accent), cx));
+                }
+                let stage_rows: Vec<_> = panes
+                    .iter()
+                    .filter(|id| **id != orch && !several)
+                    .filter_map(|id| {
+                        self.terminal_row(
+                            *id,
+                            shown == Some(*id),
+                            color(card.accent),
+                            Nest::Stage,
                             cx,
                         )
-                    })),
-            );
-            let settings_shown = self.pipeline_shown(orch)
-                && self.pipeline_tabs.get(&orch).map(|t| t.view)
-                    == Some(super::pipeline_tab::TabView::Settings);
-            block = block.child(
-                div()
-                    .id(SharedString::from(format!("pipeline-settings-link-{orch}")))
-                    .ml(px(26.))
-                    .mr_1()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .text_size(px(12.5))
-                    .text_color(cx.theme().muted_foreground)
-                    .when(settings_shown, |d| d.bg(tint.opacity(0.2)))
-                    .hover(|d| d.bg(tint.opacity(0.12)))
-                    .cursor_pointer()
-                    .child("Pipeline settings")
-                    .on_click(cx.listener(move |ws, _, window, cx| {
-                        ws.open_pipeline_settings(orch, window, cx)
-                    })),
-            );
-            if let Some(row) =
-                self.terminal_row(orch, shown == Some(orch), tint, Nest::Orchestrator, cx)
-            {
-                block = block.child(row);
+                    })
+                    .collect();
+                if !stage_rows.is_empty() {
+                    // A guide line down from the orchestrator ties its sessions to it.
+                    block = block.child(
+                        v_flex()
+                            .ml(px(18.))
+                            .mr_1()
+                            .pl(px(6.))
+                            .gap_0p5()
+                            .border_l_2()
+                            .border_color(color(card.accent).opacity(0.45))
+                            .children(stage_rows),
+                    );
+                }
+                list = list.child(block);
             }
-            let stage_rows: Vec<_> = panes
-                .iter()
-                .filter(|id| **id != orch)
-                .filter_map(|id| self.terminal_row(*id, shown == Some(*id), tint, Nest::Stage, cx))
-                .collect();
-            if !stage_rows.is_empty() {
-                // A guide line down from the orchestrator ties its sessions to it.
-                block = block.child(
-                    v_flex()
-                        .ml(px(18.))
-                        .mr_1()
-                        .pl(px(6.))
-                        .gap_0p5()
-                        .border_l_2()
-                        .border_color(tint.opacity(0.35))
-                        .children(stage_rows),
-                );
+            if cards.is_empty() && interrupted.is_empty() {
+                list = list.child(list_hint(if claude {
+                    "No pipeline is running here. Start one to have an orchestrator work through \
+                     tickets or pull requests."
+                } else {
+                    "Pipelines need Claude signed in to this environment."
+                }));
             }
-            list = list.child(block);
-        }
-        for (divided, id) in rows.into_iter().filter(|(_, id)| !carded.contains(id)) {
-            if divided {
-                list = list.child(
-                    div()
-                        .h(px(2.))
-                        .mx_1()
-                        .my_2()
-                        .rounded_full()
-                        .bg(tint.opacity(0.6)),
-                );
+        } else {
+            list = list.child(div().px_2().pt_1().pb_1p5().child(open));
+            for (divided, id) in rows.into_iter().filter(|(_, id)| !carded.contains(id)) {
+                if divided {
+                    list = list.child(
+                        div()
+                            .h(px(2.))
+                            .mx_1()
+                            .my_2()
+                            .rounded_full()
+                            .bg(tint.opacity(0.6)),
+                    );
+                }
+                if let Some(row) = self.terminal_row(id, shown == Some(id), tint, Nest::Plain, cx) {
+                    list = list.child(row);
+                }
             }
-            if let Some(row) = self.terminal_row(id, shown == Some(id), tint, Nest::Plain, cx) {
-                list = list.child(row);
+            if plain == 0 {
+                list = list.child(list_hint(
+                    "No sessions open. Open one for a terminal of your own; a pipeline's sessions \
+                     are under Pipelines.",
+                ));
             }
         }
         let meter = if cards.is_empty() {
@@ -250,6 +334,307 @@ impl Workspace {
         panel
             .child(list)
             .children(meter.map(|m| div().flex_none().p_1().pb_3().child(m)))
+    }
+
+    /// A folded pipeline (orchestrators `slots`): its name and state pill, then how many sessions
+    /// it has open and how its trigger is set. Its arrow unfolds it; the rest opens it.
+    fn render_collapsed_pipeline(
+        &self,
+        slots: &[PaneId],
+        cards: &[(PaneId, crate::pipeline_card::Card, Vec<PaneId>)],
+        shown: Option<PaneId>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let members: Vec<&(PaneId, crate::pipeline_card::Card, Vec<PaneId>)> = slots
+            .iter()
+            .filter_map(|s| cards.iter().find(|(o, _, _)| o == s))
+            .collect();
+        let lead = slots[0];
+        let c = if members.len() == 1 {
+            members[0].1.clone()
+        } else {
+            crate::pipeline_card::group_card(&members.iter().map(|(_, c, _)| c).collect::<Vec<_>>())
+        };
+        let sessions = members
+            .iter()
+            .map(|(o, _, panes)| panes.iter().filter(|p| *p != o).count())
+            .sum();
+        let mode = self.trigger_mode(lead, cx).map(|m| m.label());
+        let waiting = self
+            .slack_of(lead, cx)
+            .map_or(0, |(p, _, _)| self.slack_waiting(&p.file));
+        let active = members
+            .iter()
+            .any(|(_, _, panes)| panes.iter().any(|p| Some(*p) == shown));
+        let (fg, bg) = super::orchestrator::pill_colors(c.state, c.accent);
+        v_flex()
+            .id(SharedString::from(format!("pipeline-folded-{lead}")))
+            .mx_1()
+            .my_1()
+            .px(px(10.))
+            .py(px(7.))
+            .gap(px(3.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(color(c.accent).opacity(if active { 0.55 } else { 0.3 }))
+            .bg(color(crate::orchestrator_theme::SURFACE))
+            .cursor_pointer()
+            .on_click(cx.listener(move |ws, _, window, cx| ws.open_pipeline(lead, window, cx)))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().text_xs().text_color(color(c.accent)).child("◆"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(color(crate::orchestrator_theme::TEXT))
+                            .child(c.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .px(px(6.))
+                            .py(px(1.))
+                            .rounded(px(4.))
+                            .text_xs()
+                            .bg(bg)
+                            .text_color(fg)
+                            .child(c.state.word()),
+                    )
+                    .child(self.collapse_toggle(lead, true, cx)),
+            )
+            .child(
+                div()
+                    .pl(px(18.))
+                    .truncate()
+                    .text_xs()
+                    .text_color(color(crate::orchestrator_theme::TEXT_SECONDARY))
+                    .child(crate::pipeline_card::collapsed_line(
+                        sessions, mode, waiting,
+                    )),
+            )
+            .into_any_element()
+    }
+
+    /// The arrow that folds or unfolds orchestrator `orch`'s pipeline in the sidebar.
+    pub(super) fn collapse_toggle(
+        &self,
+        orch: PaneId,
+        collapsed: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        Button::new(SharedString::from(format!("pipeline-fold-{orch}")))
+            .icon(if collapsed {
+                gpui_component::IconName::ChevronRight
+            } else {
+                gpui_component::IconName::ChevronDown
+            })
+            .outline()
+            .xsmall()
+            .tooltip(if collapsed {
+                "Expand: show its sessions"
+            } else {
+                "Collapse to one line"
+            })
+            .on_click(cx.listener(move |ws, _, _, cx| {
+                // The card under it opens the pipeline; the arrow only folds.
+                cx.stop_propagation();
+                if let Some(name) = ws.orchestrators.get(&orch).cloned()
+                    && !ws.collapsed_pipelines.remove(&name)
+                {
+                    ws.collapsed_pipelines.insert(name);
+                }
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    /// The block of a pipeline running several tickets at once: one card for the pipeline, its
+    /// trigger, then each orchestrator (`orchestrator 1`, `2`, …) with its ticket and the
+    /// sessions it started nested under it.
+    fn render_pipeline_group(
+        &self,
+        slots: &[PaneId],
+        cards: &[(PaneId, crate::pipeline_card::Card, Vec<PaneId>)],
+        shown: Option<PaneId>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let members: Vec<&(PaneId, crate::pipeline_card::Card, Vec<PaneId>)> = slots
+            .iter()
+            .filter_map(|s| cards.iter().find(|(o, _, _)| o == s))
+            .collect();
+        let lead = slots[0];
+        let group = crate::pipeline_card::group_card(
+            &members.iter().map(|(_, c, _)| c).collect::<Vec<_>>(),
+        );
+        let active = members
+            .iter()
+            .any(|(_, _, panes)| panes.iter().any(|p| Some(*p) == shown));
+        let accent = color(group.accent);
+        let mut block = v_flex()
+            .id(SharedString::from(format!("pipeline-group-{lead}")))
+            .mx_1()
+            .my_1()
+            .pb_1()
+            .gap_0p5()
+            .rounded(px(10.))
+            .border_1()
+            .border_color(accent.opacity(if active { 0.55 } else { 0.3 }))
+            .child(self.render_pipeline_card(lead, &group, active, false, cx))
+            .children(self.render_linear_row(lead, group.accent, cx));
+        for (orch, _, panes) in members {
+            let orch = *orch;
+            if let Some(row) =
+                self.terminal_row(orch, shown == Some(orch), accent, Nest::Orchestrator, cx)
+            {
+                block = block.child(row);
+            }
+            // Its tickets, each a box holding its sessions.
+            let lanes = self.open_lanes(orch, cx);
+            if !lanes.is_empty() {
+                block = block.child(self.render_lanes(orch, lanes, shown, accent, cx));
+                continue;
+            }
+            let stage_rows: Vec<_> = panes
+                .iter()
+                .filter(|id| **id != orch)
+                .filter_map(|id| {
+                    self.terminal_row(*id, shown == Some(*id), accent, Nest::Stage, cx)
+                })
+                .collect();
+            if !stage_rows.is_empty() {
+                block = block.child(
+                    v_flex()
+                        .ml(px(18.))
+                        .mr_1()
+                        .pl(px(6.))
+                        .gap_0p5()
+                        .border_l_2()
+                        .border_color(accent.opacity(0.45))
+                        .children(stage_rows),
+                );
+            }
+        }
+        block.into_any_element()
+    }
+
+    /// The ticket boxes under an orchestrator (core spec §46): a guide line down from it, a
+    /// muted line saying how many it coordinates when more than one, then one box per ticket
+    /// with its sessions inside.
+    fn render_lanes(
+        &self,
+        orch: PaneId,
+        lanes: Vec<super::orchestrator::Lane>,
+        shown: Option<PaneId>,
+        accent: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let count = lanes.len();
+        let all_prs = lanes
+            .iter()
+            .all(|(r, _, _)| r.link.as_deref().is_some_and(|l| l.contains("/pull/")));
+        let mut boxes = Vec::new();
+        for (run, lane, panes) in &lanes {
+            let rows: Vec<_> = panes
+                .iter()
+                .filter_map(|id| {
+                    self.terminal_row(*id, shown == Some(*id), accent, Nest::Stage, cx)
+                })
+                .collect();
+            boxes.push(self.render_lane(orch, run, lane, rows, cx));
+        }
+        v_flex()
+            .ml(px(16.))
+            .pl(px(8.))
+            .pb_1()
+            .border_l_2()
+            .border_color(accent.opacity(0.45))
+            .when(count > 1, |d| {
+                d.child(
+                    div()
+                        .text_xs()
+                        .text_color(crate::orchestrator_theme::color(
+                            crate::orchestrator_theme::TEXT_MUTED,
+                        ))
+                        .child(format!(
+                            "Coordinating {count} {}",
+                            if all_prs { "pull requests" } else { "tickets" }
+                        )),
+                )
+            })
+            .children(boxes)
+            .into_any_element()
+    }
+
+    /// Switches the list to the tab terminal `id` sits under once its environment shows, so a
+    /// terminal shown from a toast or a link is in sight; whether the tab changed.
+    pub(super) fn reveal_in_list(&mut self, id: PaneId, cx: &gpui::App) -> bool {
+        let Some(env) = self.envs.env_of(id) else {
+            return false;
+        };
+        // Only the selected environment's cards are known; another's waits until it is shown.
+        if self.envs.active().is_none_or(|t| t.env != env) {
+            return false;
+        }
+        let want = if self.pipeline_of(id, cx).is_some() {
+            ListTab::Pipelines
+        } else {
+            ListTab::Sessions
+        };
+        let changed = self.list_tab != Some(want);
+        self.list_tab = Some(want);
+        changed
+    }
+
+    /// **Sessions · Pipelines**: the list's two tabs, each with how many it holds.
+    fn render_list_tabs(
+        &self,
+        now: ListTab,
+        sessions: usize,
+        pipelines: usize,
+        tint: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let tab = |which: ListTab, label: &str, n: usize| {
+            let on = which == now;
+            h_flex()
+                .id(SharedString::from(format!("list-tab-{label}")))
+                .flex_1()
+                .justify_center()
+                .gap_1p5()
+                .py_1()
+                .rounded(px(6.))
+                .text_sm()
+                .cursor_pointer()
+                .when(on, |d| {
+                    d.bg(tint.opacity(0.22))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                })
+                .when(!on, |d| {
+                    d.text_color(cx.theme().muted_foreground)
+                        .hover(|d| d.bg(tint.opacity(0.1)))
+                })
+                .child(label.to_string())
+                .child(div().text_xs().opacity(0.7).child(n.to_string()))
+                .on_click(cx.listener(move |ws, _, _, cx| {
+                    ws.list_tab = Some(which);
+                    cx.notify();
+                }))
+        };
+        h_flex()
+            .mx_1()
+            .mb_1()
+            .p_0p5()
+            .gap_0p5()
+            .rounded(px(8.))
+            .bg(cx.theme().muted.opacity(0.5))
+            .child(tab(ListTab::Sessions, "Sessions", sessions))
+            .child(tab(ListTab::Pipelines, "Pipelines", pipelines))
+            .into_any_element()
     }
 
     /// Terminal `id`'s row: its activity dot, name, Claude's state and × on hover;
@@ -267,7 +652,15 @@ impl Workspace {
         let v = view.read(cx);
         let (label, program) = (v.label(), v.program_title().map(str::to_string));
         let activity = self.activity.get(&id).copied();
-        let dot = self.render_tab_dot(activity, tint, cx);
+        // A stage in progress breathes even while its session waits (on a deploy, a monitor).
+        let at_work = nest == Nest::Stage && self.stage_at_work(id, cx);
+        let dot = self.render_tab_dot(
+            SharedString::from(format!("row-dot-{id}")),
+            activity,
+            at_work,
+            tint,
+            cx,
+        );
         // What a Claude session here says it is doing (its hooks), beside its name.
         let claude = activity.filter(|a| a.claude).map(|a| match a.state {
             Activity::Working => ("working", muted),

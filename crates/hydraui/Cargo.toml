@@ -40,7 +40,6 @@ serde-saphyr = "1.3"
 serde_json.workspace = true
 tiny_http.workspace = true
 getrandom.workspace = true
-keyring.workspace = true
 ureq.workspace = true
 # For the grammars hydraui builds itself (src/grammars.rs); the versions gpui-component uses.
 tree-sitter = "0.26"
@@ -66,8 +65,11 @@ keyring = { workspace = true, features = ["windows-native"] }
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
+# macOS goes through /usr/bin/security instead (hydra-platform's macos_keychain).
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+keyring.workspace = true
+
 [target.'cfg(target_os = "macos")'.dependencies]
-keyring = { workspace = true, features = ["apple-native"] }
 objc2.workspace = true
 objc2-app-kit.workspace = true
 objc2-foundation.workspace = true

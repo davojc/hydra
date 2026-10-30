@@ -11,8 +11,9 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandItem, CommandState};
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::notification::Notification;
+use gpui_component::select::{Select, SelectEvent, SelectState};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::{Disableable, Sizable, WindowExt, h_flex, v_flex};
 
@@ -20,7 +21,7 @@ use super::Workspace;
 use crate::envs::PaneId;
 use crate::mcp::server;
 use crate::orchestrator_theme::{self as theme, color};
-use crate::pipeline::{self, Edit, EditStage, validate};
+use crate::pipeline::{self, Assignee, Edit, EditStage, LinearSettings, SlackSettings, validate};
 use crate::runs::MAX_ATTEMPTS;
 
 /// The width of a stage row's up/down arrows, so the prompt can line up under the title.
@@ -38,7 +39,7 @@ struct DraftStage {
     /// The bar is the stage's own, not the pipeline's.
     own: bool,
     /// What its session is asked, before hydraui's note.
-    prompt: Entity<InputState>,
+    prompt: Entity<TextareaState>,
 }
 
 /// The settings being edited for one orchestrator's pipeline file.
@@ -46,11 +47,103 @@ pub(super) struct SettingsDraft {
     file: String,
     saved: Edit,
     name: Entity<InputState>,
+    /// The branch rule, e.g. `{ticket}`; empty: none.
+    branch: Entity<InputState>,
+    /// The Slack channel for product questions; empty: stages ask the user in hydraui.
+    product: Entity<InputState>,
+    /// How steps write product questions; empty: as each sees fit.
+    product_style: Entity<TextareaState>,
+    /// Steps ask product before a change beyond the ticket (`[product] ask`).
+    product_asks: bool,
+    /// The card's accent; `None`: the default teal.
+    color: Option<u32>,
+    /// Tickets run at once, each with its own orchestrator.
+    runs: u8,
+    /// The Advanced part is unfolded.
+    advanced: bool,
     bar: Entity<SliderState>,
     stages: Vec<DraftStage>,
     skills: Vec<String>,
     next_key: u64,
+    linear: LinearDraft,
+    slack: SlackDraft,
+    /// The Trigger dropdown: None, Linear or Slack.
+    trigger: Entity<SelectState<Vec<&'static str>>>,
     _subs: Vec<Subscription>,
+}
+
+/// The Trigger dropdown's choices, in order.
+const TRIGGERS: [&str; 3] = ["None", "Linear", "Slack"];
+
+/// The Slack section: off saves the pipeline without a `[slack]` table. Linear and Slack can't
+/// both be on.
+struct SlackDraft {
+    on: bool,
+    /// Kept as the file has it (`watch`).
+    watch: bool,
+    channel: Entity<InputState>,
+    label: Entity<InputState>,
+    every: Entity<InputState>,
+    lookback: Entity<InputState>,
+    reaction: Entity<InputState>,
+    done_reaction: Entity<InputState>,
+}
+
+impl SlackDraft {
+    fn edit(&self, cx: &App) -> Option<SlackSettings> {
+        let text = |i: &Entity<InputState>| i.read(cx).value().trim().to_string();
+        self.on.then(|| SlackSettings {
+            channel: text(&self.channel),
+            label: text(&self.label),
+            reaction: text(&self.reaction).trim_matches(':').to_string(),
+            done_reaction: text(&self.done_reaction).trim_matches(':').to_string(),
+            // Not a number: 0, which validation names.
+            every_minutes: text(&self.every).parse().unwrap_or(0),
+            lookback_hours: text(&self.lookback).parse().unwrap_or(0),
+            watch: self.watch,
+        })
+    }
+}
+
+/// The Linear section (phase 2 spec §2, §5): off saves the pipeline without a `[linear]` table.
+struct LinearDraft {
+    on: bool,
+    /// Kept as the file has it (`watch`).
+    watch: bool,
+    any: bool,
+    /// Tickets without an SLA too (`sla_only` off).
+    no_sla: bool,
+    team: Entity<InputState>,
+    pick: Entity<InputState>,
+    claim: Entity<InputState>,
+    passed: Entity<InputState>,
+    every: Entity<InputState>,
+    /// Comma-separated; empty: any label.
+    labels: Entity<InputState>,
+}
+
+impl LinearDraft {
+    fn edit(&self, cx: &App) -> Option<LinearSettings> {
+        let text = |i: &Entity<InputState>| i.read(cx).value().trim().to_string();
+        self.on.then(|| LinearSettings {
+            team: text(&self.team),
+            pick: text(&self.pick),
+            assignee: if self.any {
+                Assignee::Any
+            } else {
+                Assignee::Unassigned
+            },
+            claim: text(&self.claim),
+            passed: text(&self.passed),
+            // Not a number: 0, which validation names.
+            every_minutes: text(&self.every).parse().unwrap_or(0),
+            watch: self.watch,
+            sla_only: !self.no_sla,
+            labels: pipeline::clean_labels(
+                self.labels.read(cx).value().split(',').map(str::to_string),
+            ),
+        })
+    }
 }
 
 fn slider(value: u8, cx: &mut App) -> Entity<SliderState> {
@@ -77,6 +170,17 @@ impl SettingsDraft {
             name: self.name.read(cx).value().to_string(),
             // Not edited here: the pattern is the same for every ticket, so it stays as the file has it.
             feature_env: self.saved.feature_env.clone(),
+            branch: Some(self.branch.read(cx).value().trim().to_string()).filter(|b| !b.is_empty()),
+            linear: self.linear.edit(cx),
+            slack: self.slack.edit(cx),
+            autostart: self.saved.autostart.clone(),
+            product_channel: Some(self.product.read(cx).value().trim().to_string())
+                .filter(|c| !c.is_empty()),
+            product_style: Some(self.product_style.read(cx).value().trim().to_string())
+                .filter(|c| !c.is_empty()),
+            product_asks: self.product_asks,
+            color: self.color,
+            runs_at_once: self.runs,
             bar: slider_value(&self.bar, cx),
             stages: self
                 .stages
@@ -142,7 +246,7 @@ impl Workspace {
     }
 
     /// The pipeline file, environment and folder of `orch`'s current run.
-    fn settings_target(
+    pub(super) fn settings_target(
         &self,
         orch: PaneId,
         cx: &App,
@@ -169,21 +273,160 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> SettingsDraft {
         let name = cx.new(|cx| InputState::new(window, cx).default_value(saved.name.clone()));
+        let branch = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("{ticket}")
+                .default_value(saved.branch.clone().unwrap_or_default())
+        });
+        let product = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("#product")
+                .default_value(saved.product_channel.clone().unwrap_or_default())
+        });
+        let product_style = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(2, 10)
+                .placeholder("Or say how, e.g. one line on why it matters, then the options")
+                .default_value(saved.product_style.clone().unwrap_or_default())
+        });
         let bar = slider(saved.bar, cx);
         let mut subs = vec![
             cx.subscribe_in(&name, window, |_, _, _: &InputEvent, _, cx| cx.notify()),
+            cx.subscribe_in(&branch, window, |_, _, _: &InputEvent, _, cx| cx.notify()),
+            cx.subscribe_in(&product, window, |_, _, _: &InputEvent, _, cx| cx.notify()),
+            cx.subscribe_in(&product_style, window, |_, _, _: &InputEvent, _, cx| {
+                cx.notify()
+            }),
             cx.subscribe_in(&bar, window, move |ws, _, _: &SliderEvent, window, cx| {
                 ws.default_bar_moved(orch, window, cx)
             }),
         ];
+        let l = saved.linear.clone();
+        let mut input = |value: String, placeholder: &'static str| {
+            let i = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(placeholder)
+                    .default_value(value)
+            });
+            subs.push(cx.subscribe_in(&i, window, |_, _, _: &InputEvent, _, cx| cx.notify()));
+            i
+        };
+        let field = |f: fn(&LinearSettings) -> String, default: &str| {
+            l.as_ref().map_or(default.to_string(), f)
+        };
+        let linear = LinearDraft {
+            on: l.is_some(),
+            watch: l.as_ref().is_some_and(|l| l.watch),
+            any: l.as_ref().is_some_and(|l| l.assignee == Assignee::Any),
+            no_sla: l.as_ref().is_some_and(|l| !l.sla_only),
+            team: input(field(|l| l.team.clone(), ""), "INTH"),
+            pick: input(
+                field(|l| l.pick.clone(), pipeline::DEFAULT_PICK),
+                pipeline::DEFAULT_PICK,
+            ),
+            claim: input(
+                field(|l| l.claim.clone(), pipeline::DEFAULT_CLAIM),
+                pipeline::DEFAULT_CLAIM,
+            ),
+            passed: input(
+                field(|l| l.passed.clone(), pipeline::DEFAULT_PASSED),
+                pipeline::DEFAULT_PASSED,
+            ),
+            every: input(
+                field(
+                    |l| l.every_minutes.to_string(),
+                    &pipeline::DEFAULT_EVERY_MINUTES.to_string(),
+                ),
+                "5",
+            ),
+            labels: input(
+                field(|l| l.labels.join(", "), ""),
+                "Any label; or e.g. Bug, Frontend",
+            ),
+        };
+        let sl = saved.slack.clone();
+        let sfield = |f: fn(&SlackSettings) -> String, default: &str| {
+            sl.as_ref().map_or(default.to_string(), f)
+        };
+        let slack = SlackDraft {
+            on: sl.is_some(),
+            watch: sl.as_ref().is_some_and(|s| s.watch),
+            channel: input(
+                sfield(|s| s.channel.clone(), ""),
+                "In Slack: channel name → About → Channel ID",
+            ),
+            label: input(sfield(|s| s.label.clone(), ""), "#pull-requests"),
+            every: input(
+                sfield(
+                    |s| s.every_minutes.to_string(),
+                    &pipeline::DEFAULT_SLACK_EVERY_MINUTES.to_string(),
+                ),
+                "2",
+            ),
+            lookback: input(
+                sfield(
+                    |s| s.lookback_hours.to_string(),
+                    &pipeline::DEFAULT_LOOKBACK_HOURS.to_string(),
+                ),
+                "24",
+            ),
+            reaction: input(
+                sfield(|s| s.reaction.clone(), pipeline::DEFAULT_REACTION),
+                "eyes (👀)",
+            ),
+            done_reaction: input(
+                sfield(|s| s.done_reaction.clone(), ""),
+                "white_check_mark (✅); empty for none",
+            ),
+        };
+        let chosen = if saved.slack.is_some() {
+            2
+        } else if saved.linear.is_some() {
+            1
+        } else {
+            0
+        };
+        let trigger = cx.new(|cx| {
+            SelectState::new(
+                TRIGGERS.to_vec(),
+                Some(gpui_component::IndexPath::new(chosen)),
+                window,
+                cx,
+            )
+        });
+        subs.push(cx.subscribe_in(
+            &trigger,
+            window,
+            move |ws, _, e: &SelectEvent<Vec<&'static str>>, _, cx| {
+                let SelectEvent::Confirm(Some(choice)) = e else {
+                    return;
+                };
+                let choice = *choice;
+                // One trigger: choosing one turns the other off.
+                ws.with_draft(orch, cx, |d| {
+                    d.linear.on = choice == "Linear";
+                    d.slack.on = choice == "Slack";
+                })
+            },
+        ));
         let mut draft = SettingsDraft {
             file,
             saved: saved.clone(),
             name,
+            branch,
+            product,
+            product_style,
+            product_asks: saved.product_asks,
+            color: saved.color,
+            runs: saved.runs_at_once,
+            advanced: false,
             bar,
             stages: Vec::new(),
             skills,
             next_key: 0,
+            linear,
+            slack,
+            trigger,
             _subs: Vec::new(),
         };
         for s in &saved.stages {
@@ -214,8 +457,10 @@ impl Workspace {
         });
         let bar = slider(s.bar.unwrap_or(default), cx);
         subs.push(cx.subscribe_in(&title, window, |_, _, _: &InputEvent, _, cx| cx.notify()));
+        // A prompt is read whole: the box grows with it (a long one scrolls past 14 lines).
         let prompt = cx.new(|cx| {
-            InputState::new(window, cx)
+            TextareaState::new(window, cx)
+                .auto_grow(3, 14)
                 .placeholder("e.g. replicate {ticket}")
                 .default_value(s.prompt.clone())
         });
@@ -260,6 +505,117 @@ impl Workspace {
             s.update(cx, |s, cx| s.set_value(value, window, cx));
         }
         cx.notify();
+    }
+
+    /// The Linear section (phase 2 spec §2): where the pipeline's tickets come from.
+    fn render_linear_settings(
+        &self,
+        orch: PaneId,
+        draft: &SettingsDraft,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let l = &draft.linear;
+        let row = |label: &str, input: &Entity<InputState>| {
+            h_flex()
+                .gap_3()
+                .child(
+                    text(12.5, theme::TEXT_SECONDARY)
+                        .w(px(170.))
+                        .flex_none()
+                        .child(label.to_string()),
+                )
+                .child(div().w(px(300.)).child(Input::new(input).small()))
+        };
+        let mut body = v_flex().gap_2();
+        if l.on {
+            let who = |any: bool, label: &'static str| {
+                Button::new(SharedString::from(format!("linear-any-{any}-{orch}")))
+                    .label(label)
+                    .when(l.any == any, |b| b.primary())
+                    .when(l.any != any, |b| b.ghost())
+                    .xsmall()
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        ws.with_draft(orch, cx, |d| d.linear.any = any)
+                    }))
+            };
+            let sla = |no_sla: bool, label: &'static str| {
+                Button::new(SharedString::from(format!("linear-sla-{no_sla}-{orch}")))
+                    .label(label)
+                    .when(l.no_sla == no_sla, |b| b.primary())
+                    .when(l.no_sla != no_sla, |b| b.ghost())
+                    .xsmall()
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        ws.with_draft(orch, cx, |d| d.linear.no_sla = no_sla)
+                    }))
+            };
+            body = body
+                .child(row("Team", &l.team))
+                .child(row("Pick tickets in", &l.pick))
+                .child(row("With one of the labels", &l.labels))
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .child(
+                            text(12.5, theme::TEXT_SECONDARY)
+                                .w(px(170.))
+                                .flex_none()
+                                .child("Which tickets"),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(sla(false, "With an SLA"))
+                                .child(sla(true, "All, by priority")),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .child(
+                            text(12.5, theme::TEXT_SECONDARY)
+                                .w(px(170.))
+                                .flex_none()
+                                .child("Whose tickets"),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(who(false, "Unassigned"))
+                                .child(who(true, "Any")),
+                        ),
+                )
+                .child(row("Then move it to", &l.claim))
+                .child(row("When done, move it to", &l.passed))
+                .child(row("Check every (minutes)", &l.every));
+        }
+        body
+    }
+
+    /// The Slack trigger's options: pull requests posted in a channel.
+    fn render_slack_settings(&self, draft: &SettingsDraft) -> impl IntoElement + use<> {
+        let sl = &draft.slack;
+        let row = |label: &str, input: &Entity<InputState>| {
+            h_flex()
+                .gap_3()
+                .child(
+                    text(12.5, theme::TEXT_SECONDARY)
+                        .w(px(170.))
+                        .flex_none()
+                        .child(label.to_string()),
+                )
+                .child(div().w(px(300.)).child(Input::new(input).small()))
+        };
+        let mut body = v_flex().gap_2();
+        if sl.on {
+            body = body
+                .child(row("Channel name", &sl.label))
+                .child(row("Channel ID", &sl.channel))
+                .child(row("Mark taken with", &sl.reaction))
+                .child(row("Mark done with", &sl.done_reaction))
+                .child(row("Check every (minutes)", &sl.every))
+                .child(row("Look back (hours)", &sl.lookback));
+        }
+        body
     }
 
     fn with_draft(
@@ -607,9 +963,10 @@ impl Workspace {
                     .child(
                         // Lined up under the title: past the number, the arrows and their gaps.
                         div().pl(px(24. + 10. + ARROWS_W + 10.)).child(
-                            Input::new(&s.prompt)
-                                .small()
-                                .prefix(text(11.5, theme::TEXT_MUTED).pr(px(6.)).child("Prompt")),
+                            v_flex()
+                                .gap_1()
+                                .child(text(11.5, theme::TEXT_MUTED).child("Prompt"))
+                                .child(Textarea::new(&s.prompt)),
                         ),
                     ),
             );
@@ -651,26 +1008,7 @@ impl Workspace {
                     )
             } else {
                 h_flex()
-                .px(px(28.))
-                .py(px(12.))
-                .child(text(12., theme::TEXT_MUTED).child(
-                "Adding, removing or reordering stages applies from the next ticket; a stage's own \
-                 settings apply when it next starts.",
-            ))
             };
-        let limit = |label: &str, value: String| {
-            v_flex()
-                .flex_1()
-                .px(px(14.))
-                .py(px(12.))
-                .gap_1()
-                .rounded(px(10.))
-                .bg(color(theme::SURFACE))
-                .border_1()
-                .border_color(color(theme::BORDER_SUBTLE))
-                .child(text(12., theme::TEXT_MUTED).child(label.to_string()))
-                .child(text(16., theme::TEXT).child(value))
-        };
         v_flex()
             .size_full()
             .bg(color(theme::PANEL))
@@ -693,61 +1031,68 @@ impl Workspace {
                                             .font_weight(FontWeight::MEDIUM)
                                             .child("Pipeline settings"),
                                     )
-                                    .child(
-                                        Button::new("settings-back")
-                                            .label("← Back to pipeline")
+                                    .child({
+                                        let file = draft.file.clone();
+                                        Button::new(SharedString::from(format!("export-{orch}")))
+                                            .label("Export…")
                                             .ghost()
-                                            .small()
+                                            .tooltip(
+                                                "Save this pipeline as a file to send someone. \
+                                                 Saved settings only; it holds no secrets.",
+                                            )
                                             .on_click(cx.listener(move |ws, _, window, cx| {
-                                                ws.show_pipeline_view(
-                                                    orch,
-                                                    super::pipeline_tab::TabView::Pipeline,
-                                                    window,
-                                                    cx,
-                                                )
-                                            })),
-                                    ),
+                                                ws.export_pipeline(file.clone(), window, cx)
+                                            }))
+                                    }),
                             )
+                            // 1. What it's called and how it looks in the sidebar.
                             .child(
                                 v_flex()
                                     .gap_2()
-                                    .child(section("Orchestrator name"))
+                                    .child(section("Name"))
                                     .child(div().max_w(px(480.)).child(Input::new(&draft.name)))
-                                    .child(text(12., theme::TEXT_MUTED).child(
-                                        "Shown in the sidebar, notifications and Slack messages",
-                                    )),
+                                    .child(color_swatches(orch, draft.color, cx)),
                             )
+                            // 2. Where its work comes from.
                             .child(
                                 v_flex()
                                     .gap_2()
-                                    .child(section("Default confidence bar"))
+                                    .child(section_tip(
+                                        "Where work comes from",
+                                        "Linear: picks tickets from a team. Slack: takes pull \
+                                         requests posted in a channel. None: you give it work.",
+                                    ))
+                                    // A row like the options under it: label, then the choice.
                                     .child(
                                         h_flex()
-                                            .max_w(px(480.))
                                             .gap_3()
-                                            .px(px(14.))
-                                            .py(px(12.))
-                                            .rounded(px(10.))
-                                            .bg(color(theme::SURFACE))
-                                            .border_1()
-                                            .border_color(color(theme::BORDER_SUBTLE))
-                                            .child(div().flex_1().child(Slider::new(&draft.bar)))
                                             .child(
-                                                text(13., theme::TEXT).child(format!("{default}%")),
+                                                text(12.5, theme::TEXT_SECONDARY)
+                                                    .w(px(170.))
+                                                    .flex_none()
+                                                    .child("Source"),
+                                            )
+                                            .child(
+                                                div().w(px(300.)).child(
+                                                    Select::new(&draft.trigger)
+                                                        .small()
+                                                        .menu_width(px(300.)),
+                                                ),
                                             ),
-                                    ),
+                                    )
+                                    .child(self.render_linear_settings(orch, draft, cx))
+                                    .child(self.render_slack_settings(draft)),
                             )
+                            // 3. What it does, step by step.
                             .child(
                                 v_flex()
                                     .gap_2()
-                                    .child(section(&format!(
-                                        "Stages · run top to bottom · {count} stages"
-                                    )))
-                                    .child(text(12., theme::TEXT_MUTED).child(
-                                        "Prompts can use {ticket}, {ticket_lower}, {feature_env} \
-                                         and {handoff}. After each one, hydraui adds a short note: \
-                                         where the stage sits, its skill, and to finish with \
-                                         stage_report.",
+                                    .child(section_tip(
+                                        "Steps",
+                                        "Each step is a Claude session, run top to bottom; the \
+                                         next starts when one passes its bar. In a prompt, \
+                                         {ticket} is the ticket, {pr} the pull request link, \
+                                         {handoff} what the step before handed over.",
                                     ))
                                     .child(stages)
                                     .child(
@@ -765,48 +1110,279 @@ impl Workspace {
                                             .text_center()
                                             .text_color(color(theme::TEAL))
                                             .text_size(px(13.5))
-                                            .child("+ Add stage")
+                                            .child("+ Add step")
                                             .on_click(cx.listener(move |ws, _, window, cx| {
                                                 ws.add_stage(orch, window, cx)
                                             })),
-                                    )
-                                    .child(
-                                        h_flex()
-                                            .px(px(14.))
-                                            .py(px(10.))
-                                            .gap_3()
-                                            .rounded(px(10.))
-                                            .border_1()
-                                            .border_color(color(theme::BORDER_SUBTLE))
-                                            .child(
-                                                text(13., theme::TEXT_SECONDARY)
-                                                    .child("Done · PR left for a person to merge"),
-                                            )
-                                            .child(div().flex_1())
-                                            .child(
-                                                text(11.5, theme::TEXT_MUTED)
-                                                    .child("Always last · can't be removed"),
-                                            ),
                                     ),
                             )
+                            // 4. How it asks product.
+                            .child(self.render_product_settings(orch, draft, cx))
+                            // 5. Everything else, folded away.
                             .child(
-                                v_flex().gap_2().child(section("Limits")).child(
-                                    h_flex()
-                                        .gap_3()
-                                        .max_w(px(640.))
-                                        .child(limit(
-                                            "Retries before escalating",
-                                            format!("{MAX_ATTEMPTS}"),
-                                        ))
-                                        .child(limit(
-                                            "Claude allowance floor",
-                                            format!("{floor}%"),
-                                        )),
-                                ),
-                            ),
+                                div()
+                                    .id(SharedString::from(format!("settings-advanced-{orch}")))
+                                    .cursor_pointer()
+                                    .text_size(px(12.5))
+                                    .text_color(color(theme::TEXT_SECONDARY))
+                                    .hover(|d| d.text_color(color(theme::TEXT)))
+                                    .child(if draft.advanced {
+                                        "▾ Advanced"
+                                    } else {
+                                        "▸ Advanced"
+                                    })
+                                    .on_click(cx.listener(move |ws, _, _, cx| {
+                                        ws.with_draft(orch, cx, |d| d.advanced = !d.advanced)
+                                    })),
+                            )
+                            .when(draft.advanced, |d| {
+                                d.child(
+                                    v_flex()
+                                        .gap(px(20.))
+                                        .pl(px(14.))
+                                        .border_l_2()
+                                        .border_color(color(theme::BORDER_SUBTLE))
+                                        .child(
+                                            v_flex()
+                                                .gap_2()
+                                                .child(section_tip(
+                                                    "Tickets at once",
+                                                    "One at a time: one ticket after another. Up \
+                                                     to N: the orchestrator runs up to N tickets \
+                                                     side by side, each with its own sessions \
+                                                     under it, so it sees how they relate.",
+                                                ))
+                                                .child(runs_buttons(orch, draft.runs, cx)),
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .gap_2()
+                                                .child(section_tip(
+                                                    "Pass mark",
+                                                    "How confident a step must be to move on. A \
+                                                     step can set its own.",
+                                                ))
+                                                .child(
+                                                    h_flex()
+                                                        .max_w(px(480.))
+                                                        .gap_3()
+                                                        .child(
+                                                            div()
+                                                                .flex_1()
+                                                                .child(Slider::new(&draft.bar)),
+                                                        )
+                                                        .child(
+                                                            text(13., theme::TEXT)
+                                                                .child(format!("{default}%")),
+                                                        ),
+                                                ),
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .gap_2()
+                                                .child(section_tip(
+                                                    "Branch name",
+                                                    "The branch every step must use, e.g. \
+                                                     {ticket}. Empty: any branch.",
+                                                ))
+                                                .child(
+                                                    div()
+                                                        .max_w(px(480.))
+                                                        .child(Input::new(&draft.branch)),
+                                                ),
+                                        )
+                                        .child(text(12., theme::TEXT_MUTED).child(format!(
+                                            "A step that fails is retried up to {MAX_ATTEMPTS} \
+                                             times. Steps pause below {floor}% of the Claude week."
+                                        ))),
+                                )
+                            }),
                     ),
             )
             .child(save_bar)
             .into_any_element()
     }
+}
+
+/// The Colour row: one swatch per `pipeline::COLORS`, the chosen one ringed.
+fn color_swatches(
+    orch: PaneId,
+    chosen: Option<u32>,
+    cx: &mut Context<Workspace>,
+) -> gpui::AnyElement {
+    let chosen = chosen.unwrap_or(theme::TEAL);
+    h_flex()
+        .gap_2()
+        .children(pipeline::COLORS.iter().map(|(name, hex)| {
+            let (name, hex) = (*name, *hex);
+            let on = hex == chosen;
+            div()
+                .id(SharedString::from(format!(
+                    "pipeline-color-{orch}-{hex:06x}"
+                )))
+                .size(px(22.))
+                .rounded_full()
+                .p(px(3.))
+                .border_2()
+                .border_color(if on {
+                    color(theme::TEXT)
+                } else {
+                    gpui::transparent_black()
+                })
+                .cursor_pointer()
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(name).build(window, cx)
+                })
+                .child(div().size_full().rounded_full().bg(color(hex)))
+                .on_click(cx.listener(move |ws, _, _, cx| {
+                    // Teal is the default: chosen, the file needs no colour.
+                    let pick = (hex != theme::TEAL).then_some(hex);
+                    ws.with_draft(orch, cx, |d| d.color = pick)
+                }))
+        }))
+        .into_any_element()
+}
+
+impl Workspace {
+    /// **Product questions**: where a step asks product, and how it writes the question (one of
+    /// `pipeline::PRODUCT_STYLES`, or the person's own words).
+    fn render_product_settings(
+        &self,
+        orch: PaneId,
+        draft: &SettingsDraft,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let style = draft.product_style.read(cx).value().trim().to_string();
+        let presets = h_flex()
+            .gap_1()
+            .children(
+                pipeline::PRODUCT_STYLES
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (label, text))| {
+                        let b =
+                            Button::new(SharedString::from(format!("product-style-{orch}-{i}")))
+                                .label(*label)
+                                .small()
+                                .tooltip(*text)
+                                .on_click(cx.listener(move |ws, _, window, cx| {
+                                    let Some(input) = ws
+                                        .pipeline_settings
+                                        .get(&orch)
+                                        .map(|d| d.product_style.clone())
+                                    else {
+                                        return;
+                                    };
+                                    input.update(cx, |s, cx| s.set_value(*text, window, cx));
+                                    cx.notify();
+                                }));
+                        if style == *text {
+                            b.primary()
+                        } else {
+                            b.ghost()
+                        }
+                    }),
+            );
+        let asks = draft.product_asks;
+        let ask = |on: bool, label: &'static str| {
+            let b = Button::new(SharedString::from(format!("product-asks-{on}-{orch}")))
+                .label(label)
+                .xsmall()
+                .on_click(cx.listener(move |ws, _, _, cx| {
+                    ws.with_draft(orch, cx, |d| d.product_asks = on)
+                }));
+            if asks == on { b.primary() } else { b.ghost() }
+        };
+        let rule = if asks {
+            "Every step is told: a change beyond the ticket that alters what users see or do \
+             (a feature, copy or a flow) is product's call, so it asks before making it and the \
+             ticket waits for the answer."
+        } else {
+            "Steps aren't told to ask product and can't: they decide within their own prompt. \
+             Right for reviews, where the PR's author owns the change."
+        };
+        let mut body = v_flex()
+            .gap_2()
+            .child(section_tip(
+                "Product questions",
+                "Whether steps ask product before a change beyond the ticket, how they write the \
+                 question, and the Slack channel it goes to (empty: they ask you here).",
+            ))
+            .child(
+                h_flex()
+                    .gap_3()
+                    .child(
+                        text(12.5, theme::TEXT_SECONDARY)
+                            .w(px(170.))
+                            .flex_none()
+                            .child("Steps ask product"),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(ask(true, "On"))
+                            .child(ask(false, "Off")),
+                    ),
+            )
+            .child(
+                div()
+                    .max_w(px(640.))
+                    .child(text(12., theme::TEXT_MUTED).child(rule)),
+            );
+        if !asks {
+            return body.into_any_element();
+        }
+        body = body
+            .child(presets)
+            .child(
+                div()
+                    .max_w(px(640.))
+                    .child(Textarea::new(&draft.product_style)),
+            )
+            .child(
+                div().max_w(px(480.)).child(
+                    Input::new(&draft.product)
+                        .prefix(text(11.5, theme::TEXT_MUTED).pr(px(6.)).child("Channel")),
+                ),
+            );
+        body.into_any_element()
+    }
+}
+
+/// The Runs at once row: 1 to `pipeline::MAX_RUNS_AT_ONCE`, the chosen one filled.
+fn runs_buttons(orch: PaneId, chosen: u8, cx: &mut Context<Workspace>) -> gpui::AnyElement {
+    h_flex()
+        .gap_1()
+        .children((1..=pipeline::MAX_RUNS_AT_ONCE).map(|n| {
+            let b = Button::new(SharedString::from(format!("pipeline-runs-{orch}-{n}")))
+                .label(if n == 1 {
+                    "One at a time".to_string()
+                } else {
+                    format!("Up to {n}")
+                })
+                .small()
+                .on_click(cx.listener(move |ws, _, _, cx| ws.with_draft(orch, cx, |d| d.runs = n)));
+            if n == chosen { b.primary() } else { b.ghost() }
+        }))
+        .into_any_element()
+}
+
+/// A section heading with its explanation on hover (ⓘ), so the page stays short.
+fn section_tip(title: &str, tip: &'static str) -> gpui::AnyElement {
+    h_flex()
+        .gap_1()
+        .items_center()
+        .child(text(11., theme::TEXT_MUTED).child(title.to_uppercase()))
+        .child(
+            div()
+                .id(SharedString::from(format!("tip-{title}")))
+                .text_size(px(11.))
+                .text_color(color(theme::TEXT_MUTED))
+                .cursor(gpui::CursorStyle::Arrow)
+                .child("ⓘ")
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(tip).build(window, cx)
+                }),
+        )
+        .into_any_element()
 }

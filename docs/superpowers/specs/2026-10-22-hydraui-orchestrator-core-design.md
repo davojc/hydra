@@ -537,3 +537,503 @@ starts over and the stage doesn't use up an attempt.
   new terminal's token. A stage that was running reopens the same way in its logged folder,
   told to carry on and call `stage_report`, and its latest attempt moves to the new token. A
   stage whose Claude session wasn't logged ends as if its session had gone (§5.2).
+
+## 14. Going back to an earlier stage
+
+Jordan (2026-10-24): INTH-166's Verify failed twice because Develop had pushed the wrong branch,
+and once a stage passed there was no way back to its session to correct it. A person whose run
+waits for them can now choose **Go back…** in the Pipeline tab's banner:
+
+- **The choice.** Pick an earlier stage that passed, and write a note (required).
+  `Choice::Back { stage, note }`.
+- **Same conversation.** That stage's own session reopens with the note: `claude --resume` of its
+  last attempt's Claude session, in that attempt's folder, both read from the run's log. It's
+  kept as a new attempt so its earlier report stays in the timeline. It keeps the skills its
+  conversation already used, so the skill rule doesn't make it start over. It reports again and
+  must clear its bar again, and the branch rule too.
+- **Later stages.** They wait for it again, and their earlier attempts no longer count toward
+  their three tries (`StageRun::counted_from`). Their history stays visible.
+- **The orchestrator** is told the run went back and to wait for the report. Then it starts the
+  next stage as usual.
+- **No session in the log.** Without a logged session (runs from before session ids were logged)
+  the stage fails as if its session had gone, so the orchestrator starts it afresh.
+- **Logged** as `person {choice: "back", stage, note}`, `went back`, and `stage reopened {stage,
+  label}`. A restart replays it.
+
+## 15. Asking product instead of deciding (added 2026-10-26)
+
+INTH-166's Develop stage removed the browser's automatic translation: a call for product, not
+for a stage. Every stage is now told so, and has a way to ask.
+
+- **The rule**, in every stage's note: a change beyond the ticket that alters what users see or
+  do (removing or changing a feature, copy or a flow) is a product decision; ask before making
+  it, and wait.
+- **Where it asks.** A pipeline's `[product] channel = "#…"` (Pipeline settings → Product
+  questions): the stage posts the question there itself (the ticket, the options, its pick)
+  with the environment's Slack tools, then calls **`stage_ask`** with the question and the
+  message's link. Without a channel it calls `stage_ask` alone and the user answers in hydraui.
+- **The ticket waits** (the user's choice: one ticket at a time, nothing else starts): the run
+  is needs-you with its question kept on the run (`Run.asking`); the card shows **Asked
+  product** in amber with the line `<ticket> · <stage> · paused for product`, then (since simplified, Jordan: too much text) one line, **⏸ Waiting for product · N min · see
+  question**, which opens a dialog with with the question, where and when it was
+  asked, when it next checks for a reply, **Open thread ↗**, **Check now** and **Answer…**; the
+  Automatic line says the ticket is paused for a product answer, and a notification says so. The orchestrator is told to do nothing until it's answered. A person can't re-run or go
+  back while it asks (the question would be lost), only stop the ticket.
+- **The answer.** Every 5 minutes (or at once with **Check now**) hydraui types to the waiting session: look in the thread; if
+  it's answered, call **`stage_answer`** with it and carry on. Or the user's **Answer…** records
+  it and types it to the session. A stage that reports or fails while asking drops the question.
+- **Logged and resumed**: `asked` (stage, question, link) and `answered` (answer) in the run's
+  log; a restart brings a waiting question back.
+- **No go-ahead needed** (Jordan, 2026-10-26): a stage asks rather than asking the user whether
+  to ask. With a channel, its Claude starts with `--allowedTools=` posting a Slack message and
+  reading a thread (`pipeline::PRODUCT_TOOLS`), so neither waits on a permission prompt.
+- **Questions already open count.** INTH-165's stages carried a product-owner question from the
+  ticket along as "pending PO" (and marked its test `@fixme`), so nothing on the run showed it.
+  The rule now says to register an open question with `stage_ask` and its link as well.
+- **A stray "needs you".** Claude can send a permission-prompt notification just after its turn
+  ends; an orchestrator waiting for its stage then read "needs you" for nothing. A `waiting`
+  within 10 s of the session going idle is ignored (`busy.rs`, `STRAY_WAIT`).
+
+## 16. Must address (added 2026-10-26)
+
+A stage's reasons against are often the real problems (Jordan, 2026-10-26), yet a stage that
+clears its bar goes on regardless. A person can now hold a stage to them.
+
+- **Marking.** In a stage's report (the Pipeline tab's report panel, or the stopped banner), each
+  reason against has a **Must address** toggle. Only the stage's latest report can be marked,
+  in a run that's still open and not waiting on a product answer. The marks are kept on the
+  attempt (`Attempt.must`).
+- **Send back.** With at least one marked, **Send back to <stage> · fix N reasons** appears
+  under the reasons. The stage's session is told the marked reasons, to deal with each and to
+  say in its next report how each was dealt with (`runs::must_note`).
+  - A stage that waits for the person (stopped below its bar) re-runs with that note.
+  - An earlier stage that passed reopens its own session (§14), and the stages after it run
+    again.
+  - While another stage is at work, the send-back waits (`Run.fix_after`). Once that stage
+    reports or fails, the run goes back instead of going on or finishing. The report shows
+    **↩ Going back to <stage> once <stage at work> reports**, with **Cancel send back**.
+- **The orchestrator** is told the run went back, as with **Go back** (that message now wins
+  over a pass in the same wake-up).
+- **Logged and resumed** as `marked {stage, reason, on}`, `sent back {stage}` and `send-back
+  cancelled {stage}`. A restart replays them, a waiting send-back included.
+
+## 17. New pipeline (added 2026-10-26)
+
+Until now a pipeline could be edited in **Pipeline settings** but not made in the app: another
+meant copying a TOML file by hand.
+
+- **Where.** **▶ Start pipeline** and **+ New pipeline** under the sidebar's **+ New**, for the
+  selected environment (shown only where Claude is set up); **New pipeline…** in the launcher, and as the last entry of **Start orchestrator…**'s
+  pipeline list (which now always shows, even with one pipeline).
+- **Start from.** **Blank** (one stage, `first`, to rename and fill in) or **Copy of <pipeline>**:
+  its stages, bars, prompts, branch and product channel, comments kept.
+- **Name.** The name the views show; its file is `<name>` in lowercase with words joined by `-`
+  (`pipeline::file_name_for`). An existing file is never overwritten.
+- **A copy takes no tickets yet.** Its `[linear] watch` is set false and `[autostart]` dropped, so
+  it can't race its original for the same tickets until you turn them on in its settings.
+- **Then** its orchestrator starts (in the environment already chosen, else one picked) and its
+  Pipeline tab opens on **Settings**.
+
+## 18. Pull requests from Slack (added 2026-10-26)
+
+A pipeline's work can come from a Slack channel instead of Linear: Jordan's **Review PR's**
+pipeline reviews each pull request posted in #pull-requests.
+
+```toml
+[slack]
+channel = "C0C217CER6G"     # the channel's id (names can be renamed)
+label = "#pull-requests"    # how the card shows it
+reaction = "eyes"           # the mark that a message is taken (default)
+every_minutes = 2           # default
+lookback_hours = 24         # how far back a look goes (default)
+watch = true                # start in Automatic
+```
+
+- **One trigger.** A pipeline has `[linear]` or `[slack]`, not both. The card's Automatic switch,
+  its line and its failure handling are shared (`linear::Watch`, `linear_watch::trigger`).
+- **The token** is the secret `<env>/slack` (launcher → Set secret: other…), a Slack **user**
+  token (Jordan's choice, so the 👀 shows as them) with `channels:history`, `reactions:read` and
+  `reactions:write`. A missing, revoked or under-scoped token stops Automatic at once and says
+  why; other failures retry, three in a row stop it.
+- **A look** (`slack_watch::find_and_mark`) reads the channel's people-posted messages from the
+  last `lookback_hours`, oldest first. A message with the reaction already, from anyone, is
+  someone's (Jordan's choice); one without a GitHub pull request link isn't for it. Each message
+  it takes gets the reaction first, then each of its pull requests not run before is queued, so
+  a message with three stacked PRs brings three runs.
+- **One at a time.** The queue (kept in `<HYDRA_HOME>/hydraui/slack-queue/<pipeline>.json`, so a
+  restart loses nothing) starts its next pull request whenever no run is open; looks happen only
+  when the queue is empty. The orchestrator is told the ticket (`<repo>-<number>`, e.g.
+  `svc-usage-62`), a title (`svc-usage #62`) and the link, and passes the link to `run_start`
+  (`link`, new); stage prompts get it as `{pr}` (or `{link}`). One it hasn't started within 5
+  minutes is skipped with a notification.
+- **Take next PR** (Manual) starts the next waiting pull request, else looks now.
+- **Your own pull requests are skipped** (Jordan, 2026-10-26): the first real one, version2-frontend
+  #5548, was Jordan's own, and GitHub won't let an author approve. A look asks GitHub, as the
+  environment's `gh` login (`hydra run <env> -- gh`), who you are (once) and who opened each
+  candidate. Yours aren't queued, and a message carrying only yours gets no reaction, so someone
+  else can take it. Passed-over PRs are remembered while hydraui runs, so GitHub isn't asked
+  again. A failed lookup fails the look, like any other.
+- **In Pipeline settings** (added later the same day; since folded into one **Trigger** section, Jordan: a heading, a dropdown of None, Linear or Slack, then that trigger's options): a **Slack** section beside **Linear**, with
+  the channel id, how it's shown, how often to check, how far back to look and the reaction.
+  Turning one trigger on turns the other off, and saving refuses both at once. The table keeps
+  its comments, and `label` is dropped when it's empty or the channel id.
+- **Connect Slack** (Jordan, 2026-10-26: "if they all have to make a bot it's a bit crap"). One team
+  Slack app; each person signs in to it, and nobody makes an app. Slack only hands a token to
+  whoever holds the app's client secret, so the team's Canopy (`slack_connect_url` in
+  hydraui's config.toml) finishes the sign-in: hydraui listens on `127.0.0.1:<random port>`,
+  opens `<canopy>/api/slack/connect?port&state=<48-hex nonce>`, Canopy (signed in) sends the
+  browser through Slack's consent screen and answers with a page that posts the user token to
+  `http://127.0.0.1:<port>/slack` with the nonce. hydraui keeps only a post with its nonce and
+  an `xoxp-` token, stores it as `<env>/slack`, and puts Slack watchers in that environment that
+  had stopped back on Automatic. Canopy stores nothing (iov42/pw-dashboard branch
+  `slack-connect`). Reached from the launcher (**Connect Slack…**) or the card's **Connect
+  Slack** while its Slack watcher is stopped.
+
+## 19. A colour per pipeline (added 2026-10-26)
+
+With INTH and Review PR's side by side, their cards looked the same. A pipeline may set
+`color = "#rrggbb"`: its card's ◆, the selected card's tint and border, its progress segments, and
+the frame and guide line round its sessions take it. Without one it's the default teal. Pipeline
+settings → **Colour** offers eight (`pipeline::COLORS`: Teal, Blue, Violet, Pink, Orange, Yellow,
+Green, Slate); choosing Teal removes the key. The card reads the file each time it's drawn, so a
+change shows at once, even mid-run. State colours (the pill: working, needs you, asked product,
+done) are unchanged.
+
+## 20. Runs at once (added 2026-10-26)
+
+A pipeline may work on several tickets together: `runs_at_once = N` (1 to 6; Pipeline settings →
+**Runs at once**). The one-ticket-at-a-time rule stays per orchestrator; a pipeline simply gets N
+of them (Jordan chose "one card per run"):
+
+- **Starting** (Jordan, revised: "spun up once the first picks up a ticket") a pipeline opens
+  one orchestrator. When work arrives and every orchestrator is busy, another starts, up to
+  `runs_at_once` (`slot_for_work`); the ticket waits for it to be ready. So **Tickets at once**
+  (Pipeline settings → Advanced) reads **One at a time** or **Up to 2…6**. Extra orchestrators stay
+  open once started and take later work. Names are `orchestrator 1`, `2`, … when the pipeline
+  allows more than one.
+- **A new orchestrator gets its ticket after its first turn** (bug, 2026-10-26: orchestrator 2 was
+  handed pw-dashboard #58 the instant its session started; Claude submitted its startup prompt
+  0.3 s later and the typed hand-over was lost). Wake-ups wait until a just-opened orchestrator's
+  first turn ends (`starting_up`, Working → Idle), or 90 s. A pull request an orchestrator was
+  handed but didn't start within 5 minutes goes back to the front of the queue once
+  (`Queued::tries`), then is skipped with a notification.
+- **In the sidebar** (Jordan, revised the same day: not separate cards): one block per pipeline,
+  with one card (its name, "1 of 2 running", the most urgent state), its trigger row, then
+  `orchestrator 1`, `orchestrator 2`, … each with its ticket line (ticket · stage · state, its SLA
+  and PR links; click it for that run's Pipeline tab), any product question, and its sessions
+  nested under it (`pipeline_card::group_card`).
+- **One trigger.** The first orchestrator (its *lead*) holds the Linear or Slack switch; the
+  others say "Run 2 of 3: takes work from the first card's Slack". A look happens while any run
+  is free, and what it finds goes to a free one (`free_slot`: no run open, nothing on its way to
+  it). A run told to start that doesn't within 5 minutes frees its slot again.
+- **The line** says "Next PR after all 2 running" only when every run is busy.
+- **Limits.** Each run is its own Claude orchestrator and stage session, so more runs use the
+  Claude week faster. Only the first run hydraui closed on is resumed at launch; any other shows
+  as Interrupted to resume by hand.
+
+## 21. A simpler Pipeline settings page (added 2026-10-26)
+
+Jordan: "so much text … it needs to be super simple and straightforward for non-technical people".
+The page is now four parts, with explanations moved from paragraphs to an ⓘ beside each heading:
+
+1. **Name**: the name, and the colour swatches under it.
+2. **Where work comes from**: the dropdown (None, Linear, Slack), then that trigger's fields with
+   plain labels (Linear: Team, Pick tickets in, Whose tickets, Then move it to, When done, move it
+   to; Slack: Channel name, Channel ID, Mark taken with), hints as placeholders.
+3. **Steps**: the stages and **+ Add step**. The fixed "Done" row and the prompt-placeholder
+   paragraph are gone (the ⓘ names `{ticket}`, `{pr}`, `{handoff}`).
+4. **▸ Advanced**, folded by default: Runs at once, Pass mark (the default bar), Branch name,
+   Product questions channel, and one line on retries and the Claude-week floor.
+
+## 22. A ticket put back is taken again (added 2026-10-26)
+
+Phase 2 skipped any ticket hydraui had a run log for, so a ticket could never loop. INTH-166 ran
+and finished on 24 Oct, was moved back to Ready for Investigation, and the watcher skipped it
+("run here before") while Jordan could see it waiting. hydraui never moves a ticket *into* the
+trigger state (it claims out of it, and moves a passed one on), so a ticket that's there again
+was put back by a person. The watcher now skips only tickets with a run still open here (running,
+or interrupted and waiting to be resumed); the card and notification say "still running here".
+
+## 23. Score again (added 2026-10-26)
+
+A stage stopped below its bar; the person stepped into its session and fixed the problem there,
+but nothing could ask that session to score its work again (Jordan, 2026-10-26). Re-run started
+a new session, losing the fix's context and spending a try.
+
+- **Where.** The stopped banner shows **Score again** beside **Step into**, while the stage's
+  session is still open.
+- **What it does.** The same attempt goes back to `Running` (not counted as another try), the run
+  goes on, and the session is told a person worked on it, to check the stage's work as it is now
+  and call `stage_report` again (`runs::rescore`). Its new report passes or stops the stage as any
+  report does. The orchestrator is told to wait for it.
+- **Logged and resumed** as `scoring again {stage}`; a restart replays it.
+
+## 24. How product questions are written (added 2026-10-26)
+
+Different pipelines ask different readers (Jordan, 2026-10-26): one wants product questions short,
+casual and about the purpose; another wants them technical and data-driven.
+
+- **Setting.** `[product] style` in the pipeline file: what each stage is told about writing a
+  product question, appended to the product rule in its note (`How to write a product question:
+  …`). A style needs no channel; `[product]` now takes either key.
+- **Pipeline settings.** A **Product questions** section (no longer under Advanced) has the two
+  ready-made styles from `pipeline::PRODUCT_STYLES` (**Short and plain**, **Technical, with
+  data**; the chosen one is filled), a box for the person's own words, and the channel.
+
+## 25. Every orchestrator of a pipeline in one tab row (added 2026-10-26)
+
+With two orchestrators under **Review PR's**, the row above the terminal showed only the one on
+screen and its Pipeline tab (Jordan, 2026-10-26). Now, for an orchestrator whose pipeline runs
+tickets at once, the row has each orchestrator of that pipeline in turn, its terminal tab and its
+**Pipeline N** tab, and clicking one shows it. Opening one orchestrator's Pipeline tab (the card,
+a run line) gives the others theirs too, behind it. The row starts with the pipeline's name (◆ in its
+colour), fixed and not a tab, so it's clear which pipeline these tabs are. Then the Pipeline tab(s), always
+first, then each **Orchestrator N** (capitalised), then the terminal's Tasks.
+
+## 26. Sidebar actions, colour everywhere, one pipeline's history (added 2026-10-26)
+
+- **Sidebar actions** (Jordan, 2026-10-26: "more organised"). **Open session** and **Create
+  pipeline** side by side, outlined; under them **▶ Start pipeline**, filled and full width, as
+  it's what most people come for.
+- **A pipeline's colour reaches everything it tints**, not only the frame and ◆: the state pill
+  while working or done, the trigger's **Automatic** pill and its next-look bar, the ticket and PR
+  links, and in the Pipeline tab the selected view, the running stage's ring, row and panel
+  header, the passed connectors, **Go back here**, and History's chips and in-progress pill.
+  Red, amber and grey keep their meaning; green stays for a pass or a reason for.
+  The sidebar rows under a pipeline (each orchestrator and session: the selected row and its
+  dot) take its colour too, and its card stays grey: the colour is on the frame, pills and bars.
+  `orchestrator_theme::blend` lays the colour over the dark surface for tints and edges.
+  A colour changed in Pipeline settings reaches a ticket already in progress at once
+  (`Runs::refresh_from_file`, with the product channel and style).
+- **History shows one pipeline.** The run log's `run started` names its pipeline
+  (`run_history::Entry.pipeline`); an orchestrator's History lists only its own pipeline's runs.
+
+## 27. Motion (added 2026-10-26)
+
+The once-a-second redraw made the next-look bar step and the working dot blink on and off
+(Jordan, 2026-10-26: "so stuttery").
+
+- **Next look** counts down to the second (`next look in 3:59`), and its bar slides every frame
+  from the clock (a repeating gpui animation, at most 30 frames a second).
+- **The Pipeline tab with no ticket** shows the same: **No ticket (PR) in progress**, what its
+  trigger is doing with the countdown, and the bar (`linear::look_bar`, shared with the card;
+  `Workspace::trigger_view` is the trigger's state for both).
+  Under it: give the Orchestrator a ticket number or link (a PR link) to start one now,
+  otherwise it keeps looking.
+- **The bar never disappears while it waits for work**, so the row doesn't jump when a wait
+  ends: full and breathing while it looks, then empty again as the next wait starts.
+- **Pipeline settings** lost its **← Back to pipeline** (the view bar's tabs do it), and the
+  trigger's dropdown is a **Source** row lined up with the options under it.
+- **What's at work breathes** (`busy::pulse`: a 1.6 s pulse between 15% and full, in step
+  everywhere, at most 30 frames a second): a working terminal's dot in the sidebar (a stage's
+  session's for as long as its stage is in progress, even while it waits idle on a deploy) and the
+  environment tab, the card's segment for the stage at work, and that stage's name in the
+  Pipeline tab's timeline (its ring's dot stays steady).
+
+## 28. End a pipeline (added 2026-10-26)
+
+There was no way to end a pipeline short of closing its terminals one by one (Jordan,
+2026-10-26). The Pipeline tab's view bar has **■ End pipeline** at its right, red and outlined
+(a plain "End" on the card read as a label, not a button); the card's right-click menu has **End
+pipeline…** too. It asks first, saying how many
+tickets are in progress; **End pipeline** then stops each of its orchestrators' open tickets (as
+**Stop this ticket**: logged as stopped by you) and closes its orchestrators and every session
+under them, so its trigger stops looking. **Start pipeline** starts it again; one with
+`[autostart]` also starts when hydraui does.
+
+
+## 29. A check by hand (added 2026-10-27)
+
+INTH-166's Verify stage stopped as **blocked** at 55%: everything it could run passed, but the
+last proof was real Chrome's own "Always translate", which automated Chrome can't drive. It
+wasn't blocked; it needed a person to try one thing (Jordan, 2026-10-27). `stage_report` now
+takes a third outcome, **check**, with a `check` field saying what to try and what to see.
+Like blocked it never passes by itself: the run needs you, the gate badge reads *check by
+hand*, and the stopped banner shows **What to check** in amber. Its choices add **✓ I checked
+it, it works**, which asks for an optional note and passes the stage (logged as `person`
+`checked`, then `checked`), so the next stage starts or the ticket finishes; re-run is labelled
+**Doesn't work: re-run … with a note**. This is the one choice that lets a stage through
+(§5.3), and only a stage that asked for a check.
+
+## 30. A finished ticket closes its sessions; toasts name their pipeline (added 2026-10-27)
+
+A finished run's last stage session stayed open and idle, and a Slack pipeline that reviews one
+PR per run gathered one idle **1. Review PR** session per PR (Jordan, 2026-10-27). When a run
+finishes (every stage passed), hydraui now closes each of its stage sessions (every attempt's,
+logged as `run finished: closed …`); its orchestrator stays for the next ticket. A run that's
+stopped keeps its sessions, so a person can look at what went wrong. Toasts about a pipeline's
+terminals say which: **Claude finished** and **Claude needs you** are titled
+`<pipeline> · <ticket> · …`, the stopped-ticket toast's overline is `<PIPELINE> STOPPED · NEEDS
+YOU`, and the wake-up, Automatic and Check Linear toasts carry the pipeline's name too.
+
+## 31. One orchestrator, several tickets; Sessions and Pipelines apart (added 2026-10-27)
+
+Three things from using the Review PR's pipeline (Jordan, 2026-10-27):
+
+- **Tickets under one orchestrator.** `runs_at_once` used to start another orchestrator per
+  ticket ("Orchestrator 1, 2…", each with its sessions). Now one orchestrator holds up to
+  `runs_at_once` open runs, each with its own stage sessions, so related pull requests are seen
+  by the one conversation that can relate them. `run_start` refuses a ticket already open, or
+  once that many are open; `run_status` with no run returns every open run (`open_runs`);
+  `stage_start` with no run asks which when several are open. Its card reads *N tickets in
+  progress*; under its row, each ticket's line (click opens its Pipeline tab) then that
+  ticket's sessions; the tab row has a Pipeline tab per ticket, by ticket. Wake-ups for
+  different tickets are joined, not replaced (`join_wake`). After a restart, tickets of the
+  same orchestrator conversation come back under one terminal. A second orchestrator is only
+  ever started by hand.
+- **Every PR in a message.** A message with several PR links gets one 👀 and a run per link,
+  each told the others it was posted with. The watcher keeps looking while the orchestrator is
+  full: what it takes waits in the queue, already marked, so nobody else picks it up (before,
+  it stopped looking while a review ran and others took those messages).
+- **Sessions · Pipelines.** The left list has two tabs: Sessions (Open session and your own
+  terminals) and Pipelines (Start pipeline, Create pipeline, interrupted runs and each
+  pipeline's block). It opens on Pipelines when any run here, and switches to whichever holds
+  a terminal shown from a toast or link.
+
+## 32. A merged PR ends its ticket; one Pipeline tab (added 2026-10-27)
+
+svc-usage #66's review approved the PR on GitHub, then reported 92 against its 95 bar, so the
+run stopped for a person; a re-run then reviewed it again after it had merged and posted five
+more comments (Jordan, 2026-10-27). The score is the stage's confidence; approving was a step
+it took before its gate. Two changes:
+
+- **Settled outside hydraui.** Every two minutes hydraui asks GitHub (as the run's
+  environment) for the state of each open run's pull request (its `link`). Merged or closed:
+  the run ends as done (`Runs::settle`, logged as `run ended` with the reason), whatever its
+  gates said; its sessions close and the orchestrator is told not to touch it again.
+- **No outward step below the bar.** Stage sessions are told (server instructions and
+  `stage_report`) not to approve or merge a pull request, or take any step outside hydraui
+  that can't be undone, unless they will report at or above their bar; below it they report
+  and leave that to the person.
+
+The tab row now has one **Pipeline** tab per pipeline, not one per orchestrator or ticket.
+When the pipeline holds more than one ticket, the Pipeline tab's Ticket view opens with a row
+of ticket tabs (a dot in the ticket's state colour, then the ticket); clicking one shows it.
+
+## 33. Checks with screenshots; a check isn't a failure (added 2026-10-27)
+
+- **Screenshots.** `stage_report` takes `screenshots`: up to six absolute paths to .png, .jpg,
+  .gif or .webp images the session captured. hydraui copies them beside the run's log
+  (`runs/<run>/shots/<label>-<n>.<ext>`) and records the copies, so they outlive the session's
+  temp files; a missing file refuses the report, naming it. The stopped banner's **What to
+  check** box shows them as thumbnails (click: full size), beside **✓ I checked it, it works**.
+  Stages are told to attach them whenever a check needs a person's eyes.
+- **Amber, not red.** PRE-830's Test scored 86 against an 85 bar and asked for a check by
+  hand; it read as failed (Jordan, 2026-10-27). A stage waiting for a check is now amber
+  everywhere: the card's pill reads **Check it**, its segment, the timeline's mark (`?`) and
+  the badge (`86% · check by hand`).
+- **Must address** reads as a button: outlined **+ Mark must address**, then red **✓ Marked:
+  must address**.
+
+## 34. A message that didn't take doesn't silence a session (added 2026-10-27)
+
+INTH-170's Plan fix waited on product. hydraui asked it every 5 minutes to look in the Slack
+thread for the answer, but from 13:49 none of those messages reached it, and product's reply
+went unread (Jordan, 2026-10-27). The 13:49 message didn't start the session working (a Claude
+Code question was likely in the way). A prompt hydraui types counts as a draft until the
+session starts on it, so every later message waited for a draft that was never cleared, and
+the "isn't taking messages" toast never came because only one try was made.
+
+- A wake-up that didn't take (`recheck_wakes`) now lets the screen decide whether the input
+  still holds it (`Readiness::prompt_not_taken`): an empty input frees the session for the
+  next try.
+- A wake-up that has waited 3 minutes while its session sits idle without taking it (a draft,
+  or a Claude Code question) tells the person once, with a toast naming the session that
+  stays until closed; clicking it shows that terminal.
+
+Once INTH-170's session read its thread again, it found no decision, rightly: product's reply
+was a question back ("where does this solution apply if we're allowing larger ruleset
+saves?"). The check told it only to look for an answer, so nobody would ever have replied.
+The 5-minute check now also has the stage reply in the thread to a question or request to
+explain that nobody has answered yet, then wait for the decision as before.
+
+A finished ticket no longer stays on its orchestrator's card (Jordan, 2026-10-27: Review PR's
+kept saying "version-2-backend-1840 · Done" after the review ended). Once the last ticket there
+is finished, the card goes back to its pipeline's ready state and drops the ticket's link; a
+stopped one stays so someone can look (`pipeline_card::stays_on_card`). Ticket history keeps
+every finished ticket.
+
+## 35. Not needed (added 2026-10-28)
+
+Beside each reason against's **+ Mark must address** there is **Not needed** (Jordan,
+2026-10-28): a concern the person doesn't want acted on. A reason is one or the other, never
+both (`Runs::mark_as`, logged as `not needed`). Marked, its text is struck through and muted;
+the stage's next session (a re-run, a send-back, or **Score again**) is told those concerns are
+not needed and not to count them against its score again (`waived_note`).
+
+## 36. Tickets without an SLA (added 2026-10-28)
+
+The Hydra Triage pipeline watches PRE's *Next up (prioritised)* for unassigned tickets and found
+none, though Linear had four (Jordan, 2026-10-28): the pick only ever took tickets with an SLA
+running (§3), right for SLA Tickets, but PRE's tickets have none. `[linear] sla_only` (default
+true, so existing pipelines are unchanged) set to false also takes tickets without an SLA: those
+with one still first, by breach; then by priority, Urgent first and no priority last; then the
+oldest. Linear's `priority` and `createdAt` are now read with each ticket. Pipeline settings show
+it as **Which tickets: With an SLA · All, by priority**.
+
+## 37. Labels (added 2026-10-28)
+
+A Linear trigger can be narrowed to labels: `labels = ["Bug", "Frontend"]` in `[linear]`, or "With one of the labels" in Pipeline settings (comma-separated). A ticket is picked only when it carries at least one of them, in any case; no labels means any ticket, as before. Labels are trimmed and a repeat in another case is dropped when read and saved. The check right before a claim asks again, so a ticket whose label was taken off since the list is passed over.
+
+## 38. Open pipelines stay open across a restart (added 2026-10-28)
+
+hydraui saves the pipelines that are open (`~/.hydra/hydraui/open-pipelines.toml`: each one's name, the environment of its first orchestrator, and whether that orchestrator is in Automatic) whenever the set changes, checked each second. At launch each saved pipeline opens again, Automatic or Manual as it was, and its interrupted runs carry on, as an `[autostart]` pipeline's do; `[autostart]` pipelines that weren't open start as before. End pipeline (or closing its orchestrator) takes a pipeline off the list. Nothing is saved before launch has reopened the saved ones, nor while the window is closing, so a quit or a crash both leave the list as it was. `HYDRAUI_NO_AUTOSTART` turns reopening off too.
+
+## 39. Folding pipelines; prompts read whole (added 2026-10-28)
+
+Each pipeline's card in the sidebar has an outlined chevron button beside its name that folds it to one line: the pipeline's name, its state pill and the button (Needs you, Asked product, Check it, Working, Stopped, …), then how many sessions it has open and how its trigger is set (Automatic, Manual or Stopped). The button unfolds it; clicking the rest opens the pipeline, as the card does. A pipeline running several tickets folds as a whole, its pill the most urgent of them. Folding is kept with the open pipelines (§38, `collapsed`), so it lasts across a restart.
+
+In Pipeline settings each stage's prompt, and the product-question style, is a box that grows with what's written (prompts 3 to 14 lines, the style 2 to 10), wrapping instead of running off the edge.
+
+## 40. A pull request posted again is reviewed again (added 2026-10-28)
+
+A Slack look used to pass over any pull request hydraui had ever run, so a re-post asking for a re-review (new commits dismissed the approval) was never picked up: version2-frontend#5550, reviewed at 13:21, posted again by its author at 16:53. Now only a run that hasn't ended (running, or interrupted and waiting to resume) holds its pull request, with the queue and the person's own pull requests as before. A message without the reaction is a new ask, so a pull request whose earlier run ended (done or stopped) starts a new run (`<ticket>-2`, …) and the message is marked.
+
+## 41. Asking product is a setting (added 2026-10-28)
+
+The "a change beyond the ticket that alters what users see or do is product's call: ask" rule (§15) went into every stage of every pipeline, from hydraui's own stage note, where Pipeline settings never showed it. A PR review took it as a reason to ask product about a line in someone else's PR (version2-frontend#5536). It is now `[product] ask` (on unless `false`) and **Steps ask product · On | Off** under Product questions, which says the rule in words. Off: the note leaves the rule out, no Slack tools are pre-approved for it, and `stage_ask` is refused ("decide it within your stage"). The style and channel fields show only when it's on. A run takes its pipeline as it was when it started, so a run already waiting on product keeps waiting.
+
+## 42. Waiting on a pull request's author (added 2026-10-28)
+
+A review that requested changes had only `blocked` to report, which stops the stage and shows **Needs you** (version2-frontend#5418), though nothing was the user's to do. `stage_ask` now takes `who`: `"product"` (the default, §15) or `"author"`, with the pull request's link (required). An author wait is never refused by `[product] ask = false`. The card reads **Waiting on author** in the pipeline's own colour (not amber, not red), the line says "· waiting on the author", the sidebar shows "⏸ Waiting on the author · Nm", and no toast is raised. Every 5 minutes hydraui has the stage look at the pull request again: re-review what changed, answer comments, and when it's safe to approve, approve, post in the Slack thread, `stage_answer` with what changed, and report; otherwise ask for more and stop. Every stage note says to wait this way rather than report blocked. Logs carry `who`, and older logs resume as product questions.
+
+## 43. Waiting PRs shown, waiting runs free their place, a done reaction (added 2026-10-29)
+
+A message with six pull requests (iov42-lingo-app #50–#55) queued all six, but the pipeline was full: runs waiting on an author or on product held 2 of its 6 places, and the queue showed only as a count on a line that appears when every place is taken. So four looked dropped.
+
+- **Waiting PRs are named.** The trigger row under the card says `Waiting: iov42-lingo-app #52, #54, svc-usage #80` in the order they'll start, the repo said once for a run of the same repo (full list in its tooltip). A folded pipeline adds `· 4 waiting`.
+- **A run waiting on someone's answer leaves its place.** `Runs::busy_of` is the open runs not asking (product or author, §15/§42). Only those count against `runs_at_once`, in `start_run` and in choosing an orchestrator with room, and "all N running" counts them. A one-run pipeline takes its next ticket while the first waits on an answer. When the answer comes, the run carries on, so for a while more than `runs_at_once` may run.
+- **A done reaction.** `[slack] done_reaction` (Pipeline settings: **Mark done with**; empty or absent: none). Each look, a message with the taken reaction and without the done one, whose every pull request's latest run ended **done** (or was passed over as the watcher's own) and none is queued or on its way to an orchestrator, gets the done reaction. A stopped run holds the tick back, so an unticked message shows something wasn't reviewed to the end. Only messages within `lookback_hours` are ticked. It must differ from the taken reaction.
+
+## 44. Sharing a pipeline: export and import (added 2026-10-29)
+
+A pipeline is one TOML file holding no secrets (those stay in each environment), so sharing one is sending that file.
+
+- **Export.** **Export…** at the top of Pipeline settings, or **Export pipeline…** in the launcher (pick the pipeline), opens the Save panel in Downloads with `<file>.toml` filled in (`.toml` added when no extension is typed). The file is the pipeline as last saved, comments and all, without `[autostart]`, whose environment is the exporter's own. Unsaved changes in Pipeline settings aren't in it.
+- **Import.** **Import pipeline…** in the launcher, or **Import from a file…** at the end of New pipeline's list, opens a file. It must parse as a pipeline (a mistake is named: "that file isn't a hydraui pipeline: …"), and is written as a new pipeline under its own name. A name already taken gets a number (`INTH 2`, `inth-2.toml`), so nothing is overwritten. Like a copy (New pipeline), it doesn't start at launch and its trigger's `watch` is off, so it takes no tickets until turned on. Its orchestrator then starts (an environment picked as for a new pipeline) with its settings open, to check folders and skills that may not exist on this machine before turning the trigger on.
+
+## 45. A wait on the author can't turn into Needs you; runs keep their pipeline (added 2026-10-29)
+
+iov42-lingo-app #53 showed **Needs you** from 10:05 until the PR merged at 15:28 and after. Two faults:
+
+- **Blocked while waiting on the author.** A Check reply stage asked to wait on the author (§42) and, seven seconds later, reported `blocked` ("nothing new since the review"). A report used to drop the question and stop the run for a person. Now `stage_report` with outcome `blocked` is refused while the stage waits on the author ("you're waiting on the author, so this isn't blocked … end your turn"). The stage stays waiting and is woken every 5 minutes as before. A `done` report still ends the wait, and so does a `blocked` report while waiting on product.
+- **A run outlived its pipeline's stages.** The Check reply stage was added to Review PR's at 09:08 and removed at 10:01. At the 13:24 restart the run was rebuilt against the file as it was then. That file had no `check-reply` stage, so the rebuild failed silently: the run was neither resumed nor ended. Its history said Needs you, and the merged-PR check (which looks at loaded runs) never saw it. `run started` now logs `pipeline_text`, the pipeline file as the run started with it, and a resume rebuilds from that (a log without it uses the current file, as before). That matches §41: a run takes its pipeline as it was when it started.
+
+## 46. Each ticket is a box under its orchestrator (added 2026-10-30)
+
+With several reviews under one orchestrator, the sidebar listed each ticket's line ("svc-requirements-83 · Review PR") and then its sessions in an indented rule. Nothing grouped the line with its sessions, so it was unclear whether a line named the session above or below it. The orchestrator sat directly above the first ticket, so it looked like it ran that one. And the "Waiting on the author" banner at the top didn't say which ticket it meant.
+
+Now, under the orchestrator's row, a guide line runs down to one box per open ticket:
+
+- When there's more than one ticket, a muted line above the boxes says "Coordinating 3 pull requests" (or "3 tickets" when any isn't a PR).
+- Each box's header is the ticket's name, with a pull request as `repo #N` (`pipeline_card::ticket_title`), and its state pill. Clicking the header opens that run in the Pipeline tab.
+- Under the header come that ticket's own "Waiting on…" line (`render_question` per run, whose dialog is about that run), its Linear link and PRs (not repeated for a PR ticket), and the sessions working on it.
+- A box's edge is red when it needs you and amber while waiting on product or a check. Otherwise it's quiet: waiting on an author stays calm, per §42.
+
+A pipeline running tickets in several orchestrators boxes each orchestrator's ticket the same way. A single ticket under one orchestrator is drawn as before, since the card already names it.
+
+## 47. Pipelines on one Linear team, picking differently (added 2026-10-30)
+
+Turning Automatic on was refused when another orchestrator already watched the same Linear team. That kept hydra-triage off: it picks unassigned PRE tickets in Next up, while PRE tickets picks `hydra-xs`/`hydra-s` tickets in the same state, whoever they're assigned to. Since labels and assignee rules exist, one team can feed several pipelines.
+
+The one-watcher rule now compares `linear_watch::pick_key`: team, pick state, assignee rule, `sla_only` and labels, ignoring case and order. Only an identical key is refused ("Another orchestrator already picks PRE tickets in Next up the same way"). A Slack trigger still compares its channel. Where two pipelines' picks overlap (an unassigned `hydra-xs` ticket), a ticket with a run open or waiting to resume in any pipeline is passed over, so it is never run twice at once.

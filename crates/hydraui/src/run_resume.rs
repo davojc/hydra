@@ -23,6 +23,8 @@ pub struct Interrupted {
     pub claude: String,
     /// Per attempt label: the folder its terminal opened in and its Claude session, as logged.
     pub stages: HashMap<String, (Option<PathBuf>, Option<String>)>,
+    /// Its Linear ticket as logged when it started (phase 2 §5): the card's link and SLA.
+    pub ticket: Option<crate::linear::Ticket>,
 }
 
 /// Every run under `<hydra_root>/hydraui/runs` that never ended, whose hydraui is no longer
@@ -40,6 +42,34 @@ pub fn interrupted(hydra_root: &Path, alive: impl Fn(u32) -> bool) -> Vec<Interr
         .iter()
         .filter_map(|f| read(hydra_root, f, &alive))
         .collect()
+}
+
+/// The folder attempt `label` of run `run` opened in and its Claude session, as its log has
+/// them; what reopening that attempt's conversation needs.
+pub fn logged_session(
+    hydra_root: &Path,
+    run: &str,
+    label: &str,
+) -> (Option<PathBuf>, Option<String>) {
+    let Ok(log) = std::fs::read_to_string(crate::run_log::file_for(hydra_root, run)) else {
+        return (None, None);
+    };
+    let (mut folder, mut claude) = (None, None);
+    for e in log
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+    {
+        match event(&e) {
+            "stage folder" if text(&e, "label") == label => {
+                folder = Some(PathBuf::from(text(&e, "folder")));
+            }
+            "claude session" if text(&e, "who") == label => {
+                claude = Some(text(&e, "id").to_string()).filter(|c| !c.is_empty());
+            }
+            _ => {}
+        }
+    }
+    (folder, claude)
 }
 
 fn event(e: &Value) -> &str {
@@ -74,7 +104,16 @@ fn read(hydra_root: &Path, file: &Path, alive: &impl Fn(u32) -> bool) -> Option<
         .map(|e| text(e, "id"))
         .filter(|c| !c.is_empty())?;
     let started = events.iter().find(|e| event(e) == "run started")?;
-    let pipeline = crate::pipeline::load(hydra_root, text(started, "pipeline")).ok()?;
+    // The pipeline as the run started with it (core spec §45), since edited or not; a log from
+    // before that was kept has only the file as it is now.
+    let file = text(started, "pipeline");
+    let pipeline = match started.get("pipeline_text").and_then(Value::as_str) {
+        Some(t) => crate::pipeline::parse(t).ok().map(|mut p| {
+            p.file = file.to_string();
+            p
+        }),
+        None => crate::pipeline::load(hydra_root, file).ok(),
+    }?;
     let run = replay(id, pipeline, &events)?;
     let mut stages: HashMap<String, (Option<PathBuf>, Option<String>)> = HashMap::new();
     for e in &events {
@@ -90,13 +129,40 @@ fn read(hydra_root: &Path, file: &Path, alive: &impl Fn(u32) -> bool) -> Option<
             _ => {}
         }
     }
+    let ticket = events
+        .iter()
+        .rev()
+        .find(|e| event(e) == "linear ticket")
+        .map(|e| crate::linear::Ticket {
+            id: String::new(),
+            identifier: run.ticket.clone(),
+            title: run.summary.clone(),
+            url: text(e, "url").to_string(),
+            sla_breaches_at: e["sla_breaches_at"].as_str().map(str::to_string),
+            sla_high_risk_at: e["sla_high_risk_at"].as_str().map(str::to_string),
+            assignee: None,
+            state: String::new(),
+            priority: 0,
+            created_at: String::new(),
+            labels: Vec::new(),
+        });
     Some(Interrupted {
+        ticket,
         run,
         env: text(orch, "env").to_string(),
         folder: PathBuf::from(text(orch, "folder")),
         claude: claude.to_string(),
         stages,
     })
+}
+
+/// Where stage `stage` (its id) is in run `id`'s pipeline.
+fn stage_index(runs: &Runs, id: &str, stage: &str) -> Option<usize> {
+    runs.run(id)?
+        .pipeline
+        .stages
+        .iter()
+        .position(|s| s.id == stage)
 }
 
 /// Run `id` as `events` made it, through the calls that made it live, with `pipeline` as its
@@ -126,10 +192,21 @@ fn replay(id: &str, pipeline: Pipeline, events: &[Value]) -> Option<Run> {
                     |c| c != id,
                 )
                 .ok()?;
+                runs.set_link(id, text(e, "link"));
             }
             "stage started" => {
                 let s = runs.begin(REPLAYED, id, text(e, "stage"), "", 0).ok()?;
                 runs.link(id, s.stage, text(e, "label"), &s.name);
+            }
+            // A person sent the run back here and its session reopened (Go back).
+            "stage reopened" => {
+                let r = runs.run(id)?;
+                let i = r
+                    .pipeline
+                    .stages
+                    .iter()
+                    .position(|s| s.id == text(e, "stage"))?;
+                runs.link(id, i, text(e, "label"), text(e, "label"));
             }
             "skill used" => {
                 if let Some(token) = latest(&runs, text(e, "stage")) {
@@ -151,12 +228,64 @@ fn replay(id: &str, pipeline: Pipeline, events: &[Value]) -> Option<Run> {
                         note: text(e, "note").to_string(),
                     },
                     "stop" => Choice::Stop,
+                    // A stage asked for a check by hand and the person said it works.
+                    "checked" => Choice::Checked {
+                        note: text(e, "note").to_string(),
+                    },
+                    "back" => Choice::Back {
+                        stage: text(e, "stage").to_string(),
+                        note: text(e, "note").to_string(),
+                    },
                     _ => continue,
                 };
                 runs.person(id, choice).ok()?;
             }
             "paused" => {
                 runs.pause(id, true).ok()?;
+            }
+            // A person marked a reason against Must address, and sent the stage back for it.
+            "marked" => {
+                let i = stage_index(&runs, id, text(e, "stage"))?;
+                let reason = e.get("reason").and_then(Value::as_u64)? as usize;
+                let on = e.get("on").and_then(Value::as_bool).unwrap_or(true);
+                runs.mark(id, i, reason, on).ok()?;
+            }
+            // A person marked a reason against Not needed.
+            "not needed" => {
+                let i = stage_index(&runs, id, text(e, "stage"))?;
+                let reason = e.get("reason").and_then(Value::as_u64)? as usize;
+                let on = e.get("on").and_then(Value::as_bool).unwrap_or(true);
+                runs.mark_as(id, i, reason, crate::runs::Mark::NotNeeded, on)
+                    .ok()?;
+            }
+            // A person worked in the stopped stage's session and asked it to score again.
+            "scoring again" => {
+                let i = stage_index(&runs, id, text(e, "stage"))?;
+                runs.rescore(id, i).ok()?;
+            }
+            "sent back" => {
+                let i = stage_index(&runs, id, text(e, "stage"))?;
+                runs.send_back(id, i).ok()?;
+            }
+            "send-back cancelled" => {
+                runs.cancel_fix(id).ok()?;
+            }
+            // A stage asked a person (product) and the ticket waited.
+            "asked" => {
+                let token = latest(&runs, text(e, "stage"))?;
+                let link = e.get("link").and_then(Value::as_str);
+                // When it was asked, as logged, so the wait doesn't restart with hydraui.
+                let now = std::time::SystemTime::now();
+                let asked = crate::run_history::ago(text(e, "at"), &crate::action_log::now())
+                    .and_then(|d| now.checked_sub(d))
+                    .unwrap_or(now);
+                // Logs from before `who` are product questions.
+                let whom = crate::runs::Whom::parse(text(e, "who")).unwrap_or_default();
+                runs.ask(&token, text(e, "question"), link, asked, whom)
+                    .ok()?;
+            }
+            "answered" => {
+                runs.answered(id, text(e, "answer")).ok()?;
             }
             "resumed" => {
                 runs.pause(id, false).ok()?;
@@ -222,6 +351,30 @@ mod tests {
     }
 
     #[test]
+    fn a_question_waiting_for_its_answer_comes_back_and_an_answered_one_does_not() {
+        let mut log = mid_run();
+        log.push(line(
+            "asked",
+            r#","stage":"b","question":"Remove auto-translate?","link":"https://s/t/1""#,
+        ));
+        let home = home_with(&log);
+        let i = &interrupted(home.path(), |_| false)[0];
+        let ask = i.run.asking.as_ref().expect("still asking");
+        assert_eq!(
+            (ask.stage, ask.question.as_str()),
+            (1, "Remove auto-translate?")
+        );
+        assert_eq!(ask.link.as_deref(), Some("https://s/t/1"));
+        assert!(matches!(i.run.state, RunState::NeedsYou(_)));
+
+        log.push(line("answered", r#","stage":"b","answer":"Keep it""#));
+        let home = home_with(&log);
+        let i = &interrupted(home.path(), |_| false)[0];
+        assert!(i.run.asking.is_none());
+        assert_eq!(i.run.state, RunState::Running);
+    }
+
+    #[test]
     fn a_run_left_open_is_rebuilt_where_it_was() {
         let home = home_with(&mid_run());
         let found = interrupted(home.path(), |_| false);
@@ -241,6 +394,35 @@ mod tests {
             i.stages.get("s-02"),
             Some(&(Some(PathBuf::from("/w/dev")), Some("b-c".to_string())))
         );
+    }
+
+    #[test]
+    fn a_run_resumes_with_its_pipeline_as_it_started_though_a_stage_was_since_removed() {
+        // iov42-lingo-app-53-1 ran Review PR's with a Check reply stage that was removed an
+        // hour later; at the next restart it couldn't be rebuilt, and showed Needs you forever.
+        let two = "name = \"Two\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\nskill = \"qa\"\n\
+                   [[stage]]\nid = \"b\"\ntitle = \"B\"\n";
+        let mut log = mid_run();
+        log[0] = line(
+            "run started",
+            &format!(
+                r#","ticket":"INTH-7","summary":"Export","pipeline":"two","pipeline_text":{}"#,
+                serde_json::to_string(two).unwrap()
+            ),
+        );
+        let home = home_with(&log);
+        let one = "name = \"Two\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\nskill = \"qa\"\n";
+        std::fs::write(crate::pipeline::folder(home.path()).join("two.toml"), one).unwrap();
+        let found = interrupted(home.path(), |_| false);
+        assert_eq!(found.len(), 1);
+        let r = &found[0].run;
+        assert_eq!(r.pipeline.file, "two");
+        assert_eq!(r.pipeline.stages.len(), 2);
+        assert_eq!(r.stages[1].status, StageStatus::Running);
+        // Logged before the pipeline was: the file as it is now, which no longer fits.
+        let home = home_with(&mid_run());
+        std::fs::write(crate::pipeline::folder(home.path()).join("two.toml"), one).unwrap();
+        assert!(interrupted(home.path(), |_| false).is_empty());
     }
 
     #[test]
@@ -277,5 +459,132 @@ mod tests {
         assert_eq!(r.stages[0].attempts.len(), 2);
         assert_eq!(r.stages[0].status, StageStatus::Running);
         assert!(r.paused);
+    }
+
+    #[test]
+    fn a_linear_runs_ticket_comes_back_from_its_log() {
+        let mut log = mid_run();
+        log.insert(
+            3,
+            line(
+                "linear ticket",
+                r#","url":"https://linear.app/iov42/issue/INTH-7","sla_breaches_at":"2026-11-04T14:00:00.000Z","sla_high_risk_at":null"#,
+            ),
+        );
+        let found = interrupted(home_with(&log).path(), |_| false);
+        let t = found[0].ticket.as_ref().unwrap();
+        assert_eq!(t.identifier, "INTH-7");
+        assert_eq!(t.url, "https://linear.app/iov42/issue/INTH-7");
+        assert_eq!(
+            t.sla_breaches_at.as_deref(),
+            Some("2026-11-04T14:00:00.000Z")
+        );
+        assert!(
+            interrupted(home_with(&mid_run()).path(), |_| false)[0]
+                .ticket
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_attempts_folder_and_session_are_read_back_for_reopening() {
+        let home = home_with(&mid_run());
+        assert_eq!(
+            logged_session(home.path(), "INTH-7-2", "s-01"),
+            (Some(PathBuf::from("/w/qa")), Some("a-c".to_string()))
+        );
+        assert_eq!(
+            logged_session(home.path(), "INTH-7-2", "s-09"),
+            (None, None)
+        );
+        assert_eq!(logged_session(home.path(), "NOPE-1", "s-01"), (None, None));
+    }
+
+    #[test]
+    fn a_send_back_waiting_for_the_running_stage_replays() {
+        let against = RATING.replace(
+            r#"[{"side":"for","text":"r"}]"#,
+            r#"[{"side":"for","text":"r"},{"side":"against","text":"No mobile check."}]"#,
+        );
+        let mut log = mid_run();
+        log[7] = line(
+            "report",
+            &format!(r#","stage":"a","label":"s-01","rating":{against}"#),
+        );
+        log.push(line("marked", r#","stage":"a","reason":1,"on":true"#));
+        log.push(line("sent back", r#","stage":"a""#));
+        let r = &interrupted(home_with(&log).path(), |_| false)[0].run;
+        assert_eq!(r.stages[0].latest().unwrap().must, [1]);
+        let fix = r.fix_after.as_ref().expect("still queued");
+        assert_eq!(fix.stage, 0);
+        assert!(fix.note.contains("No mobile check."), "{}", fix.note);
+    }
+
+    #[test]
+    fn a_run_sent_back_to_an_earlier_stage_replays() {
+        let mut log = mid_run();
+        let low = RATING.replace("88", "30");
+        log.push(line(
+            "report",
+            &format!(r#","stage":"b","label":"s-02","rating":{low}"#),
+        ));
+        log.push(line(
+            "person",
+            r#","choice":"back","note":"rename the branch","stage":"a""#,
+        ));
+        log.push(line("stage reopened", r#","stage":"a","label":"s-03""#));
+        let found = interrupted(home_with(&log).path(), |_| false);
+        let r = &found[0].run;
+        assert_eq!(r.stages[0].status, StageStatus::Running);
+        assert_eq!(r.stages[0].attempts.len(), 2);
+        assert_eq!(
+            r.stages[0].latest().unwrap().session.as_deref(),
+            Some("s-03")
+        );
+        assert_eq!(r.stages[1].status, StageStatus::Waiting);
+        assert_eq!(r.stages[1].tries(), 0);
+    }
+
+    #[test]
+    fn a_stage_scoring_again_replays_as_running_on_the_same_try() {
+        let mut log = mid_run();
+        let low = RATING.replace("88", "30");
+        log.push(line(
+            "report",
+            &format!(r#","stage":"b","label":"s-02","rating":{low}"#),
+        ));
+        log.push(line("scoring again", r#","stage":"b""#));
+        let found = interrupted(home_with(&log).path(), |_| false);
+        let r = &found[0].run;
+        assert_eq!(r.state, crate::runs::RunState::Running);
+        assert_eq!(r.stages[1].status, StageStatus::Running);
+        assert_eq!(r.stages[1].attempts.len(), 1);
+    }
+
+    #[test]
+    fn a_check_passed_by_a_person_replays_as_passed() {
+        let mut log = mid_run();
+        let check = RATING.replace(
+            r#""outcome":"done""#,
+            r#""outcome":"check","check":"Try it in Chrome.""#,
+        );
+        log.push(line(
+            "report",
+            &format!(r#","stage":"b","label":"s-02","rating":{check}"#),
+        ));
+        let waiting = interrupted(home_with(&log).path(), |_| false);
+        assert!(matches!(
+            waiting[0].run.state,
+            crate::runs::RunState::NeedsYou(_)
+        ));
+        log.push(line(
+            "person",
+            r#","choice":"checked","note":"works","stage":null"#,
+        ));
+        log.push(line("checked", r#","stage":"b","note":"works""#));
+        let found = interrupted(home_with(&log).path(), |_| false);
+        let r = &found[0].run;
+        assert_eq!(r.stages[1].status, StageStatus::Passed);
+        assert_eq!(r.state, crate::runs::RunState::Finished);
     }
 }

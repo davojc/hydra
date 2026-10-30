@@ -3,7 +3,10 @@
 use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, Hsla, SharedString, Window, div, px};
+use gpui::{
+    Animation, AnimationExt, AnyElement, Context, ElementId, Hsla, SharedString, Window, div,
+    pulsating_between, px,
+};
 use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, WindowExt};
 
@@ -11,6 +14,9 @@ use super::Workspace;
 use crate::activity::{Activity, busiest};
 use crate::envs::PaneId;
 use crate::mcp::{Alert, SessionState, alert_for};
+
+/// How soon after a turn ends a "waiting" is taken as stray rather than a real prompt.
+const STRAY_WAIT: Duration = Duration::from_secs(10);
 
 /// Keys the Claude alerts' toasts, one per terminal, so a newer one replaces the last.
 struct ClaudeAlert;
@@ -47,8 +53,23 @@ pub(super) fn tooltip_text(a: PaneActivity) -> String {
 }
 
 impl Workspace {
+    /// Whether terminal `pane` is the session of a stage in progress (starting or running).
+    pub(super) fn stage_at_work(&self, pane: PaneId, cx: &gpui::App) -> bool {
+        let Some(token) = self
+            .panes
+            .get(&pane)
+            .and_then(|v| v.read(cx).mcp_token().map(str::to_string))
+        else {
+            return false;
+        };
+        crate::mcp::server::get().is_some_and(|sv| {
+            let reg = crate::mcp::server::lock(sv.registry());
+            matches!(reg.runs.role(&token), crate::runs::Role::Stage(r, si) if r.stages[si].status.busy())
+        })
+    }
+
     /// Recomputes every terminal's activity. Redraws when one changed, and while any is
-    /// working (once a second, for the blinking dot: no per-frame animation).
+    /// working (once a second, for the times beside them).
     pub(super) fn tick_activity(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
         let mut changed = false;
@@ -101,11 +122,35 @@ impl Workspace {
             return;
         };
         let before = view.read(cx).claude();
+        // A permission prompt or a question comes during a turn. Claude sometimes sends one
+        // just after its turn ended (an orchestrator waiting for its stage showed "needs you"
+        // for nothing): it isn't one.
+        let idle_for = self
+            .activity
+            .get(&id)
+            .filter(|_| before == Some(SessionState::Idle))
+            .map(|a| a.since.elapsed());
+        if state == SessionState::Waiting && idle_for.is_some_and(|d| d < STRAY_WAIT) {
+            crate::action_log::write(format!(
+                "hook: {}: ignored waiting just after its turn ended",
+                self.pane_name(id, cx)
+            ));
+            return;
+        }
         crate::action_log::write(format!(
             "hook: {}: {before:?} -> {state:?}{}",
             self.pane_name(id, cx),
             if resumed { " (resumed session)" } else { "" }
         ));
+        // A wake-up typed to it took.
+        if state == SessionState::Working {
+            self.sent_wakes.remove(&id);
+            self.wake_tries.remove(&id);
+        }
+        // Its first turn is over: it can be handed work.
+        if before == Some(SessionState::Working) && state == SessionState::Idle {
+            self.starting_up.remove(&id);
+        }
         if state == SessionState::Ended {
             // Claude ended without reporting: its stage fails (orchestrator spec §3.4).
             self.stage_session_gone(token);
@@ -175,9 +220,11 @@ impl Workspace {
         let ws = cx.entity();
         let note = match alert {
             Alert::NeedsYou => Notification::warning(place)
-                .title("Claude needs you")
+                .title(self.toast_title(id, "Claude needs you", cx))
                 .autohide(false),
-            Alert::Finished => Notification::info(place).title("Claude finished"),
+            Alert::Finished => {
+                Notification::info(place).title(self.toast_title(id, "Claude finished", cx))
+            }
         };
         let note = note
             .id1::<ClaudeAlert>(SharedString::from(format!("claude-{id}")))
@@ -205,12 +252,22 @@ impl Workspace {
     /// while quiet, steady when idle.
     pub(super) fn render_tab_dot(
         &self,
+        key: impl Into<ElementId>,
         a: Option<PaneActivity>,
+        at_work: bool,
         tint: Hsla,
         cx: &Context<Self>,
     ) -> AnyElement {
+        let key = key.into();
         let state = a.map(|a| a.state).unwrap_or_default();
-        let dim = state == Activity::Working && !self.blink;
+        let inner = div().size(px(8.)).rounded_full().bg(tint);
+        let inner = if at_work || state == Activity::Working {
+            inner
+                .with_animation(key, pulse(), |d, a| d.opacity(a))
+                .into_any_element()
+        } else {
+            inner.into_any_element()
+        };
         div()
             .size(px(12.))
             .flex_none()
@@ -221,15 +278,17 @@ impl Workspace {
             .when(state == Activity::Waiting, |d| {
                 d.border_2().border_color(cx.theme().warning)
             })
-            .child(
-                div()
-                    .size(px(8.))
-                    .rounded_full()
-                    .bg(tint)
-                    .opacity(if dim { 0.3 } else { 1.0 }),
-            )
+            .child(inner)
             .into_any_element()
     }
+}
+
+/// Something at work breathing: a slow pulse, in step everywhere, at most 30 frames a second.
+pub(super) fn pulse() -> Animation {
+    Animation::new(Duration::from_millis(1600))
+        .repeat_synced()
+        .with_easing(pulsating_between(0.15, 1.0))
+        .with_max_fps(30.)
 }
 
 #[cfg(test)]

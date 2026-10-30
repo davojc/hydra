@@ -14,12 +14,14 @@ use crate::run_log;
 use crate::runs::{Change, Decided, Refusal, Role, StageStatus};
 
 /// The tools this module answers, in the order `tools/list` shows them.
-pub const NAMES: [&str; 5] = [
+pub const NAMES: [&str; 7] = [
     "run_start",
     "stage_start",
     "run_status",
     "stage_brief",
     "stage_report",
+    "stage_ask",
+    "stage_answer",
 ];
 
 /// The `tools/list` entries for `NAMES`.
@@ -31,8 +33,10 @@ pub fn schemas() -> Vec<Value> {
             "description": "Orchestrator: start a run of one ticket through a pipeline's stages. \
                 Returns the run's id, its stages with their skills and confidence bars, and the \
                 first stage. You coordinate: start each stage with stage_start and never do a \
-                stage's work yourself. One ticket at a time: refused while your last run is still \
-                going or waiting for a person.",
+                stage's work yourself. You may hold as many tickets at once as the pipeline's \
+                runs_at_once (one unless it says more): each run has its own id and its own \
+                stage sessions, and hydraui's messages name the run they're about. Refused \
+                when that many are still going or waiting for a person.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -40,6 +44,8 @@ pub fn schemas() -> Vec<Value> {
                         without .toml (ticket is the example hydraui writes)."),
                     "ticket": string("The ticket, e.g. INTH-123."),
                     "summary": string("The ticket's title, in one line."),
+                    "link": string("What the run is about, as a link: the pull request a \
+                        Slack-picked run reviews (optional; stages get it as {pr})."),
                 },
                 "required": ["pipeline", "ticket", "summary"],
             },
@@ -72,7 +78,8 @@ pub fn schemas() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "run": string("The run's id; your current run when left out."),
+                    "run": string("The run's id; left out, your only open run (or latest), and \
+                        when you hold several open, each of them."),
                 },
             },
         }),
@@ -88,12 +95,18 @@ pub fn schemas() -> Vec<Value> {
             "description": "Stage session: end your stage with its confidence rating, once. The \
                 next stage starts only if your score is at or above the stage's bar; below it, \
                 or blocked, a person is asked to step in. Be honest: give evidence and reasons \
-                for and against. Report blocked rather than guess when the stage can't be done \
-                (not enough information, no access, a service down).",
+                for and against. Don't approve or merge a pull request (or take any step outside \
+                hydraui that can't be undone) unless you report at or above the bar: the person \
+                decides below it. Report blocked rather than guess when the stage can't be done \
+                (not enough information, no access, a service down). Report check when the work \
+                is done as far as you can prove it but the last proof needs a person to try \
+                something by hand that no tool here can (a real browser feature automation \
+                can't drive, a device, a printout): say exactly what to try and what they \
+                should see in check. A person then passes the stage or sends it back.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "outcome": {"type": "string", "enum": ["done", "blocked"]},
+                    "outcome": {"type": "string", "enum": ["done", "blocked", "check"]},
                     "score": {
                         "type": "integer", "minimum": 0, "maximum": 100,
                         "description": "Your confidence that the stage is done well.",
@@ -126,8 +139,52 @@ pub fn schemas() -> Vec<Value> {
                     },
                     "handoff": string("What the next stage needs to know (may be empty for the \
                         last stage)."),
+                    "check": string("With outcome check: the steps a person should take by \
+                        hand and what they should see if it works."),
+                    "screenshots": {
+                        "type": "array", "maxItems": rating::MAX_SHOTS,
+                        "items": {"type": "string"},
+                        "description": "Absolute paths to screenshots (.png, .jpg, .gif, .webp) \
+                            of what the person should look at, when you can capture them (a \
+                            browser screenshot of the page, before and after). With check, \
+                            capture them whenever you can: the person sees them in hydraui \
+                            beside the button that passes the stage.",
+                    },
                 },
                 "required": ["outcome", "score", "summary", "evidence", "reasons"],
+            },
+        }),
+        json!({
+            "name": "stage_ask",
+            "description": "Stage session: your stage waits on someone. who \"product\" (the \
+                default): a decision isn't yours to make (a change beyond the ticket that alters \
+                what users see or do); ask it, once you've posted it where your stage note says. \
+                who \"author\": you asked a pull request's author for changes and wait for them \
+                to push or reply; give the pull request's link. Either way the ticket waits, \
+                not marked as needing the user. Then stop: hydraui tells you when to look again, \
+                or gives you the answer. Don't make the change meanwhile.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "question": string("The decision needed, in a sentence or two: what you'd \
+                        change, the options and your recommendation."),
+                    "link": string("The Slack message you asked in (optional), or the pull \
+                        request's link for who \"author\" (required)."),
+                    "who": string("\"product\" (default) or \"author\"."),
+                },
+                "required": ["question"],
+            },
+        }),
+        json!({
+            "name": "stage_answer",
+            "description": "Stage session: the answer to your stage_ask came (you found it in \
+                the Slack thread). Record it, then carry on with your stage as it says.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "answer": string("The answer, and who gave it."),
+                },
+                "required": ["answer"],
             },
         }),
     ]
@@ -164,10 +221,20 @@ pub fn call(
             &arg("pipeline"),
             &arg("ticket"),
             &arg("summary"),
+            &arg("link"),
         ),
         "stage_start" => stage_start(reg, &root, token, &arg("run"), &arg("stage"), &arg("brief")),
         "run_status" => (run_status(reg, token, &arg("run")), None),
         "stage_brief" => (stage_brief(reg, token), None),
+        "stage_ask" => stage_ask(
+            reg,
+            &root,
+            token,
+            &arg("question"),
+            &arg("link"),
+            &arg("who"),
+        ),
+        "stage_answer" => stage_answer(reg, &root, token, &arg("answer")),
         _ => stage_report(reg, &root, token, args),
     })
 }
@@ -190,6 +257,7 @@ fn run_start(
     pipeline_name: &str,
     ticket: &str,
     summary: &str,
+    link: &str,
 ) -> (Outcome, Option<McpEvent>) {
     if let Role::Stage(..) = reg.runs.role(token) {
         return (Outcome::err("a stage session can't start a run"), None);
@@ -233,11 +301,17 @@ fn run_start(
             (r.id.clone(), reply)
         }
     };
+    reg.runs.set_link(&id, link);
+    // The pipeline as it is now, so a restart resumes the run with it though it's edited
+    // meanwhile (core spec §45).
+    let pipeline_text =
+        std::fs::read_to_string(pipeline::folder(root).join(format!("{pipeline_name}.toml"))).ok();
     log(
         root,
         &id,
         "run started",
-        json!({"ticket": ticket, "summary": summary, "pipeline": pipeline_name}),
+        json!({"ticket": ticket, "summary": summary, "pipeline": pipeline_name, "link": link,
+               "pipeline_text": pipeline_text}),
     );
     let started = Change {
         run: id,
@@ -258,7 +332,23 @@ fn stage_start(
     stage: &str,
     brief: &str,
 ) -> (Outcome, Option<McpEvent>) {
+    let open: Vec<String> = reg
+        .runs
+        .open_of(token)
+        .iter()
+        .map(|r| r.id.clone())
+        .collect();
     let run = match run {
+        "" if open.len() > 1 => {
+            return (
+                Outcome::err(format!(
+                    "you hold {} tickets ({}): say which run",
+                    open.len(),
+                    open.join(", ")
+                )),
+                None,
+            );
+        }
         "" => reg
             .runs
             .current(token)
@@ -291,6 +381,15 @@ fn stage_start(
 }
 
 fn run_status(reg: &Registry, token: &str, run: &str) -> Outcome {
+    let live = |t: &str| reg.session(t).map(super::SessionState::word);
+    let open = reg.runs.open_of(token);
+    if run.is_empty() && open.len() > 1 {
+        let all: Vec<Value> = open
+            .iter()
+            .map(|r| reg.runs.status_json(r, reg.min_week_left, live))
+            .collect();
+        return Outcome::ok(pretty(&json!({ "open_runs": all })));
+    }
     let found = match run {
         "" => reg.runs.current(token),
         id => reg.runs.run(id),
@@ -300,10 +399,7 @@ fn run_status(reg: &Registry, token: &str, run: &str) -> Outcome {
         Some(r) if r.orchestrator != token => {
             Outcome::err("only the run's orchestrator reads its status")
         }
-        Some(r) => {
-            let live = |t: &str| reg.session(t).map(super::SessionState::word);
-            Outcome::ok(pretty(&reg.runs.status_json(r, reg.min_week_left, live)))
-        }
+        Some(r) => Outcome::ok(pretty(&reg.runs.status_json(r, reg.min_week_left, live))),
     }
 }
 
@@ -334,6 +430,100 @@ fn stage_brief(reg: &Registry, token: &str) -> Outcome {
     })))
 }
 
+fn stage_ask(
+    reg: &mut Registry,
+    root: &Path,
+    token: &str,
+    question: &str,
+    link: &str,
+    who: &str,
+) -> (Outcome, Option<McpEvent>) {
+    let link = (!link.is_empty()).then_some(link);
+    let Some(whom) = crate::runs::Whom::parse(who) else {
+        return (
+            Outcome::err(format!("who {who:?} must be \"product\" or \"author\"")),
+            None,
+        );
+    };
+    let changes = match reg
+        .runs
+        .ask(token, question, link, std::time::SystemTime::now(), whom)
+    {
+        Ok(changes) => changes,
+        Err(e) => return (Outcome::err(e), None),
+    };
+    run_log::record(root, &reg.runs, &changes);
+    (
+        Outcome::ok(
+            "Recorded: your ticket waits for the answer. Stop here and don't make the change: \
+             hydraui will ask you to look for the answer, or give it to you."
+                .to_string(),
+        ),
+        Some(McpEvent::RunChanged(changes)),
+    )
+}
+
+fn stage_answer(
+    reg: &mut Registry,
+    root: &Path,
+    token: &str,
+    answer: &str,
+) -> (Outcome, Option<McpEvent>) {
+    let Role::Stage(r, i) = reg.runs.role(token) else {
+        return (
+            Outcome::err("only the stage that asked records the answer"),
+            None,
+        );
+    };
+    if r.asking.as_ref().map(|a| a.stage) != Some(i) {
+        return (Outcome::err("your stage isn't waiting for an answer"), None);
+    }
+    let run = r.id.clone();
+    let changes = match reg.runs.answered(&run, answer) {
+        Ok(changes) => changes,
+        Err(e) => return (Outcome::err(e), None),
+    };
+    run_log::record(root, &reg.runs, &changes);
+    (
+        Outcome::ok("Recorded. Carry on with your stage as the answer says.".to_string()),
+        Some(McpEvent::RunChanged(changes)),
+    )
+}
+
+/// Copies `rating`'s screenshots into `<run log>/../<run>/shots/<label>-<n>.<ext>` and points
+/// it at the copies; a missing file is named.
+fn keep_shots(
+    root: &Path,
+    run: &str,
+    label: &str,
+    rating: &mut rating::Rating,
+) -> Result<(), String> {
+    if rating.screenshots.is_empty() {
+        return Ok(());
+    }
+    let dir = run_log::file_for(root, run)
+        .with_extension("")
+        .join("shots");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("can't keep screenshots: {e}"))?;
+    let mut kept = Vec::new();
+    for (n, shot) in rating.screenshots.iter().enumerate() {
+        let from = Path::new(shot);
+        if !from.is_file() {
+            return Err(format!("screenshot {shot} doesn't exist"));
+        }
+        let ext = from
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("png")
+            .to_ascii_lowercase();
+        let to = dir.join(format!("{label}-{}.{ext}", n + 1));
+        std::fs::copy(from, &to).map_err(|e| format!("can't copy screenshot {shot}: {e}"))?;
+        kept.push(to.display().to_string());
+    }
+    rating.screenshots = kept;
+    Ok(())
+}
+
 fn stage_report(
     reg: &mut Registry,
     root: &Path,
@@ -352,7 +542,7 @@ fn stage_report(
         r.pipeline.stages[i].id.clone(),
     );
     let label = r.stages[i].latest().map(|a| a.label.clone());
-    let rating = match rating::from_args(args) {
+    let mut rating = match rating::from_args(args) {
         Ok(rating) => rating,
         Err(e) => {
             return (
@@ -361,6 +551,13 @@ fn stage_report(
             );
         }
     };
+    // Screenshots are copied beside the run's log, so they outlive the session's temp files.
+    if let Err(e) = keep_shots(root, &run, label.as_deref().unwrap_or("s"), &mut rating) {
+        return (
+            Outcome::err(format!("Not recorded: {e}. Fix it and report again.")),
+            None,
+        );
+    }
     // Bars follow the file to the gate (§5.1); one that no longer reads keeps the run's.
     if let Ok(now) = pipeline::load(root, &file) {
         reg.runs.refresh_from_file(&file, &now);
@@ -392,4 +589,34 @@ fn stage_report(
         )
     };
     (Outcome::ok(text), Some(McpEvent::RunChanged(changes)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn checked(shots: Vec<String>) -> rating::Rating {
+        let mut r = rating::from_args(&json!({"outcome": "done", "score": 90, "summary": "s",
+            "evidence": [{"kind": "note", "detail": "d"}],
+            "reasons": [{"side": "for", "text": "r"}]}))
+        .unwrap();
+        r.screenshots = shots;
+        r
+    }
+
+    #[test]
+    fn screenshots_are_kept_beside_the_run_log_and_a_missing_one_is_named() {
+        let home = tempfile::tempdir().unwrap();
+        let shot = home.path().join("from-session.PNG");
+        std::fs::write(&shot, b"png").unwrap();
+        let mut r = checked(vec![shot.display().to_string()]);
+        keep_shots(home.path(), "PRE-1-1", "s-03", &mut r).unwrap();
+        let kept = std::path::PathBuf::from(&r.screenshots[0]);
+        assert!(kept.ends_with("runs/PRE-1-1/shots/s-03-1.png"), "{kept:?}");
+        assert_eq!(std::fs::read(&kept).unwrap(), b"png");
+
+        let mut gone = checked(vec!["/nowhere/x.png".into()]);
+        let e = keep_shots(home.path(), "PRE-1-1", "s-03", &mut gone).unwrap_err();
+        assert!(e.contains("/nowhere/x.png"), "{e}");
+    }
 }

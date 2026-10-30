@@ -3,9 +3,10 @@
 use std::path::PathBuf;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, SharedString, Window, div, px, relative};
+use gpui::{AnimationExt, AnyElement, Context, SharedString, Window, div, px, relative};
 use gpui_component::WindowExt;
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::notification::Notification;
 use gpui_component::{Sizable, h_flex, v_flex};
 
@@ -20,14 +21,26 @@ use crate::rating::{Outcome, Side};
 use crate::runs::{Change, Decided, MAX_ATTEMPTS, Role, Run, RunState, StageStatus, StartStage};
 use crate::worktrees;
 
-/// The first prompt of a terminal started as an orchestrator (spec §3.0, §9).
-pub fn orchestrator_prompt(pipeline: &str) -> String {
+/// A ticket an orchestrator holds open: its run, its card, and its stage sessions' terminals.
+pub(super) type Lane = (Run, Card, Vec<PaneId>);
+
+/// The first prompt of a terminal started as an orchestrator (spec §3.0, §9). A pipeline
+/// with a `[linear]` table may get its tickets from hydraui, whichever mode its card is in, so
+/// its orchestrator waits for one rather than asking.
+pub fn orchestrator_prompt(pipeline: &str, from_linear: bool) -> String {
+    let ticket = if from_linear {
+        "Tickets reach you from hydraui, which picks them (from Linear, or pull requests posted \
+         in Slack) and sends you one, or from me. Don't ask me for one: say you're ready and \
+         wait."
+    } else {
+        "Ask me which ticket to run."
+    };
     format!(
         "You are the orchestrator for hydraui's pipeline \"{pipeline}\". You coordinate one \
-         ticket at a time through its stages and never do a stage's work yourself. Ask me which \
-         ticket to run. Then call run_start with pipeline \"{pipeline}\", the ticket and its \
-         title, and start each stage in order with stage_start. After each one, wait: hydraui \
-         tells you when it reports. When a run needs a person, tell me why and wait."
+         ticket at a time through its stages and never do a stage's work yourself. {ticket} \
+         Then call run_start with pipeline \"{pipeline}\", the ticket and its title, and start \
+         each stage in order with stage_start. After each one, wait: hydraui tells you when it \
+         reports. When a run needs a person, tell me why and wait."
     )
 }
 
@@ -61,6 +74,24 @@ pub fn resume_prompt(run: &str, ticket: &str) -> String {
     )
 }
 
+/// What a stage's own session is told when a person sends the run back to it: their note, that
+/// a later stage found a problem, the branch rule, and to report again.
+pub fn reopen_prompt(run: &Run, stage: usize, note: &str) -> String {
+    let title = &run.pipeline.stages[stage].title;
+    let branch = run
+        .pipeline
+        .branch_for(&run.ticket)
+        .map_or(String::new(), |b| {
+            format!(" Every branch must be named exactly {b}, in each repository.")
+        });
+    format!(
+        "{note}\n\n---\nhydraui: a person sent run {} ({}) back to this stage, {title}, after a \
+         later stage found a problem. Fix it as the note says, then call stage_report again: a \
+         new report replaces your last.{branch}",
+        run.id, run.ticket
+    )
+}
+
 /// What a reopened stage session is told (§13).
 pub const STAGE_RESUME_PROMPT: &str = "hydraui restarted and reopened this session. Please \
      carry on with your stage where you left off, and call stage_report when it's done.";
@@ -72,24 +103,38 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
     let stage = |i: usize| run.pipeline.stages[i].id.as_str();
     let (mut finished, mut needs, mut ended, mut failed, mut passed) =
         (false, None, None, None, None);
+    let mut settled = None;
     let (mut retrying, mut run_resumed, mut resumed) = (None, false, false);
+    let (mut reopened, mut rescoring) = (None, None);
+    let (mut asked, mut answered) = (None, None);
     for c in changes.iter().filter(|c| &c.run == id) {
         match (&c.what, c.stage) {
             (Decided::RunFinished, _) => finished = true,
+            (Decided::RunSettled(why), _) => settled = Some(why),
             (Decided::RunNeedsYou(why), _) => needs = Some(why),
             (Decided::RunStopped(why), _) => ended = Some(why),
             (Decided::Failed(why), Some(i)) => failed = Some((i, why)),
             (Decided::Passed, Some(i)) => passed = Some(i),
             (Decided::Retrying, Some(i)) => retrying = Some(i),
+            (Decided::Reopened, Some(i)) => reopened = Some(i),
+            (Decided::Rescoring, Some(i)) => rescoring = Some(i),
             (Decided::RunResumed, _) => run_resumed = true,
             (Decided::Resumed, _) => resumed = true,
+            (Decided::Asked(q), Some(i)) => asked = Some((i, q)),
+            (Decided::Answered(_), Some(i)) => answered = Some(i),
             _ => {}
         }
     }
-    Some(if finished {
+    Some(if let Some(why) = settled {
         format!(
-            "Run {id} finished: every stage passed. Tell the user, then wait for them to ask for \
-             the next ticket."
+            "Run {id} is over: {why}, so nothing more is needed on it, whatever its gate said. \
+             Don't review or post on it again. Tell the user, then carry on with any other \
+             tickets you hold."
+        )
+    } else if finished {
+        format!(
+            "Run {id} finished: every stage passed. Tell the user, then wait for the next \
+             ticket, from hydraui or from them."
         )
     } else if let Some(why) = ended {
         format!(
@@ -101,12 +146,49 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
             "Run {id} needs a person: {why}. Tell the user why and wait: nothing you can call \
              moves it on."
         )
+    } else if let Some((i, question)) = asked {
+        let author = run
+            .asking
+            .as_ref()
+            .is_some_and(|a| a.whom == crate::runs::Whom::Author);
+        if author {
+            format!(
+                "Run {id}: stage {} waits on the pull request's author: {question} Do nothing \
+                 meanwhile: hydraui has the stage look again every 5 minutes and tells you when \
+                 it moves on.",
+                stage(i)
+            )
+        } else {
+            format!(
+                "Run {id}: stage {} asked product a question, and the ticket waits for the \
+                 answer: {question} Do nothing meanwhile: hydraui tells you when it's answered.",
+                stage(i)
+            )
+        }
+    } else if let Some(i) = answered {
+        format!(
+            "Run {id}: stage {} has its answer and carries on. Wait: hydraui tells you when it \
+             reports.",
+            stage(i)
+        )
+    } else if let Some(i) = reopened {
+        format!(
+            "Run {id}: a person sent it back to stage {}; its own session is reopened beside them \
+             with their note. Wait: hydraui tells you when it reports, then start the next stage.",
+            stage(i)
+        )
+    } else if let Some(i) = rescoring {
+        format!(
+            "Run {id}: a person worked on stage {} in its own session and asked it to score \
+             again. Wait: hydraui tells you when it reports.",
+            stage(i)
+        )
     } else if let Some((i, why)) = failed {
         format!(
             "Run {id}: stage {} failed ({why}), attempt {} of {MAX_ATTEMPTS}. Call run_status, \
              then start it again with stage_start.",
             stage(i),
-            run.stages[i].attempts.len()
+            run.stages[i].tries()
         )
     } else if let Some(i) = passed {
         let score = run.stages[i].rating().map_or(0, |r| r.score);
@@ -131,6 +213,18 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
     })
 }
 
+/// The wake-up waiting for an orchestrator after `new` for run `run` joins `waiting`: a newer
+/// one for the same run replaces it; one for another of its tickets is added, so an
+/// orchestrator holding several tickets hears about each.
+pub fn join_wake(waiting: Option<(String, String)>, run: String, new: String) -> (String, String) {
+    match waiting {
+        Some((old_run, old)) if old_run != run && !old.contains(&new) => {
+            (run, format!("{old} {new}"))
+        }
+        _ => (run, new),
+    }
+}
+
 /// Keys a run's escalation toast, so a newer one for the same run replaces it.
 struct RunAlert;
 
@@ -138,6 +232,8 @@ struct RunAlert;
 /// stopped · needs you", spec §5.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Escalation {
+    /// The pipeline's name, so the toast says which one stopped.
+    pub pipeline: String,
     /// `<ticket> stopped at <stage>`.
     pub title: String,
     /// The score against the bar, why it was blocked, or the failure or usage reason.
@@ -161,6 +257,7 @@ pub fn escalation(run: &Run) -> Option<Escalation> {
         .flatten();
     let body = match rating {
         Some(r) if r.outcome == Outcome::Blocked => format!("Blocked: {}", r.summary),
+        Some(r) if r.outcome == Outcome::Check => format!("Check it by hand: {}", r.check),
         Some(r) => format!("Rated {}%, bar is {}%.", r.score, run.pipeline.bar_for(i)),
         None => crate::pipeline_view::sentence(why),
     };
@@ -171,6 +268,7 @@ pub fn escalation(run: &Run) -> Option<Escalation> {
             .map(|x| x.text.clone())
     });
     Some(Escalation {
+        pipeline: run.pipeline.name.clone(),
         title: format!("{} stopped at {}", run.ticket, run.pipeline.stages[i].title),
         body,
         reason,
@@ -202,7 +300,7 @@ pub(super) fn tell(changes: Vec<Change>) {
 
 /// Writes `event` to run `run`'s log (§8), noting a failure in hydraui's log: what only the app
 /// knows, which a restart needs to pick the run back up (§13).
-fn note_run(run: &str, event: &str, fields: serde_json::Value) {
+pub(super) fn note_run(run: &str, event: &str, fields: serde_json::Value) {
     let Some(root) = server::get().and_then(|sv| server::lock(sv.registry()).hydra_root.clone())
     else {
         return;
@@ -320,22 +418,56 @@ impl Workspace {
         } else {
             self.env_cwd(&i.env, cx)
         };
-        let mut request = PaneRequest::new(&i.env, folder.clone(), shell);
-        request.command = Some(command_line(
-            shell,
-            &[
-                "claude".into(),
-                "--resume".into(),
-                i.claude.clone(),
-                resume_prompt(&run_id, &i.run.ticket),
-            ],
-        ));
-        let id = self.open_terminal(&i.env, request, window, cx);
+        // Another ticket of the same orchestrator came back already: this one joins it there,
+        // rather than a second terminal resuming the same conversation.
+        let joined = self
+            .resumed_orchestrators
+            .get(&i.claude)
+            .copied()
+            .filter(|p| self.panes.contains_key(p));
+        let id = match joined {
+            Some(p) => {
+                self.queue_wake(p, run_id.clone(), resume_prompt(&run_id, &i.run.ticket));
+                p
+            }
+            None => {
+                let mut request = PaneRequest::new(&i.env, folder.clone(), shell);
+                request.command = Some(command_line(
+                    shell,
+                    &[
+                        "claude".into(),
+                        "--resume".into(),
+                        i.claude.clone(),
+                        resume_prompt(&run_id, &i.run.ticket),
+                    ],
+                ));
+                let id = self.open_terminal(&i.env, request, window, cx);
+                self.starting_up.insert(id, std::time::Instant::now());
+                self.resumed_orchestrators.insert(i.claude.clone(), id);
+                id
+            }
+        };
         let Some(view) = self.panes.get(&id).cloned() else {
             return;
         };
-        view.update(cx, |v, cx| v.set_name(Some("orchestrator".into()), cx));
-        self.orchestrators.insert(id, i.run.pipeline.file.clone());
+        // Numbered like a fresh one when another orchestrator runs its pipeline already.
+        let n = self
+            .orchestrators
+            .iter()
+            .filter(|(o, f)| {
+                **f == i.run.pipeline.file
+                    && self.panes.get(o).is_some_and(|v| v.read(cx).env() == i.env)
+            })
+            .count();
+        let name = if n > 0 {
+            format!("Orchestrator {}", n + 1)
+        } else {
+            "Orchestrator".to_string()
+        };
+        if joined.is_none() {
+            view.update(cx, |v, cx| v.set_name(Some(name), cx));
+            self.orchestrators.insert(id, i.run.pipeline.file.clone());
+        }
         let (Some(token), Some(sv)) =
             (view.read(cx).mcp_token().map(str::to_string), server::get())
         else {
@@ -349,6 +481,11 @@ impl Workspace {
             let mut reg = server::lock(sv.registry());
             reg.runs.restore(i.run.clone());
             reg.runs.adopt(&run_id, &token);
+        }
+        // Its Linear ticket's link and SLA, as logged (phase 2 §5).
+        if let Some(t) = i.ticket.clone() {
+            self.linear_tickets
+                .insert(t.identifier.to_ascii_uppercase(), t);
         }
         note_run(
             &run_id,
@@ -369,15 +506,13 @@ impl Workspace {
             match i.stages.get(&label) {
                 Some((Some(dir), Some(claude))) if dir.is_dir() => {
                     let mut request = PaneRequest::new(&i.env, dir.clone(), shell);
-                    request.command = Some(command_line(
-                        shell,
-                        &[
-                            "claude".into(),
-                            "--resume".into(),
-                            claude.clone(),
-                            STAGE_RESUME_PROMPT.into(),
-                        ],
-                    ));
+                    let mut argv = i.run.pipeline.stage_claude();
+                    argv.extend([
+                        "--resume".into(),
+                        claude.clone(),
+                        STAGE_RESUME_PROMPT.into(),
+                    ]);
+                    request.command = Some(command_line(shell, &argv));
                     let name = crate::runs::session_name(
                         si,
                         &i.run.pipeline.stages[si].title,
@@ -413,6 +548,86 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Reopens stage `stage` of `run`'s own conversation after a person sent the run back to it
+    /// (Go back): `claude --resume` of its last attempt's session in its folder, with their
+    /// note, linked as the new attempt. Without a logged session it fails, and the orchestrator
+    /// starts it afresh.
+    fn reopen_stage(
+        &mut self,
+        run: &str,
+        stage: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sv) = server::get() else {
+            return;
+        };
+        let (r, root) = {
+            let reg = server::lock(sv.registry());
+            (reg.runs.run(run).cloned(), reg.hydra_root.clone())
+        };
+        let (Some(r), Some(root)) = (r, root) else {
+            return;
+        };
+        let s = &r.stages[stage];
+        let (Some(now), Some(before)) = (s.latest(), s.attempts.iter().rev().nth(1)) else {
+            return;
+        };
+        let note = now.note.clone().unwrap_or_default();
+        let (folder, claude) = crate::run_resume::logged_session(&root, run, &before.label);
+        let env = self.panes.values().find_map(|v| {
+            let v = v.read(cx);
+            (v.mcp_token() == Some(r.orchestrator.as_str())).then(|| v.request.env.clone())
+        });
+        let fail = |why: &str| {
+            let mut reg = server::lock(sv.registry());
+            let changes = reg.runs.start_failed(run, stage, why);
+            crate::run_log::record(&root, &reg.runs, &changes);
+            changes
+        };
+        let (Some(env), Some(dir), Some(claude)) = (env, folder.filter(|d| d.is_dir()), claude)
+        else {
+            let changes = fail("its earlier session can't be reopened (not in the run's log)");
+            return self.runs_changed(changes, window, cx);
+        };
+        let shell = self.shell();
+        let mut request = PaneRequest::new(&env, dir.clone(), shell);
+        let mut argv = r.pipeline.stage_claude();
+        argv.extend(["--resume".into(), claude, reopen_prompt(&r, stage, &note)]);
+        request.command = Some(command_line(shell, &argv));
+        let name =
+            crate::runs::session_name(stage, &r.pipeline.stages[stage].title, s.attempts.len() - 1);
+        let opened = self
+            .open_terminal_beside(&env, request, window, cx)
+            .and_then(|id| self.panes.get(&id).cloned());
+        let Some(view) = opened else {
+            let changes = fail("its terminal didn't open");
+            return self.runs_changed(changes, window, cx);
+        };
+        view.update(cx, |v, cx| v.set_name(Some(name.clone()), cx));
+        let token = view.read(cx).mcp_token().map(str::to_string);
+        let taker = view.read(cx).taker_name().unwrap_or(name);
+        let Some(token) = token else {
+            let changes = fail("its terminal has no MCP token");
+            return self.runs_changed(changes, window, cx);
+        };
+        server::lock(sv.registry())
+            .runs
+            .link(run, stage, &token, &taker);
+        note_run(
+            run,
+            "stage reopened",
+            serde_json::json!({"stage": r.pipeline.stages[stage].id, "label": now.label}),
+        );
+        note_run(
+            run,
+            "stage folder",
+            serde_json::json!({"label": now.label, "folder": dir.display().to_string()}),
+        );
+        crate::action_log::write(format!("run {run}: reopened {taker} for a person"));
+        cx.notify();
+    }
+
     /// **Stop ticket** on interrupted run `idx` (§13): its log ends, and its card goes.
     pub(super) fn stop_interrupted(&mut self, idx: usize, cx: &mut Context<Self>) {
         if idx >= self.interrupted.len() {
@@ -440,6 +655,7 @@ impl Workspace {
                 Segment::Passed => color(theme::TEAL),
                 Segment::Running => color(theme::AMBER),
                 Segment::Stopped => color(theme::RED),
+                Segment::Checking => color(theme::AMBER),
                 Segment::Pending => color(theme::BORDER),
             };
             div().flex_1().h(px(3.)).rounded_full().bg(fill)
@@ -544,10 +760,9 @@ impl Workspace {
             serde_json::json!({"label": s.label, "folder": cwd.display().to_string()}),
         );
         let mut request = PaneRequest::new(env, cwd, shell);
-        request.command = Some(command_line(
-            shell,
-            &["claude".to_string(), s.prompt.clone()],
-        ));
+        let mut argv = s.claude.clone();
+        argv.push(s.prompt.clone());
+        request.command = Some(command_line(shell, &argv));
         let Some(id) = self.open_terminal_beside(env, request, window, cx) else {
             return stage_failed(&s, format!("environment {env} isn't open"));
         };
@@ -589,6 +804,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Linear hears of runs that started or ended (phase 2 §4).
+        self.linear_runs_changed(&changes, cx);
+        // A person sent a run back to an earlier stage: its own session reopens.
+        for c in changes.iter().filter(|c| c.what == Decided::Reopened) {
+            if let Some(stage) = c.stage {
+                self.reopen_stage(&c.run, stage, window, cx);
+            }
+        }
         // Where a new run's orchestrator is, and which hydraui drives it (§13).
         let started: Vec<(String, String)> = server::get()
             .map(|sv| {
@@ -636,10 +859,11 @@ impl Workspace {
                 .find(|(_, v)| v.read(cx).mcp_token() == Some(token.as_str()))
                 .map(|(id, _)| *id);
             if let Some(pane) = pane {
-                self.pending_wakes.insert(pane, (run, message));
+                self.queue_wake(pane, run, message);
             }
         }
         self.send_wakes(window, cx);
+        self.asked_notify(&changes, window, cx);
         let mut needs_you: Vec<&str> = changes
             .iter()
             .filter(|c| matches!(c.what, Decided::RunNeedsYou(_)))
@@ -650,13 +874,44 @@ impl Workspace {
         for run in needs_you {
             self.escalate(run, window, cx);
         }
+        // A finished run's stage sessions have nothing left to do: they close.
+        let done: Vec<String> = server::get()
+            .map(|sv| {
+                let reg = server::lock(sv.registry());
+                changes
+                    .iter()
+                    .filter(|c| matches!(c.what, Decided::RunFinished | Decided::RunSettled(_)))
+                    .filter_map(|c| reg.runs.run(&c.run))
+                    .flat_map(crate::pipeline_card::stage_tokens)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let closing: Vec<PaneId> = self
+            .panes
+            .iter()
+            .filter(|(_, v)| {
+                v.read(cx)
+                    .mcp_token()
+                    .is_some_and(|t| done.iter().any(|d| d == t))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for pane in closing {
+            crate::action_log::write(format!("run finished: closed {}", self.pane_name(pane, cx)));
+            self.close_terminal_now(pane, window, cx);
+        }
         // A run that ended lets its worktree go when nothing in it is uncommitted (spec §8).
         let ended: Vec<PathBuf> = server::get()
             .map(|sv| {
                 let reg = server::lock(sv.registry());
                 changes
                     .iter()
-                    .filter(|c| matches!(c.what, Decided::RunFinished | Decided::RunStopped(_)))
+                    .filter(|c| {
+                        matches!(
+                            c.what,
+                            Decided::RunFinished | Decided::RunSettled(_) | Decided::RunStopped(_)
+                        )
+                    })
                     .filter_map(|c| reg.runs.run(&c.run)?.worktree.clone())
                     .collect()
             })
@@ -721,6 +976,7 @@ impl Workspace {
         if !window.is_window_active() {
             crate::claim::flash(crate::claim::hwnd_of(window));
         }
+        let run_owned = run_id.to_string();
         let ws = cx.entity();
         let note = Notification::new()
             .id1::<RunAlert>(SharedString::from(format!("run-{run_id}")))
@@ -729,6 +985,7 @@ impl Workspace {
             .bg(color(theme::TOAST))
             .border_color(color(theme::RED_BORDER))
             .content(move |_, _, cx| {
+                let run = run_owned.clone();
                 let ws = ws.clone();
                 v_flex()
                     .gap_1()
@@ -736,7 +993,7 @@ impl Workspace {
                         div()
                             .text_xs()
                             .text_color(color(theme::RED))
-                            .child("PIPELINE STOPPED · NEEDS YOU"),
+                            .child(format!("{} STOPPED · NEEDS YOU", e.pipeline.to_uppercase())),
                     )
                     .child(
                         div()
@@ -766,7 +1023,10 @@ impl Workspace {
                                     .primary()
                                     .on_click(cx.listener(move |note, _, window, cx| {
                                         note.dismiss(window, cx);
-                                        ws.update(cx, |ws, cx| ws.open_pipeline(orch, window, cx));
+                                        let run = run.clone();
+                                        ws.update(cx, |ws, cx| {
+                                            ws.open_pipeline_run(orch, run, window, cx)
+                                        });
                                     })),
                             )
                             .child(Button::new("later").label("Later").ghost().on_click(
@@ -792,8 +1052,17 @@ impl Workspace {
         for (pane, run, message) in pending {
             let Some(session) = sessions.iter().find(|s| s.pane == pane) else {
                 self.pending_wakes.remove(&pane);
+                self.wake_waiting.remove(&pane);
                 continue;
             };
+            // Still on its first turn: what's typed now never reaches it.
+            if self
+                .starting_up
+                .get(&pane)
+                .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(90))
+            {
+                continue;
+            }
             let paused = server::get().is_some_and(|sv| {
                 server::lock(sv.registry())
                     .runs
@@ -801,6 +1070,40 @@ impl Workspace {
                     .is_some_and(|r| r.paused)
             });
             if !wake_now(session, paused) {
+                // Idle but not taking it (a draft or a Claude Code question in the way) for
+                // three minutes: the person is told once, rather than the run waiting unseen.
+                let stuck = !paused
+                    && session.claude == Some(crate::mcp::SessionState::Idle)
+                    && self.wake_waiting.get(&pane).is_some_and(|(since, told)| {
+                        !told && since.elapsed() >= std::time::Duration::from_secs(180)
+                    });
+                if stuck {
+                    if let Some(w) = self.wake_waiting.get_mut(&pane) {
+                        w.1 = true;
+                    }
+                    let name = self.pane_name(pane, cx);
+                    crate::action_log::write(format!(
+                        "run {run}: {name} can't take hydraui's message; told the user"
+                    ));
+                    let title = self.toast_title(pane, &run, cx);
+                    let ws = cx.entity();
+                    window.push_notification(
+                        Notification::warning(format!(
+                            "{} has a message from hydraui it can't take: something is in its \
+                             input, or Claude Code is asking a question. Open it and clear or \
+                             answer it, and hydraui sends the message.",
+                            self.panes
+                                .get(&pane)
+                                .map_or("A session".into(), |v| v.read(cx).label())
+                        ))
+                        .title(title)
+                        .autohide(false)
+                        .on_click(move |_, window, cx| {
+                            ws.update(cx, |ws, cx| ws.show_terminal(pane, window, cx));
+                        }),
+                        cx,
+                    );
+                }
                 continue;
             }
             let typed = self
@@ -809,11 +1112,217 @@ impl Workspace {
                 .cloned()
                 .is_some_and(|v| v.update(cx, |v, cx| v.type_prompt(&message, cx)));
             if typed {
-                crate::action_log::write(format!("run {run}: woke the orchestrator: {message}"));
+                crate::action_log::write(format!("run {run}: woke a session: {message}"));
                 self.reserved.insert(pane, std::time::Instant::now());
                 self.pending_wakes.remove(&pane);
+                self.wake_waiting.remove(&pane);
+                let tries = self.wake_tries.remove(&pane).unwrap_or(0) + 1;
+                self.sent_wakes
+                    .insert(pane, (run, message, std::time::Instant::now(), tries));
             }
         }
+    }
+
+    /// A wake-up typed 30 seconds ago whose session never started working didn't reach Claude
+    /// (a Claude Code prompt was open over the input): it's sent again, up to 3 times, then
+    /// the user is told to look at that terminal.
+    pub(super) fn recheck_wakes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        const TAKE: std::time::Duration = std::time::Duration::from_secs(30);
+        let stale: Vec<PaneId> = self
+            .sent_wakes
+            .iter()
+            .filter(|(_, (_, _, at, _))| at.elapsed() >= TAKE)
+            .map(|(p, _)| *p)
+            .collect();
+        for pane in stale {
+            let Some((run, message, _, tries)) = self.sent_wakes.remove(&pane) else {
+                continue;
+            };
+            let Some(view) = self.panes.get(&pane) else {
+                continue;
+            };
+            if view.read(cx).claude() != Some(crate::mcp::SessionState::Idle) {
+                continue;
+            }
+            if tries >= 3 {
+                let name = self.pane_name(pane, cx);
+                let title = self.toast_title(pane, &run, cx);
+                crate::action_log::write(format!(
+                    "run {run}: {name} didn't take a wake-up after 3 tries"
+                ));
+                window.push_notification(
+                    Notification::warning(format!(
+                        "{name} isn't taking messages from hydraui. Look at its terminal: \
+                         Claude Code may be showing a question. Answer it, and hydraui carries \
+                         on."
+                    ))
+                    .title(title),
+                    cx,
+                );
+                continue;
+            }
+            crate::action_log::write(format!(
+                "run {run}: the wake-up didn't take; sending it again"
+            ));
+            if let Some(v) = self.panes.get(&pane).cloned() {
+                v.update(cx, |v, _| v.prompt_not_taken());
+            }
+            // Back out, with the tries already made counted.
+            self.wake_tries.insert(pane, tries);
+            self.queue_wake(pane, run, message);
+        }
+        self.send_wakes(window, cx);
+    }
+
+    /// **End** on a pipeline's card: asks, then ends it (`end_pipeline`).
+    pub(super) fn end_pipeline_dialog(
+        &mut self,
+        orch: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = self
+            .pipeline_of(orch, cx)
+            .map_or_else(|| "this pipeline".to_string(), |(n, _)| n);
+        let slots = self.slots(orch, cx);
+        let open: usize = slots.iter().map(|s| self.open_runs_of(*s, cx).len()).sum();
+        let tickets = match open {
+            0 => "No ticket is in progress.".to_string(),
+            1 => "Its ticket in progress is stopped, recorded as stopped by you.".to_string(),
+            n => format!("Its {n} tickets in progress are stopped, recorded as stopped by you."),
+        };
+        let body = format!(
+            "{tickets} Its orchestrator{} and every session under {} close, and it stops \
+             looking for work. Start it again any time with Start pipeline.",
+            if slots.len() > 1 { "s" } else { "" },
+            if slots.len() > 1 { "them" } else { "it" },
+        );
+        let ws = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let ws = ws.clone();
+            dialog
+                .title(format!("End {name}?"))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(color(theme::TEXT))
+                        .child(body.clone()),
+                )
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("end-pipeline-cancel")
+                                .label("Cancel")
+                                .ghost()
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("end-pipeline-go")
+                                .label("End pipeline")
+                                .danger()
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    ws.update(cx, |ws, cx| ws.end_pipeline(orch, window, cx));
+                                }),
+                        ),
+                )
+        });
+    }
+
+    /// Ends the pipeline orchestrator `orch` runs: each of its orchestrators' open ticket
+    /// stops (as **Stop this ticket**), then they and every session under them close.
+    fn end_pipeline(&mut self, orch: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        let slots = self.slots(orch, cx);
+        let panes: Vec<PaneId> = self
+            .pipeline_cards(cx)
+            .into_iter()
+            .filter(|(o, _, _)| slots.contains(o))
+            .flat_map(|(o, _, p)| std::iter::once(o).chain(p))
+            .collect();
+        for s in &slots {
+            let token = self
+                .panes
+                .get(s)
+                .and_then(|v| v.read(cx).mcp_token().map(str::to_string));
+            let open: Vec<String> = token
+                .zip(server::get())
+                .map(|(t, sv)| {
+                    server::lock(sv.registry())
+                        .runs
+                        .open_of(&t)
+                        .iter()
+                        .map(|r| r.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            for run in open {
+                self.person_choice(*s, &run, crate::runs::Choice::Stop, window, cx);
+            }
+        }
+        let mut closed = std::collections::HashSet::new();
+        for p in panes {
+            if closed.insert(p) {
+                self.close_terminal_now(p, window, cx);
+            }
+        }
+        crate::action_log::write(format!(
+            "ended a pipeline: closed {} terminals",
+            closed.len()
+        ));
+        cx.notify();
+    }
+
+    /// The colour of the pipeline terminal `pane` belongs to (its orchestrator or a stage's
+    /// session), when it belongs to one.
+    pub(super) fn pipeline_tint(&self, pane: PaneId, cx: &gpui::App) -> Option<gpui::Hsla> {
+        self.pipeline_of(pane, cx).map(|(_, accent)| color(accent))
+    }
+
+    /// A toast's title for something about terminal `pane`: `<pipeline> · <what>`, with the
+    /// ticket when `pane` is in a run's, so it's clear which pipeline it's about.
+    pub(super) fn toast_title(&self, pane: PaneId, what: &str, cx: &gpui::App) -> String {
+        let token = self
+            .panes
+            .get(&pane)
+            .and_then(|v| v.read(cx).mcp_token().map(str::to_string));
+        let from_run = token.as_deref().zip(server::get()).and_then(|(t, sv)| {
+            let reg = server::lock(sv.registry());
+            let run = reg
+                .runs
+                .all()
+                .filter(|r| crate::pipeline_card::card_tokens(r).iter().any(|x| x == t))
+                .last()?;
+            Some(format!("{} · {}", run.pipeline.name, run.ticket))
+        });
+        let from_file = || {
+            let file = self.orchestrators.get(&pane)?;
+            crate::pipeline::load(self.hydra.paths.root(), file)
+                .ok()
+                .map(|p| p.name)
+        };
+        match from_run.or_else(from_file) {
+            Some(about) if about.contains(what) || what.is_empty() => about,
+            Some(about) => format!("{about} · {what}"),
+            None => what.to_string(),
+        }
+    }
+
+    /// Queues `message` about `run` for orchestrator `pane` (`join_wake`), typed when it's
+    /// ready for a prompt.
+    pub(super) fn queue_wake(&mut self, pane: PaneId, run: String, message: String) {
+        let waiting = self.pending_wakes.remove(&pane);
+        self.pending_wakes
+            .insert(pane, join_wake(waiting, run, message));
+    }
+
+    /// The name and colour of the pipeline terminal `pane` belongs to, when it belongs to one.
+    pub(super) fn pipeline_of(&self, pane: PaneId, cx: &gpui::App) -> Option<(String, u32)> {
+        self.pipeline_cards(cx)
+            .into_iter()
+            .find(|(_, _, panes)| panes.contains(&pane))
+            .map(|(_, c, _)| (c.name, c.accent))
     }
 
     /// The selected environment's pipeline cards (§7.1): for each terminal that started a run,
@@ -837,17 +1346,98 @@ impl Workspace {
         tokens
             .iter()
             .filter_map(|(id, token)| {
-                let Some(run) = reg.runs.current(token) else {
-                    // Started from the launcher, no ticket yet: the card of its pipeline.
-                    let file = self.orchestrators.get(id)?;
-                    let pipeline = crate::pipeline::load(root, file).ok()?;
+                // Several tickets under one orchestrator: one card for them all, and every
+                // ticket's sessions under it.
+                let open = reg.runs.open_of(token);
+                if open.len() > 1 {
+                    let cards: Vec<Card> = open.iter().map(|r| self.card_now(r)).collect();
+                    let mut c = crate::pipeline_card::group_card(&cards.iter().collect::<Vec<_>>());
+                    c.line = format!("{} tickets in progress", open.len());
+                    let panes = std::iter::once(*id)
+                        .chain(open.iter().flat_map(|r| {
+                            crate::pipeline_card::stage_tokens(r)
+                                .into_iter()
+                                .filter_map(|t| {
+                                    tokens.iter().find(|(_, x)| *x == t).map(|(p, _)| *p)
+                                })
+                                .collect::<Vec<_>>()
+                        }))
+                        .collect();
+                    return Some((*id, c, panes));
+                }
+                // No ticket yet, or its last one is done: the card of its pipeline, ready for
+                // the next (a finished ticket doesn't stay on the card).
+                let Some(run) = reg
+                    .runs
+                    .current(token)
+                    .filter(|r| crate::pipeline_card::stays_on_card(r))
+                else {
+                    let file = self
+                        .orchestrators
+                        .get(id)
+                        .cloned()
+                        .or_else(|| reg.runs.current(token).map(|r| r.pipeline.file.clone()))?;
+                    let pipeline = crate::pipeline::load(root, &file).ok()?;
                     return Some((*id, ready_card(&pipeline), vec![*id]));
                 };
                 let panes = card_tokens(run)
                     .iter()
                     .filter_map(|t| tokens.iter().find(|(_, x)| x == t).map(|(p, _)| *p))
                     .collect();
-                Some((*id, card(run), panes))
+                Some((*id, self.card_now(run), panes))
+            })
+            .collect()
+    }
+
+    /// `run`'s card, in its pipeline's colour as the file has it now, so a change in Settings
+    /// shows at once.
+    fn card_now(&self, run: &Run) -> Card {
+        let mut c = card(run);
+        if let Ok(p) = crate::pipeline::load(self.hydra.paths.root(), &run.pipeline.file) {
+            c.accent = crate::pipeline_card::accent(&p);
+        }
+        c
+    }
+
+    /// The tickets orchestrator `orch` holds open, each with its card and the terminals of its
+    /// stage sessions; empty unless it holds more than one.
+    pub(super) fn lanes(&self, orch: PaneId, cx: &gpui::App) -> Vec<Lane> {
+        let lanes = self.open_lanes(orch, cx);
+        if lanes.len() < 2 {
+            return Vec::new();
+        }
+        lanes
+    }
+
+    /// Every ticket orchestrator `orch` holds open, with its card and its stage sessions.
+    pub(super) fn open_lanes(&self, orch: PaneId, cx: &gpui::App) -> Vec<(Run, Card, Vec<PaneId>)> {
+        let (Some(token), Some(sv)) = (
+            self.panes
+                .get(&orch)
+                .and_then(|v| v.read(cx).mcp_token().map(str::to_string)),
+            server::get(),
+        ) else {
+            return Vec::new();
+        };
+        let open: Vec<Run> = server::lock(sv.registry())
+            .runs
+            .open_of(&token)
+            .into_iter()
+            .cloned()
+            .collect();
+        open.into_iter()
+            .map(|r| {
+                let panes = crate::pipeline_card::stage_tokens(&r)
+                    .iter()
+                    .filter_map(|t| {
+                        self.panes
+                            .iter()
+                            .find(|(_, v)| v.read(cx).mcp_token() == Some(t.as_str()))
+                            .map(|(id, _)| *id)
+                    })
+                    .collect();
+                let c = self.card_now(&r);
+                (r, c, panes)
             })
             .collect()
     }
@@ -863,8 +1453,15 @@ impl Workspace {
             .flat_map(|t| t.terminals.iter())
             .filter_map(|id| {
                 let token = self.panes.get(id)?.read(cx).mcp_token()?.to_string();
-                reg.runs.current(&token).filter(|r| r.state.open()).cloned()
+                Some(
+                    reg.runs
+                        .open_of(&token)
+                        .into_iter()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
             })
+            .flatten()
             .collect()
     }
 
@@ -900,7 +1497,10 @@ impl Workspace {
                                     w.close_dialog(cx);
                                     ws.update(cx, |ws, cx| {
                                         let all: Vec<PaneId> = ws.files.keys().copied().collect();
-                                        ws.confirm_unsaved(all, w, cx, |_, w, _| w.remove_window());
+                                        ws.confirm_unsaved(all, w, cx, |_, w, _| {
+                                            closing();
+                                            w.remove_window()
+                                        });
                                     });
                                 }),
                         ),
@@ -950,29 +1550,35 @@ impl Workspace {
     /// The design's pipeline card: the diamond and the pipeline's name, the ticket and stage
     /// with the state pill, and one segment per stage. Clicking it shows the orchestrator (the
     /// Pipeline view takes its place in plan Task 10).
+    /// `ticket`: show the run's ticket link (one run per card); a pipeline's card over several
+    /// orchestrators leaves it to each orchestrator's line.
     pub(super) fn render_pipeline_card(
         &self,
         orchestrator: PaneId,
         c: &Card,
         active: bool,
+        ticket: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (pill_fg, pill_bg) = match c.state {
-            CardState::Ready => (theme::TEXT_SECONDARY, theme::RAISED),
-            CardState::Working => (theme::TEAL, theme::TEAL_TINT),
-            CardState::NeedsYou => (theme::RED, theme::RED_TINT),
-            CardState::Paused => (theme::AMBER, theme::AMBER_TINT),
-            CardState::Done => (theme::GREEN, theme::GREEN_TINT),
-            CardState::Stopped => (theme::TEXT_SECONDARY, theme::RAISED),
-        };
-        let segments = c.segments.iter().map(|s| {
-            let fill = match s {
-                Segment::Passed => color(theme::TEAL),
-                Segment::Running => color(theme::TEAL).opacity(0.53),
-                Segment::Stopped => color(theme::RED),
-                Segment::Pending => color(theme::BORDER),
-            };
-            div().flex_1().h(px(3.)).rounded_full().bg(fill)
+        let (pill_fg, pill_bg) = pill_colors(c.state, c.accent);
+        let accent = c.accent;
+        let segments = c.segments.iter().enumerate().map(|(i, s)| {
+            let bar = div().flex_1().h(px(3.)).rounded_full();
+            match s {
+                // The stage at work breathes.
+                Segment::Running => bar
+                    .bg(color(accent))
+                    .with_animation(
+                        SharedString::from(format!("segment-{orchestrator}-{i}")),
+                        super::busy::pulse(),
+                        move |d, a| d.bg(color(accent).opacity(a)),
+                    )
+                    .into_any_element(),
+                Segment::Passed => bar.bg(color(accent)).into_any_element(),
+                Segment::Stopped => bar.bg(color(theme::RED)).into_any_element(),
+                Segment::Checking => bar.bg(color(theme::AMBER)).into_any_element(),
+                Segment::Pending => bar.bg(color(theme::BORDER)).into_any_element(),
+            }
         });
         v_flex()
             .id(SharedString::from(format!("pipeline-card-{orchestrator}")))
@@ -982,24 +1588,35 @@ impl Workspace {
             .gap(px(6.))
             .rounded(px(8.))
             .border_1()
-            .bg(color(if active {
-                theme::TEAL_TINT
+            // Grey whatever its colour: the colour is on its frame, pills and bars.
+            .bg(color(theme::SURFACE))
+            .border_color(if active {
+                color(c.accent).opacity(0.45)
             } else {
-                theme::SURFACE
-            }))
-            .border_color(color(if active {
-                theme::TEAL_BORDER
-            } else {
-                theme::BORDER_SUBTLE
-            }))
+                color(theme::BORDER_SUBTLE)
+            })
             .cursor_pointer()
             .on_click(
                 cx.listener(move |ws, _, window, cx| ws.open_pipeline(orchestrator, window, cx)),
             )
+            // Right-click: end it (also **End pipeline** on its Pipeline tab).
+            .context_menu({
+                let ws = cx.entity();
+                move |menu, _, _| {
+                    let ws = ws.clone();
+                    menu.item(
+                        PopupMenuItem::new("End pipeline…").on_click(move |_, window, cx| {
+                            ws.update(cx, |ws, cx| {
+                                ws.end_pipeline_dialog(orchestrator, window, cx)
+                            });
+                        }),
+                    )
+                }
+            })
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().text_xs().text_color(color(theme::TEAL)).child("◆"))
+                    .child(div().text_xs().text_color(color(c.accent)).child("◆"))
                     .child(
                         div()
                             .flex_1()
@@ -1009,7 +1626,8 @@ impl Workspace {
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(color(theme::TEXT))
                             .child(c.name.clone()),
-                    ),
+                    )
+                    .child(self.collapse_toggle(orchestrator, false, cx)),
             )
             .child(
                 h_flex()
@@ -1030,12 +1648,96 @@ impl Workspace {
                             .py(px(2.))
                             .rounded(px(4.))
                             .text_xs()
-                            .bg(color(pill_bg))
-                            .text_color(color(pill_fg))
+                            .bg(pill_bg)
+                            .text_color(pill_fg)
                             .child(c.state.word()),
                     ),
             )
-            .child(h_flex().gap(px(3.)).children(segments))
+            .when(!c.segments.is_empty(), |d| {
+                d.child(h_flex().gap(px(3.)).children(segments))
+            })
+            .when(ticket && c.state != CardState::Ready, |d| {
+                d.children(
+                    self.current_ticket(orchestrator, cx)
+                        .and_then(|(t, prs)| self.render_ticket_link(&t, &prs, c.accent)),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// One ticket of a pipeline in the sidebar, as a box hanging off its orchestrator: its name
+    /// (a pull request as `repo #N`) and state, what it waits on, its ticket link, then the
+    /// sessions working on it inside (core spec §46). Its edge is red when it needs you and
+    /// amber while it waits on product or a check; otherwise quiet.
+    pub(super) fn render_lane(
+        &self,
+        orchestrator: PaneId,
+        run: &Run,
+        c: &Card,
+        sessions: Vec<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (fg, bg) = pill_colors(c.state, c.accent);
+        let edge = match c.state {
+            CardState::NeedsYou => color(theme::RED).opacity(0.6),
+            CardState::Asking | CardState::Checking | CardState::Paused => {
+                color(theme::AMBER).opacity(0.5)
+            }
+            _ => color(theme::BORDER_STRONG),
+        };
+        let id = run.id.clone();
+        let title = crate::pipeline_card::ticket_title(&run.ticket, run.link.as_deref());
+        let prs = crate::linear_watch::pr_links(run);
+        // A pull request's own link is its title; a Linear ticket's link and PRs show below.
+        let link = (!run.link.as_deref().is_some_and(|l| l.contains("/pull/")))
+            .then(|| self.render_ticket_link(&run.ticket, &prs, c.accent))
+            .flatten();
+        v_flex()
+            .id(SharedString::from(format!("lane-{orchestrator}-{id}")))
+            .mt_1()
+            .mr_1()
+            .px(px(6.))
+            .pt(px(6.))
+            .pb_1()
+            .gap_1()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(edge)
+            .bg(color(theme::RAISED))
+            .child(
+                h_flex()
+                    .id(SharedString::from(format!("lane-head-{orchestrator}-{id}")))
+                    .px(px(2.))
+                    .gap_2()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.open_pipeline_run(orchestrator, id.clone(), window, cx)
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.5))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(color(theme::TEXT))
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .px(px(6.))
+                            .py(px(1.))
+                            .rounded(px(4.))
+                            .text_xs()
+                            .bg(bg)
+                            .text_color(fg)
+                            .child(c.state.word()),
+                    ),
+            )
+            .children(self.render_question(orchestrator, Some(&run.id), cx))
+            .children(link)
+            .children(sessions)
             .into_any_element()
     }
 
@@ -1109,11 +1811,20 @@ impl Workspace {
         let changes = server::get().map_or_else(Vec::new, |sv| {
             let mut reg = server::lock(sv.registry());
             match reg.runs.role(token) {
-                Role::Stage(..) => reg.runs.session_gone(token),
+                // A shell that dies as hydraui closes isn't a stage failing (§13).
+                Role::Stage(..) if !reg.closing => reg.runs.session_gone(token),
                 _ => Vec::new(),
             }
         });
         tell(changes);
+    }
+}
+
+/// The window is about to close: from now on its terminals going is hydraui quitting, not
+/// their work ending, so open runs stay open for a restart to pick up (§13).
+pub(super) fn closing() {
+    if let Some(sv) = server::get() {
+        server::lock(sv.registry()).closing = true;
     }
 }
 
@@ -1131,8 +1842,35 @@ fn stage_failed(s: &StartStage, why: String) {
     tell(changes);
 }
 
+/// A card state's pill: text and background colour.
+/// A card's state pill: in the pipeline's own colour while it works or when it's done; red,
+/// amber and grey keep their meaning whatever the colour.
+pub(super) fn pill_colors(state: CardState, accent: u32) -> (gpui::Hsla, gpui::Hsla) {
+    let pair = |fg: u32, bg: u32| (color(fg), color(bg));
+    match state {
+        CardState::Working | CardState::Done => (color(accent), color(accent).opacity(0.16)),
+        CardState::Ready | CardState::Stopped => pair(theme::TEXT_SECONDARY, theme::RAISED),
+        // Someone else's move: calm, not a call for the user.
+        CardState::Waiting => (color(accent), color(accent).opacity(0.16)),
+        CardState::NeedsYou => pair(theme::RED, theme::RED_TINT),
+        CardState::Asking | CardState::Checking | CardState::Paused => {
+            pair(theme::AMBER, theme::AMBER_TINT)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wake_ups_for_different_tickets_add_up_and_one_ticket_keeps_its_newest() {
+        let first = super::join_wake(None, "A-1".into(), "A passed.".into());
+        assert_eq!(first, ("A-1".into(), "A passed.".into()));
+        let newer = super::join_wake(Some(first.clone()), "A-1".into(), "A needs you.".into());
+        assert_eq!(newer.1, "A needs you.");
+        let both = super::join_wake(Some(first), "B-1".into(), "B passed.".into());
+        assert_eq!(both, ("B-1".into(), "A passed. B passed.".into()));
+    }
+
     use serde_json::json;
 
     use super::*;
@@ -1163,6 +1901,31 @@ mod tests {
 
     fn wake(runs: &Runs, id: &str, changes: &[Change]) -> String {
         wake_message(runs.run(id).unwrap(), changes).unwrap()
+    }
+
+    #[test]
+    fn the_orchestrator_waits_while_a_stage_asks_product() {
+        let (mut runs, id) = runs_of(&["a", "b"]);
+        let s = runs.begin("orch", &id, "a", "", 30).unwrap();
+        runs.link(&id, s.stage, "t1", "t1");
+        let asked = runs
+            .ask(
+                "t1",
+                "Remove it?",
+                None,
+                std::time::SystemTime::now(),
+                crate::runs::Whom::Product,
+            )
+            .unwrap();
+        let m = wake_message(runs.run(&id).unwrap(), &asked).unwrap();
+        assert!(
+            m.contains("asked product") && m.contains("Remove it?"),
+            "{m}"
+        );
+        assert!(m.contains("Do nothing"), "{m}");
+        let answered = runs.answered(&id, "No").unwrap();
+        let m = wake_message(runs.run(&id).unwrap(), &answered).unwrap();
+        assert!(m.contains("has its answer"), "{m}");
     }
 
     #[test]
@@ -1321,8 +2084,51 @@ mod tests {
     }
 
     #[test]
+    fn going_back_tells_the_orchestrator_and_the_reopened_session() {
+        let mut runs = crate::runs::Runs::default();
+        let mut p = crate::pipeline::parse(
+            "name = \"t\"\nbranch = \"{ticket}\"\n[[stage]]\nid = \"develop\"\ntitle = \"Develop\"\n\
+             [[stage]]\nid = \"verify\"\ntitle = \"Verify\"\n",
+        )
+        .unwrap();
+        p.file = "t".into();
+        let id = runs
+            .start_run("orch", p, "INTH-166", "x")
+            .unwrap()
+            .id
+            .clone();
+        let changes = vec![Change {
+            run: id.clone(),
+            stage: Some(0),
+            what: Decided::Reopened,
+        }];
+        let run = runs.run(&id).unwrap();
+        let wake = wake_message(run, &changes).unwrap();
+        assert!(
+            wake.contains("sent it back to stage develop") && wake.contains("Wait"),
+            "{wake}"
+        );
+        let prompt = reopen_prompt(run, 0, "Rename the branch to INTH-166.");
+        assert!(
+            prompt.starts_with("Rename the branch to INTH-166."),
+            "{prompt}"
+        );
+        for says in ["Develop", "stage_report again", "named exactly INTH-166"] {
+            assert!(prompt.contains(says), "{says}: {prompt}");
+        }
+    }
+
+    #[test]
+    fn a_linear_orchestrator_waits_for_tickets_instead_of_asking() {
+        let p = orchestrator_prompt("inth", true);
+        assert!(p.contains("Don't ask me for one"), "{p}");
+        assert!(!p.contains("Ask me which ticket"), "{p}");
+        assert!(orchestrator_prompt("inth", false).contains("Ask me which ticket to run."));
+    }
+
+    #[test]
     fn the_orchestrator_prompt_names_the_pipeline_and_its_role() {
-        let p = orchestrator_prompt("ticket");
+        let p = orchestrator_prompt("ticket", false);
         for says in [
             "\"ticket\"",
             "run_start",

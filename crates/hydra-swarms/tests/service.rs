@@ -28,7 +28,8 @@ type Person = Arc<Mutex<[u8; 32]>>;
 
 /// How many of these tests run at once. Each runs two to four services with their own iroh
 /// endpoints, so on a machine with many cores, running them all together starves them and
-/// their waits run out.
+/// their waits run out. Under `cargo nextest`, each test is its own process and the
+/// `network` test group in `.config/nextest.toml` caps them instead.
 const AT_ONCE: usize = 6;
 
 static RUNNING: (Mutex<usize>, std::sync::Condvar) = (Mutex::new(0), std::sync::Condvar::new());

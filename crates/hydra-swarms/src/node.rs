@@ -88,6 +88,8 @@ pub enum NodeEvent {
     SyncFinished,
     /// An owner told this machine it was removed from the swarm.
     Removed,
+    /// Another machine of this person's told this one it was taken out of the swarm.
+    Dropped,
 }
 
 /// The ALPNs that carry the swarm document, its content and its gossip.
@@ -162,7 +164,8 @@ pub(crate) struct Core {
     pub(crate) doc: Doc,
     pub(crate) author: AuthorId,
     pub(crate) anchor: PersonId,
-    pub(crate) person: PersonKey,
+    /// This machine's person's key, replaced when one of their machines is removed.
+    person: std::sync::RwLock<[u8; 32]>,
     /// Set once this machine holds the write capability; a promotion can set it later.
     pub(crate) writable: AtomicBool,
     gate: Gate,
@@ -301,7 +304,7 @@ impl SwarmNode {
                 name: name.to_string(),
                 owner,
             },
-            &node.core.person,
+            &node.core.person(),
             now_micros(),
         );
         let written = async {
@@ -428,7 +431,7 @@ impl SwarmNode {
             doc,
             author,
             anchor,
-            person: cfg.person,
+            person: std::sync::RwLock::new(cfg.person.to_bytes()),
             writable: AtomicBool::new(writable),
             gate: parts.gate,
             addrs: parts.addrs,
@@ -621,6 +624,16 @@ impl SwarmNode {
         self.core.kept(person).await
     }
 
+    /// What the machine whose author id is `author` wrote, as a change taking that one machine
+    /// out lists it: its file entries and parent records, and no changes.
+    pub async fn kept_machine(&self, author: &str) -> anyhow::Result<Kept> {
+        let authors = self.core.kept_authors(&[author.to_string()]).await?;
+        Ok(Kept {
+            changes: Vec::new(),
+            authors,
+        })
+    }
+
     /// Records what this machine's next entry for `p` is made from. Written before the entry
     /// itself.
     pub async fn put_parent(&self, p: &RelPath, record: &ParentRecord) -> anyhow::Result<()> {
@@ -678,6 +691,12 @@ impl SwarmNode {
     }
 
     /// Where a peer can be reached when address lookup can't find it, as with relays off.
+    /// Acts as the person whose key is `key` from now on: their new key, after one of their
+    /// machines was removed.
+    pub fn set_person(&self, key: [u8; 32]) {
+        *self.core.person.write().unwrap_or_else(|e| e.into_inner()) = key;
+    }
+
     pub fn remember_addr(&self, addr: EndpointAddr) {
         self.core.addrs.add_endpoint_info(addr);
     }
@@ -719,6 +738,11 @@ impl SwarmNode {
 }
 
 impl Core {
+    pub(crate) fn person(&self) -> PersonKey {
+        let key = self.person.read().unwrap_or_else(|e| e.into_inner());
+        PersonKey::from_bytes(*key)
+    }
+
     pub(crate) fn id(&self) -> String {
         self.doc.id().to_string()
     }
@@ -792,16 +816,22 @@ impl Core {
         else {
             return Ok(kept);
         };
-        let mut authors: BTreeMap<String, KeptAuthor> = member
-            .machines
+        let authors: Vec<String> = member.machines.iter().map(|m| m.author.clone()).collect();
+        kept.authors = self.kept_authors(&authors).await?;
+        Ok(kept)
+    }
+
+    /// The file entries and parent records each of `authors` wrote.
+    pub(crate) async fn kept_authors(&self, authors: &[String]) -> anyhow::Result<Vec<KeptAuthor>> {
+        let mut authors: BTreeMap<String, KeptAuthor> = authors
             .iter()
-            .map(|m| {
+            .map(|a| {
                 let author = KeptAuthor {
-                    author: m.author.clone(),
+                    author: a.clone(),
                     files: Vec::new(),
                     records: Vec::new(),
                 };
-                (m.author.clone(), author)
+                (a.clone(), author)
             })
             .collect();
         let files = Query::key_prefix(FILES_PREFIX).include_empty().build();
@@ -832,8 +862,7 @@ impl Core {
                 author.records.push(kept_entry(&path, e.timestamp(), hash));
             }
         }
-        kept.authors = authors.into_values().collect();
-        Ok(kept)
+        Ok(authors.into_values().collect())
     }
 
     pub(crate) async fn write_change(&self, c: &SignedChange) -> anyhow::Result<()> {

@@ -12,6 +12,7 @@ use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey};
 use iroh_docs::{Author, AuthorId, Capability, NamespaceId, NamespaceSecret};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast::{self, error::RecvError};
@@ -29,9 +30,6 @@ const CODE_PREFIX: &str = "hydra-swarm:";
 /// How long either side waits on the other for one request.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-const USED: &str = "This invite has already been used.";
-const EXPIRED: &str = "This invite has expired.";
-const CANCELLED: &str = "This invite was cancelled.";
 const NOT_AN_OWNER: &str = "Whoever invited you is no longer an owner of this swarm.";
 /// An owner's refusal to pass on a change from a machine it doesn't count as the signer's,
 /// which, for a change the signer sends from their own machine, means they are out already.
@@ -74,24 +72,45 @@ impl InviteCode {
     }
 }
 
-fn is_token(s: &str) -> bool {
+pub(crate) fn is_token(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-fn random32() -> io::Result<[u8; 32]> {
+pub(crate) fn random32() -> io::Result<[u8; 32]> {
     let mut b = [0u8; 32];
     getrandom::fill(&mut b).map_err(|e| io::Error::other(format!("random bytes: {e}")))?;
     Ok(b)
 }
 
-fn token_hash(token: &str) -> String {
+pub(crate) fn token_hash(token: &str) -> String {
     to_hex(&Sha256::digest(token.as_bytes()))
 }
 
+/// Why a code can't be used.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Unusable {
+    Used,
+    Expired,
+    Cancelled,
+}
+
+impl Unusable {
+    /// What to tell someone whose invite this is.
+    pub(crate) fn invite_text(self) -> &'static str {
+        match self {
+            Unusable::Used => "This invite has already been used.",
+            Unusable::Expired => "This invite has expired.",
+            Unusable::Cancelled => "This invite was cancelled.",
+        }
+    }
+}
+
+/// A single-use code this machine made: an invite to a swarm, whose `role` is the role it
+/// gives, or a link for another machine of yours, which gives no role (`()`).
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-pub struct Invite {
+pub struct Invite<R = Role> {
     pub id: String,
-    pub role: Role,
+    pub role: R,
     /// Unix seconds.
     pub created: u64,
     /// Unix seconds.
@@ -101,30 +120,45 @@ pub struct Invite {
 
 /// An invite as kept on disk: with a hash of its token, never the token.
 #[derive(Serialize, Deserialize)]
-struct Stored {
+struct Stored<R> {
     #[serde(flatten)]
-    invite: Invite,
+    invite: Invite<R>,
     token_sha256: String,
     #[serde(default)]
     cancelled: bool,
 }
 
-/// The invites this machine has made for one swarm, in `invites.json` in the swarm's folder.
-pub struct Invites {
+/// The invites this machine has made for one swarm, in `invites.json` in the swarm's folder;
+/// or, as `Invites<()>`, the codes it has made to link your other machines.
+pub struct Invites<R = Role> {
     path: PathBuf,
     lock: Mutex<()>,
+    _role: std::marker::PhantomData<fn() -> R>,
 }
 
-impl Invites {
-    pub fn new(dir: &Path) -> Invites {
+impl Invites<Role> {
+    pub fn new(dir: &Path) -> Invites<Role> {
+        Invites::at(dir.join("invites.json"))
+    }
+
+    /// `spend`, with what to tell the joiner when it can't be used.
+    fn spend_invite(&self, token: &str, now: u64) -> io::Result<Result<Role, &'static str>> {
+        Ok(self.spend(token, now)?.map_err(Unusable::invite_text))
+    }
+}
+
+impl<R: Serialize + DeserializeOwned + Clone> Invites<R> {
+    /// The codes kept in the file at `path`.
+    pub fn at(path: PathBuf) -> Invites<R> {
         Invites {
-            path: dir.join("invites.json"),
+            path,
             lock: Mutex::new(()),
+            _role: std::marker::PhantomData,
         }
     }
 
-    /// A new invite for `role` made at `now` (Unix seconds), and its token.
-    pub fn create(&self, role: Role, now: u64) -> io::Result<(Invite, String)> {
+    /// A new code for `role` made at `now` (Unix seconds), and its token.
+    pub fn create(&self, role: R, now: u64) -> io::Result<(Invite<R>, String)> {
         let token = to_hex(&random32()?);
         let invite = Invite {
             id: to_hex(&random32()?[..8]),
@@ -155,8 +189,8 @@ impl Invites {
         })
     }
 
-    /// The invites that can still be used, oldest first.
-    pub fn pending(&self, now: u64) -> Vec<Invite> {
+    /// The codes that can still be used, oldest first.
+    pub fn pending(&self, now: u64) -> Vec<Invite<R>> {
         let _held = self.hold();
         self.load()
             .unwrap_or_default()
@@ -167,27 +201,27 @@ impl Invites {
     }
 
     /// Marks it used and returns its role if `token` is unused, uncancelled and unexpired.
-    pub fn redeem(&self, token: &str, now: u64) -> Option<Role> {
+    pub fn redeem(&self, token: &str, now: u64) -> Option<R> {
         self.spend(token, now).ok()?.ok()
     }
 
-    /// `redeem`, with what to tell the joiner when it can't be used.
-    fn spend(&self, token: &str, now: u64) -> io::Result<Result<Role, &'static str>> {
+    /// `redeem`, with why it can't be used. A token that was never made reads as used.
+    pub(crate) fn spend(&self, token: &str, now: u64) -> io::Result<Result<R, Unusable>> {
         let hash = token_hash(token);
-        let mut outcome = Err(USED);
+        let mut outcome = Err(Unusable::Used);
         self.change(|all| {
             let Some(s) = all.iter_mut().find(|s| s.token_sha256 == hash) else {
                 return Ok(());
             };
             outcome = if s.invite.used {
-                Err(USED)
+                Err(Unusable::Used)
             } else if s.cancelled {
-                Err(CANCELLED)
+                Err(Unusable::Cancelled)
             } else if now >= s.invite.expires {
-                Err(EXPIRED)
+                Err(Unusable::Expired)
             } else {
                 s.invite.used = true;
-                Ok(s.invite.role)
+                Ok(s.invite.role.clone())
             };
             Ok(())
         })?;
@@ -198,7 +232,7 @@ impl Invites {
         self.lock.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn load(&self) -> io::Result<Vec<Stored>> {
+    fn load(&self) -> io::Result<Vec<Stored<R>>> {
         match std::fs::read(&self.path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
@@ -209,7 +243,7 @@ impl Invites {
 
     /// Loads the invites, lets `f` change them and saves them, all under the lock, so a token
     /// can't be spent twice at once.
-    fn change(&self, f: impl FnOnce(&mut Vec<Stored>) -> io::Result<()>) -> io::Result<()> {
+    fn change(&self, f: impl FnOnce(&mut Vec<Stored<R>>) -> io::Result<()>) -> io::Result<()> {
         let _held = self.hold();
         let mut all = self.load()?;
         f(&mut all)?;
@@ -293,7 +327,7 @@ async fn redeem_via(
 }
 
 /// `hex` as the secret of the namespace `ns`.
-fn namespace_secret(hex: &str, ns: NamespaceId) -> Option<NamespaceSecret> {
+pub(crate) fn namespace_secret(hex: &str, ns: NamespaceId) -> Option<NamespaceSecret> {
     let bytes = <[u8; 32]>::try_from(from_hex(hex)?).ok()?;
     let secret = NamespaceSecret::from_bytes(&bytes);
     (secret.id() == ns).then_some(secret)
@@ -413,7 +447,7 @@ impl SwarmNode {
         role: Role,
         person: &PersonKey,
     ) -> anyhow::Result<(Invite, InviteCode)> {
-        if person.id() != self.core.person.id() {
+        if person.id() != self.core.person().id() {
             bail!("invites are made by this machine's person");
         }
         let roster = self
@@ -572,7 +606,7 @@ impl Core {
         let Some(roster) = self.roster().await? else {
             return Ok(refused(NOT_AN_OWNER));
         };
-        if roster.role_of(&self.person.id()) != Some(Role::Owner) {
+        if roster.role_of(&self.person().id()) != Some(Role::Owner) {
             return Ok(refused(NOT_AN_OWNER));
         }
         if roster.role_of(&member.person).is_some() {
@@ -603,7 +637,7 @@ impl Core {
                 "The joining machine's ids already belong to someone in this swarm.",
             ));
         }
-        let role = match self.invites.spend(token, now_secs())? {
+        let role = match self.invites.spend_invite(token, now_secs())? {
             Ok(role) => role,
             Err(reason) => return Ok(refused(reason)),
         };
@@ -611,7 +645,7 @@ impl Core {
         let add = SignedChange::sign(
             &self.id(),
             Change::AddMember { member },
-            &self.person,
+            &self.person(),
             now_micros(),
         );
         self.write_change(&add).await?;
@@ -633,13 +667,18 @@ impl Core {
         let Some(roster) = self
             .roster()
             .await?
-            .filter(|r| r.role_of(&self.person.id()) == Some(Role::Owner))
+            .filter(|r| r.role_of(&self.person().id()) == Some(Role::Owner))
         else {
             return Ok(refused("Only an owner's machine can pass your changes on."));
         };
-        // Only a current member's own machine may ask, so strangers can't fill the log.
+        // Only a current member's own machine may ask, so strangers can't fill the log. A new key
+        // is asked for by a machine of the person under their old one.
         let sender = roster.member_by_endpoint(&from.to_string());
-        if sender.is_none_or(|m| m.person != change.by) {
+        let asker = match &change.change {
+            Change::Rekey { person, to, .. } if *to == change.by => *person,
+            _ => change.by,
+        };
+        if sender.is_none_or(|m| m.person != asker) {
             return Ok(refused(NOT_THEIR_MACHINE));
         }
         if !change.verify(&self.id()) {
@@ -649,11 +688,16 @@ impl Core {
             Change::Rename { person, name } => *person == change.by && name_fits(name),
             Change::RenameMachine { person, name, .. } => *person == change.by && name_fits(name),
             Change::Leave { person, .. } => *person == change.by,
+            Change::AddMachine { person, machine } => {
+                *person == change.by && name_fits(&machine.name)
+            }
+            Change::RemoveMachine { person, .. } => *person == change.by,
+            Change::Rekey { to, .. } => *to == change.by,
             _ => false,
         };
         if !own {
             return Ok(refused(
-                "Only your own name, your machines' names or your leaving can be passed on.",
+                "Only your own name, your machines or your leaving can be passed on.",
             ));
         }
         self.write_change(&change).await?;
@@ -662,10 +706,27 @@ impl Core {
 
     /// Taken only as a hint: the roster, with the removal the owner sent, must show it.
     async fn on_removed(&self, from: EndpointId, change: &SignedChange) -> anyhow::Result<Reply> {
+        // One of this person's own machines taking this one out, with the change that does it.
+        let mine = self.endpoint.id().to_string();
+        let roster = self.roster().await?;
+        let ours = roster.as_ref().is_some_and(|r| {
+            r.member_by_endpoint(&from.to_string())
+                .zip(r.member_by_endpoint(&mine))
+                .is_some_and(|(sender, me)| sender.person == me.person)
+        });
+        if ours
+            && self
+                .roster_with(Some(change))
+                .await?
+                .is_some_and(|r| r.dropped.contains(&mine))
+        {
+            let _ = self.events.send(NodeEvent::Dropped);
+            return Ok(Reply::Ok);
+        }
         if !self.sent_by_owner(from).await? {
             return Ok(refused("Only an owner can say who was removed."));
         }
-        let me = self.person.id();
+        let me = self.person().id();
         let removed = self
             .roster_with(Some(change))
             .await?
@@ -734,22 +795,31 @@ mod tests {
         assert_eq!(invites.pending(NOW), vec![invite]);
         assert_eq!(invites.redeem(&token, NOW + 1), Some(Role::Writer));
         assert_eq!(invites.redeem(&token, NOW + 2), None);
-        assert_eq!(invites.spend(&token, NOW + 2).unwrap(), Err(USED));
+        assert_eq!(
+            invites.spend_invite(&token, NOW + 2).unwrap(),
+            Err(Unusable::Used.invite_text())
+        );
         assert!(invites.pending(NOW).is_empty());
     }
 
     #[test]
     fn refusals_say_why() {
         let (_dir, invites) = store();
-        assert_eq!(invites.spend(&"0".repeat(64), NOW).unwrap(), Err(USED));
+        assert_eq!(
+            invites.spend_invite(&"0".repeat(64), NOW).unwrap(),
+            Err(Unusable::Used.invite_text())
+        );
         let (_, old) = invites.create(Role::Reader, NOW).unwrap();
         assert_eq!(
-            invites.spend(&old, NOW + INVITE_LIFETIME).unwrap(),
-            Err(EXPIRED)
+            invites.spend_invite(&old, NOW + INVITE_LIFETIME).unwrap(),
+            Err(Unusable::Expired.invite_text())
         );
         let (cancelled, token) = invites.create(Role::Reader, NOW).unwrap();
         invites.cancel(&cancelled.id).unwrap();
-        assert_eq!(invites.spend(&token, NOW).unwrap(), Err(CANCELLED));
+        assert_eq!(
+            invites.spend_invite(&token, NOW).unwrap(),
+            Err(Unusable::Cancelled.invite_text())
+        );
         assert!(invites.pending(NOW + INVITE_LIFETIME).is_empty());
         assert!(invites.cancel("nope").is_err());
     }

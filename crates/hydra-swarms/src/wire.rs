@@ -9,9 +9,14 @@ use std::io;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::roster::{MAX_CHANGE_BYTES, Member, SignedChange};
+use crate::ids::RekeyCert;
+use crate::mine::Mine;
+use crate::roster::{MAX_CHANGE_BYTES, Member, Role, SignedChange};
 
 pub const ALPN: &[u8] = b"hydra/swarm/1";
+
+/// Between your own machines, on each machine's device endpoint.
+pub const MINE_ALPN: &[u8] = b"hydra/mine/1";
 
 /// The longest frame either side accepts: room for the longest change, which a leaving passed
 /// on or a removal notice carries.
@@ -49,6 +54,63 @@ pub enum Reply {
     Refused {
         reason: String,
     },
+}
+
+/// A request from one of your machines to another (or, for `Link`, from a machine becoming
+/// yours).
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MineRequest {
+    /// Spends a link code; `name` is the new machine's name.
+    Link { token: String, name: String },
+    /// What the asking machine holds, to merge; the reply is what this one holds after.
+    Sync { mine: Mine },
+    /// A swarm the asking machine is in, for this one to join.
+    Offer { offer: Offer },
+    /// This person's `AddMachine` for the asking machine, for a machine in swarm `ns` to write
+    /// or pass to an owner.
+    Joining { ns: String, change: SignedChange },
+    /// Your new personal key (hex), and the chain vouching for it.
+    NewKey {
+        secret: String,
+        chain: Vec<RekeyCert>,
+    },
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MineReply {
+    /// The personal key (hex), what your machines share, and the swarms on offer.
+    Linked {
+        person: String,
+        mine: Mine,
+        offers: Vec<Offer>,
+    },
+    Synced {
+        mine: Mine,
+    },
+    /// The swarm's write capability (hex) for a writer or owner, and the answering machine's
+    /// endpoint in that swarm, for the joiner to sync with first.
+    Joined {
+        write_secret: Option<String>,
+        host: String,
+    },
+    Ok,
+    Refused {
+        reason: String,
+    },
+}
+
+/// A swarm one of your machines is in, offered to another.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct Offer {
+    /// The namespace id.
+    pub ns: String,
+    pub anchor: String,
+    pub name: String,
+    pub role: Role,
+    /// The offering machine's device id.
+    pub from: String,
 }
 
 pub async fn write_msg<W: AsyncWrite + Unpin, T: Serialize>(w: &mut W, msg: &T) -> io::Result<()> {
@@ -95,7 +157,8 @@ pub async fn read_msg<R: AsyncRead + Unpin, T: DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::PersonKey;
+    use crate::ids::{PersonKey, RekeyCert};
+    use crate::mine::Mine;
     use crate::roster::{Change, Machine, Role};
     use serde_json::json;
     use tokio::io::duplex;
@@ -165,6 +228,94 @@ mod tests {
     async fn round_trips_every_message() {
         round_trip(requests()).await;
         round_trip(replies()).await;
+    }
+
+    fn mine_requests() -> Vec<MineRequest> {
+        let [a, b] = [(); 2].map(|()| PersonKey::generate());
+        let change = SignedChange::sign(
+            "ns",
+            Change::Rename {
+                person: a.id(),
+                name: "x".into(),
+            },
+            &a,
+            1,
+        );
+        let mine = Mine {
+            name: "Olive".into(),
+            name_at: 1,
+            chain: vec![RekeyCert::new(&a, b.id())],
+            ..Mine::default()
+        };
+        vec![
+            MineRequest::Link {
+                token: "t".into(),
+                name: "laptop".into(),
+            },
+            MineRequest::Sync { mine },
+            MineRequest::Offer { offer: offer() },
+            MineRequest::Joining {
+                ns: "ns".into(),
+                change,
+            },
+            MineRequest::NewKey {
+                secret: "s".into(),
+                chain: vec![RekeyCert::new(&a, b.id())],
+            },
+        ]
+    }
+
+    fn offer() -> Offer {
+        Offer {
+            ns: "ns".into(),
+            anchor: "a".into(),
+            name: "Notes".into(),
+            role: Role::Writer,
+            from: "dev".into(),
+        }
+    }
+
+    fn mine_replies() -> Vec<MineReply> {
+        vec![
+            MineReply::Linked {
+                person: "p".into(),
+                mine: Mine::default(),
+                offers: vec![offer()],
+            },
+            MineReply::Synced {
+                mine: Mine::default(),
+            },
+            MineReply::Joined {
+                write_secret: Some("w".into()),
+                host: "h".into(),
+            },
+            MineReply::Ok,
+            MineReply::Refused {
+                reason: "no".into(),
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn round_trips_every_mine_message() {
+        round_trip(mine_requests()).await;
+        round_trip(mine_replies()).await;
+    }
+
+    #[test]
+    fn mine_json_shape_is_stable() {
+        assert_eq!(
+            serde_json::to_value(MineReply::Ok).unwrap(),
+            json!({"type":"ok"})
+        );
+        assert_eq!(
+            serde_json::to_value(MineRequest::Link {
+                token: "t".into(),
+                name: "n".into()
+            })
+            .unwrap(),
+            json!({"type":"link","token":"t","name":"n"})
+        );
     }
 
     #[test]

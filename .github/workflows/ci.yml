@@ -32,7 +32,13 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --workspace --all-features
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      # The tests that sync real nodes run two at a time and get retries: see
+      # .config/nextest.toml. nextest doesn't run doc tests, so cargo test does those.
+      - run: cargo nextest run --workspace --all-features --profile ci
+      - run: cargo test --workspace --all-features --doc
 
   version:
     needs: test

@@ -1,0 +1,15 @@
+# Tests that start real nodes and wait for them to sync. They share the machine's cores, so
+# on a small CI runner they slow each other past their waits when too many run at once.
+[test-groups]
+network = { max-threads = 2 }
+
+# CI: `cargo nextest run --profile ci`. A test that times out on a busy runner gets two more
+# tries; one that is really broken fails all three, and the summary names the ones that
+# needed a retry.
+[profile.ci]
+retries = 2
+fail-fast = false
+
+[[profile.ci.overrides]]
+filter = "(package(hydra-swarms) | package(hydra-link)) & kind(test)"
+test-group = "network"

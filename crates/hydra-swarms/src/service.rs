@@ -26,10 +26,13 @@ use tokio::time::Instant;
 
 use crate::folder::{Attention, Folder, FolderEvent};
 use crate::ids::{PersonId, PersonKey, to_hex};
+use crate::ids::{RekeyCert, chain_ends};
 use crate::invites::{Invite, InviteCode, NOT_THEIR_MACHINE, Refused, redeem, redeem_at};
+use crate::mine::DEVICE_KEY_ID;
 use crate::node::{NodeConfig, NodeEvent, SwarmNode, now_micros};
 use crate::paths::{RelPath, safe_rel_path};
 use crate::roster::{Change, Kept, Machine, Member, Role, Roster, SignedChange};
+use crate::wire::{MineReply, Offer};
 
 /// How often every swarm reconciles its folder, and retries what it couldn't send.
 const PERIODIC: Duration = Duration::from_secs(60);
@@ -44,6 +47,13 @@ const LEAVE_RETRY: Duration = Duration::from_secs(5);
 /// The first wait before another change no owner took is sent again; it doubles on each miss,
 /// up to `PERIODIC`.
 const RELAY_RETRY: Duration = Duration::from_secs(5);
+/// How long after syncing with a machine new to the roster it is tried again, while it isn't
+/// connected: it may not have had the roster that lets this machine in yet.
+const FRESH_RETRY: Duration = Duration::from_secs(2);
+/// How many times a machine new to the roster is tried again.
+const FRESH_TRIES: u32 = 4;
+/// How long a machine of yours waits for the roster to show another one joining through it.
+const JOINING_WAIT: Duration = Duration::from_secs(20);
 const REGISTRY_FILE: &str = "registry.json";
 const SEEN_FILE: &str = "seen.json";
 const OWED_FILE: &str = "owed.json";
@@ -60,6 +70,11 @@ pub struct Identity {
 /// Gives a swarm's machine key for a key id, making it the first time.
 pub type SwarmKeyFn = Box<dyn Fn(&str) -> Result<[u8; 32], String> + Send>;
 
+/// Keeps a new personal key, in place of the one before.
+pub type PersonKeyFn = Box<dyn Fn([u8; 32]) -> Result<(), String> + Send>;
+
+mod linking;
+
 pub struct ServiceConfig {
     /// `state_root/swarms`.
     pub root: PathBuf,
@@ -69,17 +84,26 @@ pub struct ServiceConfig {
     /// is known (the joining machine's key is part of the request to join), and the registry
     /// remembers it.
     pub swarm_key: SwarmKeyFn,
+    /// The keyring in hydraui, for a personal key this machine is given or makes.
+    pub set_person: PersonKeyFn,
     pub relays: bool,
     direct_peers: Option<DirectPeers>,
     lose_relays: Duration,
 }
 
 impl ServiceConfig {
-    pub fn new(root: PathBuf, identity: Identity, swarm_key: SwarmKeyFn, relays: bool) -> Self {
+    pub fn new(
+        root: PathBuf,
+        identity: Identity,
+        swarm_key: SwarmKeyFn,
+        set_person: PersonKeyFn,
+        relays: bool,
+    ) -> Self {
         ServiceConfig {
             root,
             identity,
             swarm_key,
+            set_person,
             relays,
             direct_peers: None,
             lose_relays: Duration::ZERO,
@@ -114,7 +138,8 @@ impl DirectPeers {
         lock(&self.0).insert(addr.id.to_string(), addr);
     }
 
-    fn get(&self, id: &str) -> Option<EndpointAddr> {
+    /// Where the node with endpoint id `id` listens, if it is in the book.
+    pub fn get(&self, id: &str) -> Option<EndpointAddr> {
         lock(&self.0).get(id).cloned()
     }
 
@@ -141,6 +166,8 @@ pub struct SwarmView {
     /// The machine that made the newest change applied here, and when (Unix seconds).
     pub last_change: Option<(String, u64)>,
     pub removed: bool,
+    /// How many other machines of yours are in this swarm.
+    pub my_other_machines: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -159,6 +186,27 @@ pub struct MachineView {
     pub online: bool,
     /// When it was last connected, in Unix seconds, as this machine saw it.
     pub last_seen: Option<u64>,
+    pub this_machine: bool,
+}
+
+/// Your machines, as this one sees them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MachinesView {
+    /// This machine's device id.
+    pub this: String,
+    pub devices: Vec<DeviceView>,
+    /// The link codes this machine has made that can still be used.
+    pub links: Vec<Invite<()>>,
+    /// The swarms offered to this machine.
+    pub offers: Vec<Offer>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceView {
+    pub id: String,
+    pub name: String,
+    /// Heard from in the last minute (this machine always is).
+    pub online: bool,
     pub this_machine: bool,
 }
 
@@ -218,6 +266,30 @@ pub enum Command {
         swarm: String,
         action: Resolution,
     },
+    /// Replies with a code another machine of yours can link with.
+    LinkCode {
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    CancelLink {
+        id: String,
+    },
+    /// Links this machine to the one that made `code`, taking its person.
+    Link {
+        code: String,
+    },
+    /// Removes one of your machines, by device id.
+    RemoveMachine {
+        device: String,
+    },
+    /// Joins the swarm offered to this machine into `folder`, which must be empty or new.
+    AcceptOffer {
+        swarm: String,
+        folder: PathBuf,
+    },
+    /// Says no to the swarm offered to this machine, for good.
+    DeclineOffer {
+        swarm: String,
+    },
     Stop,
 }
 
@@ -236,6 +308,12 @@ impl Command {
             Command::Create { .. }
             | Command::Join { .. }
             | Command::SetIdentity { .. }
+            | Command::LinkCode { .. }
+            | Command::CancelLink { .. }
+            | Command::Link { .. }
+            | Command::RemoveMachine { .. }
+            | Command::AcceptOffer { .. }
+            | Command::DeclineOffer { .. }
             | Command::Stop => None,
         }
     }
@@ -261,6 +339,12 @@ pub enum ServiceEvent {
         text: String,
     },
     Failed(String),
+    /// Your machines changed.
+    Machines(MachinesView),
+    /// Another machine of yours set your name; hydraui keeps it.
+    Named {
+        name: String,
+    },
 }
 
 pub struct SwarmsService;
@@ -277,6 +361,7 @@ impl SwarmsService {
         fmpsc::UnboundedReceiver<ServiceEvent>,
     )> {
         let (cmd_tx, cmd_rx) = fmpsc::unbounded();
+        let (left_tx, left_rx) = mpsc::unbounded_channel();
         let (ev_tx, ev_rx) = fmpsc::unbounded();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -303,11 +388,13 @@ impl SwarmsService {
                     views: Mutex::default(),
                     dirty: Notify::new(),
                     swarm_key: Mutex::new(cfg.swarm_key),
+                    keys: Mutex::default(),
+                    left: left_tx,
                 });
                 if let Some(text) = damaged {
                     shared.failed(text);
                 }
-                rt.block_on(run(shared, cfg.identity, cmd_rx));
+                rt.block_on(run(shared, cfg.identity, cfg.set_person, cmd_rx, left_rx));
             })?;
         Ok((cmd_tx, ev_rx))
     }
@@ -447,6 +534,17 @@ struct Shared {
     /// Set when a view changes; the main task pushes them all, at most every `VIEWS_EVERY`.
     dirty: Notify,
     swarm_key: Mutex<SwarmKeyFn>,
+    /// What each swarm needs to move this person to their current key: the chain of personal
+    /// keys, and the endpoints of the machines removed from yours.
+    keys: Mutex<KeyState>,
+    /// Swarms this machine has left or forgotten, so they aren't offered to it again.
+    left: mpsc::UnboundedSender<String>,
+}
+
+#[derive(Clone, Default)]
+struct KeyState {
+    chain: Vec<RekeyCert>,
+    gone: HashSet<String>,
 }
 
 impl Shared {
@@ -541,6 +639,10 @@ struct Handle {
 enum Msg {
     Command(Command),
     Identity(Identity),
+    /// Another machine of yours joining: this person's `AddMachine` for it, and where to answer.
+    Joining(SignedChange, oneshot::Sender<MineReply>),
+    /// This person's new key, after one of their machines was removed.
+    Person([u8; 32]),
     Stop,
 }
 
@@ -548,39 +650,167 @@ enum Msg {
 async fn run(
     shared: Arc<Shared>,
     mut identity: Identity,
+    set_person: PersonKeyFn,
     mut commands: fmpsc::UnboundedReceiver<Command>,
+    mut left: mpsc::UnboundedReceiver<String>,
 ) {
+    let (up_tx, mut up) = mpsc::unbounded_channel();
+    let machines = match start_machines(&shared, &identity, set_person, up_tx).await {
+        Ok(m) => Some(m),
+        Err(e) => {
+            shared.failed(format!(
+                "Your other machines can't be reached from here: {e:#}"
+            ));
+            None
+        }
+    };
+    if let Some(m) = &machines {
+        let name = m.name();
+        if name != identity.name {
+            identity.name = name.clone();
+            shared.emit(ServiceEvent::Named { name });
+        }
+        m.publish();
+        tokio::spawn(Arc::clone(m).sync_all());
+    }
+    let mut tick = tokio::time::interval_at(Instant::now() + PERIODIC, PERIODIC);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut swarms: HashMap<String, Handle> = HashMap::new();
-    let mut opening: JoinSet<Option<Opened>> = JoinSet::new();
+    // Each swarm opening, with the personal key it opens as.
+    let mut opening: JoinSet<([u8; 32], Option<Opened>)> = JoinSet::new();
     for entry in shared.registry.entries() {
-        opening.spawn(open_existing(Arc::clone(&shared), identity.clone(), entry));
+        let open = open_existing(Arc::clone(&shared), identity.clone(), entry);
+        opening.spawn(as_person(identity.person, open));
     }
     // The first push says what there is, even when there is nothing.
     shared.dirty.notify_one();
     let mut last_push: Option<Instant> = None;
     let mut push_at: Option<Instant> = None;
+    let mut offered: HashSet<String> = HashSet::new();
     loop {
         tokio::select! {
+            // What your other machines changed (a new key above all) comes before any command
+            // sent after it.
+            biased;
+            Some(up) = up.recv() => match up {
+                linking::Up::Named(name) => {
+                    identity.name = name.clone();
+                    for h in swarms.values() {
+                        let _ = h.tx.send(Msg::Identity(identity.clone()));
+                    }
+                    shared.emit(ServiceEvent::Named { name });
+                }
+                linking::Up::Person(person) => {
+                    // Every open swarm acts as the person's new key; ones still opening do once
+                    // they have.
+                    identity.person = person;
+                    for h in swarms.values() {
+                        let _ = h.tx.send(Msg::Person(person));
+                    }
+                }
+                linking::Up::Joining { ns, change, reply } => match swarms.get(&ns) {
+                    Some(h) => {
+                        if let Err(mpsc::error::SendError(Msg::Joining(_, reply))) =
+                            h.tx.send(Msg::Joining(*change, reply))
+                        {
+                            let _ = reply.send(linking::not_here());
+                        }
+                    }
+                    None => {
+                        let _ = reply.send(linking::not_here());
+                    }
+                },
+            },
             cmd = commands.next() => match cmd {
                 None | Some(Command::Stop) => break,
                 Some(Command::Create { name, folder }) => {
-                    opening.spawn(create(Arc::clone(&shared), identity.clone(), name, folder));
+                    let open = create(Arc::clone(&shared), identity.clone(), name, folder);
+                    opening.spawn(as_person(identity.person, open));
                 }
                 Some(Command::Join { code, folder }) => {
-                    opening.spawn(join(Arc::clone(&shared), identity.clone(), code, folder));
+                    let open = join(Arc::clone(&shared), identity.clone(), code, folder);
+                    opening.spawn(as_person(identity.person, open));
                 }
                 Some(Command::SetIdentity { name, machine_name }) => {
+                    if let Some(m) = &machines {
+                        m.set_identity(&name, &machine_name);
+                        tokio::spawn(Arc::clone(m).sync_all());
+                    }
                     identity.name = name;
                     identity.machine_name = machine_name;
                     for h in swarms.values() {
                         let _ = h.tx.send(Msg::Identity(identity.clone()));
                     }
                 }
+                Some(Command::LinkCode { reply }) => {
+                    let code = match &machines {
+                        Some(m) => m.link_code(),
+                        None => Err(NO_DEVICE.to_string()),
+                    };
+                    let _ = reply.send(code);
+                }
+                Some(Command::CancelLink { id }) => {
+                    if let Some(m) = &machines {
+                        m.cancel_link(&id);
+                    }
+                }
+                Some(Command::Link { code }) => match &machines {
+                    Some(m) => {
+                        tokio::spawn(Arc::clone(m).link(code, identity.machine_name.clone()));
+                    }
+                    None => shared.failed(NO_DEVICE),
+                },
+                Some(Command::RemoveMachine { device }) => match &machines {
+                    Some(m) => {
+                        let (m, shared) = (Arc::clone(m), Arc::clone(&shared));
+                        tokio::spawn(async move {
+                            // Up to date with your other machines first, so a removal made on
+                            // one of them is built on rather than forked from.
+                            m.sync_within(linking::BEFORE_REMOVAL).await;
+                            match m.remove_machine(&device).await {
+                                // Your other machines get the new key now.
+                                Ok(()) => m.sync_all().await,
+                                Err(text) => shared.failed(text),
+                            }
+                        });
+                    }
+                    None => shared.failed(NO_DEVICE),
+                },
+                Some(Command::AcceptOffer { swarm, folder }) => match &machines {
+                    Some(m) => {
+                        let accept = Arc::clone(m).accept(identity.clone(), swarm, folder);
+                        opening.spawn(as_person(identity.person, accept));
+                    }
+                    None => shared.failed(NO_DEVICE),
+                },
+                Some(Command::DeclineOffer { swarm }) => {
+                    if let Some(m) = &machines {
+                        m.decline(&swarm);
+                    }
+                }
                 Some(cmd) => to_swarm(&shared, &mut swarms, cmd),
             },
+            Some(ns) = left.recv() => {
+                // Left here: not offered back by your other machines.
+                if let Some(m) = &machines {
+                    m.decline(&ns);
+                }
+            }
+            _ = tick.tick() => {
+                if let Some(m) = &machines {
+                    tokio::spawn(Arc::clone(m).sync_all());
+                }
+            }
             Some(done) = opening.join_next(), if !opening.is_empty() => {
-                if let Ok(Some(opened)) = done {
+                if let Ok((person, Some(opened))) = done {
+                    // Opened as a key this person no longer has: it acts as the new one.
+                    if let (true, Some(node)) = (person != identity.person, &opened.node) {
+                        node.set_person(identity.person);
+                    }
                     let ns = opened.entry.ns.clone();
+                    if let (Some(m), Some(node)) = (&machines, &opened.node) {
+                        m.note_endpoint(&node.endpoint_id());
+                    }
                     let (tx, rx) = mpsc::unbounded_channel();
                     let worker = Worker::new(Arc::clone(&shared), identity.clone(), opened);
                     let task = tokio::spawn(worker.run(rx));
@@ -596,15 +826,28 @@ async fn run(
             () = sleep_until(push_at) => {
                 push_at = None;
                 last_push = Some(Instant::now());
-                shared.emit(ServiceEvent::Swarms(shared.views()));
+                let views = shared.views();
+                // A swarm showing for the first time is offered to your other machines; its
+                // view is what the offer is made from.
+                let shown: HashSet<String> = views.iter().map(|v| v.id.clone()).collect();
+                if let Some(m) = &machines
+                    && !shown.is_subset(&offered)
+                {
+                    tokio::spawn(Arc::clone(m).sync_all());
+                }
+                offered = shown;
+                shared.emit(ServiceEvent::Swarms(views));
             }
         }
     }
     // Swarms still being made or joined are let finish, then closed with the rest.
     while let Some(done) = opening.join_next().await {
-        if let Ok(Some(Opened {
-            node: Some(node), ..
-        })) = done
+        if let Ok((
+            _,
+            Some(Opened {
+                node: Some(node), ..
+            }),
+        )) = done
         {
             node.shutdown().await;
         }
@@ -615,6 +858,30 @@ async fn run(
     for (_, h) in swarms {
         let _ = h.task.await;
     }
+    if let Some(m) = machines {
+        m.shutdown().await;
+    }
+}
+
+/// `open`, with the personal key it opens the swarm as.
+async fn as_person(
+    person: [u8; 32],
+    open: impl Future<Output = Option<Opened>>,
+) -> ([u8; 32], Option<Opened>) {
+    (person, open.await)
+}
+
+/// Why nothing to do with your other machines works here.
+const NO_DEVICE: &str = "Your other machines can't be reached from here.";
+
+async fn start_machines(
+    shared: &Arc<Shared>,
+    identity: &Identity,
+    set_person: PersonKeyFn,
+    up: mpsc::UnboundedSender<linking::Up>,
+) -> anyhow::Result<Arc<linking::Machines>> {
+    let device_key = shared.machine_key(DEVICE_KEY_ID).await?;
+    linking::Machines::start(Arc::clone(shared), device_key, identity, set_person, up).await
 }
 
 /// Passes a command to its swarm's task.
@@ -851,28 +1118,63 @@ async fn try_join(
     if shared.registry.contains(&ns) {
         bail!("You're already in {name}.");
     }
+    let joining = Joining {
+        anchor,
+        name,
+        folder,
+        key_id,
+        machine_key,
+        cap,
+        author,
+        host,
+    };
+    open_joined(shared, &identity, joining).await
+}
+
+/// A swarm this machine has been let into, before it opens.
+struct Joining {
+    anchor: PersonId,
+    name: String,
+    folder: PathBuf,
+    key_id: String,
+    machine_key: [u8; 32],
+    cap: Capability,
+    author: Author,
+    /// The member machine that let it in, which it syncs with first.
+    host: EndpointAddr,
+}
+
+/// Opens a swarm this machine was let into and syncs with the machine that let it in; with
+/// nothing left behind if that fails.
+async fn open_joined(
+    shared: &Arc<Shared>,
+    identity: &Identity,
+    j: Joining,
+) -> anyhow::Result<Opened> {
+    let ns = j.cap.id().to_string();
+    let host = j.host.id.to_string();
     let dir = shared.root.join(&ns);
     let joined = async {
-        let synced = Folder::new(folder.clone(), dir.join("folder"), true)?;
-        let mut cfg = shared.node_config(&ns, machine_key, identity.person);
-        cfg.anchor = Some(anchor);
-        let node = SwarmNode::join(cfg, cap, author).await?;
+        let synced = Folder::new(j.folder.clone(), dir.join("folder"), true)?;
+        let mut cfg = shared.node_config(&ns, j.machine_key, identity.person);
+        cfg.anchor = Some(j.anchor);
+        let node = SwarmNode::join(cfg, j.cap, j.author).await?;
         // The gate starts with the inviter alone; the swarm's task opens it to the roster once
         // the roster shows this machine.
         let entry = Entry {
             ns: ns.clone(),
-            anchor: anchor.to_string(),
-            folder,
+            anchor: j.anchor.to_string(),
+            folder: j.folder,
             removed: false,
-            name: name.clone(),
-            key: Some(key_id),
+            name: j.name,
+            key: Some(j.key_id),
             leaving: false,
         };
         let started = async {
             shared.remember_peers(&node);
-            node.remember_addr(host);
-            node.set_gate(std::slice::from_ref(&code.host));
-            node.sync_with(std::slice::from_ref(&code.host)).await?;
+            node.remember_addr(j.host);
+            node.set_gate(std::slice::from_ref(&host));
+            node.sync_with(std::slice::from_ref(&host)).await?;
             shared.registry.add(entry.clone())
         }
         .await;
@@ -926,9 +1228,18 @@ struct SeenFile {
 
 /// A message to another machine finished.
 enum Sent {
-    Promoted { endpoint: String, ok: bool },
-    Relayed { sig: String, leave: bool, ok: bool },
+    Promoted {
+        endpoint: String,
+        ok: bool,
+    },
+    Relayed {
+        sig: String,
+        leave: bool,
+        ok: bool,
+    },
     Removed,
+    /// A machine of yours joining through this one has had its answer.
+    Answered,
 }
 
 /// One swarm's task: its node, its folder and everything this machine knows of it.
@@ -956,6 +1267,9 @@ struct Worker {
     /// straight back (a restart leaves the other side holding the old connection until it
     /// times out).
     resync: HashSet<String>,
+    /// Machines new to the roster, and how often they've been tried again since, until they
+    /// connect.
+    fresh: HashMap<String, u32>,
     seen: SeenFile,
     /// Machines owed the write capability after their person was promoted.
     owed: Vec<String>,
@@ -982,6 +1296,11 @@ struct Worker {
     /// Whether the names in the roster have been checked against this machine's, which may have
     /// changed while the service wasn't running.
     names_checked: bool,
+    /// Taken out on its own by another machine of this person's, not with the person.
+    dropped: bool,
+    /// Old keys this machine has asked to move this person from, and removed machines it has
+    /// asked to take out, so each is asked once.
+    rekeyed: HashSet<String>,
 }
 
 impl Worker {
@@ -1015,6 +1334,7 @@ impl Worker {
             peers: HashSet::new(),
             online: HashSet::new(),
             resync: HashSet::new(),
+            fresh: HashMap::new(),
             in_flight: HashSet::new(),
             sends: JoinSet::new(),
             pass_at: Some(Instant::now()),
@@ -1028,6 +1348,8 @@ impl Worker {
             relay_backoff: RELAY_RETRY,
             finished: false,
             names_checked: false,
+            dropped: false,
+            rekeyed: HashSet::new(),
             shared,
         }
     }
@@ -1042,6 +1364,8 @@ impl Worker {
                     None | Some(Msg::Stop) => break,
                     Some(Msg::Command(cmd)) => self.command(cmd).await,
                     Some(Msg::Identity(id)) => self.set_identity(id).await,
+                    Some(Msg::Joining(change, reply)) => self.joining(change, reply).await,
+                    Some(Msg::Person(key)) => self.set_person(key),
                 },
                 ev = next_event(&mut self.events) => self.node_event(ev),
                 Some(()) = next_signal(&mut self.watch) => self.soon(Duration::ZERO),
@@ -1111,6 +1435,7 @@ impl Worker {
             }
             Ok(NodeEvent::SyncFinished) => self.soon(SETTLE),
             Ok(NodeEvent::PeerUp(e)) => {
+                self.fresh.remove(&e);
                 self.online.insert(e.clone());
                 self.resync.insert(e);
                 self.soon(RESYNC_AFTER);
@@ -1127,6 +1452,10 @@ impl Worker {
                 if !self.leaving {
                     self.removed_now = true;
                 }
+            }
+            Ok(NodeEvent::Dropped) => {
+                self.dropped = true;
+                self.removed_now = true;
             }
             Err(broadcast::error::RecvError::Closed) => self.events = None,
         }
@@ -1211,12 +1540,18 @@ impl Worker {
             }
             // A joiner keeps its inviter-only gate until the roster shows it.
             node.set_gate(&r.endpoints());
+        } else if self.seen_me && !self.leaving && r.dropped.contains(&self.my_endpoint) {
+            self.dropped = true;
+            self.removed_now = true;
         } else if self.seen_me
             && !self.leaving
             && r.removed.contains(&me)
             && r.role_of(&me).is_none()
         {
             self.removed_now = true;
+        }
+        if me_in && !self.removed_now {
+            self.move_to_current_key(node, &r).await;
         }
         if r.name != self.name && !r.name.is_empty() {
             self.name = r.name.clone();
@@ -1233,7 +1568,13 @@ impl Worker {
         if !new.is_empty() && !self.removed_now {
             self.shared.remember_peers(node);
             match node.sync_with(&new).await {
-                Ok(()) => self.peers.extend(new),
+                Ok(()) => {
+                    for e in &new {
+                        self.fresh.insert(e.clone(), 0);
+                    }
+                    self.peers.extend(new);
+                    self.soon(FRESH_RETRY);
+                }
                 Err(e) => self.report(format!("{}: {e:#}", self.name)),
             }
         }
@@ -1255,11 +1596,24 @@ impl Worker {
         let Some(r) = &self.roster else {
             return;
         };
-        let again: Vec<String> = self
+        let mut again: Vec<String> = self
             .resync
             .drain()
             .filter(|e| r.member_by_endpoint(e).is_some())
             .collect();
+        // Machines new to the roster that haven't connected: they may have refused this one
+        // before their own roster let it in.
+        self.fresh
+            .retain(|e, tries| !self.online.contains(e) && *tries < FRESH_TRIES);
+        for (e, tries) in &mut self.fresh {
+            if r.member_by_endpoint(e).is_some() && !again.contains(e) {
+                *tries += 1;
+                again.push(e.clone());
+            }
+        }
+        if !self.fresh.is_empty() {
+            self.soon(FRESH_RETRY);
+        }
         if !again.is_empty() {
             self.shared.remember_peers(node);
             let _ = node.sync_with(&again).await;
@@ -1388,6 +1742,12 @@ impl Worker {
             Command::Create { .. }
             | Command::Join { .. }
             | Command::SetIdentity { .. }
+            | Command::LinkCode { .. }
+            | Command::CancelLink { .. }
+            | Command::Link { .. }
+            | Command::RemoveMachine { .. }
+            | Command::AcceptOffer { .. }
+            | Command::DeclineOffer { .. }
             | Command::Stop => Ok(()),
         };
         if let Err(text) = done {
@@ -1605,16 +1965,32 @@ impl Worker {
         let node = self.live_node()?;
         let r = self.fresh_roster(&node).await?;
         let me = self.person.id();
-        if Self::is_last_owner(&r, &me) {
-            return Err(self.needs_an_owner());
-        }
-        let kept = self.kept(&node, &me).await?;
-        let signed = SignedChange::sign(
-            &self.ns,
-            Change::Leave { person: me, kept },
-            &self.person,
-            now_micros(),
-        );
+        let others = r
+            .person_machines(&me)
+            .iter()
+            .any(|x| x.endpoint != self.my_endpoint);
+        // With other machines of yours in the swarm, only this one leaves.
+        let change = if others {
+            let kept = if r.role_of(&me) >= Some(Role::Writer) {
+                node.kept_machine(&node.author())
+                    .await
+                    .map_err(|e| format!("{}: {e:#}", self.name))?
+            } else {
+                Kept::default()
+            };
+            Change::RemoveMachine {
+                person: me,
+                endpoint: self.my_endpoint.clone(),
+                kept,
+            }
+        } else {
+            if Self::is_last_owner(&r, &me) {
+                return Err(self.needs_an_owner());
+            }
+            let kept = self.kept(&node, &me).await?;
+            Change::Leave { person: me, kept }
+        };
+        let signed = SignedChange::sign(&self.ns, change, &self.person, now_micros());
         if node.can_write() {
             node.write_change(&signed)
                 .await
@@ -1646,6 +2022,7 @@ impl Worker {
         }
         self.shared.drop_view(&self.ns);
         let _ = fs::remove_dir_all(&self.dir);
+        let _ = self.shared.left.send(self.ns.clone());
         self.finished = true;
     }
 
@@ -1654,8 +2031,12 @@ impl Worker {
             return;
         }
         self.removed = true;
-        self.shared
-            .toast(&self.ns, format!("You were removed from {}.", self.name));
+        let text = if self.dropped {
+            format!("This machine was removed from {}.", self.name)
+        } else {
+            format!("You were removed from {}.", self.name)
+        };
+        self.shared.toast(&self.ns, text);
         let name = self.name.clone();
         if let Err(e) = self.shared.registry.update(&self.ns, |e| {
             e.removed = true;
@@ -1735,6 +2116,168 @@ impl Worker {
         self.deliver(true);
     }
 
+    /// Acts as this person's new key from now on, and looks at the roster again at once to move
+    /// them to it here.
+    fn set_person(&mut self, key: [u8; 32]) {
+        self.identity.person = key;
+        self.person = PersonKey::from_bytes(key);
+        if let Some(node) = &self.node {
+            node.set_person(key);
+        }
+        self.soon(Duration::ZERO);
+    }
+
+    /// When this swarm still knows this person by an earlier key, moves them to the current one,
+    /// taking out the machines removed from yours; and takes out any of those still listed under
+    /// the current key. Each is asked once; a reader's go through an owner.
+    async fn move_to_current_key(&mut self, node: &SwarmNode, r: &Roster) {
+        let keys = lock(&self.shared.keys).clone();
+        let me = self.person.id();
+        let earlier = keys.chain.iter().position(|c| r.role_of(&c.from).is_some());
+        if let Some(i) = earlier {
+            let old = keys.chain[i].from;
+            let certs = keys.chain[i..].to_vec();
+            if chain_ends(&certs, &old) != Some(me) || !self.rekeyed.insert(old.to_string()) {
+                return;
+            }
+            let gone: Vec<Machine> = r
+                .person_machines(&old)
+                .iter()
+                .filter(|x| keys.gone.contains(&x.endpoint))
+                .cloned()
+                .collect();
+            let kept = self.kept_machines(node, r, &old, &gone).await;
+            let change = Change::Rekey {
+                person: old,
+                to: me,
+                certs,
+                drop: gone.iter().map(|x| x.endpoint.clone()).collect(),
+                kept,
+            };
+            self.submit(node, change, &gone).await;
+            return;
+        }
+        let gone: Vec<Machine> = r
+            .person_machines(&me)
+            .iter()
+            .filter(|x| keys.gone.contains(&x.endpoint) && x.endpoint != self.my_endpoint)
+            .filter(|x| self.rekeyed.insert(x.endpoint.clone()))
+            .cloned()
+            .collect();
+        for x in gone {
+            let kept = self
+                .kept_machines(node, r, &me, std::slice::from_ref(&x))
+                .await;
+            let change = Change::RemoveMachine {
+                person: me,
+                endpoint: x.endpoint.clone(),
+                kept,
+            };
+            self.submit(node, change, &[x]).await;
+        }
+    }
+
+    /// What `machines` of `person`'s wrote, for a change taking them out; nothing for a reader.
+    async fn kept_machines(
+        &self,
+        node: &SwarmNode,
+        r: &Roster,
+        person: &PersonId,
+        machines: &[Machine],
+    ) -> Kept {
+        let mut kept = Kept::default();
+        if r.role_of(person) < Some(Role::Writer) {
+            return kept;
+        }
+        for x in machines {
+            match node.kept_machine(&x.author).await {
+                Ok(k) => kept.authors.extend(k.authors),
+                Err(e) => self.report(format!("{}: {e:#}", self.name)),
+            }
+        }
+        kept
+    }
+
+    /// Writes this person's `change`, or has an owner write it, and tells the machines it takes
+    /// out, as far as they can be reached.
+    async fn submit(&mut self, node: &SwarmNode, change: Change, out: &[Machine]) {
+        let signed = SignedChange::sign(&self.ns, change, &self.person, now_micros());
+        if node.can_write() {
+            if let Err(e) = node.write_change(&signed).await {
+                self.report(format!("{}: {e:#}", self.name));
+            }
+        } else {
+            self.outbox.push(signed.clone());
+            self.save_outbox();
+            self.deliver(true);
+        }
+        let Some(node) = self.node.clone() else {
+            return;
+        };
+        for x in out {
+            let node = Arc::clone(&node);
+            let endpoint = x.endpoint.clone();
+            let signed = signed.clone();
+            self.sends.spawn(async move {
+                let _ = node.send_removed(&endpoint, &signed).await;
+                Sent::Removed
+            });
+        }
+    }
+
+    /// Another machine of yours is joining: writes this person's `AddMachine` for it (or has an
+    /// owner write it), then answers once the roster shows that machine and the gate lets it in,
+    /// with write access when this person has it.
+    async fn joining(&mut self, change: SignedChange, reply: oneshot::Sender<MineReply>) {
+        let refuse = |reason: String| MineReply::Refused { reason };
+        let (Ok(node), Change::AddMachine { machine, .. }) = (self.live_node(), &change.change)
+        else {
+            let _ = reply.send(linking::not_here());
+            return;
+        };
+        let endpoint = machine.endpoint.clone();
+        if node.can_write() {
+            if let Err(e) = node.write_change(&change).await {
+                let _ = reply.send(refuse(format!("{}: {e:#}", self.name)));
+                return;
+            }
+        } else if !self.outbox.iter().any(|c| c.sig == change.sig) {
+            self.outbox.push(change);
+            self.save_outbox();
+            self.deliver(true);
+        }
+        let me = self.person.id();
+        let host = self.my_endpoint.clone();
+        let name = self.name.clone();
+        // One of the swarm's sends, so closing the swarm stops it and lets the node go.
+        self.sends.spawn(async move {
+            let deadline = Instant::now() + JOINING_WAIT;
+            while Instant::now() < deadline {
+                if let Ok(Some(r)) = node.roster().await
+                    && r.member_by_endpoint(&endpoint).is_some()
+                {
+                    node.set_gate(&r.endpoints());
+                    let write_secret = match r.role_of(&me) {
+                        Some(role) if role >= Role::Writer => {
+                            match node.capability(Role::Writer).await {
+                                Ok(Capability::Write(secret)) => Some(to_hex(&secret.to_bytes())),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    let _ = reply.send(MineReply::Joined { write_secret, host });
+                    return Sent::Answered;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            let _ = reply.send(refuse(format!(
+                "Your machine in {name} couldn't add this one yet. Try again in a moment."
+            )));
+            Sent::Answered
+        });
+    }
+
     /// Sends what is owed to connected machines: the write capability to promoted ones, and this
     /// person's queued changes to an owner.
     ///
@@ -1780,9 +2323,14 @@ impl Worker {
             let node = Arc::clone(&node);
             let owners = owners.clone();
             let shared = Arc::clone(&self.shared);
+            let me = self.my_endpoint.clone();
             self.sends.spawn(async move {
                 let sig = change.sig.clone();
-                let leave = matches!(change.change, Change::Leave { .. });
+                let leave = match &change.change {
+                    Change::Leave { .. } => true,
+                    Change::RemoveMachine { endpoint, .. } => *endpoint == me,
+                    _ => false,
+                };
                 let mut ok = false;
                 for owner in owners {
                     let answer = node.relay(&owner, change.clone()).await;
@@ -1832,7 +2380,7 @@ impl Worker {
                     self.relay_backoff = (self.relay_backoff * 2).min(PERIODIC);
                 }
             }
-            Sent::Removed => {}
+            Sent::Removed | Sent::Answered => {}
         }
     }
 
@@ -1916,6 +2464,14 @@ impl Worker {
             syncing: self.syncing,
             last_change: self.seen.last_change.clone(),
             removed: self.removed,
+            my_other_machines: roster
+                .map(|r| {
+                    r.person_machines(&me)
+                        .iter()
+                        .filter(|x| x.endpoint != self.my_endpoint)
+                        .count()
+                })
+                .unwrap_or(0),
         }
     }
 }

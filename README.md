@@ -96,7 +96,14 @@ A swarm keeps a folder in sync between hydra machines, say a folder of skills sh
 - **Owners rank by seniority.** The swarm's creator ranks first, and each owner ranks below whoever made them one. An owner can demote or remove only owners junior to them.
 - **Clocks.** Machines' clocks must agree to within 10 minutes. iroh-docs drops changes dated more than 10 minutes ahead, so a machine whose clock is further out than that won't sync until its clock is corrected.
 
-Linking several of your own machines to you is not in this version; it is coming later.
+- **Your other machines.** On **You and this machine**, **Add another machine of mine…** makes a link code that works once and expires after 7 days. Paste it into **Link this machine…** on the other machine, which must be in no swarm yet. That machine becomes yours: it takes your name, and every swarm you're in is offered to it to join into a folder of its choosing. Swarms you join later are offered too. In each swarm you show once, with your machines underneath, and each has your role. Change your name on one machine and the rest follow.
+- **Leaving on one machine.** Where you have other machines in a swarm, **Leave on this machine…** takes out only this one. The rest stay in, and this machine keeps its files.
+- **Removing one of your machines.** **Remove…** shuts it out of every swarm and gives your other machines a new key for you. A machine that was off at the time picks up the key the next time it reaches one that has it. The removed machine keeps the files it has, and its past edits stay.
+- **Known limits of linking.**
+  - A removed machine still holds your old key. hydra on that machine never uses it again, but a modified client could sign changes with it dated before the removal. In a swarm one of your machines hasn't moved to the new key yet, that could take your place, add a machine back, or, in a swarm you created, replace its history. This is the same trust in your teammates' and your own machines that the members log already relies on.
+  - A swarm that only the removed machine is in (you chose **Not on this machine** everywhere else) keeps it until an owner there removes it.
+  - Remove a machine from one that's up to date: if two of your machines each remove one while they can't reach each other, they end up with different keys, and one of them stops syncing until you link it again.
+  - A machine removed before its place in a swarm reached your other machines stays listed in that swarm until it does.
 
 ## Quick start: two GitHub and Claude accounts
 

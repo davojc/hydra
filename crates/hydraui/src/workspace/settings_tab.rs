@@ -400,6 +400,13 @@ impl Workspace {
                 "Join a swarm…",
                 Box::new(cx.listener(|ws, _, window, cx| ws.join_swarm_dialog(window, cx))),
             ))
+            .when(self.may_link_here(), |d| {
+                d.child(add(
+                    "settings-link-machine",
+                    "Link this machine…",
+                    Box::new(cx.listener(|ws, _, window, cx| ws.link_machine_dialog(window, cx))),
+                ))
+            })
             .child(heading("ENVIRONMENTS"))
             .children(envs)
             .child(add(

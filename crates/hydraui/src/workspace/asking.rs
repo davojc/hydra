@@ -208,17 +208,26 @@ impl Workspace {
         }
     }
 
-    /// The question `run` asked, where and when, and the thread, for the dialog and the line.
-    fn asked(&self, orch: PaneId, cx: &App) -> Option<(String, Ask, Option<String>)> {
+    /// The question a ticket of `orch` asked (`run`, else the first asking), where and when,
+    /// and the thread, for the dialog and the line.
+    fn asked(
+        &self,
+        orch: PaneId,
+        run: Option<&str>,
+        cx: &App,
+    ) -> Option<(String, Ask, Option<String>)> {
         let token = self.panes.get(&orch)?.read(cx).mcp_token()?.to_string();
         let sv = server::get()?;
         let reg = server::lock(sv.registry());
         let open = reg.runs.open_of(&token);
-        let r = open
-            .iter()
-            .find(|r| r.asking.is_some())
-            .copied()
-            .or_else(|| reg.runs.current(&token))?;
+        let r = match run {
+            Some(id) => open.iter().find(|r| r.id == id).copied()?,
+            None => open
+                .iter()
+                .find(|r| r.asking.is_some())
+                .copied()
+                .or_else(|| reg.runs.current(&token))?,
+        };
         Some((
             r.id.clone(),
             r.asking.clone()?,
@@ -228,19 +237,25 @@ impl Workspace {
 
     /// Under an orchestrator while its ticket waits on product: one short line; clicking it
     /// shows the question, its thread, **Check now** and **Answer…**.
+    /// `run`: that ticket's question, in its box in the sidebar; `None`: the orchestrator's.
     pub(super) fn render_question(
         &self,
         orch: PaneId,
+        run: Option<&str>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let (_, ask, _) = self.asked(orch, cx)?;
+        let (_, ask, _) = self.asked(orch, run, cx)?;
+        let run = run.map(str::to_string);
         let waited = SystemTime::now()
             .duration_since(ask.since)
             .map_or(0, |d| d.as_secs() / 60);
         Some(
             h_flex()
-                .id(SharedString::from(format!("question-{orch}")))
-                .ml(px(26.))
+                .id(SharedString::from(format!(
+                    "question-{orch}-{}",
+                    run.as_deref().unwrap_or("")
+                )))
+                .when(run.is_none(), |d| d.ml(px(26.)))
                 .mr_1()
                 .my_1()
                 .px_2()
@@ -275,17 +290,23 @@ impl Workspace {
                         .text_color(color(theme::AMBER))
                         .child("›"),
                 )
-                .on_click(
-                    cx.listener(move |ws, _, window, cx| ws.question_dialog(orch, window, cx)),
-                )
+                .on_click(cx.listener(move |ws, _, window, cx| {
+                    ws.question_dialog(orch, run.clone(), window, cx)
+                }))
                 .into_any_element(),
         )
     }
 
     /// The question in full, where it was asked, when hydraui next looks for the reply, and
     /// what can be done about it.
-    fn question_dialog(&mut self, orch: PaneId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((run, ask, channel)) = self.asked(orch, cx) else {
+    fn question_dialog(
+        &mut self,
+        orch: PaneId,
+        run: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((run, ask, channel)) = self.asked(orch, run.as_deref(), cx) else {
             return;
         };
         let now = SystemTime::now();

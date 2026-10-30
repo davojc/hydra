@@ -308,10 +308,15 @@ impl Workspace {
             return;
         }
         // What it watches, a Linear team or a Slack channel, and who else watches the same.
+        // A Linear trigger races only one that picks the same tickets: pipelines on one team
+        // with different states, labels or assignee rules each go their own way (§47).
         let (watched, label) = if let Some((_, s, _)) = self.linear_of(orch, cx) {
-            (s.team.clone(), s.team)
+            (
+                linear_watch::pick_key(&s),
+                format!("picks {} tickets in {} the same way", s.team, s.pick),
+            )
         } else if let Some((_, s, _)) = self.slack_of(orch, cx) {
-            (s.channel.clone(), s.label)
+            (s.channel.clone(), format!("watches {}", s.label))
         } else {
             return;
         };
@@ -321,7 +326,7 @@ impl Workspace {
             .filter(|(id, w)| w.on && self.panes.contains_key(id))
             .filter_map(|(id, _)| {
                 let what = match self.linear_of(*id, cx) {
-                    Some((_, s, _)) => s.team,
+                    Some((_, s, _)) => linear_watch::pick_key(&s),
                     None => self.slack_of(*id, cx)?.1.channel,
                 };
                 Some((*id, what))
@@ -335,7 +340,7 @@ impl Workspace {
         if other.is_some() {
             window.push_notification(
                 Notification::warning(format!(
-                    "Another orchestrator already watches {label}: only one may, or they'd race \
+                    "Another orchestrator already {label}: only one may, or they'd race \
                      for its work."
                 ))
                 .title(self.toast_title(orch, "Automatic", cx)),

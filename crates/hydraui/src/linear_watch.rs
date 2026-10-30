@@ -242,8 +242,8 @@ pub fn in_team(ticket: &str, team: &str) -> bool {
         .is_some_and(|(key, n)| key.eq_ignore_ascii_case(team) && !n.is_empty())
 }
 
-/// Another orchestrator already watching `team`, from `(orchestrator, team)` pairs; `me` doesn't
-/// count. Only one may watch a team (§3).
+/// Another orchestrator already watching `what` (a Linear pick's [`pick_key`], or a Slack
+/// channel), from `(orchestrator, what)` pairs; `me` doesn't count. Only one may watch it (§3).
 pub fn watched_by<'a, K: PartialEq + 'a>(
     team: &str,
     me: &K,
@@ -253,6 +253,23 @@ pub fn watched_by<'a, K: PartialEq + 'a>(
         .into_iter()
         .find(|(k, t)| *k != me && t.eq_ignore_ascii_case(team))
         .map(|(k, _)| k)
+}
+
+/// Which tickets a Linear trigger picks, as one key: its team, pick state, assignee rule, SLA
+/// rule and labels, case and order aside. Two pipelines with the same key race for the same
+/// tickets; pipelines on one team that pick differently don't (core spec §47).
+pub fn pick_key(s: &LinearSettings) -> String {
+    let mut labels: Vec<String> = s.labels.iter().map(|l| l.to_lowercase()).collect();
+    labels.sort();
+    labels.dedup();
+    format!(
+        "{}|{}|{}|{}|{}",
+        s.team.to_lowercase(),
+        s.pick.trim().to_lowercase(),
+        s.assignee.word(),
+        s.sla_only,
+        labels.join(",")
+    )
 }
 
 /// What the orchestrator is told when hydraui picked `ticket` for it (§3).
@@ -878,6 +895,43 @@ mod tests {
         assert_eq!(watched_by("INTH", &c, watching.clone()), Some(&a));
         assert_eq!(watched_by("INTH", &a, watching.clone()), None, "itself");
         assert_eq!(watched_by("OPS", &c, watching), None);
+    }
+
+    #[test]
+    fn pipelines_on_one_team_race_only_when_they_pick_the_same_way() {
+        let p = |extra: &str| {
+            crate::pipeline::parse(&format!(
+                "name = \"x\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n\
+                 [linear]\nteam = \"PRE\"\npick = \"Next up\"\n{extra}"
+            ))
+            .unwrap()
+            .linear
+            .unwrap()
+        };
+        // hydra-triage and PRE tickets: one team, different tickets.
+        let triage = p("assignee = \"unassigned\"\nsla_only = false\n");
+        let dev = p("assignee = \"any\"\nsla_only = false\nlabels = [\"hydra-xs\", \"hydra-s\"]\n");
+        assert_ne!(pick_key(&triage), pick_key(&dev));
+        assert_ne!(
+            pick_key(&dev),
+            pick_key(&p(
+                "assignee = \"any\"\nsla_only = false\nlabels = [\"hydra-xs\"]\n"
+            ))
+        );
+        let mut elsewhere = triage.clone();
+        elsewhere.pick = "Triage".into();
+        assert_ne!(pick_key(&triage), pick_key(&elsewhere));
+        // The same picks, written differently, race.
+        assert_eq!(
+            pick_key(&dev),
+            pick_key(&p(
+                "labels = [\"Hydra-S\", \"hydra-xs\"]\nsla_only = false\nassignee = \"any\"\n"
+            ))
+        );
+        assert_eq!(
+            pick_key(&p("")),
+            pick_key(&p("assignee = \"unassigned\"\n"))
+        );
     }
 
     fn pipeline() -> Pipeline {

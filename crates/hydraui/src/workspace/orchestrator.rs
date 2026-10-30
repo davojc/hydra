@@ -21,6 +21,9 @@ use crate::rating::{Outcome, Side};
 use crate::runs::{Change, Decided, MAX_ATTEMPTS, Role, Run, RunState, StageStatus, StartStage};
 use crate::worktrees;
 
+/// A ticket an orchestrator holds open: its run, its card, and its stage sessions' terminals.
+pub(super) type Lane = (Run, Card, Vec<PaneId>);
+
 /// The first prompt of a terminal started as an orchestrator (spec §3.0, §9). A pipeline
 /// with a `[linear]` table may get its tickets from hydraui, whichever mode its card is in, so
 /// its orchestrator waits for one rather than asking.
@@ -1398,7 +1401,16 @@ impl Workspace {
 
     /// The tickets orchestrator `orch` holds open, each with its card and the terminals of its
     /// stage sessions; empty unless it holds more than one.
-    pub(super) fn lanes(&self, orch: PaneId, cx: &gpui::App) -> Vec<(Run, Card, Vec<PaneId>)> {
+    pub(super) fn lanes(&self, orch: PaneId, cx: &gpui::App) -> Vec<Lane> {
+        let lanes = self.open_lanes(orch, cx);
+        if lanes.len() < 2 {
+            return Vec::new();
+        }
+        lanes
+    }
+
+    /// Every ticket orchestrator `orch` holds open, with its card and its stage sessions.
+    pub(super) fn open_lanes(&self, orch: PaneId, cx: &gpui::App) -> Vec<(Run, Card, Vec<PaneId>)> {
         let (Some(token), Some(sv)) = (
             self.panes
                 .get(&orch)
@@ -1413,9 +1425,6 @@ impl Workspace {
             .into_iter()
             .cloned()
             .collect();
-        if open.len() < 2 {
-            return Vec::new();
-        }
         open.into_iter()
             .map(|r| {
                 let panes = crate::pipeline_card::stage_tokens(&r)
@@ -1656,45 +1665,63 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// Under a numbered orchestrator of a pipeline with several runs: its ticket and stage, its
-    /// state, and its ticket link; clicking it opens that orchestrator's Pipeline tab.
-    pub(super) fn render_run_line(
+    /// One ticket of a pipeline in the sidebar, as a box hanging off its orchestrator: its name
+    /// (a pull request as `repo #N`) and state, what it waits on, its ticket link, then the
+    /// sessions working on it inside (core spec §46). Its edge is red when it needs you and
+    /// amber while it waits on product or a check; otherwise quiet.
+    pub(super) fn render_lane(
         &self,
         orchestrator: PaneId,
+        run: &Run,
         c: &Card,
-        run: Option<&Run>,
+        sessions: Vec<AnyElement>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (fg, bg) = pill_colors(c.state, c.accent);
-        let id = run.map(|r| r.id.clone());
-        let link = match run {
-            Some(r) => Some((r.ticket.clone(), crate::linear_watch::pr_links(r))),
-            None => self.current_ticket(orchestrator, cx),
+        let edge = match c.state {
+            CardState::NeedsYou => color(theme::RED).opacity(0.6),
+            CardState::Asking | CardState::Checking | CardState::Paused => {
+                color(theme::AMBER).opacity(0.5)
+            }
+            _ => color(theme::BORDER_STRONG),
         };
+        let id = run.id.clone();
+        let title = crate::pipeline_card::ticket_title(&run.ticket, run.link.as_deref());
+        let prs = crate::linear_watch::pr_links(run);
+        // A pull request's own link is its title; a Linear ticket's link and PRs show below.
+        let link = (!run.link.as_deref().is_some_and(|l| l.contains("/pull/")))
+            .then(|| self.render_ticket_link(&run.ticket, &prs, c.accent))
+            .flatten();
         v_flex()
-            .id(SharedString::from(format!(
-                "run-line-{orchestrator}-{}",
-                id.as_deref().unwrap_or("")
-            )))
-            .ml(px(26.))
+            .id(SharedString::from(format!("lane-{orchestrator}-{id}")))
+            .mt_1()
             .mr_1()
-            .gap_0p5()
-            .cursor_pointer()
-            .on_click(cx.listener(move |ws, _, window, cx| match id.clone() {
-                Some(run) => ws.open_pipeline_run(orchestrator, run, window, cx),
-                None => ws.open_pipeline(orchestrator, window, cx),
-            }))
+            .px(px(6.))
+            .pt(px(6.))
+            .pb_1()
+            .gap_1()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(edge)
+            .bg(color(theme::RAISED))
             .child(
                 h_flex()
+                    .id(SharedString::from(format!("lane-head-{orchestrator}-{id}")))
+                    .px(px(2.))
                     .gap_2()
-                    .justify_between()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.open_pipeline_run(orchestrator, id.clone(), window, cx)
+                    }))
                     .child(
                         div()
+                            .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_xs()
-                            .text_color(color(theme::TEXT_SECONDARY))
-                            .child(c.line.clone()),
+                            .text_size(px(12.5))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(color(theme::TEXT))
+                            .child(title),
                     )
                     .child(
                         div()
@@ -1708,7 +1735,9 @@ impl Workspace {
                             .child(c.state.word()),
                     ),
             )
-            .children(link.and_then(|(t, prs)| self.render_ticket_link(&t, &prs, c.accent)))
+            .children(self.render_question(orchestrator, Some(&run.id), cx))
+            .children(link)
+            .children(sessions)
             .into_any_element()
     }
 

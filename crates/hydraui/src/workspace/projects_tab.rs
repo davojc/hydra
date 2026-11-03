@@ -3741,14 +3741,10 @@ fn pill(text: &str, fg: u32, bg: u32) -> gpui::Div {
 }
 
 /// `A`, `B`, … for a question's suggested answers.
-/// A milestone's description: its points as a bulleted list, or an older paragraph as it is.
+/// A milestone's description as a bulleted list: its points, or an older paragraph's
+/// sentences.
 fn description_points(text: &str) -> gpui::Div {
-    let Some(points) = pj::points_of(text) else {
-        return div()
-            .text_sm()
-            .text_color(color(theme::TEXT_SECONDARY))
-            .child(text.to_string());
-    };
+    let points = pj::points_of(text).unwrap_or_else(|| pj::sentences_of(text));
     // The dot is placed absolutely so each point's text is a stack child with the full width.
     v_flex().gap_1().children(points.into_iter().map(|p| {
         v_flex()

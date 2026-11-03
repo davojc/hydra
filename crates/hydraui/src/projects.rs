@@ -648,6 +648,27 @@ pub fn points_of(text: &str) -> Option<Vec<&str>> {
         .then(|| lines.iter().map(|l| strip_point(l)).collect())
 }
 
+/// An older paragraph description as one point per sentence, so it never shows as a wall
+/// of text: split after `.`, `!` or `?` followed by white space, and at line breaks.
+pub fn sentences_of(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let mut start = 0;
+        let mut chars = line.char_indices().peekable();
+        while let Some((i, c)) = chars.next() {
+            let ends = matches!(c, '.' | '!' | '?')
+                && chars.peek().is_some_and(|(_, n)| n.is_whitespace());
+            if ends {
+                out.push(line[start..=i].trim());
+                start = i + 1;
+            }
+        }
+        out.push(line[start..].trim());
+    }
+    out.retain(|s| !s.is_empty());
+    out
+}
+
 pub fn list_of(text: &str) -> Vec<String> {
     text.split([',', ' ', '\n'])
         .map(|s| s.trim().trim_start_matches('@'))
@@ -735,6 +756,19 @@ mod tests {
         assert_eq!(points_of(""), None);
         assert_eq!(strip_point("  - x "), "x");
         assert_eq!(strip_point("plain"), "plain");
+    }
+
+    #[test]
+    fn a_paragraph_reads_as_one_point_per_sentence() {
+        assert_eq!(
+            sentences_of("We know it works. The old page (v1.2) stays!  Done?\nYes"),
+            vec![
+                "We know it works.",
+                "The old page (v1.2) stays!",
+                "Done?",
+                "Yes"
+            ]
+        );
     }
 
     fn project(dir: &Path) -> Project {

@@ -174,6 +174,12 @@ pub const MAX_RESOURCE_BYTES: u64 = 10 * 1024 * 1024;
 /// Copies `from` into `resources/`, keeping its name (or adding ` (2)`, ` (3)` … when taken).
 /// Returns the name it was saved under.
 pub fn add_resource(dir: &Path, from: &Path) -> Result<String, Error> {
+    add_resource_as(dir, from, "")
+}
+
+/// Copies `from` into `resources/` as `name` (its own name when empty; its extension added
+/// when `name` has none), never over another file. Returns the name it was saved under.
+pub fn add_resource_as(dir: &Path, from: &Path, name: &str) -> Result<String, Error> {
     let size = std::fs::metadata(from)?.len();
     if size > MAX_RESOURCE_BYTES {
         return Err(Error::TooLarge {
@@ -181,14 +187,84 @@ pub fn add_resource(dir: &Path, from: &Path) -> Result<String, Error> {
             bytes: size,
         });
     }
-    let resources = dir.join("resources");
-    std::fs::create_dir_all(&resources)?;
-    let name = from
+    let own = from
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| Error::Invalid(format!("{} has no file name", from.display())))?;
-    let name = free_name(&resources, name);
+    let name = resource_name(name, own)?;
+    let resources = dir.join("resources");
+    std::fs::create_dir_all(&resources)?;
+    let name = free_name(&resources, &name);
     std::fs::copy(from, resources.join(&name))?;
+    Ok(name)
+}
+
+/// Renames resource file `old` to `new` (its extension kept when `new` has none). Returns the
+/// new name; refused if another file has it.
+pub fn rename_resource(dir: &Path, old: &str, new: &str) -> Result<String, Error> {
+    let resources = dir.join("resources");
+    let from = resources.join(old);
+    if old.contains(['/', '\\']) || !from.is_file() {
+        return Err(Error::Invalid(format!("There's no file {old}.")));
+    }
+    let name = resource_name(new, old)?;
+    if name == old {
+        return Ok(name);
+    }
+    let to = resources.join(&name);
+    // A case-only rename is the same file on macOS and Windows.
+    if to.exists() && !name.eq_ignore_ascii_case(old) {
+        return Err(Error::Invalid(format!(
+            "There's already a file called {name}."
+        )));
+    }
+    std::fs::rename(from, to)?;
+    Ok(name)
+}
+
+/// Gives link `url` the title `title`.
+pub fn rename_link(dir: &Path, url: &str, title: &str) -> Result<(), Error> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err(Error::Invalid("Give the link a title.".into()));
+    }
+    let mut links = load(dir)?.links;
+    let link = links
+        .iter_mut()
+        .find(|l| l.url == url)
+        .ok_or_else(|| Error::Invalid(format!("There's no link {url}.")))?;
+    link.title = title.to_string();
+    write_links(dir, &links)
+}
+
+/// The file name to save as, from what the user typed (`wanted`) and the file's own name.
+fn resource_name(wanted: &str, own: &str) -> Result<String, Error> {
+    let wanted = wanted.trim();
+    if wanted.is_empty() {
+        return Ok(own.to_string());
+    }
+    if wanted.contains(['/', '\\', ':']) || wanted.starts_with('.') {
+        return Err(Error::Invalid(
+            "A name can't start with a dot or hold / \\ or :.".into(),
+        ));
+    }
+    let ext = match own.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => Some(ext),
+        _ => None,
+    };
+    let name = match ext {
+        Some(ext)
+            if !wanted
+                .to_ascii_lowercase()
+                .ends_with(&format!(".{}", ext.to_ascii_lowercase())) =>
+        {
+            format!("{wanted}.{ext}")
+        }
+        _ => wanted.to_string(),
+    };
+    if name.eq_ignore_ascii_case("links.toml") {
+        return Err(Error::Invalid("links.toml is taken by the links.".into()));
+    }
     Ok(name)
 }
 
@@ -441,6 +517,57 @@ title = "Sharing"
         let p = load(&dir).unwrap();
         assert_eq!(p.files, ["flow (2).png", "flow.png"]);
         assert_eq!(p.links[0].title, "Figma");
+    }
+
+    #[test]
+    fn a_resource_is_saved_and_renamed_under_a_chosen_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("pg");
+        sample(&dir);
+        let src = tmp.path().join("IMG_0042.png");
+        std::fs::write(&src, b"png").unwrap();
+        assert_eq!(
+            add_resource_as(&dir, &src, "Share flow").unwrap(),
+            "Share flow.png"
+        );
+        assert_eq!(
+            add_resource_as(&dir, &src, "share flow.PNG").unwrap(),
+            "share flow (2).PNG"
+        );
+        assert!(add_resource_as(&dir, &src, "../escape").is_err());
+        assert!(add_resource_as(&dir, &src, ".hidden").is_err());
+        assert_eq!(
+            rename_resource(&dir, "Share flow.png", "Sharing v2").unwrap(),
+            "Sharing v2.png"
+        );
+        assert!(
+            rename_resource(&dir, "Sharing v2.png", "share flow (2).PNG").is_err(),
+            "taken"
+        );
+        assert!(rename_resource(&dir, "missing.png", "x").is_err());
+        assert_eq!(
+            load(&dir).unwrap().files,
+            ["Sharing v2.png", "share flow (2).PNG"]
+        );
+    }
+
+    #[test]
+    fn a_link_is_retitled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("pg");
+        sample(&dir);
+        write_links(
+            &dir,
+            &[Link {
+                title: "x".into(),
+                url: "https://f/x".into(),
+            }],
+        )
+        .unwrap();
+        rename_link(&dir, "https://f/x", "Figma: sharing").unwrap();
+        assert!(rename_link(&dir, "https://f/x", " ").is_err());
+        assert!(rename_link(&dir, "https://nope", "y").is_err());
+        assert_eq!(load(&dir).unwrap().links[0].title, "Figma: sharing");
     }
 
     #[test]

@@ -391,20 +391,208 @@ impl Workspace {
         self.go(Page::Home, cx);
     }
 
-    fn add_draft_files(
+    /// The folder `target`'s resources live under.
+    fn target_dir(&self, target: &LinkTarget) -> Option<PathBuf> {
+        match target {
+            LinkTarget::Draft(dir) => Some(dir.clone()),
+            LinkTarget::Project(env, slug) => self
+                .projects_data
+                .envs
+                .get(env)
+                .map(|e| e.checkout.join(slug)),
+        }
+    }
+
+    /// `target`'s resources changed: show them.
+    fn resources_changed(&mut self, target: &LinkTarget, cx: &mut Context<Self>) {
+        if let LinkTarget::Project(env, _) = target {
+            self.reload_env(env, cx);
+        }
+        self.projects_data.preview = None;
+        cx.notify();
+    }
+
+    /// Attaches `paths`. One file is named first (its own name offered); several keep their
+    /// names, to rename from the list.
+    fn add_files(
         &mut self,
-        dir: &Path,
+        target: LinkTarget,
         paths: &[PathBuf],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        for path in paths.iter().filter(|p| p.is_file()) {
-            if let Err(e) = repo::add_resource(dir, path) {
+        let Some(dir) = self.target_dir(&target) else {
+            return;
+        };
+        let files: Vec<PathBuf> = paths.iter().filter(|p| p.is_file()).cloned().collect();
+        if let [one] = files.as_slice() {
+            let one = one.clone();
+            let stem = one
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let own = one
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            self.text_dialog(
+                format!("Name {own}"),
+                stem,
+                "what it is, e.g. Share flow; its extension is kept",
+                move |ws, name, _window, cx| {
+                    repo::add_resource_as(&dir, &one, &name).map_err(|e| e.to_string())?;
+                    ws.resources_changed(&target, cx);
+                    Ok(())
+                },
+                window,
+                cx,
+            );
+            return;
+        }
+        for path in &files {
+            if let Err(e) = repo::add_resource(&dir, path) {
                 window.push_notification(Notification::error(e.to_string()), cx);
             }
         }
-        self.projects_data.preview = None;
-        cx.notify();
+        if files.len() > 1 {
+            window.push_notification(
+                Notification::info(format!(
+                    "Attached {} files under their own names; Rename changes them.",
+                    files.len()
+                )),
+                cx,
+            );
+        }
+        self.resources_changed(&target, cx);
+    }
+
+    fn pick_file(&mut self, target: LinkTarget, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_dialog_path(false, window, cx, move |ws, path, window, cx| {
+            ws.add_files(target, &[path], window, cx)
+        })
+    }
+
+    fn rename_file_dialog(
+        &mut self,
+        target: LinkTarget,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dir) = self.target_dir(&target) else {
+            return;
+        };
+        let stem = Path::new(&name)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| name.clone());
+        self.text_dialog(
+            format!("Rename {name}"),
+            stem,
+            "its new name; the extension is kept",
+            move |ws, new, _window, cx| {
+                repo::rename_resource(&dir, &name, &new).map_err(|e| e.to_string())?;
+                ws.resources_changed(&target, cx);
+                Ok(())
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn rename_link_dialog(
+        &mut self,
+        target: LinkTarget,
+        url: String,
+        title: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dir) = self.target_dir(&target) else {
+            return;
+        };
+        self.text_dialog(
+            format!("Rename {url}"),
+            title,
+            "what it is, e.g. Figma: share dialog",
+            move |ws, new, _window, cx| {
+                repo::rename_link(&dir, &url, &new).map_err(|e| e.to_string())?;
+                ws.resources_changed(&target, cx);
+                Ok(())
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Resources as a list: each file and link opens on click and has Rename (spec §8.2).
+    fn resource_list(
+        &self,
+        target: &LinkTarget,
+        p: &Project,
+        files_dir: &Path,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let mut list = v_flex().gap_1();
+        let row = |id: String,
+                   icon: &'static str,
+                   label: String,
+                   open: Box<dyn Fn(&mut gpui::App)>,
+                   rename: Box<Rename>,
+                   cx: &mut Context<Self>| {
+            h_flex()
+                .gap_2()
+                .text_sm()
+                .child(div().flex_none().child(icon))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("open-{id}")))
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(color(theme::TEAL))
+                        .cursor_pointer()
+                        .hover(|s| s.underline())
+                        .child(label)
+                        .on_click(move |_, _, cx| open(cx)),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("rename-{id}")))
+                        .label("Rename")
+                        .ghost()
+                        .xsmall()
+                        .on_click(cx.listener(move |ws, _, window, cx| rename(ws, window, cx))),
+                )
+        };
+        for f in &p.files {
+            let path = files_dir.join("resources").join(f);
+            let (t, name) = (target.clone(), f.clone());
+            list = list.child(row(
+                format!("file-{f}"),
+                "📎",
+                f.clone(),
+                Box::new(move |cx| cx.open_with_system(&path)),
+                Box::new(move |ws, window, cx| {
+                    ws.rename_file_dialog(t.clone(), name.clone(), window, cx)
+                }),
+                cx,
+            ));
+        }
+        for l in &p.links {
+            let (url, t, title) = (l.url.clone(), target.clone(), l.title.clone());
+            let open_url = l.url.clone();
+            list = list.child(row(
+                format!("link-{}", l.url),
+                "🔗",
+                l.title.clone(),
+                Box::new(move |cx| cx.open_url(&open_url)),
+                Box::new(move |ws, window, cx| {
+                    ws.rename_link_dialog(t.clone(), url.clone(), title.clone(), window, cx)
+                }),
+                cx,
+            ));
+        }
+        list
     }
 
     fn add_link_dialog(&mut self, target: LinkTarget, window: &mut Window, cx: &mut Context<Self>) {
@@ -1172,43 +1360,36 @@ impl Workspace {
         }
 
         // Spec and resources.
-        let mut resources = v_flex().gap_1().child(section_title("Resources"));
-        for f in &p.files {
-            let path = e.checkout.join(&p.slug).join("resources").join(f);
-            resources = resources.child(
-                div()
-                    .id(SharedString::from(format!("res-{f}")))
-                    .text_sm()
-                    .text_color(color(theme::TEAL))
-                    .cursor_pointer()
-                    .child(f.clone())
-                    .on_click(move |_, _, cx| cx.open_with_system(&path)),
-            );
-        }
-        for l in &p.links {
-            let url = l.url.clone();
-            resources = resources.child(
-                div()
-                    .id(SharedString::from(format!("link-{}", l.url)))
-                    .text_sm()
-                    .text_color(color(theme::TEAL))
-                    .cursor_pointer()
-                    .child(l.title.clone())
-                    .on_click(move |_, _, cx| cx.open_url(&url)),
-            );
-        }
+        let target = LinkTarget::Project(env_s.clone(), slug_s.clone());
+        let mut resources = v_flex()
+            .gap_1()
+            .child(section_title("Resources"))
+            .child(self.resource_list(&target, p, &e.checkout.join(&p.slug), cx));
         if p.files.is_empty() && p.links.is_empty() {
             resources = resources.child(muted("None yet."));
         }
-        let target = LinkTarget::Project(env_s.clone(), slug_s.clone());
+        let (file_target, link_target) = (target.clone(), target);
         resources = resources.child(
-            Button::new("project-add-link")
-                .label("Add link")
-                .ghost()
-                .small()
-                .on_click(cx.listener(move |ws, _, window, cx| {
-                    ws.add_link_dialog(target.clone(), window, cx)
-                })),
+            h_flex()
+                .gap_2()
+                .child(
+                    Button::new("project-add-file")
+                        .label("Add file…")
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.pick_file(file_target.clone(), window, cx)
+                        })),
+                )
+                .child(
+                    Button::new("project-add-link")
+                        .label("Add link…")
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.add_link_dialog(link_target.clone(), window, cx)
+                        })),
+                ),
         );
         let spec =
             v_flex()
@@ -1860,10 +2041,7 @@ impl Workspace {
                     .small()
                     .ghost()
                     .on_click(cx.listener(move |ws, _, window, cx| {
-                        let dir = dir_f.clone();
-                        ws.open_dialog_path(false, window, cx, move |ws, path, window, cx| {
-                            ws.add_draft_files(&dir, &[path], window, cx)
-                        })
+                        ws.pick_file(LinkTarget::Draft(dir_f.clone()), window, cx)
                     })),
             )
             .child(
@@ -1906,7 +2084,7 @@ impl Workspace {
             .bg(color(theme::SURFACE))
             .drag_over::<ExternalPaths>(|s, _, _, _| s.bg(color(theme::TEAL_TINT)))
             .on_drop(cx.listener(move |ws, paths: &ExternalPaths, window, cx| {
-                ws.add_draft_files(&dir_drop, paths.paths(), window, cx)
+                ws.add_files(LinkTarget::Draft(dir_drop.clone()), paths.paths(), window, cx)
             }))
             .child(v_flex().p_3().gap_2().border_b_1().border_color(color(theme::BORDER)).child(actions).child(muted(
                 "Talk the project through with Claude on the left; the draft fills in here. \
@@ -1946,9 +2124,9 @@ impl Workspace {
     fn draft_preview(
         &self,
         _env: &str,
-        _dir: &Path,
+        dir: &Path,
         p: &Project,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let mut out = v_flex().gap_4().child(
             h_flex()
@@ -2029,15 +2207,12 @@ impl Workspace {
             )));
         }
         out = out.child(qs);
-        let mut res = v_flex().gap_1().child(section_title("Resources"));
+        let mut res = v_flex()
+            .gap_1()
+            .child(section_title("Resources"))
+            .child(self.resource_list(&LinkTarget::Draft(dir.to_path_buf()), p, dir, cx));
         if p.files.is_empty() && p.links.is_empty() {
-            res = res.child(muted("None yet: drop files here, or Add link…"));
-        }
-        for f in &p.files {
-            res = res.child(div().text_sm().child(format!("📎 {f}")));
-        }
-        for l in &p.links {
-            res = res.child(div().text_sm().child(format!("🔗 {}", l.title)));
+            res = res.child(muted("None yet: drop files here, or Add file… / Add link…"));
         }
         out = out.child(res);
         out.child(v_flex().gap_2().child(section_title("Spec")).child(
@@ -2052,6 +2227,9 @@ impl Workspace {
         .into_any_element()
     }
 }
+
+/// What a resource row's Rename does.
+type Rename = dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>);
 
 #[derive(Clone)]
 enum LinkTarget {

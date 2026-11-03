@@ -279,6 +279,25 @@ pub fn new_ticket(
     Ok(id)
 }
 
+/// Attaches link `url` to the project or draft in `dir`, titled `title` (the link itself when
+/// empty). Only web links.
+pub fn add_link(dir: &Path, url: &str, title: &str) -> Result<(), String> {
+    let url = url.trim();
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("Give a web link, starting https://".into());
+    }
+    let title = match title.trim() {
+        "" => url,
+        t => t,
+    };
+    let mut links = repo::load(dir).map_err(|e| e.to_string())?.links;
+    links.push(hydraui_projects::Link {
+        title: title.to_string(),
+        url: url.to_string(),
+    });
+    repo::write_links(dir, &links).map_err(|e| e.to_string())
+}
+
 /// Moves `ticket` to `status`.
 pub fn move_ticket(dir: &Path, ticket: &Ticket, status: TicketStatus) -> Result<(), String> {
     let mut t = ticket.clone();
@@ -541,6 +560,23 @@ mod tests {
             (id.as_str(), "me")
         );
         assert!(!d.is_open() && d.meta.decided_at.is_some());
+    }
+
+    #[test]
+    fn links_are_web_links_titled_by_default_with_themselves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("pg");
+        project(&dir);
+        assert!(add_link(&dir, "figma.com/x", "Figma").is_err());
+        add_link(&dir, " https://figma.com/x ", "Figma: share dialog").unwrap();
+        add_link(&dir, "https://docs/y", "").unwrap();
+        let links = repo::load(&dir).unwrap().links;
+        assert_eq!(links.len(), 2);
+        assert_eq!(
+            (links[0].title.as_str(), links[0].url.as_str()),
+            ("Figma: share dialog", "https://figma.com/x")
+        );
+        assert_eq!(links[1].title, "https://docs/y");
     }
 
     #[test]

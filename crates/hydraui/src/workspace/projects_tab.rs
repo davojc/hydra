@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, ExternalPaths, SharedString, Window, div, px};
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::input::{Input, InputState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::notification::Notification;
 use gpui_component::{Selectable, Sizable, WindowExt, h_flex, v_flex};
@@ -407,51 +408,122 @@ impl Workspace {
     }
 
     fn add_link_dialog(&mut self, target: LinkTarget, window: &mut Window, cx: &mut Context<Self>) {
-        self.text_dialog(
+        self.two_field_dialog(
             "Add a link".into(),
-            String::new(),
-            "https://…",
-            move |ws, url, window, cx| {
-                if !url.starts_with("http://") && !url.starts_with("https://") {
-                    return Err("Give a web link, starting https://".into());
+            ("Link", "https://…", String::new()),
+            (
+                "What is it?",
+                "a title, e.g. Figma: share dialog",
+                String::new(),
+            ),
+            move |ws, url, title, _window, cx| {
+                let dir = match &target {
+                    LinkTarget::Draft(dir) => dir.clone(),
+                    LinkTarget::Project(env, slug) => ws
+                        .projects_data
+                        .envs
+                        .get(env)
+                        .map(|e| e.checkout.join(slug))
+                        .ok_or("This project isn't in the repo any more.")?,
+                };
+                pj::add_link(&dir, &url, &title)?;
+                if let LinkTarget::Project(env, _) = &target {
+                    ws.reload_env(env, cx);
                 }
-                let target = target.clone();
-                window.close_dialog(cx);
-                ws.text_dialog(
-                    "What is it?".into(),
-                    String::new(),
-                    "a title, e.g. Figma: share dialog",
-                    move |ws, title, _window, cx| {
-                        let title = if title.is_empty() { url.clone() } else { title };
-                        let dir = match &target {
-                            LinkTarget::Draft(dir) => dir.clone(),
-                            LinkTarget::Project(env, slug) => ws
-                                .projects_data
-                                .envs
-                                .get(env)
-                                .map(|e| e.checkout.join(slug))
-                                .ok_or("no such project")?,
-                        };
-                        let mut links = repo::load(&dir).map_err(|e| e.to_string())?.links;
-                        links.push(hydraui_projects::Link {
-                            title,
-                            url: url.clone(),
-                        });
-                        repo::write_links(&dir, &links).map_err(|e| e.to_string())?;
-                        if let LinkTarget::Project(env, _) = &target {
-                            ws.reload_env(env, cx);
-                        }
-                        ws.projects_data.preview = None;
-                        Ok(())
-                    },
-                    window,
-                    cx,
-                );
+                ws.projects_data.preview = None;
+                cx.notify();
                 Ok(())
             },
             window,
             cx,
         );
+    }
+
+    /// A dialog with two labelled boxes, each `(label, placeholder, initial)`; Save runs
+    /// `save` with both, and the dialog stays open showing what's wrong until it succeeds.
+    /// (Two dialogs one after the other don't work: the first's Save closes the second.)
+    fn two_field_dialog(
+        &mut self,
+        title: String,
+        first: (&'static str, &'static str, String),
+        second: (&'static str, &'static str, String),
+        save: impl Fn(&mut Self, String, String, &mut Window, &mut Context<Self>) -> Result<(), String>
+        + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = |(_, placeholder, initial): &(&'static str, &'static str, String),
+                     window: &mut Window,
+                     cx: &mut Context<Self>| {
+            let (placeholder, initial) = (*placeholder, initial.clone());
+            cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(placeholder)
+                    .default_value(initial)
+            })
+        };
+        let (a, b) = (input(&first, window, cx), input(&second, window, cx));
+        let (label_a, label_b) = (first.0, second.0);
+        let problem = cx.new(|_| None::<String>);
+        let workspace = cx.entity();
+        let save = std::rc::Rc::new(save);
+        let focused = std::cell::Cell::new(false);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if !focused.replace(true) {
+                a.update(cx, |s, cx| s.focus(window, cx));
+            }
+            let shown = problem.read(cx).clone();
+            let (a2, b2, p, ws, save) = (
+                a.clone(),
+                b.clone(),
+                problem.clone(),
+                workspace.clone(),
+                save.clone(),
+            );
+            let label = |text: &'static str| {
+                div()
+                    .text_sm()
+                    .text_color(color(theme::TEXT_SECONDARY))
+                    .child(text)
+            };
+            dialog
+                .title(title.clone())
+                .w(px(640.))
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(label(label_a))
+                        .child(Input::new(&a))
+                        .child(label(label_b))
+                        .child(Input::new(&b))
+                        .when_some(shown, |d, e| {
+                            d.child(div().text_sm().text_color(color(theme::RED)).child(e))
+                        }),
+                )
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(Button::new("save").label("Save").primary().on_click(
+                            move |_, window, cx| {
+                                let first = a2.read(cx).value().trim().to_string();
+                                let second = b2.read(cx).value().trim().to_string();
+                                match ws.update(cx, |ws, cx| save(ws, first, second, window, cx)) {
+                                    Ok(()) => window.close_dialog(cx),
+                                    Err(e) => p.update(cx, |p, cx| {
+                                        *p = Some(e);
+                                        cx.notify();
+                                    }),
+                                }
+                            },
+                        )),
+                )
+        });
     }
 
     // ---- Rendering ----
@@ -1295,38 +1367,26 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.text_dialog(
+        let lead = self
+            .find_project(&env, &slug)
+            .map(|p| p.file.lead.clone())
+            .unwrap_or_default();
+        self.two_field_dialog(
             "Ask a question".into(),
-            String::new(),
-            "a decision that needs making",
-            move |ws, question, window, cx| {
-                if question.trim().is_empty() {
-                    return Err("Write the question first.".into());
-                }
-                let lead = ws
-                    .find_project(&env, &slug)
-                    .map(|p| p.file.lead.clone())
-                    .unwrap_or_default();
-                let (env, slug) = (env.clone(), slug.clone());
-                window.close_dialog(cx);
-                ws.text_dialog(
-                    "Who decides?".into(),
-                    lead,
-                    "their GitHub login",
-                    move |ws, who, window, cx| {
-                        let q = question.clone();
-                        ws.edit_project(
-                            &env,
-                            &slug,
-                            |dir, p, login| pj::ask(dir, p, &q, &who, login).map(|_| ()),
-                            window,
-                            cx,
-                        )
-                    },
+            ("Question", "a decision that needs making", String::new()),
+            (
+                "Who decides?",
+                "their GitHub login; the lead when empty",
+                lead,
+            ),
+            move |ws, question, who, window, cx| {
+                ws.edit_project(
+                    &env,
+                    &slug,
+                    |dir, p, login| pj::ask(dir, p, &question, &who, login).map(|_| ()),
                     window,
                     cx,
-                );
-                Ok(())
+                )
             },
             window,
             cx,

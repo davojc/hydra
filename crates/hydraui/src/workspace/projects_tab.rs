@@ -2311,7 +2311,11 @@ impl Workspace {
                         .on_click(cx.listener(move |ws, _, window, cx| {
                             let prompt = "Pick up planning this project: call plan_show, sum up \
                                           what's approved, what's waiting for review and what had \
-                                          changes asked, and act on any notes."
+                                          changes asked, and act on any notes. Milestones are short \
+                                          and purpose-driven, in plain words anyone can read: \
+                                          rewrite with plan_revise any still to review that are \
+                                          technical or longer than 60 characters (title) or 240 \
+                                          (description)."
                                 .to_string();
                             ws.tell_planner(&env_b, &slug_b, prompt, window, cx)
                         })),
@@ -3634,8 +3638,12 @@ fn start_prompt(p: &Project) -> String {
          back to you here. Carry on with what doesn't depend on it.\n\
          3. Write the spec with plan_set_spec: short numbered sections in plain words, with \
          the decisions and their reasons.\n\
-         4. Propose the milestones in order with plan_propose_milestone, each with what's true \
-         when it's done and a target date where you know one.\n\
+         4. Propose the milestones in order with plan_propose_milestone. Keep them few, short \
+         and purpose-driven, readable by anyone on the team: each an outcome people care \
+         about, in plain words with no technical terms (e.g. \"Partners can see shared \
+         groups\", not \"Implement group ACL service\"), a one- or two-sentence description \
+         of why it matters and how we'll know it's done, and a target date where you know \
+         one. Technical detail belongs in the tickets.\n\
          Don't propose tickets yet: the lead asks for them per milestone once it's approved. \
          Use only the plan tools to change the project; never write its files yourself. When \
          you've proposed the milestones, tell the lead they're ready to review.",

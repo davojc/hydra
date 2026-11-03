@@ -75,11 +75,16 @@ pub fn schemas() -> Vec<Value> {
         tool(
             "plan_propose_milestone",
             "Planning: propose a milestone, added at the end for the lead to review. Returns \
-             its id (M1, M2, ...). Don't propose again what was rejected.",
+             its id (M1, M2, ...). Write it for anyone on the team, not only engineers: an \
+             outcome people care about, in plain words, with no technical terms, components or \
+             implementation detail (those go in its tickets). Title at most 60 characters, e.g. \
+             \"Partners can see shared groups\"; description at most 240, one or two sentences on \
+             why it matters and how we'll know it's done. Don't propose again what was \
+             rejected.",
             json!({
-                "title": s("The milestone, in a few words."),
+                "title": s("The outcome, in plain words; at most 60 characters."),
                 "target": s("Target date, YYYY-MM-DD (optional)."),
-                "description": s("What is true when it is done."),
+                "description": s("Why it matters and how we'll know it's done, in one or two plain sentences; at most 240 characters."),
             }),
             vec!["title", "description"],
         ),
@@ -98,8 +103,9 @@ pub fn schemas() -> Vec<Value> {
         tool(
             "plan_revise",
             "Planning: revise a milestone (M..) or ticket (KEY-..) that is still to review or \
-             had changes asked; it goes back to the lead to review. Only the fields given \
-             change. Use the lead's note (plan_show shows it).",
+             had changes asked (a milestone keeps to plain words, title at most 60 characters \
+             and description at most 240); it goes back to the lead to review. Only the fields \
+             given change. Use the lead's note (plan_show shows it).",
             json!({
                 "id": s("What to revise."),
                 "title": s("New title."),
@@ -239,12 +245,14 @@ fn plan(dir: &Path, login: &str, name: &str, args: &Value) -> Result<String, Str
                     + 1
             );
             let mut ms = p.milestones.clone();
+            let (title, description) = (need(args, "title")?, need(args, "description")?);
+            milestone_fits(&title, &description)?;
             ms.push(Milestone {
                 id: id.clone(),
-                title: need(args, "title")?,
+                title,
                 target: get(args, "target").map(crate::projects::date).transpose()?,
                 status: MilestoneStatus::Planned,
-                description: need(args, "description")?,
+                description,
                 review: Review::Proposed,
                 ..Default::default()
             });
@@ -358,6 +366,30 @@ fn ask(dir: &Path, p: &Project, args: &Value, ticket: &str) -> Result<String, St
     ))
 }
 
+/// The longest milestone title and description (Jordan, 2026-11-03: milestones are short,
+/// purpose-driven and easy for anyone to read; detail belongs in tickets).
+pub const MILESTONE_TITLE_MAX: usize = 60;
+pub const MILESTONE_DESCRIPTION_MAX: usize = 240;
+
+/// Refuses a milestone that's too long to take in at a glance, saying how to fix it.
+fn milestone_fits(title: &str, description: &str) -> Result<(), String> {
+    let (t, d) = (title.chars().count(), description.chars().count());
+    if t > MILESTONE_TITLE_MAX {
+        return Err(format!(
+            "The title is {t} characters; keep it to {MILESTONE_TITLE_MAX}: the outcome, in \
+             plain words, with no technical terms."
+        ));
+    }
+    if d > MILESTONE_DESCRIPTION_MAX {
+        return Err(format!(
+            "The description is {d} characters; keep it to {MILESTONE_DESCRIPTION_MAX}: one or \
+             two plain sentences on why it matters and how we'll know it's done. Technical \
+             detail goes in its tickets."
+        ));
+    }
+    Ok(())
+}
+
 fn revise(dir: &Path, p: &Project, id: &str, args: &Value) -> Result<String, String> {
     let e = |e: hydraui_projects::Error| e.to_string();
     let open = |r: Review| matches!(r, Review::Proposed | Review::Changes);
@@ -379,6 +411,7 @@ fn revise(dir: &Path, p: &Project, id: &str, args: &Value) -> Result<String, Str
         if let Some(v) = get(args, "description") {
             m.description = v.to_string();
         }
+        milestone_fits(&m.title, &m.description)?;
         m.review = Review::Proposed;
         repo::write_milestones(dir, &ms).map_err(e)?;
     } else if let Some(t) = p.tickets.iter().find(|t| t.id == id) {
@@ -789,6 +822,51 @@ mod tests {
         assert_eq!(
             (d.meta.ticket.as_str(), d.meta.assigned_to.as_str()),
             ("PG-1", "aza")
+        );
+    }
+
+    #[test]
+    fn milestones_stay_short() {
+        let (_tmp, reg, _dir) = setup();
+        let long_title = "x".repeat(MILESTONE_TITLE_MAX + 1);
+        let out = run(
+            &reg,
+            "plan",
+            "plan_propose_milestone",
+            json!({"title": long_title, "description": "x"}),
+        );
+        assert!(
+            out.is_error && out.text.contains("keep it to 60"),
+            "{}",
+            out.text
+        );
+        let long_text = "y".repeat(MILESTONE_DESCRIPTION_MAX + 1);
+        let out = run(
+            &reg,
+            "plan",
+            "plan_propose_milestone",
+            json!({"title": "Partners see groups", "description": long_text}),
+        );
+        assert!(
+            out.is_error && out.text.contains("goes in its tickets"),
+            "{}",
+            out.text
+        );
+        run(
+            &reg,
+            "plan",
+            "plan_propose_milestone",
+            json!({"title": "Partners see groups", "description": "So they stop asking."}),
+        );
+        let long_title = "z".repeat(61);
+        assert!(
+            run(
+                &reg,
+                "plan",
+                "plan_revise",
+                json!({"id": "M1", "title": long_title})
+            )
+            .is_error
         );
     }
 

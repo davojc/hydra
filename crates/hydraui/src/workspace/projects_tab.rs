@@ -64,8 +64,19 @@ pub(super) enum Page {
     Waiting,
 }
 
+/// The project page's tabs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum Section {
+    #[default]
+    Overview,
+    Milestones,
+    Questions,
+}
+
 pub(super) struct ProjectsTab {
     page: Page,
+    /// Which tab a project page shows.
+    section: Section,
     /// Paused and done projects show too.
     show_all: bool,
     /// Rejected milestones and tickets show too.
@@ -159,6 +170,7 @@ impl Workspace {
         if self.projects.is_none() {
             self.projects = Some(ProjectsTab {
                 page: Page::Home,
+                section: Section::Overview,
                 show_all: false,
                 show_rejected: false,
                 show_claude: true,
@@ -183,6 +195,16 @@ impl Workspace {
 
     fn go(&mut self, page: Page, cx: &mut Context<Self>) {
         if let Some(tab) = &mut self.projects {
+            let project = |p: &Page| match p {
+                Page::Project { env, slug }
+                | Page::Milestone { env, slug, .. }
+                | Page::Settings { env, slug } => Some((env.clone(), slug.clone())),
+                _ => None,
+            };
+            // Another project opens on its Overview; a milestone's way back keeps the tab.
+            if project(&page) != project(&tab.page) {
+                tab.section = Section::Overview;
+            }
             tab.page = page;
         }
         cx.notify();
@@ -1827,15 +1849,12 @@ impl Workspace {
         };
         let login = e.login.clone().unwrap_or_default();
         let lead = p.file.lead.eq_ignore_ascii_case(&login);
-        let show_rejected = self.projects.as_ref().is_some_and(|t| t.show_rejected);
-        let today = today();
-        let counts = milestone_counts(p, |t| t.meta.status);
+        let section = self
+            .projects
+            .as_ref()
+            .map(|t| t.section)
+            .unwrap_or_default();
         let (env_s, slug_s) = (env.to_string(), slug.to_string());
-        let target = Target {
-            env: env_s.clone(),
-            slug: slug_s.clone(),
-        };
-        let planning = self.planner(env, slug).is_some();
 
         let title = h_flex()
             .gap_3()
@@ -1882,16 +1901,6 @@ impl Workspace {
                 None => div().into_any_element(),
             })
             .child({
-                let (env_s, slug_s) = (env_s.clone(), slug_s.clone());
-                Button::new("project-ask")
-                    .label("Ask a question")
-                    .small()
-                    .ghost()
-                    .on_click(cx.listener(move |ws, _, window, cx| {
-                        ws.ask_dialog(env_s.clone(), slug_s.clone(), window, cx)
-                    }))
-            })
-            .child({
                 let page = Page::Settings {
                     env: env_s.clone(),
                     slug: slug_s.clone(),
@@ -1903,10 +1912,80 @@ impl Workspace {
                     .on_click(cx.listener(move |ws, _, _, cx| ws.go(page.clone(), cx)))
             });
 
-        let mut page = v_flex().gap_6().max_w(px(1200.)).child(title);
+        // The tabs, each with a count of what needs you (spec §8.2).
+        let (rm, rt) = pj::to_review(p);
+        let review_count = if lead { rm + rt } else { 0 };
+        let mine = p
+            .decisions
+            .iter()
+            .filter(|d| d.is_open() && d.meta.assigned_to.eq_ignore_ascii_case(&login))
+            .count();
+        let open_q = p.decisions.iter().filter(|d| d.is_open()).count();
+        let mut tabs = h_flex()
+            .gap_1()
+            .border_b_1()
+            .border_color(color(theme::BORDER));
+        for (s, label, count, quiet) in [
+            (Section::Overview, "Overview", 0, 0),
+            (Section::Milestones, "Milestones", review_count, 0),
+            (Section::Questions, "Questions", mine, open_q),
+        ] {
+            let selected = s == section;
+            tabs = tabs.child(
+                h_flex()
+                    .id(SharedString::from(format!("project-tab-{label}")))
+                    .gap_2()
+                    .px_4()
+                    .py_2()
+                    .cursor_pointer()
+                    .border_b_2()
+                    .border_color(color(if selected { theme::TEAL } else { theme::PANEL }))
+                    .text_color(color(if selected {
+                        theme::TEXT
+                    } else {
+                        theme::TEXT_SECONDARY
+                    }))
+                    .hover(|d| d.text_color(color(theme::TEXT)))
+                    .child(label)
+                    .when(count > 0, |d| d.child(count_badge(count, true)))
+                    .when(count == 0 && quiet > 0, |d| {
+                        d.child(count_badge(quiet, false))
+                    })
+                    .on_click(cx.listener(move |ws, _, _, cx| ws.tab_flag(cx, |t| t.section = s))),
+            );
+        }
+
+        let body = match section {
+            Section::Overview => self.project_overview(env, p, lead, cx),
+            Section::Milestones => self.project_milestones(env, p, lead, cx),
+            Section::Questions => self.project_questions(env, p, &login, cx),
+        };
+        v_flex()
+            .gap_5()
+            .max_w(px(1400.))
+            .child(title)
+            .child(tabs)
+            .child(body)
+            .into_any_element()
+    }
+
+    fn project_overview(
+        &self,
+        env: &str,
+        p: &Project,
+        lead: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (env_s, slug_s) = (env.to_string(), p.slug.clone());
+        let target = Target {
+            env: env_s.clone(),
+            slug: slug_s.clone(),
+        };
+        let planning = self.planner(env, &p.slug).is_some();
+        let started = !p.spec.trim().is_empty() || !p.milestones.is_empty();
+        let mut page = v_flex().gap_6();
 
         // Not started: resources first, then Start project (spec §14).
-        let started = !p.spec.trim().is_empty() || !p.milestones.is_empty();
         if !started {
             let (env_b, slug_b) = (env_s.clone(), slug_s.clone());
             page = page.child(
@@ -1921,201 +2000,199 @@ impl Workspace {
                     .drag_over::<ExternalPaths>(|s, _, _, _| s.border_color(color(theme::TEAL)))
                     .on_drop({
                         let t = target.clone();
-                        cx.listener(move |ws, paths: &ExternalPaths, window, cx| ws.add_files(t.clone(), paths.paths(), window, cx))
+                        cx.listener(move |ws, paths: &ExternalPaths, window, cx| {
+                            ws.add_files(t.clone(), paths.paths(), window, cx)
+                        })
                     })
                     .child(div().text_lg().child("Start the project"))
                     .child(div().text_sm().text_color(color(theme::TEXT_SECONDARY)).child(
                         "1. Attach what Claude should read: files (drop them here) and links. \
-                         2. Start project: a Claude session reads them, writes the spec and proposes \
-                         milestones for you to review here.",
+                         2. Start project: a Claude session reads them, writes the spec and \
+                         proposes milestones for you to review here.",
                     ))
                     .child(self.resources_block(&target, p, cx))
                     .when(lead, |d| {
                         d.child(
                             h_flex().child(
                                 Button::new("start-project-button")
-                                    .label(if planning { "Start project (session running)" } else { "Start project" })
+                                    .label(if planning {
+                                        "Start project (session running)"
+                                    } else {
+                                        "Start project"
+                                    })
                                     .primary()
-                                    .on_click(cx.listener(move |ws, _, window, cx| ws.start_project(env_b.clone(), slug_b.clone(), window, cx))),
+                                    .on_click(cx.listener(move |ws, _, window, cx| {
+                                        ws.start_project(env_b.clone(), slug_b.clone(), window, cx)
+                                    })),
                             ),
                         )
                     })
-                    .when(!lead, |d| d.child(muted(&format!("{} (the lead) starts it.", p.file.lead)))),
+                    .when(!lead, |d| {
+                        d.child(muted(&format!("{} (the lead) starts it.", p.file.lead)))
+                    }),
             );
         }
 
-        // What needs review (spec §14).
+        // What needs you, at a glance.
         let (rm, rt) = pj::to_review(p);
-        let changes = p
+        let counts = milestone_counts(p, |t| t.meta.status);
+        let live: Vec<&Milestone> = p
             .milestones
             .iter()
-            .filter(|m| m.review == Review::Changes)
-            .count()
-            + p.tickets
-                .iter()
-                .filter(|t| t.meta.review == Review::Changes)
-                .count();
-        if rm + rt + changes > 0 {
-            let mut where_tickets: BTreeMap<&str, usize> = BTreeMap::new();
-            for t in p.tickets.iter().filter(|t| t.meta.review.waiting()) {
-                *where_tickets.entry(t.meta.milestone.as_str()).or_default() += 1;
-            }
-            let mut bar = h_flex()
-                .gap_3()
-                .flex_wrap()
-                .px_4()
-                .py_3()
+            .filter(|m| m.review != Review::Rejected)
+            .collect();
+        let ms_done = live
+            .iter()
+            .filter(|m| {
+                let c = counts.get(&m.id).copied().unwrap_or_default();
+                m.status == MilestoneStatus::Done || (c.total() > 0 && c.done == c.total())
+            })
+            .count();
+        let tickets: Vec<&Ticket> = p
+            .tickets
+            .iter()
+            .filter(|t| t.meta.review != Review::Rejected && t.meta.status != TicketStatus::Dropped)
+            .collect();
+        let t_done = tickets
+            .iter()
+            .filter(|t| t.meta.status == TicketStatus::Done)
+            .count();
+        let open_q = p.decisions.iter().filter(|d| d.is_open()).count();
+        let tile = |label: &str,
+                    value: String,
+                    note: String,
+                    to: Section,
+                    warn: bool,
+                    cx: &mut Context<Self>| {
+            v_flex()
+                .id(SharedString::from(format!("tile-{label}")))
+                .flex_1()
+                .min_w(px(180.))
+                .gap_1()
+                .p_4()
                 .rounded_lg()
-                .bg(color(theme::AMBER_TINT))
+                .bg(color(theme::RAISED))
                 .border_1()
-                .border_color(color(theme::AMBER))
-                .child(div().text_color(color(theme::AMBER)).child(format!(
-                    "To review: {rm} milestone{} · {rt} ticket{}",
-                    if rm == 1 { "" } else { "s" },
-                    if rt == 1 { "" } else { "s" }
-                )));
-            if changes > 0 {
-                bar = bar.child(
+                .border_color(color(if warn { theme::AMBER } else { theme::BORDER }))
+                .cursor_pointer()
+                .hover(|d| d.border_color(color(theme::TEAL)))
+                .on_click(cx.listener(move |ws, _, _, cx| ws.tab_flag(cx, |t| t.section = to)))
+                .child(section_title(label))
+                .child(div().text_2xl().child(value))
+                .child(
                     div()
-                        .text_sm()
-                        .text_color(color(theme::TEXT_SECONDARY))
-                        .child(format!("{changes} with Claude for changes")),
-                );
-            }
-            for (mid, n) in where_tickets {
-                let page = Page::Milestone {
+                        .text_xs()
+                        .text_color(color(if warn {
+                            theme::AMBER
+                        } else {
+                            theme::TEXT_SECONDARY
+                        }))
+                        .child(note),
+                )
+        };
+        if started {
+            page = page.child(
+                h_flex()
+                    .gap_3()
+                    .flex_wrap()
+                    .child(tile(
+                        "Milestones",
+                        format!("{ms_done}/{}", live.len()),
+                        if lead && rm > 0 {
+                            format!("{rm} to review")
+                        } else {
+                            "done".into()
+                        },
+                        Section::Milestones,
+                        lead && rm > 0,
+                        cx,
+                    ))
+                    .child(tile(
+                        "Tickets",
+                        format!("{t_done}/{}", tickets.len()),
+                        if lead && rt > 0 {
+                            format!("{rt} to review")
+                        } else {
+                            "done".into()
+                        },
+                        Section::Milestones,
+                        lead && rt > 0,
+                        cx,
+                    ))
+                    .child(tile(
+                        "Questions",
+                        open_q.to_string(),
+                        "open".into(),
+                        Section::Questions,
+                        false,
+                        cx,
+                    )),
+            );
+            // Milestones, one line each.
+            let today = today();
+            let mut lines = v_flex().gap_2().child(section_title("Milestones"));
+            for m in &live {
+                let c = counts.get(&m.id).copied().unwrap_or_default();
+                let page_to = Page::Milestone {
                     env: env_s.clone(),
                     slug: slug_s.clone(),
-                    id: mid.to_string(),
+                    id: m.id.clone(),
                 };
-                bar = bar.child(
-                    Button::new(SharedString::from(format!("review-in-{mid}")))
-                        .label(format!(
-                            "{mid}: {n} ticket{}",
-                            if n == 1 { "" } else { "s" }
-                        ))
-                        .xsmall()
-                        .on_click(cx.listener(move |ws, _, _, cx| ws.go(page.clone(), cx))),
-                );
-            }
-            page = page.child(bar);
-        }
-
-        // Milestones, in order (spec §8.2).
-        let mut row = h_flex().gap_3().items_start().flex_wrap();
-        let rejected = p
-            .milestones
-            .iter()
-            .filter(|m| m.review == Review::Rejected)
-            .count();
-        for m in p
-            .milestones
-            .iter()
-            .filter(|m| show_rejected || m.review != Review::Rejected)
-        {
-            let c = counts.get(&m.id).copied().unwrap_or_default();
-            row = row.child(self.milestone_card(env, p, m, &c, &today, lead, cx));
-        }
-        if p.milestones.is_empty() && started {
-            row = row.child(muted(if planning {
-                "Claude is working on them…"
-            } else {
-                "No milestones yet."
-            }));
-        }
-        let mut ms_section =
-            v_flex()
-                .gap_2()
-                .child(h_flex().gap_3().child(section_title("Milestones")).when(
-                    rejected > 0,
-                    |d| {
-                        d.child(
-                            div()
-                                .id("toggle-rejected")
-                                .text_xs()
-                                .text_color(color(theme::TEXT_MUTED))
-                                .cursor_pointer()
-                                .child(if show_rejected {
-                                    format!("hide {rejected} rejected")
-                                } else {
-                                    format!("show {rejected} rejected")
-                                })
-                                .on_click(cx.listener(|ws, _, _, cx| {
-                                    ws.tab_flag(cx, |t| t.show_rejected = !t.show_rejected)
-                                })),
-                        )
-                    },
-                ));
-        ms_section = ms_section.child(row);
-        if started && lead && !planning {
-            let (env_b, slug_b) = (env_s.clone(), slug_s.clone());
-            ms_section = ms_section.child(
-                h_flex().child(
-                    Button::new("resume-planning")
-                        .label("Open planning session")
-                        .ghost()
-                        .small()
-                        .on_click(cx.listener(move |ws, _, window, cx| {
-                            let prompt = "Pick up planning this project: call plan_show, sum up what's \
-                                          approved, what's waiting for review and what had changes asked, \
-                                          and act on any notes."
-                                .to_string();
-                            ws.tell_planner(&env_b, &slug_b, prompt, window, cx)
-                        })),
-                ),
-            );
-        }
-        page = page.child(ms_section);
-
-        // Decisions at a glance (spec §8.2).
-        let now = pj::now_secs();
-        let mut open: Vec<&Decision> = p.decisions.iter().filter(|d| d.is_open()).collect();
-        open.sort_by_key(|d| d.meta.asked_at.map(|t| t.to_string()).unwrap_or_default());
-        let mut answered: Vec<&Decision> = p.decisions.iter().filter(|d| !d.is_open()).collect();
-        answered.sort_by_key(|d| {
-            std::cmp::Reverse(d.meta.decided_at.map(|t| t.to_string()).unwrap_or_default())
-        });
-        let mut decisions = v_flex()
-            .gap_2()
-            .child(section_title("Outstanding questions"));
-        if open.is_empty() {
-            decisions = decisions.child(muted("Nothing waiting."));
-        }
-        for d in open {
-            decisions = decisions.child(self.question_row(env, p, d, &login, now, cx));
-        }
-        decisions = decisions
-            .child(div().h(px(8.)))
-            .child(section_title("Recently decided"));
-        if answered.is_empty() {
-            decisions = decisions.child(muted("No decisions yet."));
-        }
-        for d in answered.into_iter().take(6) {
-            decisions =
-                decisions.child(
-                    v_flex()
-                        .gap_1()
-                        .p_3()
-                        .rounded_md()
-                        .bg(color(theme::SURFACE))
+                lines = lines.child(
+                    h_flex()
+                        .id(SharedString::from(format!("overview-m-{}", m.id)))
+                        .gap_3()
+                        .cursor_pointer()
+                        .hover(|d| d.text_color(color(theme::TEAL)))
+                        .on_click(cx.listener(move |ws, _, _, cx| ws.go(page_to.clone(), cx)))
                         .child(
                             div()
-                                .text_sm()
-                                .text_color(color(theme::TEXT_SECONDARY))
-                                .child(format!("{} · {}", d.id, d.meta.question)),
+                                .w(px(36.))
+                                .flex_none()
+                                .text_xs()
+                                .font_family("monospace")
+                                .text_color(color(theme::TEXT_MUTED))
+                                .child(m.id.clone()),
                         )
-                        .child(div().child(d.meta.answer.clone()))
-                        .child(div().text_xs().text_color(color(theme::TEXT_MUTED)).child(
-                            format!(
-                                "decided by {}{}",
-                                d.meta.decided_by,
-                                d.meta
-                                    .decided_at
-                                    .map(|t| format!(" · {} ago", pj::age(&t, now)))
-                                    .unwrap_or_default()
-                            ),
+                        .child(
+                            div()
+                                .w(px(280.))
+                                .flex_none()
+                                .truncate()
+                                .child(m.title.clone()),
+                        )
+                        .child(div().flex_1().child(status_bar(&c, 6.)))
+                        .child(
+                            div()
+                                .w(px(60.))
+                                .flex_none()
+                                .text_xs()
+                                .text_color(color(theme::TEXT_SECONDARY))
+                                .child(format!("{}/{}", c.done, c.total())),
+                        )
+                        .child(div().w(px(110.)).flex_none().child(
+                            if m.review != Review::Approved {
+                                review_pill(m.review).into_any_element()
+                            } else if is_late(m, &c, &today) {
+                                pill("late", theme::RED, theme::RED_TINT).into_any_element()
+                            } else {
+                                div()
+                                    .text_xs()
+                                    .text_color(color(theme::TEXT_MUTED))
+                                    .child(m.target.map(|t| t.to_string()).unwrap_or_default())
+                                    .into_any_element()
+                            },
                         )),
                 );
+            }
+            if live.is_empty() {
+                lines = lines.child(muted(if planning {
+                    "Claude is working on them…"
+                } else {
+                    "No milestones yet."
+                }));
+            }
+            page = page.child(lines);
         }
 
         // Progress, one row per person (spec §8.2).
@@ -2143,56 +2220,73 @@ impl Workspace {
                 })
                 .collect();
             progress = progress.child(
-                v_flex()
-                    .gap_1()
+                h_flex()
+                    .gap_4()
                     .p_3()
                     .rounded_md()
                     .bg(color(theme::SURFACE))
+                    .child(div().w(px(160.)).flex_none().child(person.clone()))
                     .child(
-                        h_flex().gap_2().child(div().child(person.clone())).child(
-                            div().text_xs().text_color(color(theme::TEXT_MUTED)).child(
-                                latest
-                                    .map(|w| format!("last write-up {}", w.date))
-                                    .unwrap_or_else(|| "no write-up yet".into()),
-                            ),
-                        ),
-                    )
-                    .when_some(latest, |d, w| {
-                        d.child(
-                            div()
-                                .text_sm()
-                                .text_color(color(theme::TEXT_SECONDARY))
-                                .child(first_line(&w.body)),
-                        )
-                    })
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(color(theme::TEXT_SECONDARY))
-                            .child(if working.is_empty() {
-                                "nothing in progress".to_string()
-                            } else {
-                                working
-                                    .iter()
-                                    .map(|t| format!("{} {}", t.id, t.meta.title))
-                                    .collect::<Vec<_>>()
-                                    .join(" · ")
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(color(theme::TEXT_SECONDARY))
+                                    .child(if working.is_empty() {
+                                        "nothing in progress".to_string()
+                                    } else {
+                                        working
+                                            .iter()
+                                            .map(|t| format!("{} {}", t.id, t.meta.title))
+                                            .collect::<Vec<_>>()
+                                            .join(" · ")
+                                    }),
+                            )
+                            .when_some(latest, |d, w| {
+                                d.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(color(theme::TEXT_MUTED))
+                                        .child(format!("{}: {}", w.date, first_line(&w.body))),
+                                )
                             }),
                     ),
             );
         }
-
-        let mut side = v_flex().w(px(380.)).flex_none().gap_6().child(progress);
+        let mut lower = h_flex()
+            .gap_6()
+            .items_start()
+            .child(v_flex().flex_1().min_w_0().child(progress));
         if started {
-            side = side.child(self.resources_block(&target, p, cx));
+            lower = lower.child(
+                v_flex()
+                    .w(px(420.))
+                    .flex_none()
+                    .child(self.resources_block(&target, p, cx)),
+            );
         }
-        page = page.child(
-            h_flex()
-                .gap_6()
-                .items_start()
-                .child(v_flex().flex_1().min_w_0().child(decisions))
-                .child(side),
-        );
+        page = page.child(lower);
+        if started && lead && !planning {
+            let (env_b, slug_b) = (env_s.clone(), slug_s.clone());
+            page = page.child(
+                h_flex().child(
+                    Button::new("resume-planning")
+                        .label("Open planning session")
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            let prompt = "Pick up planning this project: call plan_show, sum up \
+                                          what's approved, what's waiting for review and what had \
+                                          changes asked, and act on any notes."
+                                .to_string();
+                            ws.tell_planner(&env_b, &slug_b, prompt, window, cx)
+                        })),
+                ),
+            );
+        }
         page.child(v_flex().gap_2().child(section_title("Spec")).child(
             if p.spec.trim().is_empty() {
                 muted(if planning {
@@ -2203,7 +2297,7 @@ impl Workspace {
                 .into_any_element()
             } else {
                 gpui_base::TextView::markdown(
-                    SharedString::from(format!("spec-{slug}")),
+                    SharedString::from(format!("spec-{}", p.slug)),
                     p.spec.clone(),
                 )
                 .selectable(true)
@@ -2213,8 +2307,100 @@ impl Workspace {
         .into_any_element()
     }
 
-    #[allow(clippy::too_many_arguments)] // The card's inputs, all read-only.
-    fn milestone_card(
+    fn project_milestones(
+        &self,
+        env: &str,
+        p: &Project,
+        lead: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let show_rejected = self.projects.as_ref().is_some_and(|t| t.show_rejected);
+        let planning = self.planner(env, &p.slug).is_some();
+        let today = today();
+        let counts = milestone_counts(p, |t| t.meta.status);
+        let (rm, rt) = pj::to_review(p);
+        let mut page = v_flex().gap_3();
+        if lead && rm + rt > 0 {
+            let mut where_tickets: BTreeMap<&str, usize> = BTreeMap::new();
+            for t in p.tickets.iter().filter(|t| t.meta.review.waiting()) {
+                *where_tickets.entry(t.meta.milestone.as_str()).or_default() += 1;
+            }
+            let mut bar = h_flex()
+                .gap_3()
+                .flex_wrap()
+                .px_4()
+                .py_3()
+                .rounded_lg()
+                .bg(color(theme::AMBER_TINT))
+                .border_1()
+                .border_color(color(theme::AMBER))
+                .child(div().text_color(color(theme::AMBER)).child(format!(
+                    "To review: {rm} milestone{} · {rt} ticket{}",
+                    if rm == 1 { "" } else { "s" },
+                    if rt == 1 { "" } else { "s" }
+                )));
+            for (mid, n) in where_tickets {
+                let page_to = Page::Milestone {
+                    env: env.to_string(),
+                    slug: p.slug.clone(),
+                    id: mid.to_string(),
+                };
+                bar = bar.child(
+                    Button::new(SharedString::from(format!("review-in-{mid}")))
+                        .label(format!(
+                            "{mid}: {n} ticket{}",
+                            if n == 1 { "" } else { "s" }
+                        ))
+                        .xsmall()
+                        .on_click(cx.listener(move |ws, _, _, cx| ws.go(page_to.clone(), cx))),
+                );
+            }
+            page = page.child(bar);
+        }
+        let rejected = p
+            .milestones
+            .iter()
+            .filter(|m| m.review == Review::Rejected)
+            .count();
+        if rejected > 0 {
+            page = page.child(
+                div()
+                    .id("toggle-rejected")
+                    .text_xs()
+                    .text_color(color(theme::TEXT_MUTED))
+                    .cursor_pointer()
+                    .child(if show_rejected {
+                        format!("hide {rejected} rejected")
+                    } else {
+                        format!("show {rejected} rejected")
+                    })
+                    .on_click(cx.listener(|ws, _, _, cx| {
+                        ws.tab_flag(cx, |t| t.show_rejected = !t.show_rejected)
+                    })),
+            );
+        }
+        for m in p
+            .milestones
+            .iter()
+            .filter(|m| show_rejected || m.review != Review::Rejected)
+        {
+            let c = counts.get(&m.id).copied().unwrap_or_default();
+            page = page.child(self.milestone_row(env, p, m, &c, &today, lead, cx));
+        }
+        if p.milestones.is_empty() {
+            page = page.child(muted(if planning {
+                "Claude is working on them…"
+            } else {
+                "No milestones yet: Start project on the Overview has Claude propose them."
+            }));
+        }
+        page.into_any_element()
+    }
+
+    /// One milestone across the page: what it is on the left, its progress in the middle,
+    /// what you can do on the right.
+    #[allow(clippy::too_many_arguments)] // The row's inputs, all read-only.
+    fn milestone_row(
         &self,
         env: &str,
         p: &Project,
@@ -2228,7 +2414,7 @@ impl Workspace {
         let late = is_late(m, c, today);
         let done = m.status == MilestoneStatus::Done || (c.total() > 0 && c.done == c.total());
         let waiting = m.review.waiting();
-        let page = Page::Milestone {
+        let page_to = Page::Milestone {
             env: env_s.clone(),
             slug: slug_s.clone(),
             id: m.id.clone(),
@@ -2244,23 +2430,25 @@ impl Workspace {
         } else {
             theme::BORDER
         };
-        let mut card = v_flex()
-            .id(SharedString::from(format!("milestone-{}", m.id)))
-            .w(px(270.))
-            .gap_2()
-            .p_3()
-            .rounded_lg()
-            .bg(color(if m.status == MilestoneStatus::Active {
-                theme::RAISED
-            } else {
-                theme::SURFACE
-            }))
-            .border_1()
-            .border_color(color(edge))
-            .when(m.review == Review::Rejected, |d| d.opacity(0.6))
+        let ticket_count = p
+            .tickets
+            .iter()
+            .filter(|t| t.meta.milestone == m.id && t.meta.review != Review::Rejected)
+            .count();
+        let tickets_waiting = p
+            .tickets
+            .iter()
+            .filter(|t| t.meta.milestone == m.id && t.meta.review.waiting())
+            .count();
+
+        let left = v_flex()
+            .flex_1()
+            .min_w_0()
+            .gap_1()
             .child(
                 h_flex()
                     .gap_2()
+                    .items_baseline()
                     .child(
                         div()
                             .text_xs()
@@ -2268,7 +2456,15 @@ impl Workspace {
                             .text_color(color(theme::TEXT_MUTED))
                             .child(m.id.clone()),
                     )
-                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("open-milestone-{}", m.id)))
+                            .text_lg()
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(color(theme::TEAL)))
+                            .child(m.title.clone())
+                            .on_click(cx.listener(move |ws, _, _, cx| ws.go(page_to.clone(), cx))),
+                    )
                     .when(m.review != Review::Approved, |d| {
                         d.child(review_pill(m.review))
                     })
@@ -2278,14 +2474,6 @@ impl Workspace {
                     .when(late && m.review == Review::Approved, |d| {
                         d.child(pill("late", theme::RED, theme::RED_TINT))
                     }),
-            )
-            .child(
-                div()
-                    .id(SharedString::from(format!("open-milestone-{}", m.id)))
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(color(theme::TEAL)))
-                    .child(m.title.clone())
-                    .on_click(cx.listener(move |ws, _, _, cx| ws.go(page.clone(), cx))),
             )
             .child(
                 div()
@@ -2300,7 +2488,7 @@ impl Workspace {
             .when(!m.description.is_empty(), |d| {
                 d.child(
                     div()
-                        .text_xs()
+                        .text_sm()
                         .text_color(color(theme::TEXT_SECONDARY))
                         .child(m.description.clone()),
                 )
@@ -2310,19 +2498,40 @@ impl Workspace {
                 |d| {
                     d.child(
                         div()
-                            .text_xs()
+                            .text_sm()
                             .text_color(color(theme::AMBER))
                             .child(format!("“{}”", m.review_note)),
                     )
                 },
             );
-        if m.review == Review::Approved {
-            card = card.child(status_bar(c, 8.)).child(counts_line(c));
-        }
+
+        let middle = v_flex()
+            .w(px(320.))
+            .flex_none()
+            .gap_2()
+            .when(m.review == Review::Approved, |d| {
+                d.child(status_bar(c, 8.)).child(counts_line(c))
+            })
+            .when(m.review == Review::Approved && ticket_count == 0, |d| {
+                d.child(muted("No tickets yet."))
+            })
+            .when(tickets_waiting > 0, |d| {
+                d.child(
+                    div()
+                        .text_xs()
+                        .text_color(color(theme::AMBER))
+                        .child(format!(
+                            "{tickets_waiting} ticket{} to review",
+                            if tickets_waiting == 1 { "" } else { "s" }
+                        )),
+                )
+            });
+
+        let mut right = v_flex().w(px(300.)).flex_none().gap_2().items_end();
         if lead && waiting {
             let mc = m.clone();
             let (e, s) = (env_s.clone(), slug_s.clone());
-            card = card.child(self.review_actions(
+            right = right.child(self.review_actions(
                 env,
                 &p.slug,
                 Item::Milestone(m.id.clone()),
@@ -2333,30 +2542,159 @@ impl Workspace {
                 cx,
             ));
         }
-        if lead && m.review == Review::Approved {
-            let has_tickets = p
-                .tickets
-                .iter()
-                .any(|t| t.meta.milestone == m.id && t.meta.review != Review::Rejected);
-            let mc = m.clone();
-            card = card.child(
-                h_flex().child(
+        if m.review == Review::Approved {
+            let page_to = Page::Milestone {
+                env: env_s.clone(),
+                slug: slug_s.clone(),
+                id: m.id.clone(),
+            };
+            let mut buttons = h_flex().gap_2().child(
+                Button::new(SharedString::from(format!("board-{}", m.id)))
+                    .label(format!("Tickets ({ticket_count})"))
+                    .small()
+                    .ghost()
+                    .on_click(cx.listener(move |ws, _, _, cx| ws.go(page_to.clone(), cx))),
+            );
+            if lead {
+                let mc = m.clone();
+                buttons = buttons.child(
                     Button::new(SharedString::from(format!("tickets-{}", m.id)))
-                        .label(if has_tickets {
+                        .label(if ticket_count > 0 {
                             "More tickets"
                         } else {
                             "Create tickets"
                         })
                         .small()
-                        .when(!has_tickets, |b| b.primary())
-                        .when(has_tickets, |b| b.ghost())
+                        .when(ticket_count == 0, |b| b.primary())
+                        .when(ticket_count > 0, |b| b.ghost())
                         .on_click(cx.listener(move |ws, _, window, cx| {
                             ws.create_tickets(env_s.clone(), slug_s.clone(), &mc, window, cx)
                         })),
+                );
+            }
+            right = right.child(buttons);
+        }
+
+        h_flex()
+            .id(SharedString::from(format!("milestone-{}", m.id)))
+            .w_full()
+            .gap_6()
+            .items_start()
+            .px_4()
+            .py_3()
+            .rounded_lg()
+            .bg(color(if m.status == MilestoneStatus::Active {
+                theme::RAISED
+            } else {
+                theme::SURFACE
+            }))
+            .border_1()
+            .border_color(color(edge))
+            .when(m.review == Review::Rejected, |d| d.opacity(0.6))
+            .child(left)
+            .child(middle)
+            .child(right)
+            .into_any_element()
+    }
+
+    fn project_questions(
+        &self,
+        env: &str,
+        p: &Project,
+        login: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let now = pj::now_secs();
+        let mut open: Vec<&Decision> = p.decisions.iter().filter(|d| d.is_open()).collect();
+        // Yours first, then the oldest.
+        open.sort_by_key(|d| {
+            (
+                !d.meta.assigned_to.eq_ignore_ascii_case(login),
+                d.meta.asked_at.map(|t| t.to_string()).unwrap_or_default(),
+            )
+        });
+        let mut answered: Vec<&Decision> = p.decisions.iter().filter(|d| !d.is_open()).collect();
+        answered.sort_by_key(|d| {
+            std::cmp::Reverse(d.meta.decided_at.map(|t| t.to_string()).unwrap_or_default())
+        });
+        let (env_s, slug_s) = (env.to_string(), p.slug.clone());
+        let mut page = v_flex().gap_3().child(
+            h_flex()
+                .gap_3()
+                .child(section_title(&format!("Outstanding · {}", open.len())))
+                .child(div().flex_1())
+                .child(
+                    Button::new("project-ask")
+                        .label("Ask a question")
+                        .small()
+                        .ghost()
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.ask_dialog(env_s.clone(), slug_s.clone(), window, cx)
+                        })),
                 ),
+        );
+        if open.is_empty() {
+            page = page.child(muted("Nothing waiting."));
+        }
+        for d in open {
+            page = page.child(self.question_row(env, p, d, login, now, cx));
+        }
+        page = page
+            .child(div().h(px(12.)))
+            .child(section_title(&format!("Decided · {}", answered.len())));
+        if answered.is_empty() {
+            page = page.child(muted("No decisions yet."));
+        }
+        for d in answered {
+            page = page.child(
+                h_flex()
+                    .w_full()
+                    .gap_6()
+                    .items_start()
+                    .px_4()
+                    .py_3()
+                    .rounded_md()
+                    .bg(color(theme::SURFACE))
+                    .child(
+                        div()
+                            .w(px(48.))
+                            .flex_none()
+                            .text_xs()
+                            .font_family("monospace")
+                            .text_color(color(theme::TEXT_MUTED))
+                            .child(d.id.clone()),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(color(theme::TEXT_SECONDARY))
+                                    .child(d.meta.question.clone()),
+                            )
+                            .child(div().child(d.meta.answer.clone())),
+                    )
+                    .child(
+                        div()
+                            .w(px(240.))
+                            .flex_none()
+                            .text_xs()
+                            .text_color(color(theme::TEXT_MUTED))
+                            .child(format!(
+                                "decided by {}{}",
+                                d.meta.decided_by,
+                                d.meta
+                                    .decided_at
+                                    .map(|t| format!(" · {} ago", pj::age(&t, now)))
+                                    .unwrap_or_default()
+                            )),
+                    ),
             );
         }
-        card.into_any_element()
+        page.into_any_element()
     }
 
     fn question_row(
@@ -2374,22 +2712,11 @@ impl Workspace {
             .asked_at
             .map(|t| pj::age(&t, now))
             .unwrap_or_default();
-        let mut row = v_flex()
-            .gap_2()
-            .p_3()
-            .rounded_md()
-            .bg(color(if mine {
-                theme::AMBER_TINT
-            } else {
-                theme::SURFACE
-            }))
-            .border_1()
-            .border_color(color(if mine {
-                theme::AMBER
-            } else {
-                theme::BORDER_SUBTLE
-            }))
-            .child(div().child(format!("{} · {}", d.id, d.meta.question)))
+        let text = v_flex()
+            .flex_1()
+            .min_w_0()
+            .gap_1()
+            .child(div().child(d.meta.question.clone()))
             .child(
                 div()
                     .text_xs()
@@ -2425,8 +2752,54 @@ impl Workspace {
                         .child(d.body.trim().to_string()),
                 )
             });
+        let mut row = h_flex()
+            .w_full()
+            .gap_6()
+            .items_start()
+            .px_4()
+            .py_3()
+            .rounded_md()
+            .bg(color(if mine {
+                theme::AMBER_TINT
+            } else {
+                theme::SURFACE
+            }))
+            .border_1()
+            .border_color(color(if mine {
+                theme::AMBER
+            } else {
+                theme::BORDER_SUBTLE
+            }))
+            .child(
+                v_flex()
+                    .w(px(48.))
+                    .flex_none()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family("monospace")
+                            .text_color(color(theme::TEXT_MUTED))
+                            .child(d.id.clone()),
+                    )
+                    .when(!d.meta.ticket.is_empty(), |c| {
+                        c.child(
+                            div()
+                                .text_xs()
+                                .font_family("monospace")
+                                .text_color(color(theme::TEXT_MUTED))
+                                .child(d.meta.ticket.clone()),
+                        )
+                    }),
+            )
+            .child(text);
         if mine {
-            let mut actions = h_flex().gap_2().flex_wrap();
+            let mut actions = h_flex()
+                .w(px(360.))
+                .flex_none()
+                .justify_end()
+                .gap_2()
+                .flex_wrap();
             for (i, option) in d.meta.options.iter().enumerate() {
                 let (env, slug, q, option) =
                     (env.to_string(), p.slug.clone(), d.clone(), option.clone());
@@ -3297,6 +3670,27 @@ fn pill(text: &str, fg: u32, bg: u32) -> gpui::Div {
         .bg(color(bg))
         .text_color(color(fg))
         .child(text.to_string())
+}
+
+/// A tab's count: amber when it's waiting on you, grey when it's only there.
+fn count_badge(n: usize, yours: bool) -> gpui::Div {
+    let (fg, bg) = if yours {
+        (theme::ON_TEAL, theme::AMBER)
+    } else {
+        (theme::TEXT_SECONDARY, theme::RAISED)
+    };
+    div()
+        .min_w(px(18.))
+        .h(px(18.))
+        .px_1()
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_xs()
+        .bg(color(bg))
+        .text_color(color(fg))
+        .child(n.to_string())
 }
 
 fn review_pill(r: Review) -> gpui::Div {

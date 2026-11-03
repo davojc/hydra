@@ -117,6 +117,8 @@ pub(super) struct ProjectsData {
     /// The questions waiting on you when last read, as (environment, project, id); `None`
     /// before the first read, so what was already waiting doesn't pop up at start.
     asked: Option<BTreeSet<(String, String, String)>>,
+    /// New questions not toasted yet, shown together at most once a minute.
+    toasts: QuestionToasts,
 }
 
 impl ProjectsData {
@@ -139,6 +141,37 @@ impl ProjectsData {
                 Some(pj::questions_for(login, &e.projects).len() + reviews)
             })
             .sum()
+    }
+}
+
+/// New questions waiting on you, toasted together and at most once a minute: the count on
+/// the tabs carries every question; the toast only says some arrived.
+#[derive(Default)]
+struct QuestionToasts {
+    /// Each new question, as one line.
+    pending: Vec<String>,
+    last: Option<Instant>,
+}
+
+impl QuestionToasts {
+    const EVERY: Duration = Duration::from_secs(60);
+
+    /// The toast to show now, if one is due: the question itself when there's one, else how
+    /// many.
+    fn take(&mut self, now: Instant) -> Option<String> {
+        if self.pending.is_empty() || self.last.is_some_and(|t| now < t + Self::EVERY) {
+            return None;
+        }
+        self.last = Some(now);
+        let text = match self.pending.as_slice() {
+            [one] => format!("{one}\nAnswer it in Projects → Waiting on you."),
+            many => format!(
+                "{} new questions are waiting on you.\nAnswer them in Projects → Waiting on you.",
+                many.len()
+            ),
+        };
+        self.pending.clear();
+        Some(text)
     }
 }
 
@@ -320,11 +353,9 @@ impl Workspace {
             }
         }
         self.projects_data.asked = Some(now);
-        for text in fresh {
-            window.push_notification(
-                Notification::info(format!("{text}\nAnswer it in Projects → Waiting on you.")),
-                cx,
-            );
+        self.projects_data.toasts.pending.extend(fresh);
+        if let Some(text) = self.projects_data.toasts.take(Instant::now()) {
+            window.push_notification(Notification::info(text), cx);
         }
     }
 
@@ -3786,6 +3817,21 @@ fn first_line(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn question_toasts_come_together_at_most_once_a_minute() {
+        let start = Instant::now();
+        let mut t = QuestionToasts::default();
+        assert_eq!(t.take(start), None, "nothing new");
+        t.pending.push("Claude asks (PG, D-1): Postgres?".into());
+        assert!(t.take(start).unwrap().starts_with("Claude asks (PG, D-1)"));
+        t.pending
+            .extend(["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(t.take(start + Duration::from_secs(30)), None, "too soon");
+        let later = t.take(start + Duration::from_secs(61)).unwrap();
+        assert!(later.starts_with("3 new questions"), "{later}");
+        assert!(t.pending.is_empty());
+    }
 
     #[test]
     fn pull_request_links_read_shortly() {

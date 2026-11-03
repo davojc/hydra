@@ -41,6 +41,9 @@ const READ_EVERY: Duration = Duration::from_secs(2);
 /// a list, and would take the prompt after it too. People can still type to the session.
 const NO_TERMINAL_QUESTIONS: &str = "--disallowedTools=AskUserQuestion";
 
+/// Every review button's width, so the four line up as one set.
+const REVIEW_BUTTON_WIDTH: f32 = 108.;
+
 const MODELS: [&str; 4] = ["default", "opus", "sonnet", "haiku"];
 const EFFORTS: [&str; 6] = ["default", "low", "medium", "high", "xhigh", "max"];
 
@@ -800,40 +803,38 @@ impl Workspace {
             title.to_string(),
         );
         let (e3, s3, i3) = (env.to_string(), slug.to_string(), item);
+        // One size and one order everywhere: the yes first, the no last.
+        let sized = |b: Button| b.small().w(px(REVIEW_BUTTON_WIDTH));
         h_flex()
-            .gap_1()
-            .flex_wrap()
+            .gap_2()
             .child(
-                Button::new(SharedString::from(format!("approve-{id}")))
+                sized(Button::new(SharedString::from(format!("approve-{id}"))))
                     .label("Approve")
                     .primary()
-                    .xsmall()
                     .on_click(cx.listener(move |ws, _, window, cx| {
                         let _ =
                             ws.set_review(&e1, &s1, i1.clone(), Review::Approved, "", window, cx);
                     })),
             )
             .child(
-                Button::new(SharedString::from(format!("edit-{id}")))
-                    .label("Edit…")
-                    .ghost()
-                    .xsmall()
-                    .on_click(cx.listener(move |ws, _, window, cx| edit(ws, window, cx))),
-            )
-            .child(
-                Button::new(SharedString::from(format!("note-{id}")))
+                sized(Button::new(SharedString::from(format!("note-{id}"))))
                     .label("Ask Claude…")
-                    .ghost()
-                    .xsmall()
+                    .outline()
                     .on_click(cx.listener(move |ws, _, window, cx| {
                         ws.note_dialog(e2.clone(), s2.clone(), i2.clone(), t2.clone(), window, cx)
                     })),
             )
             .child(
-                Button::new(SharedString::from(format!("reject-{id}")))
+                sized(Button::new(SharedString::from(format!("edit-{id}"))))
+                    .label("Edit…")
+                    .outline()
+                    .on_click(cx.listener(move |ws, _, window, cx| edit(ws, window, cx))),
+            )
+            .child(
+                sized(Button::new(SharedString::from(format!("reject-{id}"))))
                     .label("Reject…")
-                    .ghost()
-                    .xsmall()
+                    .danger()
+                    .outline()
                     .on_click(cx.listener(move |ws, _, window, cx| {
                         ws.reject_dialog(e3.clone(), s3.clone(), i3.clone(), window, cx)
                     })),
@@ -2816,14 +2817,49 @@ impl Workspace {
                 )
             });
         if mine {
-            let mut actions = h_flex().gap_2().flex_wrap();
+            // The suggested answers as one even list, lettered, each across the row (their text
+            // wraps inside), then a way to answer something else.
+            let mut choices = v_flex().gap_1();
             for (i, option) in d.meta.options.iter().enumerate() {
                 let (env, slug, q, option) =
                     (env.to_string(), p.slug.clone(), d.clone(), option.clone());
-                actions = actions.child(
-                    Button::new(SharedString::from(format!("opt-{}-{i}", d.id)))
-                        .label(option.clone())
-                        .small()
+                choices = choices.child(
+                    // A stack with the letter pinned at its left, so the answer's text wraps
+                    // across the row (text in a growing column of a row wraps narrow).
+                    v_flex()
+                        .id(SharedString::from(format!("opt-{}-{i}", d.id)))
+                        .relative()
+                        .w_full()
+                        .pl(px(44.))
+                        .pr_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(color(theme::RAISED))
+                        .border_1()
+                        .border_color(color(theme::BORDER))
+                        .cursor_pointer()
+                        .hover(|s| {
+                            s.border_color(color(theme::TEAL))
+                                .bg(color(theme::TEAL_TINT))
+                        })
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(12.))
+                                .top(px(7.))
+                                .size(px(22.))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_xs()
+                                .bg(color(theme::SURFACE))
+                                .border_1()
+                                .border_color(color(theme::BORDER_STRONG))
+                                .text_color(color(theme::TEXT_SECONDARY))
+                                .child(option_letter(i)),
+                        )
+                        .child(div().text_sm().py(px(2.)).child(option.clone()))
                         .on_click(cx.listener(move |ws, _, window, cx| {
                             let (q, option) = (q.clone(), option.clone());
                             let _ = ws.answer_question(&env, &slug, &q, &option, window, cx);
@@ -2831,27 +2867,30 @@ impl Workspace {
                 );
             }
             let (env, slug, q) = (env.to_string(), p.slug.clone(), d.clone());
-            actions = actions.child(
-                Button::new(SharedString::from(format!("answer-{}", d.id)))
-                    .label("Answer…")
-                    .small()
-                    .primary()
-                    .on_click(cx.listener(move |ws, _, window, cx| {
-                        let (env, slug, q) = (env.clone(), slug.clone(), q.clone());
-                        ws.text_dialog(
-                            format!("Answer {}: {}", q.id, q.meta.question),
-                            String::new(),
-                            "your answer; it's recorded with your name and the time",
-                            move |ws, text, window, cx| {
-                                let q = q.clone();
-                                ws.answer_question(&env, &slug, &q, &text, window, cx)
-                            },
-                            window,
-                            cx,
-                        )
-                    })),
-            );
-            row = row.child(actions);
+            let other = Button::new(SharedString::from(format!("answer-{}", d.id)))
+                .label(if d.meta.options.is_empty() {
+                    "Answer…"
+                } else {
+                    "Something else…"
+                })
+                .small()
+                .when(d.meta.options.is_empty(), |b| b.primary())
+                .when(!d.meta.options.is_empty(), |b| b.outline())
+                .on_click(cx.listener(move |ws, _, window, cx| {
+                    let (env, slug, q) = (env.clone(), slug.clone(), q.clone());
+                    ws.text_dialog(
+                        format!("Answer {}: {}", q.id, q.meta.question),
+                        String::new(),
+                        "your answer; it's recorded with your name and the time",
+                        move |ws, text, window, cx| {
+                            let q = q.clone();
+                            ws.answer_question(&env, &slug, &q, &text, window, cx)
+                        },
+                        window,
+                        cx,
+                    )
+                }));
+            row = row.child(choices).child(h_flex().child(other));
         }
         row.into_any_element()
     }
@@ -3693,6 +3732,13 @@ fn pill(text: &str, fg: u32, bg: u32) -> gpui::Div {
         .child(text.to_string())
 }
 
+/// `A`, `B`, … for a question's suggested answers.
+fn option_letter(i: usize) -> String {
+    char::from_u32(u32::from(b'A') + (i % 26) as u32)
+        .map(String::from)
+        .unwrap_or_default()
+}
+
 /// A tab's count: amber when it's waiting on you, grey when it's only there.
 fn count_badge(n: usize, yours: bool) -> gpui::Div {
     let (fg, bg) = if yours {
@@ -3821,6 +3867,12 @@ mod tests {
         let later = t.take(start + Duration::from_secs(61)).unwrap();
         assert!(later.starts_with("3 new questions"), "{later}");
         assert!(t.pending.is_empty());
+    }
+
+    #[test]
+    fn options_are_lettered() {
+        assert_eq!(option_letter(0), "A");
+        assert_eq!(option_letter(2), "C");
     }
 
     #[test]

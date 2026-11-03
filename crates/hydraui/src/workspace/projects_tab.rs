@@ -4643,10 +4643,16 @@ fn notice(text: &str, fg: u32, bg: u32) -> gpui::Div {
 }
 
 fn pill(text: &str, fg: u32, bg: u32) -> gpui::Div {
-    div()
-        .px_2()
+    // A fixed height with the text centred, never wrapped or squeezed by its row.
+    h_flex()
+        .flex_none()
+        .items_center()
+        .h(px(20.))
+        .px(px(8.))
         .rounded_full()
         .text_xs()
+        .line_height(px(20.))
+        .whitespace_nowrap()
         .bg(color(bg))
         .text_color(color(fg))
         .child(text.to_string())

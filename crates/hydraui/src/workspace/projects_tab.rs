@@ -89,6 +89,8 @@ pub(super) struct ProjectsTab {
     show_claude: bool,
     /// The milestone points opened to their full explanation: (project, milestone, index).
     open_points: BTreeSet<(String, String, usize)>,
+    /// The send bar lists the changes not sent yet.
+    show_changes: bool,
 }
 
 /// One environment's projects, as last read.
@@ -106,6 +108,8 @@ pub(super) struct EnvProjects {
     broken: Vec<(String, String)>,
     /// Files changed and not sent yet (slice 1: the checkout's working tree).
     pending: BTreeSet<String>,
+    /// The checkout's `git status`, for listing those changes in words.
+    status: String,
     /// Projects already in the repo, not only on this machine.
     sent: BTreeSet<String>,
     /// hydraui's open pull requests in the repo, as last fetched.
@@ -253,6 +257,7 @@ impl Workspace {
                 show_rejected: false,
                 show_claude: true,
                 open_points: BTreeSet::new(),
+                show_changes: false,
             });
         }
         self.projects_data.next_fetch = None;
@@ -861,12 +866,28 @@ impl Workspace {
             );
         };
         let can_send = unsent > 0 && !waiting && !sending;
+        let show_changes = unsent > 0 && self.projects.as_ref().is_some_and(|t| t.show_changes);
         let row = h_flex()
             .gap_3()
             .items_center()
             .flex_wrap()
             .child(div().text_sm().child(status))
             .child(div().flex_1())
+            .when(unsent > 0, |d| {
+                d.child(
+                    Button::new("show-changes")
+                        .label(if show_changes {
+                            "Hide changes"
+                        } else {
+                            "Show changes"
+                        })
+                        .xsmall()
+                        .ghost()
+                        .on_click(cx.listener(|ws, _, _, cx| {
+                            ws.tab_flag(cx, |t| t.show_changes = !t.show_changes)
+                        })),
+                )
+            })
             .when_some(my_pr.map(|pr| pr.url), |d, url| d.child(view(url)))
             .when(can_send, |d| {
                 let (e, s) = (env_s.clone(), slug_s.clone());
@@ -897,10 +918,55 @@ impl Workspace {
         } else {
             (theme::BORDER, theme::SURFACE)
         };
+        let mut changes = v_flex().gap_1();
+        if show_changes {
+            for (i, (words, path)) in ps::pending_changes(&e.status, &p.slug)
+                .into_iter()
+                .enumerate()
+            {
+                let file = e.checkout.join(&path);
+                let exists = file.is_file();
+                changes = changes.child(
+                    h_flex()
+                        .id(SharedString::from(format!("change-{i}")))
+                        .gap_3()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .when(exists, |d| {
+                            d.cursor_pointer()
+                                .hover(|s| s.bg(color(theme::RAISED)))
+                                .on_click(move |_, _, cx| cx.open_with_system(&file))
+                        })
+                        .child(div().flex_none().text_sm().child(words))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .font_family("monospace")
+                                .text_color(color(theme::TEXT_MUTED))
+                                .child(
+                                    path.trim_start_matches(&format!("{}/", p.slug)).to_string(),
+                                ),
+                        ),
+                );
+            }
+        }
         Some(
             boxed(edge, tint)
                 .children(lines)
                 .child(row)
+                .when(show_changes, |d| {
+                    d.child(
+                        div()
+                            .pt_2()
+                            .border_t_1()
+                            .border_color(color(theme::BORDER_SUBTLE))
+                            .child(changes),
+                    )
+                })
                 .into_any_element(),
         )
     }
@@ -4485,7 +4551,8 @@ fn read_checkout(e: &mut EnvProjects) {
             Err(why) => e.broken.push((slug, why.to_string())),
         }
     }
-    e.pending = pj::pending(&e.checkout);
+    e.status = ps::status_text(&ps::Local, &e.checkout).unwrap_or_default();
+    e.pending = pj::parse_status(&e.status);
     e.sent = pj::sent_projects(&e.checkout);
     e.sent_for_lead = e
         .projects

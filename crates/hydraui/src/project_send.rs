@@ -633,6 +633,79 @@ pub fn is_sent(r: &dyn Runner, dir: &Path, slug: &str) -> bool {
 
 // ---- The pull request's words ----
 
+/// One changed file of a project in words: `status` is git's letter (`A`, `M` or `D`), and
+/// `path` starts with the project's folder.
+fn change_words(status: &str, path: &str) -> String {
+    let rest = path.split_once('/').map(|(_, r)| r).unwrap_or(path);
+    let (added, removed) = (status.starts_with('A'), status.starts_with('D'));
+    let stem = |p: &str| {
+        Path::new(p)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let verb = if added {
+        "added"
+    } else if removed {
+        "removed"
+    } else {
+        "updated"
+    };
+    match rest {
+        "project.toml" if added => "Project created".to_string(),
+        "project.toml" => "Project settings changed".to_string(),
+        "spec.md" if added => "Spec written".to_string(),
+        "spec.md" => "Spec updated".to_string(),
+        "milestones.toml" if added => "Milestones proposed".to_string(),
+        "milestones.toml" => "Milestones updated".to_string(),
+        "resources/links.toml" => "Links updated".to_string(),
+        r if r.starts_with("tickets/") => format!("Ticket {} {verb}", stem(r)),
+        r if r.starts_with("decisions/") && added => format!("Question {} asked", stem(r)),
+        r if r.starts_with("decisions/") => format!("Decision {} {verb}", stem(r)),
+        r if r.starts_with("resources/") => {
+            format!("Resource {} {verb}", r.trim_start_matches("resources/"))
+        }
+        r if r.starts_with("meetings/") => format!("Meeting notes {} {verb}", stem(r)),
+        r if r.starts_with("progress/") => "Progress written".to_string(),
+        r => format!("{r} {verb}"),
+    }
+}
+
+/// Project `slug`'s changes not sent yet, from `git status --porcelain -z` output: each in
+/// words, with its file.
+pub fn pending_changes(status: &str, slug: &str) -> Vec<(String, String)> {
+    let prefix = format!("{slug}/");
+    let mut out = Vec::new();
+    let mut entries = status.split('\0');
+    while let Some(entry) = entries.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        let (x, y) = (&entry[..1], &entry[1..2]);
+        if x == "R" || x == "C" {
+            entries.next();
+        }
+        let path = &entry[3..];
+        if !path.starts_with(&prefix) {
+            continue;
+        }
+        let letter = if entry.starts_with("??") || matches!(x, "A" | "R" | "C") {
+            "A"
+        } else if x == "D" || y == "D" {
+            "D"
+        } else {
+            "M"
+        };
+        out.push((change_words(letter, path), path.to_string()));
+    }
+    out
+}
+
+/// The checkout's `git status --porcelain -z` output, for [`pending_changes`].
+pub fn status_text(r: &dyn Runner, dir: &Path) -> Result<String, String> {
+    r.git(dir, &["status", "--porcelain", "-uall", "-z"], None)
+}
+
 /// A pull request's title and body from `git diff-tree --name-status` output: what the change
 /// does, in words, not a diff (spec §5.2).
 pub fn describe(name: &str, login: &str, name_status: &str) -> (String, String) {
@@ -644,39 +717,8 @@ pub fn describe(name: &str, login: &str, name_status: &str) -> (String, String) 
             continue;
         };
         let rest = path.split_once('/').map(|(_, r)| r).unwrap_or(path);
-        let (added, removed) = (status.starts_with('A'), status.starts_with('D'));
-        created |= rest == "project.toml" && added;
-        let stem = |p: &str| {
-            Path::new(p)
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        };
-        let verb = if added {
-            "added"
-        } else if removed {
-            "removed"
-        } else {
-            "updated"
-        };
-        let item = match rest {
-            "project.toml" if added => "Project created".to_string(),
-            "project.toml" => "Project settings changed".to_string(),
-            "spec.md" if added => "Spec written".to_string(),
-            "spec.md" => "Spec updated".to_string(),
-            "milestones.toml" if added => "Milestones proposed".to_string(),
-            "milestones.toml" => "Milestones updated".to_string(),
-            "resources/links.toml" => "Links updated".to_string(),
-            r if r.starts_with("tickets/") => format!("Ticket {} {verb}", stem(r)),
-            r if r.starts_with("decisions/") && added => format!("Question {} asked", stem(r)),
-            r if r.starts_with("decisions/") => format!("Decision {} {verb}", stem(r)),
-            r if r.starts_with("resources/") => {
-                format!("Resource {} {verb}", r.trim_start_matches("resources/"))
-            }
-            r if r.starts_with("meetings/") => format!("Meeting notes {} {verb}", stem(r)),
-            r if r.starts_with("progress/") => "Progress written".to_string(),
-            r => format!("{r} {verb}"),
-        };
+        created |= rest == "project.toml" && status.starts_with('A');
+        let item = change_words(status, path);
         if !items.contains(&item) {
             items.push(item);
         }
@@ -1013,6 +1055,26 @@ mod tests {
         assert_eq!(
             (prs[1].slug.as_str(), prs[1].sent_back.as_deref()),
             ("mx", None)
+        );
+    }
+
+    #[test]
+    fn pending_changes_read_in_words_with_their_files() {
+        let status = "?? pg/tickets/PG-3.md\0 M pg/milestones.toml\0 D pg/resources/old.pdf\0R  pg/a.md\0pg/b.md\0?? mx/spec.md\0";
+        assert_eq!(
+            pending_changes(status, "pg"),
+            vec![
+                (
+                    "Ticket PG-3 added".to_string(),
+                    "pg/tickets/PG-3.md".to_string()
+                ),
+                ("Milestones updated".into(), "pg/milestones.toml".into()),
+                (
+                    "Resource old.pdf removed".into(),
+                    "pg/resources/old.pdf".into()
+                ),
+                ("a.md added".into(), "pg/a.md".into()),
+            ]
         );
     }
 

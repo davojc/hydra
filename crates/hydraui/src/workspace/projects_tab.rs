@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Entity, ExternalPaths, SharedString, Window, div, px};
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::input::{Input, InputState};
+use gpui_component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::notification::Notification;
 use gpui_component::select::{Select, SelectState};
@@ -86,6 +86,8 @@ pub(super) struct ProjectsTab {
     show_rejected: bool,
     /// The project page shows its planning session beside it.
     show_claude: bool,
+    /// The milestone points opened to their full explanation: (project, milestone, index).
+    open_points: BTreeSet<(String, String, usize)>,
 }
 
 /// One environment's projects, as last read.
@@ -210,6 +212,7 @@ impl Workspace {
                 show_all: false,
                 show_rejected: false,
                 show_claude: true,
+                open_points: BTreeSet::new(),
             });
         }
         self.projects_data.next_fetch = None;
@@ -732,7 +735,7 @@ impl Workspace {
                 ),
                 (
                     "Points",
-                    "- what it's for  - how we'll know it's done",
+                    "- a point\n  its full explanation, indented under it",
                     m.description.clone(),
                 ),
             ],
@@ -782,6 +785,141 @@ impl Workspace {
             window,
             cx,
         );
+    }
+
+    /// A milestone's points as a list, each clicked open to its full explanation. An older
+    /// paragraph shows one point per sentence, with nothing more to open.
+    fn milestone_points(
+        &self,
+        env: &str,
+        slug: &str,
+        m: &Milestone,
+        lead: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let points = pj::points_of(&m.description).unwrap_or_else(|| {
+            pj::sentences_of(&m.description)
+                .into_iter()
+                .map(|s| pj::Point {
+                    text: s.to_string(),
+                    detail: String::new(),
+                })
+                .collect()
+        });
+        let open = |i: usize| {
+            self.projects
+                .as_ref()
+                .is_some_and(|t| t.open_points.contains(&(slug.to_string(), m.id.clone(), i)))
+        };
+        let mut list = v_flex().gap_1();
+        for (i, point) in points.into_iter().enumerate() {
+            let is_open = open(i);
+            let key = (slug.to_string(), m.id.clone(), i);
+            // The chevron is placed absolutely so the point's text is a stack child with the
+            // full width (text in a growing column of a row wraps narrow).
+            list = list.child(
+                v_flex()
+                    .id(SharedString::from(format!("point-{}-{}-{i}", slug, m.id)))
+                    .relative()
+                    .w_full()
+                    .pl(px(20.))
+                    .pr_2()
+                    .py(px(2.))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(color(theme::RAISED)))
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(5.))
+                            .top(px(3.))
+                            .text_xs()
+                            .text_color(color(if is_open {
+                                theme::TEAL
+                            } else {
+                                theme::TEXT_MUTED
+                            }))
+                            .child(if is_open { "▾" } else { "▸" }),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(color(if is_open {
+                                theme::TEXT
+                            } else {
+                                theme::TEXT_SECONDARY
+                            }))
+                            .child(point.text.clone()),
+                    )
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        if let Some(t) = ws.projects.as_mut()
+                            && !t.open_points.remove(&key)
+                        {
+                            t.open_points.insert(key.clone());
+                        }
+                        cx.notify();
+                    })),
+            );
+            if !is_open {
+                continue;
+            }
+            let mut detail = v_flex()
+                .ml(px(20.))
+                .mb_1()
+                .pl_3()
+                .py_1()
+                .gap_1()
+                .border_l_2()
+                .border_color(color(theme::TEAL_BORDER));
+            if point.detail.is_empty() {
+                detail = detail.child(
+                    div()
+                        .text_sm()
+                        .text_color(color(theme::TEXT_MUTED))
+                        .child("No full explanation was written for this point."),
+                );
+                if lead && m.review.waiting() {
+                    let (e, s, prompt) = (
+                        env.to_string(),
+                        slug.to_string(),
+                        format!(
+                            "The lead wants the full explanation of \"{}\" in {}. Call \
+                             plan_show, then give every point of {} its detail with plan_revise.",
+                            point.text, m.id, m.id
+                        ),
+                    );
+                    detail = detail.child(
+                        h_flex().child(
+                            Button::new(SharedString::from(format!(
+                                "explain-{}-{}-{i}",
+                                slug, m.id
+                            )))
+                            .label("Ask Claude to explain")
+                            .xsmall()
+                            .outline()
+                            .on_click(cx.listener(
+                                move |ws, _, window, cx| {
+                                    ws.tell_planner(&e, &s, prompt.clone(), window, cx)
+                                },
+                            )),
+                        ),
+                    );
+                }
+            } else {
+                for line in point.detail.lines() {
+                    detail = detail.child(if line.trim().is_empty() {
+                        div().h(px(4.))
+                    } else {
+                        div()
+                            .text_sm()
+                            .text_color(color(theme::TEXT_SECONDARY))
+                            .child(line.to_string())
+                    });
+                }
+            }
+            list = list.child(detail);
+        }
+        list
     }
 
     /// Approve, Edit…, Changes…, Reject…, for the lead on an item still to review.
@@ -1265,14 +1403,25 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let inputs: Vec<(&'static str, Entity<InputState>)> = fields
+        // A milestone's points (with their explanations) and a ticket's description run over
+        // several lines; the rest are one line.
+        let inputs: Vec<(&'static str, FieldBox)> = fields
             .into_iter()
             .map(|(label, placeholder, initial)| {
-                let input = cx.new(|cx| {
-                    InputState::new(window, cx)
-                        .placeholder(placeholder)
-                        .default_value(initial)
-                });
+                let input = if matches!(label, "Points" | "Description") {
+                    FieldBox::Lines(cx.new(|cx| {
+                        TextareaState::new(window, cx)
+                            .auto_grow(3, 14)
+                            .placeholder(placeholder)
+                            .default_value(initial)
+                    }))
+                } else {
+                    FieldBox::Line(cx.new(|cx| {
+                        InputState::new(window, cx)
+                            .placeholder(placeholder)
+                            .default_value(initial)
+                    }))
+                };
                 (label, input)
             })
             .collect();
@@ -1284,7 +1433,7 @@ impl Workspace {
             if !focused.replace(true)
                 && let Some((_, first)) = inputs.first()
             {
-                first.update(cx, |s, cx| s.focus(window, cx));
+                first.focus(window, cx);
             }
             let shown = problem.read(cx).clone();
             let (all, p, ws, save) = (
@@ -1302,7 +1451,10 @@ impl Workspace {
                             .text_color(color(theme::TEXT_SECONDARY))
                             .child(*label),
                     )
-                    .child(Input::new(input));
+                    .child(match input {
+                        FieldBox::Line(i) => Input::new(i).into_any_element(),
+                        FieldBox::Lines(i) => Textarea::new(i).into_any_element(),
+                    });
             }
             dialog
                 .title(title.clone())
@@ -1321,10 +1473,8 @@ impl Workspace {
                         )
                         .child(Button::new("save").label("Save").primary().on_click(
                             move |_, window, cx| {
-                                let values: Vec<String> = all
-                                    .iter()
-                                    .map(|(_, i)| i.read(cx).value().trim().to_string())
-                                    .collect();
+                                let values: Vec<String> =
+                                    all.iter().map(|(_, i)| i.value(cx)).collect();
                                 match ws.update(cx, |ws, cx| save(ws, values, window, cx)) {
                                     Ok(()) => window.close_dialog(cx),
                                     Err(e) => p.update(cx, |p, cx| {
@@ -2603,7 +2753,7 @@ impl Workspace {
                     .child(meta),
             )
             .when(!m.description.is_empty(), |d| {
-                d.child(description_points(&m.description))
+                d.child(self.milestone_points(env, &p.slug, m, lead, cx))
             })
             .when(
                 !m.review_note.is_empty() && m.review != Review::Approved,
@@ -3740,35 +3890,30 @@ fn pill(text: &str, fg: u32, bg: u32) -> gpui::Div {
         .child(text.to_string())
 }
 
-/// `A`, `B`, … for a question's suggested answers.
-/// A milestone's description as a bulleted list: its points, or an older paragraph's
-/// sentences.
-fn description_points(text: &str) -> gpui::Div {
-    let points = pj::points_of(text).unwrap_or_else(|| pj::sentences_of(text));
-    // The dot is placed absolutely so each point's text is a stack child with the full width.
-    v_flex().gap_1().children(points.into_iter().map(|p| {
-        v_flex()
-            .relative()
-            .w_full()
-            .pl(px(16.))
-            .child(
-                div()
-                    .absolute()
-                    .left(px(4.))
-                    .top(px(8.))
-                    .size(px(5.))
-                    .rounded_full()
-                    .bg(color(theme::TEXT_MUTED)),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(color(theme::TEXT_SECONDARY))
-                    .child(p.to_string()),
-            )
-    }))
+/// A box in [`Workspace::fields_dialog`].
+#[derive(Clone)]
+enum FieldBox {
+    Line(Entity<InputState>),
+    Lines(Entity<TextareaState>),
 }
 
+impl FieldBox {
+    fn focus(&self, window: &mut Window, cx: &mut gpui::App) {
+        match self {
+            FieldBox::Line(i) => i.update(cx, |s, cx| s.focus(window, cx)),
+            FieldBox::Lines(i) => i.update(cx, |s, cx| s.focus(window, cx)),
+        }
+    }
+
+    fn value(&self, cx: &gpui::App) -> String {
+        match self {
+            FieldBox::Line(i) => i.read(cx).value().trim().to_string(),
+            FieldBox::Lines(i) => i.read(cx).value().trim().to_string(),
+        }
+    }
+}
+
+/// `A`, `B`, … for a question's suggested answers.
 fn option_letter(i: usize) -> String {
     char::from_u32(u32::from(b'A') + (i % 26) as u32)
         .map(String::from)

@@ -624,7 +624,6 @@ pub fn start_work(
     repo::write_ticket(dir, &t).map_err(|e| e.to_string())
 }
 
-/// Parses a comma- or space-separated list (members, repos), dropping blanks and `@`s.
 /// `text` without a leading bullet ("- ", "* ", "• ") and surrounding space.
 pub fn strip_point(text: &str) -> &str {
     let t = text.trim();
@@ -635,17 +634,63 @@ pub fn strip_point(text: &str) -> &str {
         .trim()
 }
 
-/// A milestone description's bullet points, or None when it isn't only bullet points (an
-/// older paragraph, shown as it is).
-pub fn points_of(text: &str) -> Option<Vec<&str>> {
-    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-    let bullet = |l: &&str| {
-        ["- ", "* ", "• "]
-            .iter()
-            .any(|b| l.trim_start().starts_with(b))
-    };
-    (!lines.is_empty() && lines.iter().all(bullet))
-        .then(|| lines.iter().map(|l| strip_point(l)).collect())
+/// One of a milestone's points: a short line, and the full explanation shown when it's
+/// clicked (empty when there's none).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Point {
+    pub text: String,
+    pub detail: String,
+}
+
+/// A milestone description's points, or None when it isn't points (an older paragraph).
+/// Each point is a bullet line; its explanation is the indented lines under it.
+pub fn points_of(text: &str) -> Option<Vec<Point>> {
+    let bullet = |l: &str| ["- ", "* ", "• "].iter().any(|b| l.starts_with(b));
+    let mut points: Vec<(Point, Vec<&str>)> = Vec::new();
+    for line in text.lines() {
+        let indented = line.starts_with(char::is_whitespace);
+        match points.last_mut() {
+            Some((_, detail)) if line.trim().is_empty() => detail.push(""),
+            _ if line.trim().is_empty() => {}
+            _ if !indented && bullet(line) => points.push((
+                Point {
+                    text: strip_point(line).to_string(),
+                    detail: String::new(),
+                },
+                Vec::new(),
+            )),
+            Some((_, detail)) if indented => {
+                detail.push(line.strip_prefix("  ").unwrap_or(line.trim_start()))
+            }
+            _ => return None,
+        }
+    }
+    (!points.is_empty()).then(|| {
+        points
+            .into_iter()
+            .map(|(mut p, detail)| {
+                p.detail = detail.join("\n").trim().to_string();
+                p
+            })
+            .collect()
+    })
+}
+
+/// Points as a milestone description: each a bullet line with its explanation indented
+/// under it, which [`points_of`] reads back.
+pub fn points_text(points: &[Point]) -> String {
+    points
+        .iter()
+        .map(|p| {
+            let mut out = format!("- {}", p.text);
+            for line in p.detail.lines() {
+                out.push_str("\n  ");
+                out.push_str(line);
+            }
+            out
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// An older paragraph description as one point per sentence, so it never shows as a wall
@@ -669,6 +714,7 @@ pub fn sentences_of(text: &str) -> Vec<&str> {
     out
 }
 
+/// Parses a comma- or space-separated list (members, repos), dropping blanks and `@`s.
 pub fn list_of(text: &str) -> Vec<String> {
     text.split([',', ' ', '\n'])
         .map(|s| s.trim().trim_start_matches('@'))
@@ -748,14 +794,35 @@ mod tests {
 
     #[test]
     fn points_are_bullet_lines_only() {
+        let texts = |text| points_of(text).map(|ps| ps.into_iter().map(|p| p.text).collect());
         assert_eq!(
-            points_of("- Why\n\n* Done when\n• Third"),
-            Some(vec!["Why", "Done when", "Third"])
+            texts("- Why\n\n* Done when\n• Third"),
+            Some(vec!["Why".to_string(), "Done when".into(), "Third".into()])
         );
-        assert_eq!(points_of("A paragraph.\n- then a point"), None);
-        assert_eq!(points_of(""), None);
+        assert_eq!(texts("A paragraph.\n- then a point"), None);
+        assert_eq!(texts(""), None);
         assert_eq!(strip_point("  - x "), "x");
         assert_eq!(strip_point("plain"), "plain");
+    }
+
+    #[test]
+    fn a_point_keeps_its_explanation_indented_under_it() {
+        let points = vec![
+            Point {
+                text: "Partners see groups".into(),
+                detail: "Today they email us.\n\nThis ends that.".into(),
+            },
+            Point {
+                text: "Done when one opens".into(),
+                detail: String::new(),
+            },
+        ];
+        let text = points_text(&points);
+        assert_eq!(
+            text,
+            "- Partners see groups\n  Today they email us.\n  \n  This ends that.\n- Done when one opens"
+        );
+        assert_eq!(points_of(&text), Some(points));
     }
 
     #[test]

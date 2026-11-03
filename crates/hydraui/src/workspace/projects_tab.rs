@@ -4647,6 +4647,7 @@ fn pill(text: &str, fg: u32, bg: u32) -> gpui::Div {
     h_flex()
         .flex_none()
         .items_center()
+        .justify_center()
         .h(px(20.))
         .px(px(8.))
         .rounded_full()
@@ -4711,7 +4712,7 @@ fn count_badge(n: usize, yours: bool) -> gpui::Div {
 
 fn review_pill(r: Review) -> gpui::Div {
     match r {
-        Review::Proposed => pill("to review", theme::AMBER, theme::AMBER_TINT),
+        Review::Proposed => pill("Review needed", theme::AMBER, theme::AMBER_TINT),
         Review::Changes => pill("with Claude", theme::TEAL, theme::TEAL_TINT),
         Review::Rejected => pill("rejected", theme::RED, theme::RED_TINT),
         Review::Approved => pill("approved", theme::GREEN, theme::GREEN_TINT),

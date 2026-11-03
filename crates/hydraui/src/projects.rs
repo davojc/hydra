@@ -131,17 +131,19 @@ pub fn sync_checkout(hydra: &Path, env: &str, repo: &str, dir: &Path) -> Result<
         env_git(hydra, env, &["clone", &clone_source(repo), &path])?;
         return Ok(());
     }
-    // Nothing on the remote yet (a new repo): no branch to pull.
-    let heads = env_git(hydra, env, &["-C", &path, "ls-remote", "--heads", "origin"])?;
-    if heads.is_empty() {
-        return Ok(());
-    }
-    env_git(
+    let r = crate::project_send::EnvRunner {
         hydra,
         env,
-        &["-C", &path, "pull", "--ff-only", "--autostash"],
-    )
-    .map(|_| ())
+        cwd: dir,
+    };
+    // Nothing on the remote yet (a new repo): no branch to come up to.
+    let Some(default) = crate::project_send::default_branch(&r, dir)? else {
+        return Ok(());
+    };
+    env_git(hydra, env, &["-C", &path, "fetch", "origin", "--prune"])?;
+    // Not a plain pull: a file sent and merged is pending here too, and would clash with
+    // the same file coming from the repo.
+    crate::project_send::settle(&r, dir, &default)
 }
 
 /// Project `slug`'s folder on GitHub, for a GitHub repo (`HEAD` is its default branch).
@@ -184,7 +186,7 @@ pub fn pending(dir: &Path) -> BTreeSet<String> {
 }
 
 /// The paths in `git status --porcelain -z` output (a rename's new path).
-fn parse_status(text: &str) -> BTreeSet<String> {
+pub(crate) fn parse_status(text: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let mut entries = text.split('\0');
     while let Some(entry) = entries.next() {

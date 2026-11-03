@@ -15,7 +15,7 @@ use gpui_component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::notification::Notification;
 use gpui_component::select::{Select, SelectState};
-use gpui_component::{IndexPath, Selectable, Sizable, WindowExt, h_flex, v_flex};
+use gpui_component::{Disableable, IndexPath, Selectable, Sizable, WindowExt, h_flex, v_flex};
 use hydra_core::name::EnvName;
 use hydraui_projects::progress::{Counts, is_late, milestone_counts, today};
 use hydraui_projects::{
@@ -29,6 +29,7 @@ use crate::hydra::{PaneRequest, command_line};
 use crate::mcp::project_tools::{ASKED_BY_CLAUDE, Session};
 use crate::mcp::server;
 use crate::orchestrator_theme::{self as theme, color};
+use crate::project_send::{self as ps, OpenPr, SendError, Sent};
 use crate::projects::{self as pj, Item};
 
 /// How often the checkouts are brought up to date while hydraui is open (spec §3).
@@ -107,6 +108,36 @@ pub(super) struct EnvProjects {
     pending: BTreeSet<String>,
     /// Projects already in the repo, not only on this machine.
     sent: BTreeSet<String>,
+    /// hydraui's open pull requests in the repo, as last fetched.
+    prs: Vec<OpenPr>,
+    /// Projects whose pending change is exactly what was sent for the lead's approval.
+    sent_for_lead: BTreeSet<String>,
+}
+
+impl EnvProjects {
+    fn lead_of(&self, slug: &str) -> Option<&str> {
+        self.projects
+            .iter()
+            .find(|p| p.slug == slug)
+            .map(|p| p.file.lead.as_str())
+    }
+
+    /// Whether `pr` waits on `login`: someone else's change to a project they lead, not sent
+    /// back yet; or their own change the lead sent back (spec §8.4).
+    fn pr_waits_on(&self, login: &str, pr: &OpenPr) -> bool {
+        let mine = pr.author.eq_ignore_ascii_case(login);
+        let leads = self
+            .lead_of(&pr.slug)
+            .is_some_and(|l| l.eq_ignore_ascii_case(login));
+        (!mine && leads && pr.sent_back.is_none()) || (mine && pr.sent_back.is_some())
+    }
+
+    /// `login`'s open pull request for project `slug`.
+    fn my_pr(&self, login: &str, slug: &str) -> Option<&OpenPr> {
+        self.prs
+            .iter()
+            .find(|pr| pr.slug == slug && pr.author.eq_ignore_ascii_case(login))
+    }
 }
 
 #[derive(Default)]
@@ -124,6 +155,14 @@ pub(super) struct ProjectsData {
     asked: Option<BTreeSet<(String, String, String)>>,
     /// New questions not toasted yet, shown together at most once a minute.
     toasts: QuestionToasts,
+    /// Projects being sent now, as (environment, project).
+    sending: BTreeSet<(String, String)>,
+    /// Files that clashed in a project's last send, by (environment, project).
+    clashes: BTreeMap<(String, String), Vec<String>>,
+    /// Clashing files the engineer chose to keep their own version of.
+    keep_mine: BTreeMap<(String, String), BTreeSet<String>>,
+    /// Pull requests being approved or sent back, by URL.
+    reviewing: BTreeSet<String>,
 }
 
 impl ProjectsData {
@@ -143,7 +182,8 @@ impl ProjectsData {
                         m + t
                     })
                     .sum();
-                Some(pj::questions_for(login, &e.projects).len() + reviews)
+                let prs = e.prs.iter().filter(|pr| e.pr_waits_on(login, pr)).count();
+                Some(pj::questions_for(login, &e.projects).len() + reviews + prs)
             })
             .sum()
     }
@@ -428,6 +468,566 @@ impl Workspace {
         r
     }
 
+    // ---- Sending and approving (spec §5) ----
+
+    /// Sends project `slug`'s pending change in the background (spec §5.1). `quiet` (a send
+    /// after answering or asking) only speaks up when something goes wrong.
+    fn send_project(
+        &mut self,
+        env: &str,
+        slug: &str,
+        quiet: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (env.to_string(), slug.to_string());
+        if self.projects_data.sending.contains(&key) {
+            return;
+        }
+        let Some(e) = self.projects_data.envs.get(env) else {
+            return;
+        };
+        if !pj::is_github(&e.repo) {
+            if !quiet {
+                window.push_notification(
+                    Notification::error(
+                        "Sending needs a GitHub repo (owner/name) as the environment's projects repo.",
+                    ),
+                    cx,
+                );
+            }
+            return;
+        }
+        let Some(login) = e.login.clone() else {
+            window.push_notification(
+                Notification::error("hydraui doesn't know your GitHub login yet: is gh signed in?"),
+                cx,
+            );
+            return;
+        };
+        let Some(p) = e.projects.iter().find(|p| p.slug == slug) else {
+            return;
+        };
+        let (repo, dir, name, lead) = (
+            e.repo.clone(),
+            e.checkout.clone(),
+            p.file.name.clone(),
+            p.file.lead.clone(),
+        );
+        let mine = self
+            .projects_data
+            .keep_mine
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        self.projects_data.sending.insert(key.clone());
+        cx.notify();
+        let exe = hydra_exe();
+        let (env_s, slug_s) = key.clone();
+        let lead_name = lead.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let r = ps::EnvRunner {
+                        hydra: &exe,
+                        env: &env_s,
+                        cwd: &dir,
+                    };
+                    ps::send(
+                        &r,
+                        &ps::Send {
+                            repo: &repo,
+                            dir: &dir,
+                            slug: &slug_s,
+                            name: &name,
+                            lead: &lead,
+                            login: &login,
+                            today: &today(),
+                            mine: &mine,
+                        },
+                    )
+                })
+                .await;
+            let _ = this.update_in(cx, |ws, window, cx| {
+                ws.after_send(key, &lead_name, result, quiet, window, cx)
+            });
+        })
+        .detach();
+    }
+
+    fn after_send(
+        &mut self,
+        key: (String, String),
+        lead: &str,
+        result: Result<Sent, SendError>,
+        quiet: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let data = &mut self.projects_data;
+        data.sending.remove(&key);
+        data.clashes.remove(&key);
+        let said = match result {
+            Ok(sent) => {
+                data.keep_mine.remove(&key);
+                match sent {
+                    Sent::Merged(_) => Some(Notification::success("Sent: it's in the repo.")),
+                    Sent::Waiting(_) => Some(Notification::success(format!(
+                        "Sent to {lead} for approval."
+                    ))),
+                    Sent::Nothing => Some(Notification::info(
+                        "Nothing to send: the repo has all of it.",
+                    )),
+                }
+                .filter(|_| !quiet)
+            }
+            Err(SendError::Clash(paths)) => {
+                data.clashes.insert(key.clone(), paths);
+                None
+            }
+            Err(SendError::Failed(why)) => {
+                Some(Notification::error(format!("Couldn't send: {why}")))
+            }
+        };
+        if let Some(n) = said {
+            window.push_notification(n, cx);
+        }
+        // Fetch again soon, for the pull request's state.
+        data.next_fetch = None;
+        self.reload_env(&key.0, cx);
+    }
+
+    /// Settles one clashing file: `mine` keeps this side's version, else the repo's. When the
+    /// last one is settled, the project is sent again.
+    fn settle_clash(
+        &mut self,
+        env: &str,
+        slug: &str,
+        path: &str,
+        mine: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (env.to_string(), slug.to_string());
+        if mine {
+            self.projects_data
+                .keep_mine
+                .entry(key.clone())
+                .or_default()
+                .insert(path.to_string());
+        } else if let Some(e) = self.projects_data.envs.get(env) {
+            let r = ps::EnvRunner {
+                hydra: &hydra_exe(),
+                env,
+                cwd: &e.checkout,
+            };
+            if let Err(why) = ps::take_theirs(&r, &e.checkout, path) {
+                window.push_notification(Notification::error(why), cx);
+                return;
+            }
+        }
+        let left = self.projects_data.clashes.get_mut(&key).map(|c| {
+            c.retain(|p| p != path);
+            c.len()
+        });
+        if left == Some(0) {
+            self.send_project(env, slug, false, window, cx);
+        }
+        self.reload_env(env, cx);
+    }
+
+    /// The lead approves someone's change and merges it (spec §5.2).
+    fn approve_pr(&mut self, env: &str, pr: OpenPr, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dir) = self.projects_data.envs.get(env).map(|e| e.checkout.clone()) else {
+            return;
+        };
+        if !self.projects_data.reviewing.insert(pr.url.clone()) {
+            return;
+        }
+        cx.notify();
+        let (exe, env_s) = (hydra_exe(), env.to_string());
+        cx.spawn_in(window, async move |this, cx| {
+            let (url, author) = (pr.url.clone(), pr.author.clone());
+            let result = cx
+                .background_spawn(async move {
+                    let r = ps::EnvRunner {
+                        hydra: &exe,
+                        env: &env_s,
+                        cwd: &dir,
+                    };
+                    ps::approve(&r, &dir, &pr)
+                })
+                .await;
+            let _ = this.update_in(cx, |ws, window, cx| {
+                ws.projects_data.reviewing.remove(&url);
+                ws.projects_data.next_fetch = None;
+                let n = match result {
+                    Ok(()) => Notification::success(format!(
+                        "Approved {author}'s change: it's in the repo."
+                    )),
+                    Err(why) => Notification::error(format!("Couldn't approve it: {why}")),
+                };
+                window.push_notification(n, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The lead sends someone's change back with a note (spec §5.2).
+    fn send_back_dialog(
+        &mut self,
+        env: String,
+        pr: OpenPr,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.fields_dialog(
+            format!("Send back {}'s change", pr.author),
+            vec![(
+                "Note",
+                "what to change before you approve it",
+                String::new(),
+            )],
+            move |ws, v, window, cx| {
+                if v[0].is_empty() {
+                    return Err("Say what to change.".into());
+                }
+                let Some(dir) = ws.projects_data.envs.get(&env).map(|e| e.checkout.clone()) else {
+                    return Err(format!("{env} has no projects repo any more."));
+                };
+                ws.projects_data.reviewing.insert(pr.url.clone());
+                let (exe, env_s, pr, note) = (hydra_exe(), env.clone(), pr.clone(), v[0].clone());
+                cx.spawn_in(window, async move |this, cx| {
+                    let url = pr.url.clone();
+                    let result = cx
+                        .background_spawn(async move {
+                            let r = ps::EnvRunner {
+                                hydra: &exe,
+                                env: &env_s,
+                                cwd: &dir,
+                            };
+                            ps::send_back(&r, &pr, &note)
+                        })
+                        .await;
+                    let _ = this.update_in(cx, |ws, window, cx| {
+                        ws.projects_data.reviewing.remove(&url);
+                        ws.projects_data.next_fetch = None;
+                        if let Err(why) = result {
+                            window.push_notification(
+                                Notification::error(format!("Couldn't send it back: {why}")),
+                                cx,
+                            );
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+                Ok(())
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// What's waiting to be sent for a project, and the button that sends it; with clashes to
+    /// settle and the lead's note when they sent a change back (spec §5, §8.4).
+    fn send_bar(&self, env: &str, p: &Project, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let e = self.projects_data.envs.get(env)?;
+        if !pj::is_github(&e.repo) {
+            return None;
+        }
+        let login = e.login.clone()?;
+        let lead = p.file.lead.eq_ignore_ascii_case(&login);
+        let key = (env.to_string(), p.slug.clone());
+        let unsent = pj::project_unsent(&e.pending, &p.slug);
+        let my_pr = e.my_pr(&login, &p.slug).cloned();
+        let (env_s, slug_s) = key.clone();
+        let boxed = |edge: u32, tint: u32| {
+            v_flex()
+                .gap_2()
+                .px_4()
+                .py_3()
+                .rounded_lg()
+                .bg(color(tint))
+                .border_1()
+                .border_color(color(edge))
+        };
+        let view = |url: String| {
+            Button::new(SharedString::from(format!("view-pr-{url}")))
+                .label("View on GitHub")
+                .xsmall()
+                .ghost()
+                .on_click(move |_, _, cx| cx.open_url(&url))
+        };
+
+        if let Some(paths) = self
+            .projects_data
+            .clashes
+            .get(&key)
+            .filter(|c| !c.is_empty())
+        {
+            let mut b = boxed(theme::AMBER, theme::AMBER_TINT).child(div().text_sm().child(
+                "These files changed here and in the repo in the same places. Pick which \
+                     to keep, then it sends again:",
+            ));
+            for path in paths {
+                let (e1, s1, p1) = (env_s.clone(), slug_s.clone(), path.clone());
+                let (e2, s2, p2) = (env_s.clone(), slug_s.clone(), path.clone());
+                b = b.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .font_family("monospace")
+                                .text_sm()
+                                .child(path.clone()),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("mine-{path}")))
+                                .label("Keep mine")
+                                .small()
+                                .outline()
+                                .on_click(cx.listener(move |ws, _, window, cx| {
+                                    ws.settle_clash(&e1, &s1, &p1, true, window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("theirs-{path}")))
+                                .label("Use theirs")
+                                .small()
+                                .outline()
+                                .on_click(cx.listener(move |ws, _, window, cx| {
+                                    ws.settle_clash(&e2, &s2, &p2, false, window, cx)
+                                })),
+                        ),
+                );
+            }
+            return Some(b.into_any_element());
+        }
+
+        let mut lines: Vec<AnyElement> = Vec::new();
+        if let Some(pr) = my_pr.as_ref().filter(|pr| pr.sent_back.is_some()) {
+            let note = pr.sent_back.clone().unwrap_or_default();
+            lines.push(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(color(theme::AMBER))
+                            .child(format!(
+                                "{} sent your change back{}",
+                                p.file.lead,
+                                if note.is_empty() { "." } else { ":" }
+                            )),
+                    )
+                    .when(!note.is_empty(), |d| {
+                        d.child(div().text_sm().child(format!("“{note}”")))
+                    })
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(color(theme::TEXT_SECONDARY))
+                            .child("Change it here, then send again: it updates the same change."),
+                    )
+                    .into_any_element(),
+            );
+        }
+        let sending = self.projects_data.sending.contains(&key);
+        let waiting = e.sent_for_lead.contains(&p.slug);
+        let status = if sending {
+            "Sending…".to_string()
+        } else if unsent > 0 && waiting {
+            format!("Sent to {} for approval.", p.file.lead)
+        } else if unsent > 0 {
+            format!(
+                "{unsent} change{} not sent yet.",
+                if unsent == 1 { "" } else { "s" }
+            )
+        } else if my_pr.is_some() {
+            format!("Waiting for {} to approve your change.", p.file.lead)
+        } else if lines.is_empty() {
+            return None;
+        } else {
+            return Some(
+                boxed(theme::AMBER, theme::AMBER_TINT)
+                    .children(lines)
+                    .into_any_element(),
+            );
+        };
+        let can_send = unsent > 0 && !waiting && !sending;
+        let row = h_flex()
+            .gap_3()
+            .items_center()
+            .flex_wrap()
+            .child(div().text_sm().child(status))
+            .child(div().flex_1())
+            .when_some(my_pr.map(|pr| pr.url), |d, url| d.child(view(url)))
+            .when(can_send, |d| {
+                let (e, s) = (env_s.clone(), slug_s.clone());
+                d.child(
+                    Button::new("send-now")
+                        .label(if lead {
+                            "Send now".to_string()
+                        } else {
+                            format!("Send to {}", p.file.lead)
+                        })
+                        .small()
+                        .primary()
+                        .tooltip(if lead {
+                            "Puts your changes in the projects repo"
+                        } else {
+                            "Sends your changes to the lead to approve"
+                        })
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.send_project(&e, &s, false, window, cx)
+                        })),
+                )
+            });
+        let sent_back = !lines.is_empty();
+        let (edge, tint) = if sent_back {
+            (theme::AMBER, theme::AMBER_TINT)
+        } else if can_send {
+            (theme::TEAL_BORDER, theme::TEAL_TINT)
+        } else {
+            (theme::BORDER, theme::SURFACE)
+        };
+        Some(
+            boxed(edge, tint)
+                .children(lines)
+                .child(row)
+                .into_any_element(),
+        )
+    }
+
+    /// Other people's changes to projects `login` leads, for them to approve or send back,
+    /// optionally only project `slug`'s (spec §5.2).
+    fn approvals(&self, env: &str, slug: Option<&str>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some(e) = self.projects_data.envs.get(env) else {
+            return Vec::new();
+        };
+        let Some(login) = e.login.as_deref() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for pr in e.prs.iter().filter(|pr| {
+            slug.is_none_or(|s| pr.slug == s)
+                && !pr.author.eq_ignore_ascii_case(login)
+                && e.lead_of(&pr.slug)
+                    .is_some_and(|l| l.eq_ignore_ascii_case(login))
+        }) {
+            let busy = self.projects_data.reviewing.contains(&pr.url);
+            let items: Vec<String> = pr
+                .body
+                .lines()
+                .filter_map(|l| l.trim().strip_prefix("- "))
+                .map(str::to_string)
+                .collect();
+            let (e1, p1) = (env.to_string(), pr.clone());
+            let (e2, p2) = (env.to_string(), pr.clone());
+            let url = pr.url.clone();
+            let mut card = v_flex()
+                .gap_2()
+                .px_4()
+                .py_3()
+                .rounded_lg()
+                .bg(color(theme::SURFACE))
+                .border_1()
+                .border_color(color(if pr.sent_back.is_some() {
+                    theme::BORDER
+                } else {
+                    theme::AMBER
+                }))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .child(pr.author.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(color(theme::TEXT_SECONDARY))
+                                .child("wants to change"),
+                        )
+                        .when(pr.sent_back.is_some(), |d| {
+                            d.child(pill("sent back", theme::TEXT_SECONDARY, theme::RAISED))
+                        }),
+                )
+                .child(div().text_sm().child(pr.title.clone()));
+            for item in items {
+                card = card.child(
+                    v_flex()
+                        .relative()
+                        .w_full()
+                        .pl(px(16.))
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(4.))
+                                .top(px(8.))
+                                .size(px(5.))
+                                .rounded_full()
+                                .bg(color(theme::TEXT_MUTED)),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(color(theme::TEXT_SECONDARY))
+                                .child(item),
+                        ),
+                );
+            }
+            card = card.child(
+                h_flex()
+                    .gap_2()
+                    .flex_wrap()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(color(theme::BORDER_SUBTLE))
+                    .child(
+                        Button::new(SharedString::from(format!("approve-pr-{}", pr.url)))
+                            .label(if busy { "Working…" } else { "Approve" })
+                            .small()
+                            .primary()
+                            .w(px(REVIEW_BUTTON_WIDTH))
+                            .disabled(busy)
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                ws.approve_pr(&e1, p1.clone(), window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("back-pr-{}", pr.url)))
+                            .label("Send back…")
+                            .small()
+                            .outline()
+                            .w(px(REVIEW_BUTTON_WIDTH))
+                            .disabled(busy)
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                ws.send_back_dialog(e2.clone(), p2.clone(), window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("open-pr-{}", pr.url)))
+                            .label("View on GitHub")
+                            .small()
+                            .ghost()
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    ),
+            );
+            out.push(card.into_any_element());
+        }
+        out
+    }
+
     // ---- Starting a project (spec §14) ----
 
     fn new_project(&mut self, env: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -598,6 +1198,8 @@ impl Workspace {
             window,
             cx,
         )?;
+        // An answer goes out at once, so it reaches the lead without waiting (spec §4).
+        self.send_project(env, slug, true, window, cx);
         if q.meta.asked_by != ASKED_BY_CLAUDE {
             return Ok(());
         }
@@ -2104,12 +2706,17 @@ impl Workspace {
             .filter(|d| d.is_open() && d.meta.assigned_to.eq_ignore_ascii_case(&login))
             .count();
         let open_q = p.decisions.iter().filter(|d| d.is_open()).count();
+        let approvals_waiting = e
+            .prs
+            .iter()
+            .filter(|pr| pr.slug == p.slug && e.pr_waits_on(&login, pr))
+            .count();
         let mut tabs = h_flex()
             .gap_1()
             .border_b_1()
             .border_color(color(theme::BORDER));
         for (s, label, count, quiet) in [
-            (Section::Overview, "Overview", 0, 0),
+            (Section::Overview, "Overview", approvals_waiting, 0),
             (Section::Milestones, "Milestones", review_count, 0),
             (Section::Questions, "Questions", mine, open_q),
         ] {
@@ -2147,6 +2754,7 @@ impl Workspace {
             .gap_5()
             .max_w(px(1400.))
             .child(title)
+            .children(self.send_bar(env, p, cx))
             .child(tabs)
             .child(body)
             .into_any_element()
@@ -2167,6 +2775,18 @@ impl Workspace {
         let planning = self.planner(env, &p.slug).is_some();
         let started = !p.spec.trim().is_empty() || !p.milestones.is_empty();
         let mut page = v_flex().gap_6();
+        let approvals = self.approvals(env, Some(&p.slug), cx);
+        if !approvals.is_empty() {
+            page = page.child(
+                v_flex()
+                    .gap_3()
+                    .child(section_title(&format!(
+                        "Changes waiting for you · {}",
+                        approvals.len()
+                    )))
+                    .children(approvals),
+            );
+        }
 
         // Not started: resources first, then Start project (spec §14).
         if !started {
@@ -3081,7 +3701,10 @@ impl Workspace {
                     |dir, p, login| pj::ask(dir, p, &v[0], &v[1], login).map(|_| ()),
                     window,
                     cx,
-                )
+                )?;
+                // A question goes out at once, so it reaches its person (spec §4).
+                ws.send_project(&env, &slug, true, window, cx);
+                Ok(())
             },
             window,
             cx,
@@ -3542,6 +4165,56 @@ impl Workspace {
                         .on_click(cx.listener(move |ws, _, _, cx| ws.go(page.clone(), cx))),
                 );
             }
+            for (slug, approvals) in e
+                .projects
+                .iter()
+                .map(|p| (p, self.approvals(env, Some(&p.slug), cx)))
+                .filter(|(_, a)| !a.is_empty())
+            {
+                any = true;
+                out = out
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(color(theme::TEXT_MUTED))
+                            .child(format!("{} · {} · changes to approve", slug.file.name, env)),
+                    )
+                    .children(approvals);
+            }
+            for pr in e
+                .prs
+                .iter()
+                .filter(|pr| pr.author.eq_ignore_ascii_case(login) && pr.sent_back.is_some())
+            {
+                let Some(p) = e.projects.iter().find(|p| p.slug == pr.slug) else {
+                    continue;
+                };
+                any = true;
+                let page = Page::Project {
+                    env: env.clone(),
+                    slug: p.slug.clone(),
+                };
+                let note = pr.sent_back.clone().unwrap_or_default();
+                out = out.child(
+                    v_flex()
+                        .id(SharedString::from(format!("sent-back-{}", pr.url)))
+                        .gap_1()
+                        .p_3()
+                        .rounded_md()
+                        .bg(color(theme::AMBER_TINT))
+                        .border_1()
+                        .border_color(color(theme::AMBER))
+                        .cursor_pointer()
+                        .child(div().child(format!(
+                            "{} sent your change to {} back",
+                            p.file.lead, p.file.name
+                        )))
+                        .when(!note.is_empty(), |d| {
+                            d.child(div().text_sm().child(format!("“{note}”")))
+                        })
+                        .on_click(cx.listener(move |ws, _, _, cx| ws.go(page.clone(), cx))),
+                );
+            }
             for (p, d) in pj::questions_for(login, &e.projects) {
                 any = true;
                 out = out
@@ -3785,6 +4458,20 @@ fn fetch_env(
     if let Err(why) = pj::sync_checkout(exe, env, repo, &e.checkout) {
         e.problem = Some(format!("Can't fetch {repo}: {why}"));
     }
+    if pj::is_github(repo) {
+        let r = ps::EnvRunner {
+            hydra: exe,
+            env,
+            cwd: state,
+        };
+        match ps::open_prs(&r, repo) {
+            Ok(prs) => e.prs = prs,
+            Err(why) if e.problem.is_none() => {
+                e.problem = Some(format!("Can't read {repo}'s pull requests: {why}"))
+            }
+            Err(_) => {}
+        }
+    }
     read_checkout(&mut e);
     e
 }
@@ -3800,6 +4487,14 @@ fn read_checkout(e: &mut EnvProjects) {
     }
     e.pending = pj::pending(&e.checkout);
     e.sent = pj::sent_projects(&e.checkout);
+    e.sent_for_lead = e
+        .projects
+        .iter()
+        .map(|p| p.slug.clone())
+        .filter(|slug| {
+            pj::project_unsent(&e.pending, slug) > 0 && ps::is_sent(&ps::Local, &e.checkout, slug)
+        })
+        .collect();
     e.fetched = true;
 }
 

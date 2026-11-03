@@ -54,11 +54,27 @@ built in slices that each run in hydraui on their own.
 
 ### Slice 2: send and approve (GitHub)
 
-- Send now: branch, push and PR with the environment's gh.
-- The lead's change merges at once. Other people's changes go to the lead's Waiting on you
-  (Approve / Send back).
-- Questions and answers are sent at once.
-- Replaying steps and settling clashes (§5.3).
+- **Done (`project_send.rs`, 7 tests against a bare repo and a fake gh):**
+  - Send now: the project's pending files are rebuilt on the latest default branch in a
+    separate index, pushed to `hydra/<login>/<slug>/<date>` and opened as a pull request with
+    the environment's gh. Its title and body say what changed in words.
+  - The lead's change merges at once (squash). Other people's go to the lead's Overview and
+    Waiting on you, with Approve and Send back…; the lead's note shows on the author's
+    project page until they send again.
+  - Questions and answers are sent at once, quietly.
+  - Clashes: a text file both sides changed merges three ways; the same lines changed two
+    ways asks the engineer Keep mine or Use theirs, then sends again.
+  - Fetching settles the checkout onto the repo: a pending file that's now the same in the
+    repo (sent and merged) is dropped first, so it doesn't clash with itself.
+- **Different from the spec, for now:**
+  - Steps aren't replayed (§5.3): the pending change is still the working tree, rebuilt file
+    by file. Structured files (milestones.toml, a ticket's front matter) merge as text, so two
+    edits to the same milestone line clash rather than merging field by field.
+  - One open pull request per engineer per project, not per day: while one waits for the
+    lead, the next send updates it. A second one would carry the first one's changes too,
+    since both come from the same working tree.
+  - An empty repo gets its first commit (a README on `main`) from whoever sends first.
+  - The repo setting stays in `hydraui/projects.toml` (see Global constraints).
 
 ### Slice 3: the local check and the repo sync
 

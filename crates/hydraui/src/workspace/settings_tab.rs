@@ -48,6 +48,7 @@ impl Workspace {
             self.recheck_accounts(env, cx);
         }
         self.settings = Some(SettingsTab { section });
+        self.projects = None;
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -93,7 +94,7 @@ impl Workspace {
 
     /// A one-line box filled with `initial`; Save runs `save`, and the dialog stays open
     /// showing what's wrong until it succeeds.
-    fn text_dialog(
+    pub(super) fn text_dialog(
         &mut self,
         title: String,
         initial: String,
@@ -699,6 +700,38 @@ impl Workspace {
                 let e = e.clone();
                 move |ws, w, cx| ws.set_env_home(e.clone(), w, cx)
             }));
+        let projects_repo = self.hydra.projects_repo(env);
+        let projects_row = {
+            let (e, shown) = (e.clone(), projects_repo.clone().unwrap_or_default());
+            h_flex()
+                .gap_2()
+                .child(match &projects_repo {
+                    Some(r) => div().font_family("monospace").text_sm().child(r.clone()),
+                    None => div().text_color(muted).child("none: no Projects tab"),
+                })
+                .child(
+                    Button::new("env-projects")
+                        .label("Change…")
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            let e = e.clone();
+                            ws.text_dialog(
+                                format!("Projects repo for {e}"),
+                                shown.clone(),
+                                "owner/name on GitHub, or a local path; empty for none",
+                                move |ws, v, _window, cx| {
+                                    let value = (!v.is_empty()).then_some(v.as_str());
+                                    ws.hydra.set_projects_repo(&e, value)?;
+                                    ws.projects_config_changed(cx);
+                                    Ok(())
+                                },
+                                window,
+                                cx,
+                            )
+                        })),
+                )
+        };
         let vars = self.hydra.env_variables(env);
         let var_rows: Vec<AnyElement> = if vars.is_empty() {
             vec![
@@ -775,6 +808,7 @@ impl Workspace {
                     setting("Label", label_row.into_any_element(), cx),
                     setting("Colour", swatches.into_any_element(), cx),
                     setting("Home", home_row.into_any_element(), cx),
+                    setting("Projects", projects_row.into_any_element(), cx),
                 ],
                 cx,
             ))

@@ -16,6 +16,7 @@ hydra-update.workspace = true
 dirs.workspace = true
 hydraui-term.workspace = true
 hydraui-sets.workspace = true
+hydraui-projects.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 gpui-kit-assets.workspace = true

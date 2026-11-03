@@ -85,6 +85,28 @@ pub fn today() -> String {
     date_of_unix_days((secs / 86_400) as i64)
 }
 
+/// Now in UTC as a TOML date-time, for `asked_at`, `decided_at` and `created`.
+pub fn now() -> toml::value::Datetime {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    datetime_of_unix(secs)
+}
+
+/// The UTC date-time `secs` after the epoch.
+pub fn datetime_of_unix(secs: u64) -> toml::value::Datetime {
+    let date = date_of_unix_days((secs / 86_400) as i64);
+    let t = secs % 86_400;
+    let text = format!("{date}T{:02}:{:02}:{:02}Z", t / 3600, t / 60 % 60, t % 60);
+    // Only fails for dates TOML can't hold (before year 0): an empty date-time then.
+    text.parse().unwrap_or(toml::value::Datetime {
+        date: None,
+        time: None,
+        offset: None,
+    })
+}
+
 /// The civil date `days` after 1970-01-01 (Howard Hinnant's `civil_from_days`).
 pub fn date_of_unix_days(days: i64) -> String {
     let z = days + 719_468;
@@ -242,6 +264,14 @@ mod tests {
         assert_eq!(date_of_unix_days(0), "1970-01-01");
         assert_eq!(date_of_unix_days(20_760), "2026-11-03");
         assert_eq!(date_of_unix_days(11_016), "2000-02-29");
+    }
+
+    #[test]
+    fn datetimes_from_unix_seconds() {
+        assert_eq!(
+            datetime_of_unix(20_760 * 86_400 + 3_723).to_string(),
+            "2026-11-03T01:02:03Z"
+        );
     }
 
     #[test]

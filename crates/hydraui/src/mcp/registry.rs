@@ -45,6 +45,8 @@ pub struct Registry {
     /// hydraui's window is closing: terminals going now is hydraui quitting, so their runs stay
     /// open, to be picked back up after a restart (orchestrator spec §13).
     pub closing: bool,
+    /// New project sessions' drafts, by token (Projects spec §9.1).
+    pub drafts: HashMap<String, super::project_tools::Draft>,
     /// Claude session ids already written to a run's log, as (run, who, id) (§13).
     logged_claude: std::collections::HashSet<(String, String, String)>,
 }
@@ -58,6 +60,7 @@ impl Default for Registry {
             min_week_left: MIN_WEEK_LEFT,
             hydra_root: None,
             logged_claude: Default::default(),
+            drafts: HashMap::new(),
             hydra_exe: None,
             branch_lookup: None,
             closing: false,
@@ -131,6 +134,7 @@ impl Registry {
     /// runs (a stage it was running fails, a run it orchestrated stops).
     pub fn revoke(&mut self, token: &str) -> Vec<Change> {
         self.terminals.remove(token);
+        self.drafts.remove(token);
         self.sessions.remove(token);
         if self.closing {
             return Vec::new();

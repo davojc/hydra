@@ -331,7 +331,7 @@ pub fn render_claude_md(env: &str, base: Option<&str>, over: Option<&str>) -> Op
 pub const HYDRAUI_SERVER: &str = "hydraui";
 
 /// The tools that server offers; Claude Code may call them without asking.
-pub const HYDRAUI_TOOLS: [&str; 13] = [
+pub const HYDRAUI_TOOLS: [&str; 22] = [
     "tasks_read",
     "tasks_add",
     "tasks_take",
@@ -345,6 +345,15 @@ pub const HYDRAUI_TOOLS: [&str; 13] = [
     "stage_report",
     "stage_ask",
     "stage_answer",
+    "draft_show",
+    "draft_set_spec",
+    "draft_add_milestone",
+    "draft_add_ticket",
+    "draft_add_question",
+    "draft_add_link",
+    "draft_read_resource",
+    "draft_edit",
+    "draft_remove",
 ];
 
 /// Appends each missing `mcp__hydraui__<tool>` to `permissions.allow` in the settings JSON
@@ -467,7 +476,16 @@ mod tests {
                 "mcp__hydraui__stage_brief",
                 "mcp__hydraui__stage_report",
                 "mcp__hydraui__stage_ask",
-                "mcp__hydraui__stage_answer"
+                "mcp__hydraui__stage_answer",
+                "mcp__hydraui__draft_show",
+                "mcp__hydraui__draft_set_spec",
+                "mcp__hydraui__draft_add_milestone",
+                "mcp__hydraui__draft_add_ticket",
+                "mcp__hydraui__draft_add_question",
+                "mcp__hydraui__draft_add_link",
+                "mcp__hydraui__draft_read_resource",
+                "mcp__hydraui__draft_edit",
+                "mcp__hydraui__draft_remove"
             ])
         );
         assert!(

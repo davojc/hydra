@@ -16,8 +16,11 @@ built in slices that each run in hydraui on their own.
 
 ## Global constraints
 
-- `EnvConfig` denies unknown fields, so `[projects]` is added to it as
-  `projects: Option<ProjectsConfig>` (as `linear` was). No migration is needed.
+- **Where the repo is set:** `EnvConfig` denies unknown fields, so a hydra built before
+  Projects refuses an env.toml with `[projects]`. That would break the installed hydra and
+  hydraui the moment the prototype wrote it. Until a release that knows `[projects]` is
+  installed everywhere, the setting lives in `<HYDRA_HOME>/hydraui/projects.toml`
+  (`[repos] <env> = "owner/name"`). It moves to env.toml as the spec says (§3) when sending ships.
 - hydra's checkout lives at `state/<env>/projects/<owner>-<name>/`. Engineers never open it.
 - No GUI automation or synthetic keys from subagents. The user checks the UI by running the app.
 - CI trio: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
@@ -29,7 +32,7 @@ built in slices that each run in hydraui on their own.
 
 - **Done:** the `hydraui-projects` crate: front matter, model, load and write, ids, progress,
   late, and the ticket-key rules (20 tests).
-- **Config:** `[projects] repo` in env.toml, plus a Projects row on the Settings env page. The
+- **Config:** the env's repo in `hydraui/projects.toml`, set from a Projects row on the Settings env page. The
   value is an `owner/name` or a local path (for trying it out without GitHub).
 - **Checkout:** clone the repo if it's missing, then `git pull --ff-only` on open and every
   5 minutes, through `hydra run <env> -- git …`.

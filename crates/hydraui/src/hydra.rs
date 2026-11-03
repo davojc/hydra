@@ -411,6 +411,16 @@ impl Hydra {
         self.write_env(env, envedit::set_top(&text, key, value)?)
     }
 
+    /// `env`'s Projects repo, if it has one (`<HYDRA_HOME>/hydraui/projects.toml`).
+    pub fn projects_repo(&self, env: &str) -> Option<String> {
+        crate::projects::configured_repo(self.paths.root(), env)
+    }
+
+    /// Sets `env`'s Projects repo, or with `None` removes it.
+    pub fn set_projects_repo(&self, env: &str, repo: Option<&str>) -> Result<(), String> {
+        crate::projects::set_configured_repo(self.paths.root(), env, repo)
+    }
+
     /// `env`'s `[env]` variables, secrets as their `secret:` reference.
     pub fn env_variables(&self, env: &str) -> Vec<(String, String)> {
         self.env_text(env)

@@ -3010,6 +3010,7 @@ dependencies = [
  "hydra-platform",
  "hydra-providers",
  "hydra-update",
+ "hydraui-projects",
  "hydraui-sets",
  "hydraui-term",
  "ignore",

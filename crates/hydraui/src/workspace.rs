@@ -14,6 +14,7 @@ mod pickup;
 mod pipeline_history;
 mod pipeline_settings;
 mod pipeline_tab;
+mod projects_tab;
 mod settings_tab;
 mod shortcuts;
 mod slack;
@@ -202,6 +203,10 @@ pub struct Workspace {
     start: Option<start_page::StartPage>,
     /// The Settings tab, shown in the middle in place of a terminal.
     settings: Option<settings_tab::SettingsTab>,
+    /// The Projects tab, shown in place of everything below the tab strip (Projects spec §8).
+    projects: Option<projects_tab::ProjectsTab>,
+    /// Every environment's projects, as last read.
+    projects_data: projects_tab::ProjectsData,
     /// Terminals with a Tasks tab, and whether it's the one shown (`true`) or the terminal
     /// (task-board design §4).
     tasks_tabs: HashMap<PaneId, bool>,
@@ -336,6 +341,8 @@ impl Workspace {
                         ws.send_wakes(window, cx);
                         // A Linear watcher whose check is due looks (phase 2 §3).
                         ws.linear_tick(window, cx);
+                        // Projects: the checkouts when due, and the draft on show.
+                        ws.projects_tick(window, cx);
                         // A stage waiting on product looks in its Slack thread.
                         ws.asking_tick(window, cx);
                         // A wake-up that didn't take is sent again.
@@ -470,6 +477,8 @@ impl Workspace {
             opening: false,
             start: None,
             settings: None,
+            projects: None,
+            projects_data: Default::default(),
             tasks_tabs: HashMap::new(),
             pipeline_tabs: HashMap::new(),
             pipeline_settings: HashMap::new(),
@@ -739,7 +748,8 @@ impl Workspace {
             .envs
             .env_of(id)
             .is_some_and(|env| self.all_tasks.remove(env))
-            | self.settings.take().is_some();
+            | self.settings.take().is_some()
+            | self.projects.take().is_some();
         let left = left | self.reveal_in_list(id, cx);
         if self.envs.show(id) || left {
             self.shown_changed(window, cx);
@@ -1892,6 +1902,26 @@ impl Workspace {
                     .on_click(cx.listener(|ws, _, window, cx| ws.pick_env(window, cx))),
             )
             .child(div().flex_1())
+            .child({
+                let waiting = self.projects_data.waiting_count();
+                Button::new("open-projects")
+                    .label(if waiting > 0 {
+                        format!("Projects · {waiting}")
+                    } else {
+                        "Projects".to_string()
+                    })
+                    .ghost()
+                    .small()
+                    .selected(self.projects.is_some())
+                    .tooltip("Projects")
+                    .on_click(cx.listener(|ws, _, window, cx| {
+                        if ws.projects_shown() {
+                            ws.close_projects(window, cx)
+                        } else {
+                            ws.open_projects(window, cx)
+                        }
+                    }))
+            })
             .child(
                 Button::new("open-settings")
                     .icon(IconName::Settings)
@@ -2002,6 +2032,7 @@ impl Render for Workspace {
         let body = match self.envs.active() {
             // Settings opened from the start page shows over it; closing it goes back.
             _ if self.settings.is_some() => self.render_settings(cx),
+            _ if self.projects.is_some() => self.render_projects(cx),
             _ if self.start.is_some() => self.render_start_page(cx),
             Some(tab) => self.render_env(tab, border, muted, cx),
             None => div()

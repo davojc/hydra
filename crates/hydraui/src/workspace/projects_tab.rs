@@ -26,7 +26,7 @@ use hydraui_projects::{
 use super::Workspace;
 use crate::envs::PaneId;
 use crate::hydra::{PaneRequest, command_line};
-use crate::mcp::project_tools::Session;
+use crate::mcp::project_tools::{ASKED_BY_CLAUDE, Session};
 use crate::mcp::server;
 use crate::orchestrator_theme::{self as theme, color};
 use crate::projects::{self as pj, Item};
@@ -35,6 +35,11 @@ use crate::projects::{self as pj, Item};
 const FETCH_EVERY: Duration = Duration::from_secs(5 * 60);
 /// How often the checkouts are read again while the tab shows: sessions write to them.
 const READ_EVERY: Duration = Duration::from_secs(2);
+
+/// Projects sessions ask through hydraui (plan_add_question, ticket_ask), not Claude Code's own
+/// question tool, so every question is a recorded decision (spec §14). One word: the flag takes
+/// a list, and would take the prompt after it too. People can still type to the session.
+const NO_TERMINAL_QUESTIONS: &str = "--disallowedTools=AskUserQuestion";
 
 const MODELS: [&str; 4] = ["default", "opus", "sonnet", "haiku"];
 const EFFORTS: [&str; 6] = ["default", "low", "medium", "high", "xhigh", "max"];
@@ -98,6 +103,9 @@ pub(super) struct ProjectsData {
     planners: BTreeMap<(String, String), PaneId>,
     /// Work sessions, by (environment, project, ticket).
     workers: BTreeMap<(String, String, String), PaneId>,
+    /// The questions waiting on you when last read, as (environment, project, id); `None`
+    /// before the first read, so what was already waiting doesn't pop up at start.
+    asked: Option<BTreeSet<(String, String, String)>>,
 }
 
 impl ProjectsData {
@@ -190,7 +198,10 @@ impl Workspace {
     /// Every second: the checkouts' files while the tab shows (sessions write to them), and a
     /// fetch when one is due (on open, then every 5 minutes).
     pub(super) fn projects_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.projects.is_some()
+        // Sessions ask and propose while the tab is closed too.
+        let sessions =
+            !self.projects_data.planners.is_empty() || !self.projects_data.workers.is_empty();
+        if (self.projects.is_some() || sessions)
             && !self.projects_data.fetching
             && self
                 .projects_data
@@ -201,6 +212,7 @@ impl Workspace {
             for e in self.projects_data.envs.values_mut().filter(|e| e.fetched) {
                 read_checkout(e);
             }
+            self.announce_questions(window, cx);
             cx.notify();
         }
         let data = &self.projects_data;
@@ -243,16 +255,55 @@ impl Workspace {
                         .collect::<Vec<_>>()
                 })
                 .await;
-            let _ = this.update(cx, |ws, cx| {
+            let _ = this.update_in(cx, |ws, window, cx| {
                 for (env, read) in fetched {
                     ws.projects_data.envs.insert(env, read);
                 }
                 ws.projects_data.fetching = false;
                 ws.projects_data.next_fetch = Some(Instant::now() + FETCH_EVERY);
+                ws.announce_questions(window, cx);
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// A toast for each question that started waiting on you since the last read (spec §8.4).
+    fn announce_questions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut now = BTreeSet::new();
+        let mut fresh = Vec::new();
+        for (env, e) in &self.projects_data.envs {
+            let Some(login) = e.login.as_deref() else {
+                continue;
+            };
+            for (p, d) in pj::questions_for(login, &e.projects) {
+                let key = (env.clone(), p.slug.clone(), d.id.clone());
+                if self
+                    .projects_data
+                    .asked
+                    .as_ref()
+                    .is_some_and(|seen| !seen.contains(&key))
+                {
+                    let who = if d.meta.asked_by == ASKED_BY_CLAUDE {
+                        "Claude asks".to_string()
+                    } else {
+                        format!("{} asks", d.meta.asked_by)
+                    };
+                    fresh.push(format!(
+                        "{who} ({}, {}): {}",
+                        p.file.name, d.id, d.meta.question
+                    ));
+                }
+                now.insert(key);
+            }
+        }
+        self.projects_data.asked = Some(now);
+        for text in fresh {
+            window.push_notification(
+                Notification::info(format!("{text}\nAnswer it in Projects → Waiting on you.")),
+                cx,
+            );
+        }
     }
 
     /// Reads `env`'s checkout again after an edit here (local, so at once).
@@ -407,7 +458,11 @@ impl Workspace {
             .ok_or("hydraui doesn't know your GitHub login yet")?;
         let shell = self.shell();
         let mut request = PaneRequest::new(env, dir.clone(), shell);
-        let argv = vec!["claude".to_string(), prompt];
+        let argv = vec![
+            "claude".to_string(),
+            NO_TERMINAL_QUESTIONS.to_string(),
+            prompt,
+        ];
         request.command = Some(command_line(shell, &argv));
         let id = self
             .open_terminal_beside(env, request, window, cx)
@@ -459,10 +514,60 @@ impl Workspace {
             "The lead approved milestone {} \"{}\" ({}). Propose its tickets now with \
              plan_propose_ticket: each small enough to finish in a few days, each with what to \
              do and how to tell it's done. Call plan_show first to see what exists and what \
-             was rejected. Then tell the lead they're ready to review in hydraui.",
+             was rejected. Ask anything you need decided with plan_add_question, not here. Then \
+             tell the lead they're ready to review in hydraui.",
             m.id, m.title, m.description
         );
         self.tell_planner(&env, &slug, prompt, window, cx);
+    }
+
+    /// Records `answer` to question `q`, by you, now; a question a Claude session asked goes
+    /// back to it, typed into its terminal (spec §14).
+    fn answer_question(
+        &mut self,
+        env: &str,
+        slug: &str,
+        q: &Decision,
+        answer: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        self.edit_project(
+            env,
+            slug,
+            |dir, _, login| pj::answer(dir, q, answer, login),
+            window,
+            cx,
+        )?;
+        if q.meta.asked_by != ASKED_BY_CLAUDE {
+            return Ok(());
+        }
+        let who = self.login_of(env).unwrap_or_default();
+        let text = format!(
+            "{} was decided in hydraui by {who}.\nQuestion: {}\nAnswer: {}\n\nCarry on with that.",
+            q.id,
+            q.meta.question,
+            answer.trim()
+        );
+        // A ticket's question goes to its work session only; the rest to the planning session.
+        let pane = if q.meta.ticket.is_empty() {
+            self.planner(env, slug)
+        } else {
+            self.worker(env, slug, &q.meta.ticket)
+        };
+        match pane.and_then(|id| self.panes.get(&id).cloned()) {
+            Some(view) if view.update(cx, |v, cx| v.type_prompt(&text, cx)) => {
+                window.push_notification(Notification::success(format!("Recorded, and sent to the session that asked {}.", q.id)), cx);
+            }
+            _ => window.push_notification(
+                Notification::info(format!(
+                    "Recorded. The session that asked {} isn't running; it sees the answer when it next reads the project.",
+                    q.id
+                )),
+                cx,
+            ),
+        }
+        Ok(())
     }
 
     // ---- Review (spec §14) ----
@@ -898,7 +1003,7 @@ impl Workspace {
         let dir = self.project_dir(env, slug).ok_or("the project is gone")?;
         let shell = self.shell();
         let mut request = PaneRequest::new(env, path, shell);
-        let mut argv = vec!["claude".to_string()];
+        let mut argv = vec!["claude".to_string(), NO_TERMINAL_QUESTIONS.to_string()];
         if let Some(m) = &choice.model {
             argv.extend(["--model".to_string(), m.clone()]);
         }
@@ -2301,13 +2406,25 @@ impl Workspace {
                         } else {
                             format!(" for {waited}")
                         },
-                        if d.meta.asked_by.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" · asked by {}", d.meta.asked_by)
+                        match d.meta.asked_by.as_str() {
+                            "" => String::new(),
+                            ASKED_BY_CLAUDE if d.meta.ticket.is_empty() => {
+                                " · asked by the planning session".to_string()
+                            }
+                            ASKED_BY_CLAUDE =>
+                                format!(" · asked by {}'s work session", d.meta.ticket),
+                            who => format!(" · asked by {who}"),
                         },
                     )),
-            );
+            )
+            .when(!d.body.trim().is_empty(), |r| {
+                r.child(
+                    div()
+                        .text_sm()
+                        .text_color(color(theme::TEXT_SECONDARY))
+                        .child(d.body.trim().to_string()),
+                )
+            });
         if mine {
             let mut actions = h_flex().gap_2().flex_wrap();
             for (i, option) in d.meta.options.iter().enumerate() {
@@ -2319,13 +2436,7 @@ impl Workspace {
                         .small()
                         .on_click(cx.listener(move |ws, _, window, cx| {
                             let (q, option) = (q.clone(), option.clone());
-                            let _ = ws.edit_project(
-                                &env,
-                                &slug,
-                                |dir, _, login| pj::answer(dir, &q, &option, login),
-                                window,
-                                cx,
-                            );
+                            let _ = ws.answer_question(&env, &slug, &q, &option, window, cx);
                         })),
                 );
             }
@@ -2343,13 +2454,7 @@ impl Workspace {
                             "your answer; it's recorded with your name and the time",
                             move |ws, text, window, cx| {
                                 let q = q.clone();
-                                ws.edit_project(
-                                    &env,
-                                    &slug,
-                                    |dir, _, login| pj::answer(dir, &q, &text, login),
-                                    window,
-                                    cx,
-                                )
+                                ws.answer_question(&env, &slug, &q, &text, window, cx)
                             },
                             window,
                             cx,
@@ -3119,13 +3224,14 @@ fn start_prompt(p: &Project) -> String {
          proposal there: approve, edit, ask you for changes, or reject.\n\n\
          1. Call plan_show, then read every attached resource (plan_read_resource; Read for \
          PDFs and images).\n\
-         2. Ask the lead here about anything unclear: goals, who it's for, constraints, what's \
-         out of scope.\n\
+         2. Ask about anything unclear (goals, who it's for, constraints, what's out of \
+         scope) with plan_add_question, never in this terminal: each question shows in \
+         hydraui as a decision to make, with your options as buttons, and the answer comes \
+         back to you here. Carry on with what doesn't depend on it.\n\
          3. Write the spec with plan_set_spec: short numbered sections in plain words, with \
          the decisions and their reasons.\n\
          4. Propose the milestones in order with plan_propose_milestone, each with what's true \
-         when it's done and a target date where you know one. Put decisions still to be made \
-         as questions with plan_add_question.\n\
+         when it's done and a target date where you know one.\n\
          Don't propose tickets yet: the lead asks for them per milestone once it's approved. \
          Use only the plan tools to change the project; never write its files yourself. When \
          you've proposed the milestones, tell the lead they're ready to review.",
@@ -3146,7 +3252,8 @@ fn work_prompt(p: &Project, t: &Ticket, branch: &str, repo: &str, skill: Option<
          where the project's spec is.\n{skill}\
          Do the work here, commit it on this branch, push it and open a pull request (gh pr \
          create) with {id} in its title. Finish by calling ticket_report with the pull request \
-         URL(s) and a short summary. If you're blocked, say so here rather than guess.",
+         URL(s) and a short summary. If you need a decision, ask it with ticket_ask, never in \
+         this terminal: it shows in hydraui and the answer comes back to you here.",
         id = t.id,
         title = t.meta.title,
         name = p.file.name,

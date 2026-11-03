@@ -552,3 +552,25 @@ Calls made without the user:
 - A rejection isn't typed into the session. `plan_show` shows it with its reason.
 - Dropped tickets and rejected items don't count towards milestone progress.
 - Local clones are remembered per machine in `hydraui/projects.toml`, under `[clones]`.
+
+### 14.1 Claude's questions are decisions (added 2026-11-03)
+
+Jordan: people work in hydraui, not in the sessions, though they can type to a session if they
+want.
+
+- **Asking.** A planning session asks with `plan_add_question` and a work session with
+  `ticket_ask`.
+  - Each question becomes an open decision, with a short context and options, assigned to the
+    lead unless the session names someone else.
+  - A question from a work session names its ticket.
+  - Both sessions start with Claude Code's own question tool turned off
+    (`--disallowedTools=AskUserQuestion`), so nothing is asked only in a terminal.
+- **Surfacing.** The question shows under Waiting on you and on the project page. A toast
+  appears once when it arrives, even with the Projects tab closed, while a session is running.
+- **Answering.** The answer is recorded with who and when, like any decision, and typed into the
+  session that asked:
+  - a ticket's question goes to its work session;
+  - every other question goes to the planning session.
+
+  If that session isn't running, the answer waits in the repo, where `plan_show` and
+  `ticket_show` list it.

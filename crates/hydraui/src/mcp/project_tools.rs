@@ -36,7 +36,10 @@ pub const PLAN: [&str; 9] = [
 ];
 
 /// The work tools.
-pub const WORK: [&str; 2] = ["ticket_show", "ticket_report"];
+pub const WORK: [&str; 3] = ["ticket_show", "ticket_ask", "ticket_report"];
+
+/// Who asked a question a Claude session raised: its answer goes back to the session.
+pub const ASKED_BY_CLAUDE: &str = "claude";
 
 /// Every tool this module answers.
 pub fn names() -> impl Iterator<Item = &'static str> {
@@ -116,13 +119,16 @@ pub fn schemas() -> Vec<Value> {
         ),
         tool(
             "plan_add_question",
-            "Planning: add an open question, a decision still to be made, for whoever should \
-             decide (a GitHub login; the lead by default). Returns its id.",
+            "Planning: ask a question the lead (or someone else) must decide. This is how you \
+             ask anything: never ask in the terminal. It shows in hydraui as a decision to make, \
+             with your options as buttons; the answer is recorded and sent back to you here. \
+             Returns its id.",
             json!({
-                "question": s("The question."),
-                "assigned_to": s("GitHub login of who decides (optional)."),
+                "question": s("The question, in one line."),
+                "context": s("What the person deciding needs to know: why it matters, what each option means (optional)."),
                 "options": {"type": "array", "items": {"type": "string"},
-                    "description": "Possible answers, if there are a few (optional)."},
+                    "description": "The likely answers, as short labels (give them whenever you can)."},
+                "assigned_to": s("GitHub login of who decides (optional; the lead by default)."),
             }),
             vec!["question"],
         ),
@@ -145,6 +151,20 @@ pub fn schemas() -> Vec<Value> {
              questions about it.",
             json!({}),
             vec![],
+        ),
+        tool(
+            "ticket_ask",
+            "Work: ask a question someone must decide before you can go on. This is how you \
+             ask anything: never ask in the terminal. It shows in hydraui as a decision on your \
+             ticket; the answer is recorded and sent back to you here.",
+            json!({
+                "question": s("The question, in one line."),
+                "context": s("What the person deciding needs to know (optional)."),
+                "options": {"type": "array", "items": {"type": "string"},
+                    "description": "The likely answers, as short labels."},
+                "assigned_to": s("GitHub login of who decides (optional; the lead by default)."),
+            }),
+            vec!["question"],
         ),
         tool(
             "ticket_report",
@@ -290,35 +310,7 @@ fn plan(dir: &Path, login: &str, name: &str, args: &Value) -> Result<String, Str
             }
             Ok(format!("Withdrew {id}."))
         }
-        "plan_add_question" => {
-            let id = next_id("D", p.decisions.iter().map(|d| d.id.as_str()));
-            let options = args
-                .get("options")
-                .and_then(Value::as_array)
-                .map(|o| {
-                    o.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default();
-            let d = Decision {
-                id: id.clone(),
-                meta: DecisionMeta {
-                    question: need(args, "question")?,
-                    asked_by: login.to_string(),
-                    asked_at: Some(progress::now()),
-                    assigned_to: get(args, "assigned_to")
-                        .map(|w| w.trim_start_matches('@').to_string())
-                        .unwrap_or_else(|| p.file.lead.clone()),
-                    options,
-                    ..Default::default()
-                },
-                body: String::new(),
-            };
-            repo::write_decision(dir, &d).map_err(e)?;
-            Ok(format!("Asked {id}."))
-        }
+        "plan_add_question" => ask(dir, &p, args, ""),
         "plan_add_link" => {
             crate::projects::add_link(dir, &need(args, "url")?, &need(args, "title")?)?;
             Ok("Link added.".into())
@@ -326,6 +318,44 @@ fn plan(dir: &Path, login: &str, name: &str, args: &Value) -> Result<String, Str
         "plan_read_resource" => read_resource(dir, &need(args, "name")?),
         _ => Err(format!("unknown tool {name}")),
     }
+}
+
+/// Asks a question in hydraui for whoever should decide (spec §14): Claude asks here, not in
+/// its terminal. The answer is recorded there and sent back to the session.
+fn ask(dir: &Path, p: &Project, args: &Value, ticket: &str) -> Result<String, String> {
+    let id = next_id("D", p.decisions.iter().map(|d| d.id.as_str()));
+    let options = args
+        .get("options")
+        .and_then(Value::as_array)
+        .map(|o| {
+            o.iter()
+                .filter_map(Value::as_str)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let d = Decision {
+        id: id.clone(),
+        meta: DecisionMeta {
+            question: need(args, "question")?,
+            asked_by: ASKED_BY_CLAUDE.to_string(),
+            asked_at: Some(progress::now()),
+            assigned_to: get(args, "assigned_to")
+                .map(|w| w.trim_start_matches('@').to_string())
+                .unwrap_or_else(|| p.file.lead.clone()),
+            options,
+            ticket: ticket.to_string(),
+            ..Default::default()
+        },
+        body: get(args, "context").unwrap_or_default().to_string(),
+    };
+    repo::write_decision(dir, &d).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "Asked {id} in hydraui, for {}. Wait for the answer: hydraui sends it to you here \
+         when it's given. Carry on with anything that doesn't depend on it.",
+        d.meta.assigned_to
+    ))
 }
 
 fn revise(dir: &Path, p: &Project, id: &str, args: &Value) -> Result<String, String> {
@@ -429,6 +459,7 @@ fn work(dir: &Path, ticket: &str, name: &str, args: &Value) -> Result<String, St
             ));
             Ok(out)
         }
+        "ticket_ask" => ask(dir, &p, args, ticket),
         "ticket_report" => {
             let prs: Vec<String> = args
                 .get("prs")
@@ -528,6 +559,13 @@ fn show(dir: &Path, p: &Project) -> String {
         out.push_str(&format!(
             "- {}: {} (for {})\n",
             d.id, d.meta.question, d.meta.assigned_to
+        ));
+    }
+    out.push_str("\n## Decided\n");
+    for d in p.decisions.iter().filter(|d| !d.is_open()) {
+        out.push_str(&format!(
+            "- {}: {} → {} (by {})\n",
+            d.id, d.meta.question, d.meta.answer, d.meta.decided_by
         ));
     }
     out.push_str("\n## Resources\n");
@@ -703,6 +741,55 @@ mod tests {
         assert_eq!(t.meta.status, TicketStatus::InReview);
         assert_eq!(t.meta.prs, [pr]);
         assert!(t.body.contains("## Work\n\nAdded the tables."));
+    }
+
+    #[test]
+    fn claude_asks_through_hydraui_and_sees_the_answer() {
+        let (_tmp, mut reg, dir) = setup();
+        let q = json!({"question": "Postgres or Mongo?", "context": "We store groups.", "options": ["Postgres", " ", "Mongo"]});
+        assert!(
+            run(&reg, "plan", "plan_add_question", q)
+                .text
+                .starts_with("Asked D-1 in hydraui, for lead")
+        );
+        let d = repo::load(&dir).unwrap().decisions.remove(0);
+        assert_eq!(
+            (d.meta.asked_by.as_str(), d.meta.ticket.as_str()),
+            (ASKED_BY_CLAUDE, "")
+        );
+        assert_eq!(d.meta.options, ["Postgres", "Mongo"]);
+        assert_eq!(d.body.trim(), "We store groups.");
+        crate::projects::answer(&dir, &d, "Postgres", "lead").unwrap();
+        let shown = run(&reg, "plan", "plan_show", json!({})).text;
+        assert!(
+            shown.contains("- D-1: Postgres or Mongo? → Postgres (by lead)"),
+            "{shown}"
+        );
+        reg.project_sessions.insert(
+            "work".into(),
+            Session::Work {
+                dir: dir.clone(),
+                ticket: "PG-1".into(),
+            },
+        );
+        std::fs::create_dir_all(dir.join("tickets")).unwrap();
+        std::fs::write(
+            dir.join("tickets/PG-1.md"),
+            "+++\ntitle = \"Schema\"\n+++\n",
+        )
+        .unwrap();
+        let asked = run(
+            &reg,
+            "work",
+            "ticket_ask",
+            json!({"question": "Which table?", "assigned_to": "@aza"}),
+        );
+        assert!(!asked.is_error, "{}", asked.text);
+        let d = repo::load(&dir).unwrap().decisions.remove(1);
+        assert_eq!(
+            (d.meta.ticket.as_str(), d.meta.assigned_to.as_str()),
+            ("PG-1", "aza")
+        );
     }
 
     #[test]

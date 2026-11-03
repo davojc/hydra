@@ -49,6 +49,8 @@ pub fn names() -> impl Iterator<Item = &'static str> {
 /// The `tools/list` entries for `names()`.
 pub fn schemas() -> Vec<Value> {
     let s = |what: &str| json!({ "type": "string", "description": what });
+    let points =
+        |what: &str| json!({ "type": "array", "items": {"type": "string"}, "description": what });
     let tool = |name: &str, description: &str, properties: Value, required: Vec<&str>| {
         json!({
             "name": name,
@@ -78,15 +80,15 @@ pub fn schemas() -> Vec<Value> {
              its id (M1, M2, ...). Write it for anyone on the team, not only engineers: an \
              outcome people care about, in plain words, with no technical terms, components or \
              implementation detail (those go in its tickets). Title at most 60 characters, e.g. \
-             \"Partners can see shared groups\"; description at most 240, one or two sentences on \
-             why it matters and how we'll know it's done. Don't propose again what was \
-             rejected.",
+             \"Partners can see shared groups\"; then 1 to 4 short points (at most 80 \
+             characters each) on what it's for and how we'll know it's done, e.g. \"Partners \
+             stop emailing us for group lists\". Don't propose again what was rejected.",
             json!({
                 "title": s("The outcome, in plain words; at most 60 characters."),
                 "target": s("Target date, YYYY-MM-DD (optional)."),
-                "description": s("Why it matters and how we'll know it's done, in one or two plain sentences; at most 240 characters."),
+                "points": points("1 to 4 short points, at most 80 characters each: what it's for and how we'll know it's done."),
             }),
-            vec!["title", "description"],
+            vec!["title", "points"],
         ),
         tool(
             "plan_propose_ticket",
@@ -103,14 +105,15 @@ pub fn schemas() -> Vec<Value> {
         tool(
             "plan_revise",
             "Planning: revise a milestone (M..) or ticket (KEY-..) that is still to review or \
-             had changes asked (a milestone keeps to plain words, title at most 60 characters \
-             and description at most 240); it goes back to the lead to review. Only the fields \
+             had changes asked (a milestone keeps to plain words: title at most 60 characters \
+             and 1 to 4 points of at most 80); it goes back to the lead to review. Only the fields \
              given change. Use the lead's note (plan_show shows it).",
             json!({
                 "id": s("What to revise."),
                 "title": s("New title."),
                 "target": s("A milestone's target date, YYYY-MM-DD."),
-                "description": s("New description."),
+                "description": s("A ticket's new description."),
+                "points": points("A milestone's new points, 1 to 4, at most 80 characters each."),
                 "milestone": s("A ticket's milestone id."),
                 "kind": s("A ticket's kind: feature, bug or chore."),
             }),
@@ -245,7 +248,11 @@ fn plan(dir: &Path, login: &str, name: &str, args: &Value) -> Result<String, Str
                     + 1
             );
             let mut ms = p.milestones.clone();
-            let (title, description) = (need(args, "title")?, need(args, "description")?);
+            let title = need(args, "title")?;
+            let description = milestone_points(args)?.ok_or(
+                "Give the milestone's points: 1 to 4 short bullet points, what it's for and \
+                 how we'll know it's done.",
+            )?;
             milestone_fits(&title, &description)?;
             ms.push(Milestone {
                 id: id.clone(),
@@ -366,25 +373,66 @@ fn ask(dir: &Path, p: &Project, args: &Value, ticket: &str) -> Result<String, St
     ))
 }
 
-/// The longest milestone title and description (Jordan, 2026-11-03: milestones are short,
-/// purpose-driven and easy for anyone to read; detail belongs in tickets).
+/// How long a milestone may be (Jordan, 2026-11-03: milestones are short, purpose-driven
+/// and easy for anyone to read, a few bullet points rather than a paragraph; detail belongs
+/// in tickets).
 pub const MILESTONE_TITLE_MAX: usize = 60;
-pub const MILESTONE_DESCRIPTION_MAX: usize = 240;
+pub const MILESTONE_POINTS_MAX: usize = 4;
+pub const MILESTONE_POINT_MAX: usize = 80;
+
+/// The `points` argument as a milestone description ("- a\n- b"), if given.
+fn milestone_points(args: &Value) -> Result<Option<String>, String> {
+    let Some(v) = args.get("points") else {
+        return Ok(None);
+    };
+    let items = v
+        .as_array()
+        .ok_or("points is a list of short strings.")?
+        .iter()
+        .map(|p| p.as_str().map(crate::projects::strip_point))
+        .collect::<Option<Vec<_>>>()
+        .ok_or("points is a list of short strings.")?;
+    if items.iter().any(|p| p.is_empty()) {
+        return Err("A point is empty.".into());
+    }
+    Ok(Some(
+        items
+            .iter()
+            .map(|p| format!("- {p}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ))
+}
 
 /// Refuses a milestone that's too long to take in at a glance, saying how to fix it.
 fn milestone_fits(title: &str, description: &str) -> Result<(), String> {
-    let (t, d) = (title.chars().count(), description.chars().count());
+    let t = title.chars().count();
     if t > MILESTONE_TITLE_MAX {
         return Err(format!(
             "The title is {t} characters; keep it to {MILESTONE_TITLE_MAX}: the outcome, in \
              plain words, with no technical terms."
         ));
     }
-    if d > MILESTONE_DESCRIPTION_MAX {
+    let Some(points) = crate::projects::points_of(description) else {
+        return Err(
+            "Give the milestone as points (1 to 4 short bullet points: what it's \
+                    for and how we'll know it's done), not a paragraph."
+                .into(),
+        );
+    };
+    if points.len() > MILESTONE_POINTS_MAX {
         return Err(format!(
-            "The description is {d} characters; keep it to {MILESTONE_DESCRIPTION_MAX}: one or \
-             two plain sentences on why it matters and how we'll know it's done. Technical \
-             detail goes in its tickets."
+            "That's {} points; keep it to at most {MILESTONE_POINTS_MAX}.",
+            points.len()
+        ));
+    }
+    if let Some(long) = points
+        .iter()
+        .find(|p| p.chars().count() > MILESTONE_POINT_MAX)
+    {
+        return Err(format!(
+            "\"{long}\" is too long; keep each point to {MILESTONE_POINT_MAX} characters, in \
+             plain words. Technical detail goes in its tickets."
         ));
     }
     Ok(())
@@ -410,6 +458,9 @@ fn revise(dir: &Path, p: &Project, id: &str, args: &Value) -> Result<String, Str
         }
         if let Some(v) = get(args, "description") {
             m.description = v.to_string();
+        }
+        if let Some(v) = milestone_points(args)? {
+            m.description = v;
         }
         milestone_fits(&m.title, &m.description)?;
         m.review = Review::Proposed;
@@ -666,7 +717,7 @@ mod tests {
             &reg,
             "plan",
             "plan_propose_milestone",
-            json!({"title": "Model", "description": "tables", "target": "2026-12-01"}),
+            json!({"title": "Model", "points": ["tables"], "target": "2026-12-01"}),
         );
         assert!(out.text.starts_with("Proposed M1"), "{}", out.text);
         let ticket = json!({"milestone": "M1", "title": "Schema", "description": "x"});
@@ -697,7 +748,7 @@ mod tests {
             &reg,
             "plan",
             "plan_propose_milestone",
-            json!({"title": "Model", "description": "x"}),
+            json!({"title": "Model", "points": ["x"]}),
         );
         let m1 = Item::Milestone("M1".into());
         review(&dir, &m1, Review::Changes, "give it a date", "lead").unwrap();
@@ -724,7 +775,7 @@ mod tests {
             &reg,
             "plan",
             "plan_propose_milestone",
-            json!({"title": "Mobile", "description": "x"}),
+            json!({"title": "Mobile", "points": ["x"]}),
         );
         let m1 = Item::Milestone("M1".into());
         review(&dir, &m1, Review::Rejected, "out of scope", "lead").unwrap();
@@ -740,7 +791,7 @@ mod tests {
             &reg,
             "plan",
             "plan_propose_milestone",
-            json!({"title": "Model", "description": "x"}),
+            json!({"title": "Model", "points": ["x"]}),
         );
         approve(&dir, "M1");
         let ticket =
@@ -827,36 +878,62 @@ mod tests {
 
     #[test]
     fn milestones_stay_short() {
-        let (_tmp, reg, _dir) = setup();
+        let (_tmp, reg, dir) = setup();
         let long_title = "x".repeat(MILESTONE_TITLE_MAX + 1);
         let out = run(
             &reg,
             "plan",
             "plan_propose_milestone",
-            json!({"title": long_title, "description": "x"}),
+            json!({"title": long_title, "points": ["x"]}),
         );
         assert!(
             out.is_error && out.text.contains("keep it to 60"),
             "{}",
             out.text
         );
-        let long_text = "y".repeat(MILESTONE_DESCRIPTION_MAX + 1);
+        let long_point = "y".repeat(MILESTONE_POINT_MAX + 1);
         let out = run(
             &reg,
             "plan",
             "plan_propose_milestone",
-            json!({"title": "Partners see groups", "description": long_text}),
+            json!({"title": "Partners see groups", "points": [long_point]}),
         );
         assert!(
             out.is_error && out.text.contains("goes in its tickets"),
             "{}",
             out.text
         );
-        run(
+        let five = vec!["a"; MILESTONE_POINTS_MAX + 1];
+        let out = run(
+            &reg,
+            "plan",
+            "plan_propose_milestone",
+            json!({"title": "Partners see groups", "points": five}),
+        );
+        assert!(
+            out.is_error && out.text.contains("at most 4"),
+            "{}",
+            out.text
+        );
+        // A wall of text isn't points.
+        let out = run(
             &reg,
             "plan",
             "plan_propose_milestone",
             json!({"title": "Partners see groups", "description": "So they stop asking."}),
+        );
+        assert!(out.is_error, "{}", out.text);
+        let out = run(
+            &reg,
+            "plan",
+            "plan_propose_milestone",
+            json!({"title": "Partners see groups", "points": ["- So they stop asking", "Done when a partner opens one"]}),
+        );
+        assert!(!out.is_error, "{}", out.text);
+        let m = repo::load(&dir).unwrap().milestones.remove(0);
+        assert_eq!(
+            m.description,
+            "- So they stop asking\n- Done when a partner opens one"
         );
         let long_title = "z".repeat(61);
         assert!(
@@ -867,6 +944,38 @@ mod tests {
                 json!({"id": "M1", "title": long_title})
             )
             .is_error
+        );
+    }
+
+    #[test]
+    fn revising_an_old_milestone_needs_points() {
+        let (_tmp, reg, dir) = setup();
+        let mut p = repo::load(&dir).unwrap();
+        p.milestones.push(Milestone {
+            id: "M1".into(),
+            title: "Old".into(),
+            description: "A long paragraph from before points.".into(),
+            review: Review::Proposed,
+            ..Default::default()
+        });
+        repo::write_milestones(&dir, &p.milestones).unwrap();
+        let out = run(
+            &reg,
+            "plan",
+            "plan_revise",
+            json!({"id": "M1", "title": "New"}),
+        );
+        assert!(out.is_error && out.text.contains("points"), "{}", out.text);
+        let out = run(
+            &reg,
+            "plan",
+            "plan_revise",
+            json!({"id": "M1", "title": "New", "points": ["Why", "Done when"]}),
+        );
+        assert!(!out.is_error, "{}", out.text);
+        assert_eq!(
+            repo::load(&dir).unwrap().milestones[0].description,
+            "- Why\n- Done when"
         );
     }
 

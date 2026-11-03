@@ -625,6 +625,29 @@ pub fn start_work(
 }
 
 /// Parses a comma- or space-separated list (members, repos), dropping blanks and `@`s.
+/// `text` without a leading bullet ("- ", "* ", "• ") and surrounding space.
+pub fn strip_point(text: &str) -> &str {
+    let t = text.trim();
+    ["- ", "* ", "• ", "-", "•"]
+        .iter()
+        .find_map(|b| t.strip_prefix(b))
+        .unwrap_or(t)
+        .trim()
+}
+
+/// A milestone description's bullet points, or None when it isn't only bullet points (an
+/// older paragraph, shown as it is).
+pub fn points_of(text: &str) -> Option<Vec<&str>> {
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let bullet = |l: &&str| {
+        ["- ", "* ", "• "]
+            .iter()
+            .any(|b| l.trim_start().starts_with(b))
+    };
+    (!lines.is_empty() && lines.iter().all(bullet))
+        .then(|| lines.iter().map(|l| strip_point(l)).collect())
+}
+
 pub fn list_of(text: &str) -> Vec<String> {
     text.split([',', ' ', '\n'])
         .map(|s| s.trim().trim_start_matches('@'))
@@ -701,6 +724,18 @@ pub fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn points_are_bullet_lines_only() {
+        assert_eq!(
+            points_of("- Why\n\n* Done when\n• Third"),
+            Some(vec!["Why", "Done when", "Third"])
+        );
+        assert_eq!(points_of("A paragraph.\n- then a point"), None);
+        assert_eq!(points_of(""), None);
+        assert_eq!(strip_point("  - x "), "x");
+        assert_eq!(strip_point("plain"), "plain");
+    }
 
     fn project(dir: &Path) -> Project {
         repo::write_project_file(

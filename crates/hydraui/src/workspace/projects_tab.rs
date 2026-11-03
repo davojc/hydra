@@ -731,8 +731,8 @@ impl Workspace {
                     m.target.map(|t| t.to_string()).unwrap_or_default(),
                 ),
                 (
-                    "Description",
-                    "what is true when it's done",
+                    "Points",
+                    "- what it's for  - how we'll know it's done",
                     m.description.clone(),
                 ),
             ],
@@ -806,6 +806,7 @@ impl Workspace {
         // One size and one order everywhere: the yes first, the no last.
         let sized = |b: Button| b.small().w(px(REVIEW_BUTTON_WIDTH));
         h_flex()
+            .flex_wrap()
             .gap_2()
             .child(
                 sized(Button::new(SharedString::from(format!("approve-{id}"))))
@@ -2314,8 +2315,8 @@ impl Workspace {
                                           changes asked, and act on any notes. Milestones are short \
                                           and purpose-driven, in plain words anyone can read: \
                                           rewrite with plan_revise any still to review that are \
-                                          technical or longer than 60 characters (title) or 240 \
-                                          (description)."
+                                          technical, have a title over 60 characters, or aren't \
+                                          1 to 4 short points (give points)."
                                 .to_string();
                             ws.tell_planner(&env_b, &slug_b, prompt, window, cx)
                         })),
@@ -2477,11 +2478,14 @@ impl Workspace {
             .count();
 
         // A stack, not columns: text in a growing column of a row is wrapped at an early,
-        // narrow width; text straight in a stack gets the row's whole width.
-        let mut actions = h_flex().flex_none().gap_2();
+        // narrow width; text straight in a stack gets the row's whole width. The actions sit
+        // in a footer of their own, where they wrap rather than run off the page.
+        let mut actions = h_flex().flex_wrap().gap_2();
+        let mut has_actions = false;
         if lead && waiting {
             let mc = m.clone();
             let (e, s) = (env_s.clone(), slug_s.clone());
+            has_actions = true;
             actions = actions.child(self.review_actions(
                 env,
                 &p.slug,
@@ -2494,6 +2498,7 @@ impl Workspace {
             ));
         }
         if m.review == Review::Approved {
+            has_actions = true;
             let page_to = Page::Milestone {
                 env: env_s.clone(),
                 slug: slug_s.clone(),
@@ -2554,9 +2559,7 @@ impl Workspace {
             })
             .when(late && m.review == Review::Approved, |d| {
                 d.child(pill("late", theme::RED, theme::RED_TINT))
-            })
-            .child(div().flex_1())
-            .child(actions);
+            });
         let meta = {
             let mut parts = vec![
                 m.target
@@ -2600,12 +2603,7 @@ impl Workspace {
                     .child(meta),
             )
             .when(!m.description.is_empty(), |d| {
-                d.child(
-                    div()
-                        .text_sm()
-                        .text_color(color(theme::TEXT_SECONDARY))
-                        .child(m.description.clone()),
-                )
+                d.child(description_points(&m.description))
             })
             .when(
                 !m.review_note.is_empty() && m.review != Review::Approved,
@@ -2625,6 +2623,16 @@ impl Workspace {
                         .items_center()
                         .child(div().flex_1().child(status_bar(c, 8.)))
                         .child(div().flex_none().child(counts_line(c))),
+                )
+            })
+            .when(has_actions, |d| {
+                d.child(
+                    div()
+                        .mt_1()
+                        .pt_3()
+                        .border_t_1()
+                        .border_color(color(theme::BORDER_SUBTLE))
+                        .child(actions),
                 )
             })
             .into_any_element()
@@ -3662,9 +3670,9 @@ fn start_prompt(p: &Project) -> String {
          4. Propose the milestones in order with plan_propose_milestone. Keep them few, short \
          and purpose-driven, readable by anyone on the team: each an outcome people care \
          about, in plain words with no technical terms (e.g. \"Partners can see shared \
-         groups\", not \"Implement group ACL service\"), a one- or two-sentence description \
-         of why it matters and how we'll know it's done, and a target date where you know \
-         one. Technical detail belongs in the tickets.\n\
+         groups\", not \"Implement group ACL service\"), with 1 to 4 short points on what \
+         it's for and how we'll know it's done (not a paragraph), and a target date where you \
+         know one. Technical detail belongs in the tickets.\n\
          Don't propose tickets yet: the lead asks for them per milestone once it's approved. \
          Use only the plan tools to change the project; never write its files yourself. When \
          you've proposed the milestones, tell the lead they're ready to review.",
@@ -3733,6 +3741,38 @@ fn pill(text: &str, fg: u32, bg: u32) -> gpui::Div {
 }
 
 /// `A`, `B`, … for a question's suggested answers.
+/// A milestone's description: its points as a bulleted list, or an older paragraph as it is.
+fn description_points(text: &str) -> gpui::Div {
+    let Some(points) = pj::points_of(text) else {
+        return div()
+            .text_sm()
+            .text_color(color(theme::TEXT_SECONDARY))
+            .child(text.to_string());
+    };
+    // The dot is placed absolutely so each point's text is a stack child with the full width.
+    v_flex().gap_1().children(points.into_iter().map(|p| {
+        v_flex()
+            .relative()
+            .w_full()
+            .pl(px(16.))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(4.))
+                    .top(px(8.))
+                    .size(px(5.))
+                    .rounded_full()
+                    .bg(color(theme::TEXT_MUTED)),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(color(theme::TEXT_SECONDARY))
+                    .child(p.to_string()),
+            )
+    }))
+}
+
 fn option_letter(i: usize) -> String {
     char::from_u32(u32::from(b'A') + (i % 26) as u32)
         .map(String::from)

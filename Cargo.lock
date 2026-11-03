@@ -3043,6 +3043,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hydraui-projects"
+version = "0.6.0"
+dependencies = [
+ "hydraui-sets",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "hydraui-sets"
 version = "0.6.0"
 dependencies = [

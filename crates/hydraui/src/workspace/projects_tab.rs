@@ -2251,55 +2251,54 @@ impl Workspace {
                 })
                 .collect();
             progress = progress.child(
-                h_flex()
-                    .gap_4()
+                v_flex()
+                    .gap_1()
                     .p_3()
                     .rounded_md()
                     .bg(color(theme::SURFACE))
-                    .child(div().w(px(160.)).flex_none().child(person.clone()))
                     .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(color(theme::TEXT_SECONDARY))
-                                    .child(if working.is_empty() {
-                                        "nothing in progress".to_string()
-                                    } else {
-                                        working
-                                            .iter()
-                                            .map(|t| format!("{} {}", t.id, t.meta.title))
-                                            .collect::<Vec<_>>()
-                                            .join(" · ")
-                                    }),
-                            )
+                        h_flex()
+                            .gap_3()
+                            .child(div().flex_none().child(person.clone()))
+                            .child(div().flex_1())
                             .when_some(latest, |d, w| {
                                 d.child(
                                     div()
+                                        .flex_none()
                                         .text_xs()
                                         .text_color(color(theme::TEXT_MUTED))
-                                        .child(format!("{}: {}", w.date, first_line(&w.body))),
+                                        .child(format!("last write-up {}", w.date)),
                                 )
                             }),
-                    ),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(color(theme::TEXT_SECONDARY))
+                            .child(if working.is_empty() {
+                                "nothing in progress".to_string()
+                            } else {
+                                working
+                                    .iter()
+                                    .map(|t| format!("{} {}", t.id, t.meta.title))
+                                    .collect::<Vec<_>>()
+                                    .join(" · ")
+                            }),
+                    )
+                    .when_some(latest, |d, w| {
+                        d.child(
+                            div()
+                                .text_xs()
+                                .text_color(color(theme::TEXT_MUTED))
+                                .child(first_line(&w.body)),
+                        )
+                    }),
             );
         }
-        let mut lower = h_flex()
-            .gap_6()
-            .items_start()
-            .child(v_flex().flex_1().min_w_0().child(progress));
+        page = page.child(progress);
         if started {
-            lower = lower.child(
-                v_flex()
-                    .w(px(420.))
-                    .flex_none()
-                    .child(self.resources_block(&target, p, cx)),
-            );
+            page = page.child(self.resources_block(&target, p, cx));
         }
-        page = page.child(lower);
         if started && lead && !planning {
             let (env_b, slug_b) = (env_s.clone(), slug_s.clone());
             page = page.child(
@@ -2476,49 +2475,128 @@ impl Workspace {
             .filter(|t| t.meta.milestone == m.id && t.meta.review.waiting())
             .count();
 
-        let left = v_flex()
-            .flex_1()
-            .min_w_0()
-            .gap_1()
+        // A stack, not columns: text in a growing column of a row is wrapped at an early,
+        // narrow width; text straight in a stack gets the row's whole width.
+        let mut actions = h_flex().flex_none().gap_2();
+        if lead && waiting {
+            let mc = m.clone();
+            let (e, s) = (env_s.clone(), slug_s.clone());
+            actions = actions.child(self.review_actions(
+                env,
+                &p.slug,
+                Item::Milestone(m.id.clone()),
+                &m.title,
+                move |ws, window, cx| {
+                    ws.edit_milestone_dialog(e.clone(), s.clone(), mc.clone(), window, cx)
+                },
+                cx,
+            ));
+        }
+        if m.review == Review::Approved {
+            let page_to = Page::Milestone {
+                env: env_s.clone(),
+                slug: slug_s.clone(),
+                id: m.id.clone(),
+            };
+            actions = actions.child(
+                Button::new(SharedString::from(format!("board-{}", m.id)))
+                    .label(format!("Tickets ({ticket_count})"))
+                    .small()
+                    .ghost()
+                    .on_click(cx.listener(move |ws, _, _, cx| ws.go(page_to.clone(), cx))),
+            );
+            if lead {
+                let mc = m.clone();
+                let (e, s) = (env_s.clone(), slug_s.clone());
+                actions = actions.child(
+                    Button::new(SharedString::from(format!("tickets-{}", m.id)))
+                        .label(if ticket_count > 0 {
+                            "More tickets"
+                        } else {
+                            "Create tickets"
+                        })
+                        .small()
+                        .when(ticket_count == 0, |b| b.primary())
+                        .when(ticket_count > 0, |b| b.ghost())
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.create_tickets(e.clone(), s.clone(), &mc, window, cx)
+                        })),
+                );
+            }
+        }
+        let header = h_flex()
+            .gap_2()
+            .items_center()
             .child(
-                h_flex()
-                    .gap_2()
-                    .items_baseline()
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_family("monospace")
-                            .text_color(color(theme::TEXT_MUTED))
-                            .child(m.id.clone()),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("open-milestone-{}", m.id)))
-                            .text_lg()
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(color(theme::TEAL)))
-                            .child(m.title.clone())
-                            .on_click(cx.listener(move |ws, _, _, cx| ws.go(page_to.clone(), cx))),
-                    )
-                    .when(m.review != Review::Approved, |d| {
-                        d.child(review_pill(m.review))
-                    })
-                    .when(done, |d| {
-                        d.child(pill("done", theme::GREEN, theme::GREEN_TINT))
-                    })
-                    .when(late && m.review == Review::Approved, |d| {
-                        d.child(pill("late", theme::RED, theme::RED_TINT))
-                    }),
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .font_family("monospace")
+                    .text_color(color(theme::TEXT_MUTED))
+                    .child(m.id.clone()),
             )
             .child(
                 div()
+                    .id(SharedString::from(format!("open-milestone-{}", m.id)))
+                    .flex_none()
+                    .text_lg()
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(color(theme::TEAL)))
+                    .child(m.title.clone())
+                    .on_click(cx.listener(move |ws, _, _, cx| ws.go(page_to.clone(), cx))),
+            )
+            .when(m.review != Review::Approved, |d| {
+                d.child(review_pill(m.review))
+            })
+            .when(done, |d| {
+                d.child(pill("done", theme::GREEN, theme::GREEN_TINT))
+            })
+            .when(late && m.review == Review::Approved, |d| {
+                d.child(pill("late", theme::RED, theme::RED_TINT))
+            })
+            .child(div().flex_1())
+            .child(actions);
+        let meta = {
+            let mut parts = vec![
+                m.target
+                    .map(|t| format!("target {t}"))
+                    .unwrap_or_else(|| "no target date".into()),
+            ];
+            if tickets_waiting > 0 {
+                parts.push(format!(
+                    "{tickets_waiting} ticket{} to review",
+                    if tickets_waiting == 1 { "" } else { "s" }
+                ));
+            } else if m.review == Review::Approved && ticket_count == 0 {
+                parts.push("no tickets yet".into());
+            }
+            parts.join(" · ")
+        };
+        v_flex()
+            .id(SharedString::from(format!("milestone-{}", m.id)))
+            .w_full()
+            .gap_2()
+            .px_4()
+            .py_3()
+            .rounded_lg()
+            .bg(color(if m.status == MilestoneStatus::Active {
+                theme::RAISED
+            } else {
+                theme::SURFACE
+            }))
+            .border_1()
+            .border_color(color(edge))
+            .when(m.review == Review::Rejected, |d| d.opacity(0.6))
+            .child(header)
+            .child(
+                div()
                     .text_xs()
-                    .text_color(color(theme::TEXT_SECONDARY))
-                    .child(
-                        m.target
-                            .map(|t| format!("target {t}"))
-                            .unwrap_or_else(|| "no target date".into()),
-                    ),
+                    .text_color(color(if tickets_waiting > 0 {
+                        theme::AMBER
+                    } else {
+                        theme::TEXT_SECONDARY
+                    }))
+                    .child(meta),
             )
             .when(!m.description.is_empty(), |d| {
                 d.child(
@@ -2538,97 +2616,16 @@ impl Workspace {
                             .child(format!("“{}”", m.review_note)),
                     )
                 },
-            );
-
-        let middle = v_flex()
-            .w(px(320.))
-            .flex_none()
-            .gap_2()
-            .when(m.review == Review::Approved, |d| {
-                d.child(status_bar(c, 8.)).child(counts_line(c))
-            })
-            .when(m.review == Review::Approved && ticket_count == 0, |d| {
-                d.child(muted("No tickets yet."))
-            })
-            .when(tickets_waiting > 0, |d| {
+            )
+            .when(m.review == Review::Approved && ticket_count > 0, |d| {
                 d.child(
-                    div()
-                        .text_xs()
-                        .text_color(color(theme::AMBER))
-                        .child(format!(
-                            "{tickets_waiting} ticket{} to review",
-                            if tickets_waiting == 1 { "" } else { "s" }
-                        )),
+                    h_flex()
+                        .gap_4()
+                        .items_center()
+                        .child(div().flex_1().child(status_bar(c, 8.)))
+                        .child(div().flex_none().child(counts_line(c))),
                 )
-            });
-
-        let mut right = v_flex().w(px(300.)).flex_none().gap_2().items_end();
-        if lead && waiting {
-            let mc = m.clone();
-            let (e, s) = (env_s.clone(), slug_s.clone());
-            right = right.child(self.review_actions(
-                env,
-                &p.slug,
-                Item::Milestone(m.id.clone()),
-                &m.title,
-                move |ws, window, cx| {
-                    ws.edit_milestone_dialog(e.clone(), s.clone(), mc.clone(), window, cx)
-                },
-                cx,
-            ));
-        }
-        if m.review == Review::Approved {
-            let page_to = Page::Milestone {
-                env: env_s.clone(),
-                slug: slug_s.clone(),
-                id: m.id.clone(),
-            };
-            let mut buttons = h_flex().gap_2().child(
-                Button::new(SharedString::from(format!("board-{}", m.id)))
-                    .label(format!("Tickets ({ticket_count})"))
-                    .small()
-                    .ghost()
-                    .on_click(cx.listener(move |ws, _, _, cx| ws.go(page_to.clone(), cx))),
-            );
-            if lead {
-                let mc = m.clone();
-                buttons = buttons.child(
-                    Button::new(SharedString::from(format!("tickets-{}", m.id)))
-                        .label(if ticket_count > 0 {
-                            "More tickets"
-                        } else {
-                            "Create tickets"
-                        })
-                        .small()
-                        .when(ticket_count == 0, |b| b.primary())
-                        .when(ticket_count > 0, |b| b.ghost())
-                        .on_click(cx.listener(move |ws, _, window, cx| {
-                            ws.create_tickets(env_s.clone(), slug_s.clone(), &mc, window, cx)
-                        })),
-                );
-            }
-            right = right.child(buttons);
-        }
-
-        h_flex()
-            .id(SharedString::from(format!("milestone-{}", m.id)))
-            .w_full()
-            .gap_6()
-            .items_start()
-            .px_4()
-            .py_3()
-            .rounded_lg()
-            .bg(color(if m.status == MilestoneStatus::Active {
-                theme::RAISED
-            } else {
-                theme::SURFACE
-            }))
-            .border_1()
-            .border_color(color(edge))
-            .when(m.review == Review::Rejected, |d| d.opacity(0.6))
-            .child(left)
-            .child(middle)
-            .child(right)
+            })
             .into_any_element()
     }
 
@@ -2682,51 +2679,46 @@ impl Workspace {
         }
         for d in answered {
             page = page.child(
-                h_flex()
+                v_flex()
                     .w_full()
-                    .gap_6()
-                    .items_start()
+                    .gap_1()
                     .px_4()
                     .py_3()
                     .rounded_md()
                     .bg(color(theme::SURFACE))
                     .child(
-                        div()
-                            .w(px(48.))
-                            .flex_none()
-                            .text_xs()
-                            .font_family("monospace")
-                            .text_color(color(theme::TEXT_MUTED))
-                            .child(d.id.clone()),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_1()
+                        h_flex()
+                            .gap_3()
                             .child(
                                 div()
-                                    .text_sm()
-                                    .text_color(color(theme::TEXT_SECONDARY))
-                                    .child(d.meta.question.clone()),
+                                    .text_xs()
+                                    .font_family("monospace")
+                                    .text_color(color(theme::TEXT_MUTED))
+                                    .child(d.id.clone()),
                             )
-                            .child(div().child(d.meta.answer.clone())),
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(color(theme::TEXT_MUTED))
+                                    .child(format!(
+                                        "decided by {}{}",
+                                        d.meta.decided_by,
+                                        d.meta
+                                            .decided_at
+                                            .map(|t| format!(" · {} ago", pj::age(&t, now)))
+                                            .unwrap_or_default()
+                                    )),
+                            ),
                     )
                     .child(
                         div()
-                            .w(px(240.))
-                            .flex_none()
-                            .text_xs()
-                            .text_color(color(theme::TEXT_MUTED))
-                            .child(format!(
-                                "decided by {}{}",
-                                d.meta.decided_by,
-                                d.meta
-                                    .decided_at
-                                    .map(|t| format!(" · {} ago", pj::age(&t, now)))
-                                    .unwrap_or_default()
-                            )),
-                    ),
+                            .text_sm()
+                            .text_color(color(theme::TEXT_SECONDARY))
+                            .child(d.meta.question.clone()),
+                    )
+                    .child(div().child(d.meta.answer.clone())),
             );
         }
         page.into_any_element()
@@ -2747,50 +2739,31 @@ impl Workspace {
             .asked_at
             .map(|t| pj::age(&t, now))
             .unwrap_or_default();
-        let text = v_flex()
-            .flex_1()
-            .min_w_0()
-            .gap_1()
-            .child(div().child(d.meta.question.clone()))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(color(theme::TEXT_SECONDARY))
-                    .child(format!(
-                        "waiting on {}{}{}",
-                        if mine {
-                            "you".to_string()
-                        } else {
-                            d.meta.assigned_to.clone()
-                        },
-                        if waited.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" for {waited}")
-                        },
-                        match d.meta.asked_by.as_str() {
-                            "" => String::new(),
-                            ASKED_BY_CLAUDE if d.meta.ticket.is_empty() => {
-                                " · asked by the planning session".to_string()
-                            }
-                            ASKED_BY_CLAUDE =>
-                                format!(" · asked by {}'s work session", d.meta.ticket),
-                            who => format!(" · asked by {who}"),
-                        },
-                    )),
-            )
-            .when(!d.body.trim().is_empty(), |r| {
-                r.child(
-                    div()
-                        .text_sm()
-                        .text_color(color(theme::TEXT_SECONDARY))
-                        .child(d.body.trim().to_string()),
-                )
-            });
-        let mut row = h_flex()
+        let meta = format!(
+            "waiting on {}{}{}",
+            if mine {
+                "you".to_string()
+            } else {
+                d.meta.assigned_to.clone()
+            },
+            if waited.is_empty() {
+                String::new()
+            } else {
+                format!(" for {waited}")
+            },
+            match d.meta.asked_by.as_str() {
+                "" => String::new(),
+                ASKED_BY_CLAUDE if d.meta.ticket.is_empty() => {
+                    " · asked by the planning session".to_string()
+                }
+                ASKED_BY_CLAUDE => format!(" · asked by {}'s work session", d.meta.ticket),
+                who => format!(" · asked by {who}"),
+            },
+        );
+        // A stack, not columns, so the question and its context wrap across the row.
+        let mut row = v_flex()
             .w_full()
-            .gap_6()
-            .items_start()
+            .gap_2()
             .px_4()
             .py_3()
             .rounded_md()
@@ -2806,35 +2779,44 @@ impl Workspace {
                 theme::BORDER_SUBTLE
             }))
             .child(
-                v_flex()
-                    .w(px(48.))
-                    .flex_none()
-                    .gap_1()
+                h_flex()
+                    .gap_3()
                     .child(
                         div()
+                            .flex_none()
                             .text_xs()
                             .font_family("monospace")
                             .text_color(color(theme::TEXT_MUTED))
-                            .child(d.id.clone()),
+                            .child(if d.meta.ticket.is_empty() {
+                                d.id.clone()
+                            } else {
+                                format!("{} · {}", d.id, d.meta.ticket)
+                            }),
                     )
-                    .when(!d.meta.ticket.is_empty(), |c| {
-                        c.child(
-                            div()
-                                .text_xs()
-                                .font_family("monospace")
-                                .text_color(color(theme::TEXT_MUTED))
-                                .child(d.meta.ticket.clone()),
-                        )
-                    }),
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(color(if mine {
+                                theme::AMBER
+                            } else {
+                                theme::TEXT_SECONDARY
+                            }))
+                            .child(meta),
+                    ),
             )
-            .child(text);
+            .child(div().child(d.meta.question.clone()))
+            .when(!d.body.trim().is_empty(), |r| {
+                r.child(
+                    div()
+                        .text_sm()
+                        .text_color(color(theme::TEXT_SECONDARY))
+                        .child(d.body.trim().to_string()),
+                )
+            });
         if mine {
-            let mut actions = h_flex()
-                .w(px(360.))
-                .flex_none()
-                .justify_end()
-                .gap_2()
-                .flex_wrap();
+            let mut actions = h_flex().gap_2().flex_wrap();
             for (i, option) in d.meta.options.iter().enumerate() {
                 let (env, slug, q, option) =
                     (env.to_string(), p.slug.clone(), d.clone(), option.clone());

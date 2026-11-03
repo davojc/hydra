@@ -66,7 +66,7 @@ pub struct MilestonesFile {
     pub milestones: Vec<Milestone>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Milestone {
     pub id: String,
     pub title: String,
@@ -76,6 +76,15 @@ pub struct Milestone {
     pub status: MilestoneStatus,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+    #[serde(default)]
+    pub review: Review,
+    /// The update note or the rejection reason (spec §14).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub review_note: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reviewed_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_at: Option<Datetime>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,7 +97,7 @@ pub enum MilestoneStatus {
 }
 
 /// A ticket's front matter. Its id is its file name (`tickets/PG-12.md`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TicketMeta {
     pub title: String,
     #[serde(default)]
@@ -103,8 +112,64 @@ pub struct TicketMeta {
     pub created_by: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created: Option<Datetime>,
+    #[serde(default)]
+    pub review: Review,
+    /// The update note or the rejection reason (spec §14).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub review_note: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reviewed_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_at: Option<Datetime>,
+    /// The work branch, once work started (spec §14).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub branch: String,
+    /// The pull requests the work session reported.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prs: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub started_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<Datetime>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub skill: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub effort: String,
     #[serde(flatten)]
     pub extra: toml::Table,
+}
+
+/// Where a proposed milestone or ticket stands (spec §14). Missing means approved, so
+/// hand-written files count as decided.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Review {
+    /// Claude proposed it; nobody has looked yet.
+    Proposed,
+    /// The lead wrote a note; Claude is to revise it.
+    Changes,
+    #[default]
+    Approved,
+    /// Kept, with the reason, so it isn't proposed again.
+    Rejected,
+}
+
+impl Review {
+    /// Waiting for the lead: proposed, or revised and proposed again.
+    pub fn waiting(self) -> bool {
+        self == Review::Proposed
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Review::Proposed => "to review",
+            Review::Changes => "changes asked",
+            Review::Approved => "approved",
+            Review::Rejected => "rejected",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,7 +227,7 @@ pub struct Ticket {
 }
 
 /// A decision file's front matter: an open question, or a decision made once `answer` is set.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DecisionMeta {
     pub question: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]

@@ -1,34 +1,43 @@
-//! The Projects tab (Projects spec §8, §9.1): every environment's projects, one project's
-//! milestones, decisions and progress, a milestone's tickets, what waits on you, a project's
-//! settings, and New project with Claude. Reading and writing the repo is `crate::projects`.
+//! The Projects tab (Projects spec §8, §14): every environment's projects; one project's
+//! milestones, decisions and progress, with its planning session beside it; a milestone's
+//! tickets; what waits on you; a project's settings. Milestones and tickets are proposed by the
+//! planning session and reviewed here by the lead; approved tickets are worked by sessions
+//! started here. Reading and writing the repo is `crate::projects`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, ExternalPaths, SharedString, Window, div, px};
+use gpui::{AnyElement, Context, Entity, ExternalPaths, SharedString, Window, div, px};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::notification::Notification;
-use gpui_component::{Selectable, Sizable, WindowExt, h_flex, v_flex};
+use gpui_component::select::{Select, SelectState};
+use gpui_component::{IndexPath, Selectable, Sizable, WindowExt, h_flex, v_flex};
 use hydra_core::name::EnvName;
 use hydraui_projects::progress::{Counts, is_late, milestone_counts, today};
 use hydraui_projects::{
-    Decision, MilestoneStatus, Project, ProjectStatus, Ticket, TicketKind, TicketStatus, repo,
+    Decision, Milestone, MilestoneStatus, Project, ProjectStatus, Review, Ticket, TicketKind,
+    TicketStatus, repo,
 };
 
 use super::Workspace;
 use crate::envs::PaneId;
 use crate::hydra::{PaneRequest, command_line};
-use crate::mcp::project_tools::Draft;
+use crate::mcp::project_tools::Session;
 use crate::mcp::server;
 use crate::orchestrator_theme::{self as theme, color};
-use crate::projects as pj;
+use crate::projects::{self as pj, Item};
 
 /// How often the checkouts are brought up to date while hydraui is open (spec §3).
 const FETCH_EVERY: Duration = Duration::from_secs(5 * 60);
+/// How often the checkouts are read again while the tab shows: sessions write to them.
+const READ_EVERY: Duration = Duration::from_secs(2);
+
+const MODELS: [&str; 4] = ["default", "opus", "sonnet", "haiku"];
+const EFFORTS: [&str; 6] = ["default", "low", "medium", "high", "xhigh", "max"];
 
 /// What the Projects tab shows.
 #[derive(Debug, Clone, PartialEq)]
@@ -48,16 +57,16 @@ pub(super) enum Page {
         slug: String,
     },
     Waiting,
-    Draft {
-        env: String,
-        dir: PathBuf,
-    },
 }
 
 pub(super) struct ProjectsTab {
     page: Page,
     /// Paused and done projects show too.
     show_all: bool,
+    /// Rejected milestones and tickets show too.
+    show_rejected: bool,
+    /// The project page shows its planning session beside it.
+    show_claude: bool,
 }
 
 /// One environment's projects, as last read.
@@ -65,7 +74,6 @@ pub(super) struct ProjectsTab {
 pub(super) struct EnvProjects {
     repo: String,
     checkout: PathBuf,
-    drafts: PathBuf,
     /// The environment's GitHub login; `None` until known.
     login: Option<String>,
     /// Why the last fetch failed, if it did.
@@ -78,8 +86,6 @@ pub(super) struct EnvProjects {
     pending: BTreeSet<String>,
     /// Projects already in the repo, not only on this machine.
     sent: BTreeSet<String>,
-    /// Drafts waiting in `drafts`, by folder.
-    draft_dirs: Vec<PathBuf>,
 }
 
 #[derive(Default)]
@@ -87,20 +93,52 @@ pub(super) struct ProjectsData {
     envs: BTreeMap<String, EnvProjects>,
     next_fetch: Option<Instant>,
     fetching: bool,
-    /// New project sessions, by draft folder.
-    sessions: BTreeMap<PathBuf, PaneId>,
-    /// The draft shown on a Draft page, read again every second.
-    preview: Option<(PathBuf, Result<Project, String>)>,
+    next_read: Option<Instant>,
+    /// Planning sessions, by (environment, project).
+    planners: BTreeMap<(String, String), PaneId>,
+    /// Work sessions, by (environment, project, ticket).
+    workers: BTreeMap<(String, String, String), PaneId>,
 }
 
 impl ProjectsData {
-    /// Questions assigned to you, across every environment.
+    /// What waits on you, across every environment: questions assigned to you, and as a lead,
+    /// milestones and tickets to review.
     pub(super) fn waiting_count(&self) -> usize {
         self.envs
             .values()
-            .filter_map(|e| Some(pj::questions_for(e.login.as_deref()?, &e.projects).len()))
+            .filter_map(|e| {
+                let login = e.login.as_deref()?;
+                let reviews: usize = e
+                    .projects
+                    .iter()
+                    .filter(|p| p.file.lead.eq_ignore_ascii_case(login))
+                    .map(|p| {
+                        let (m, t) = pj::to_review(p);
+                        m + t
+                    })
+                    .sum();
+                Some(pj::questions_for(login, &e.projects).len() + reviews)
+            })
             .sum()
     }
+}
+
+/// Where resources go: a project, by environment and slug.
+#[derive(Clone)]
+struct Target {
+    env: String,
+    slug: String,
+}
+
+/// What a resource row's Rename does.
+type Rename = dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>);
+
+/// The choices Start work asks for.
+struct WorkChoice {
+    skill: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+    repo: String,
 }
 
 impl Workspace {
@@ -114,6 +152,8 @@ impl Workspace {
             self.projects = Some(ProjectsTab {
                 page: Page::Home,
                 show_all: false,
+                show_rejected: false,
+                show_claude: true,
             });
         }
         self.projects_data.next_fetch = None;
@@ -127,7 +167,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// An environment's `[projects] repo` changed: read them all again.
+    /// An environment's projects repo changed: read them all again.
     pub(super) fn projects_config_changed(&mut self, cx: &mut Context<Self>) {
         self.projects_data.next_fetch = None;
         cx.notify();
@@ -140,32 +180,46 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Every second: the checkouts when they're due (on open, then every 5 minutes), and the
-    /// draft shown, which its Claude session is writing.
+    fn tab_flag(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut ProjectsTab)) {
+        if let Some(tab) = &mut self.projects {
+            f(tab);
+        }
+        cx.notify();
+    }
+
+    /// Every second: the checkouts' files while the tab shows (sessions write to them), and a
+    /// fetch when one is due (on open, then every 5 minutes).
     pub(super) fn projects_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(Page::Draft { dir, .. }) = self.projects.as_ref().map(|t| t.page.clone()) {
-            let fresh = repo::load(&dir).map_err(|e| e.to_string());
-            if self.projects_data.preview.as_ref() != Some(&(dir.clone(), fresh.clone())) {
-                self.projects_data.preview = Some((dir, fresh));
-                cx.notify();
+        if self.projects.is_some()
+            && !self.projects_data.fetching
+            && self
+                .projects_data
+                .next_read
+                .is_none_or(|t| Instant::now() >= t)
+        {
+            self.projects_data.next_read = Some(Instant::now() + READ_EVERY);
+            for e in self.projects_data.envs.values_mut().filter(|e| e.fetched) {
+                read_checkout(e);
             }
+            cx.notify();
         }
         let data = &self.projects_data;
         if data.fetching || data.next_fetch.is_some_and(|t| Instant::now() < t) {
             return;
         }
+        let root = self.hydra.paths.root().to_path_buf();
         let jobs: Vec<(String, String, PathBuf, Option<String>)> = self
             .hydra
             .env_names()
             .into_iter()
             .filter_map(|env| {
-                let repo = self.hydra.projects_repo(&env)?;
+                let repo = pj::configured_repo(&root, &env)?;
                 let state = self.hydra.paths.state_dir(&EnvName::parse(&env).ok()?);
                 let login = data
                     .envs
                     .get(&env)
-                    .and_then(|e| e.login.clone())
-                    .filter(|_| data.envs.get(&env).is_some_and(|e| e.repo == repo));
+                    .filter(|e| e.repo == repo)
+                    .and_then(|e| e.login.clone());
                 Some((env, repo, state, login))
             })
             .collect();
@@ -177,9 +231,7 @@ impl Workspace {
             return;
         }
         self.projects_data.fetching = true;
-        let exe = server::get()
-            .and_then(|sv| server::lock(sv.registry()).hydra_exe.clone())
-            .unwrap_or_else(|| PathBuf::from("hydra"));
+        let exe = hydra_exe();
         cx.spawn_in(window, async move |this, cx| {
             let fetched = cx
                 .background_spawn(async move {
@@ -209,6 +261,26 @@ impl Workspace {
             read_checkout(e);
         }
         cx.notify();
+    }
+
+    fn find_project(&self, env: &str, slug: &str) -> Option<&Project> {
+        self.projects_data
+            .envs
+            .get(env)?
+            .projects
+            .iter()
+            .find(|p| p.slug == slug)
+    }
+
+    fn project_dir(&self, env: &str, slug: &str) -> Option<PathBuf> {
+        self.projects_data
+            .envs
+            .get(env)
+            .map(|e| e.checkout.join(slug))
+    }
+
+    fn login_of(&self, env: &str) -> Option<String> {
+        self.projects_data.envs.get(env)?.login.clone()
     }
 
     /// Runs `edit` on the folder of project `slug` in `env`, then reads it again; says what
@@ -246,15 +318,15 @@ impl Workspace {
         r
     }
 
-    // ---- New project (spec §9.1) ----
+    // ---- Starting a project (spec §14) ----
 
     fn new_project(&mut self, env: String, window: &mut Window, cx: &mut Context<Self>) {
         self.text_dialog(
             format!("New project in {env}"),
             String::new(),
             "the project's name",
-            move |ws, name, window, cx| {
-                let (drafts, login) = {
+            move |ws, name, _window, cx| {
+                let (checkout, login) = {
                     let e = ws
                         .projects_data
                         .envs
@@ -263,11 +335,17 @@ impl Workspace {
                     let login = e.login.clone().ok_or(
                         "hydraui doesn't know your GitHub login yet: is gh signed in for this environment?",
                     )?;
-                    (e.drafts.clone(), login)
+                    (e.checkout.clone(), login)
                 };
-                let dir = pj::start_draft(&drafts, &name, &login)?;
+                let slug = pj::new_project(&checkout, &name, &login)?;
                 ws.reload_env(&env, cx);
-                ws.open_draft(env.clone(), dir, true, window, cx);
+                ws.go(
+                    Page::Project {
+                        env: env.clone(),
+                        slug,
+                    },
+                    cx,
+                );
                 Ok(())
             },
             window,
@@ -275,57 +353,576 @@ impl Workspace {
         );
     }
 
-    /// Shows draft `dir`, opening its Claude session if it has none (`fresh`: the draft was
-    /// just started, rather than picked up again).
-    fn open_draft(
+    /// The planning session of project `slug`, if it's running.
+    fn planner(&self, env: &str, slug: &str) -> Option<PaneId> {
+        self.projects_data
+            .planners
+            .get(&(env.to_string(), slug.to_string()))
+            .copied()
+            .filter(|id| self.panes.contains_key(id))
+    }
+
+    /// Gives the planning session of project `slug` `prompt`: typed into it when it's running,
+    /// else as the first prompt of a new one. Shows it beside the project.
+    fn tell_planner(
         &mut self,
-        env: String,
-        dir: PathBuf,
-        fresh: bool,
+        env: &str,
+        slug: &str,
+        prompt: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let alive = self
-            .projects_data
-            .sessions
-            .get(&dir)
-            .is_some_and(|id| self.panes.contains_key(id));
-        if !alive && let Err(e) = self.start_draft_session(&env, &dir, fresh, window, cx) {
+        if let Some(id) = self.planner(env, slug)
+            && let Some(view) = self.panes.get(&id).cloned()
+        {
+            let typed = view.update(cx, |v, cx| v.type_prompt(&prompt, cx));
+            if !typed {
+                window.push_notification(
+                    Notification::error("The planning session isn't running; start it again."),
+                    cx,
+                );
+            }
+        } else if let Err(e) = self.start_planner(env, slug, prompt, window, cx) {
             window.push_notification(Notification::error(e), cx);
+            return;
         }
-        self.projects_data.preview = None;
-        self.go(Page::Draft { env, dir }, cx);
+        self.tab_flag(cx, |t| t.show_claude = true);
     }
 
-    fn start_draft_session(
+    fn start_planner(
         &mut self,
         env: &str,
-        dir: &Path,
-        fresh: bool,
+        slug: &str,
+        prompt: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        let p = repo::load(dir).map_err(|e| e.to_string())?;
+        let dir = self.project_dir(env, slug).ok_or("no such project")?;
+        let name = self
+            .find_project(env, slug)
+            .map(|p| p.file.name.clone())
+            .unwrap_or_else(|| slug.to_string());
         let login = self
-            .projects_data
-            .envs
-            .get(env)
-            .and_then(|e| e.login.clone())
-            .unwrap_or_else(|| p.file.lead.clone());
+            .login_of(env)
+            .ok_or("hydraui doesn't know your GitHub login yet")?;
         let shell = self.shell();
-        let mut request = PaneRequest::new(env, dir.to_path_buf(), shell);
-        let argv = vec!["claude".to_string(), draft_prompt(&p, &login, fresh)];
+        let mut request = PaneRequest::new(env, dir.clone(), shell);
+        let argv = vec!["claude".to_string(), prompt];
         request.command = Some(command_line(shell, &argv));
         let id = self
             .open_terminal_beside(env, request, window, cx)
-            .ok_or_else(|| format!("Open the {env} environment first, then New project again."))?;
+            .ok_or_else(|| format!("Open the {env} environment first, then try again."))?;
+        let view = self
+            .panes
+            .get(&id)
+            .cloned()
+            .ok_or("its terminal didn't open")?;
+        view.update(cx, |v, cx| v.set_name(Some(format!("plan · {name}")), cx));
+        let token = view
+            .read(cx)
+            .mcp_token()
+            .map(str::to_string)
+            .ok_or("its terminal has no MCP token")?;
+        let sv = server::get().ok_or("hydraui's MCP server isn't running")?;
+        server::lock(sv.registry())
+            .project_sessions
+            .insert(token, Session::Plan { dir, login });
+        self.projects_data
+            .planners
+            .insert((env.to_string(), slug.to_string()), id);
+        Ok(())
+    }
+
+    fn start_project(
+        &mut self,
+        env: String,
+        slug: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(p) = self.find_project(&env, &slug) else {
+            return;
+        };
+        let prompt = start_prompt(p);
+        self.tell_planner(&env, &slug, prompt, window, cx);
+    }
+
+    fn create_tickets(
+        &mut self,
+        env: String,
+        slug: String,
+        m: &Milestone,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let prompt = format!(
+            "The lead approved milestone {} \"{}\" ({}). Propose its tickets now with \
+             plan_propose_ticket: each small enough to finish in a few days, each with what to \
+             do and how to tell it's done. Call plan_show first to see what exists and what \
+             was rejected. Then tell the lead they're ready to review in hydraui.",
+            m.id, m.title, m.description
+        );
+        self.tell_planner(&env, &slug, prompt, window, cx);
+    }
+
+    // ---- Review (spec §14) ----
+
+    #[allow(clippy::too_many_arguments)] // What the review is of, and what it says.
+    fn set_review(
+        &mut self,
+        env: &str,
+        slug: &str,
+        item: Item,
+        to: Review,
+        note: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        self.edit_project(
+            env,
+            slug,
+            |dir, _, login| pj::review(dir, &item, to, note, login),
+            window,
+            cx,
+        )
+    }
+
+    fn note_dialog(
+        &mut self,
+        env: String,
+        slug: String,
+        item: Item,
+        title: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.text_dialog(
+            format!("What should change in {}?", item.id()),
+            String::new(),
+            "e.g. split it in two; Claude revises it and proposes it again",
+            move |ws, note, window, cx| {
+                ws.set_review(
+                    &env,
+                    &slug,
+                    item.clone(),
+                    Review::Changes,
+                    &note,
+                    window,
+                    cx,
+                )?;
+                let prompt = format!(
+                    "The lead asked for changes to {} \"{title}\": {note}\n\nRevise it with \
+                     plan_revise (or plan_withdraw it and propose new ones if it should be \
+                     split), then tell the lead it's ready to review again.",
+                    item.id()
+                );
+                ws.tell_planner(&env, &slug, prompt, window, cx);
+                Ok(())
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn reject_dialog(
+        &mut self,
+        env: String,
+        slug: String,
+        item: Item,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.text_dialog(
+            format!("Reject {}", item.id()),
+            String::new(),
+            "why; it stays, marked rejected, so it isn't proposed again",
+            move |ws, reason, window, cx| {
+                ws.set_review(
+                    &env,
+                    &slug,
+                    item.clone(),
+                    Review::Rejected,
+                    &reason,
+                    window,
+                    cx,
+                )
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn edit_milestone_dialog(
+        &mut self,
+        env: String,
+        slug: String,
+        m: Milestone,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.fields_dialog(
+            format!("Edit {}", m.id),
+            vec![
+                ("Title", "the milestone, in a few words", m.title.clone()),
+                (
+                    "Target date",
+                    "YYYY-MM-DD, or empty",
+                    m.target.map(|t| t.to_string()).unwrap_or_default(),
+                ),
+                (
+                    "Description",
+                    "what is true when it's done",
+                    m.description.clone(),
+                ),
+            ],
+            move |ws, v, window, cx| {
+                let id = m.id.clone();
+                ws.edit_project(
+                    &env,
+                    &slug,
+                    |dir, _, _| pj::edit_milestone(dir, &id, &v[0], &v[1], &v[2]),
+                    window,
+                    cx,
+                )
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn edit_ticket_dialog(
+        &mut self,
+        env: String,
+        slug: String,
+        t: Ticket,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.fields_dialog(
+            format!("Edit {}", t.id),
+            vec![
+                ("Title", "the ticket, in one line", t.meta.title.clone()),
+                (
+                    "Description",
+                    "what to do and how to tell it's done",
+                    t.body.trim().to_string(),
+                ),
+            ],
+            move |ws, v, window, cx| {
+                let t = t.clone();
+                ws.edit_project(
+                    &env,
+                    &slug,
+                    |dir, _, _| pj::edit_ticket(dir, &t, &v[0], &v[1]),
+                    window,
+                    cx,
+                )
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Approve, Edit…, Changes…, Reject…, for the lead on an item still to review.
+    fn review_actions(
+        &self,
+        env: &str,
+        slug: &str,
+        item: Item,
+        title: &str,
+        edit: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let id = item.id().to_string();
+        let (e1, s1, i1) = (env.to_string(), slug.to_string(), item.clone());
+        let (e2, s2, i2, t2) = (
+            env.to_string(),
+            slug.to_string(),
+            item.clone(),
+            title.to_string(),
+        );
+        let (e3, s3, i3) = (env.to_string(), slug.to_string(), item);
+        h_flex()
+            .gap_1()
+            .flex_wrap()
+            .child(
+                Button::new(SharedString::from(format!("approve-{id}")))
+                    .label("Approve")
+                    .primary()
+                    .xsmall()
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        let _ =
+                            ws.set_review(&e1, &s1, i1.clone(), Review::Approved, "", window, cx);
+                    })),
+            )
+            .child(
+                Button::new(SharedString::from(format!("edit-{id}")))
+                    .label("Edit…")
+                    .ghost()
+                    .xsmall()
+                    .on_click(cx.listener(move |ws, _, window, cx| edit(ws, window, cx))),
+            )
+            .child(
+                Button::new(SharedString::from(format!("note-{id}")))
+                    .label("Ask Claude…")
+                    .ghost()
+                    .xsmall()
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.note_dialog(e2.clone(), s2.clone(), i2.clone(), t2.clone(), window, cx)
+                    })),
+            )
+            .child(
+                Button::new(SharedString::from(format!("reject-{id}")))
+                    .label("Reject…")
+                    .ghost()
+                    .xsmall()
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.reject_dialog(e3.clone(), s3.clone(), i3.clone(), window, cx)
+                    })),
+            )
+    }
+
+    // ---- Work (spec §14) ----
+
+    fn worker(&self, env: &str, slug: &str, ticket: &str) -> Option<PaneId> {
+        self.projects_data
+            .workers
+            .get(&(env.to_string(), slug.to_string(), ticket.to_string()))
+            .copied()
+            .filter(|id| self.panes.contains_key(id))
+    }
+
+    fn start_work_dialog(
+        &mut self,
+        env: String,
+        slug: String,
+        ticket: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(p) = self.find_project(&env, &slug) else {
+            return;
+        };
+        if p.file.repos.is_empty() {
+            window.push_notification(
+                Notification::error("Set the project's code repos in its Settings first: work happens in a worktree of one of them."),
+                cx,
+            );
+            return;
+        }
+        let repos = p.file.repos.clone();
+        let dir = self.project_dir(&env, &slug).unwrap_or_default();
+        let mut skills = vec!["none".to_string()];
+        let env_claude = EnvName::parse(&env)
+            .ok()
+            .map(|n| self.hydra.paths.state_dir(&n).join("claude"));
+        let mut found: BTreeSet<String> =
+            crate::skills_list::installed(env_claude.as_deref(), &dir)
+                .into_iter()
+                .collect();
+        found.extend(crate::skills_list::installed(
+            Some(&self.hydra.user_home.join(".claude")),
+            &dir,
+        ));
+        skills.extend(found);
+        let select = |items: Vec<String>, window: &mut Window, cx: &mut Context<Self>| {
+            cx.new(|cx| {
+                SelectState::new(items, Some(IndexPath::new(0)), window, cx).searchable(true)
+            })
+        };
+        let skill = select(skills, window, cx);
+        let model = select(MODELS.iter().map(|s| s.to_string()).collect(), window, cx);
+        let effort = select(EFFORTS.iter().map(|s| s.to_string()).collect(), window, cx);
+        let repo = select(repos, window, cx);
+        let workspace = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let row = |label: &'static str, select: &Entity<SelectState<Vec<String>>>| {
+                h_flex()
+                    .gap_3()
+                    .child(div().w(px(90.)).flex_none().text_sm().text_color(color(theme::TEXT_SECONDARY)).child(label))
+                    .child(div().flex_1().child(Select::new(select).small()))
+            };
+            let (skill2, model2, effort2, repo2, ws) = (skill.clone(), model.clone(), effort.clone(), repo.clone(), workspace.clone());
+            let (env, slug, ticket) = (env.clone(), slug.clone(), ticket.clone());
+            dialog
+                .title(format!("Start work on {ticket}"))
+                .w(px(560.))
+                .child(
+                    v_flex()
+                        .gap_3()
+                        .child(row("Skill", &skill))
+                        .child(row("Model", &model))
+                        .child(row("Effort", &effort))
+                        .child(row("Repo", &repo))
+                        .child(muted("hydra makes a fresh worktree of the repo on a branch named after the ticket, and starts Claude there. The session ends by reporting its pull requests here.")),
+                )
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(Button::new("cancel").label("Cancel").on_click(|_, window, cx| window.close_dialog(cx)))
+                        .child(Button::new("start").label("Start work").primary().on_click(move |_, window, cx| {
+                            let pick = |s: &Entity<SelectState<Vec<String>>>, cx: &gpui::App| {
+                                s.read(cx).selected_value().cloned().filter(|v| v != "none" && v != "default")
+                            };
+                            let choice = WorkChoice {
+                                skill: pick(&skill2, cx),
+                                model: pick(&model2, cx),
+                                effort: pick(&effort2, cx),
+                                repo: repo2.read(cx).selected_value().cloned().unwrap_or_default(),
+                            };
+                            window.close_dialog(cx);
+                            let (env, slug, ticket) = (env.clone(), slug.clone(), ticket.clone());
+                            ws.update(cx, |ws, cx| ws.begin_work(env, slug, ticket, choice, window, cx));
+                        })),
+                )
+        });
+    }
+
+    fn begin_work(
+        &mut self,
+        env: String,
+        slug: String,
+        ticket: String,
+        choice: WorkChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let root = self.hydra.paths.root().to_path_buf();
+        match pj::clone_of(&root, &choice.repo) {
+            Some(clone) => self.work_in(env, slug, ticket, choice, clone, window, cx),
+            None => {
+                window.push_notification(
+                    Notification::info(format!(
+                        "Where is {} cloned on this Mac? Pick its folder.",
+                        choice.repo
+                    )),
+                    cx,
+                );
+                self.open_dialog_path(true, window, cx, move |ws, path, window, cx| {
+                    match pj::set_clone(&root, &choice.repo, &path) {
+                        Ok(()) => ws.work_in(env, slug, ticket, choice, path, window, cx),
+                        Err(e) => window.push_notification(Notification::error(e), cx),
+                    }
+                });
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)] // One call site; a struct would only rename them.
+    fn work_in(
+        &mut self,
+        env: String,
+        slug: String,
+        ticket: String,
+        choice: WorkChoice,
+        clone: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(t) = self
+            .find_project(&env, &slug)
+            .and_then(|p| p.tickets.iter().find(|t| t.id == ticket))
+            .cloned()
+        else {
+            return;
+        };
+        window.push_notification(
+            Notification::info(format!("Making a worktree for {ticket}…")),
+            cx,
+        );
+        let exe = hydra_exe();
+        let env_bg = env.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let made = cx
+                .background_spawn(async move { pj::ticket_worktree(&exe, &env_bg, &clone, &t) })
+                .await;
+            let _ = this.update_in(cx, |ws, window, cx| match made {
+                Ok((path, branch)) => {
+                    if let Err(e) =
+                        ws.open_worker(&env, &slug, &ticket, &choice, path, &branch, window, cx)
+                    {
+                        window.push_notification(Notification::error(e), cx);
+                    }
+                }
+                Err(e) => window.push_notification(
+                    Notification::error(format!("Can't make the worktree: {e}")),
+                    cx,
+                ),
+            });
+        })
+        .detach();
+    }
+
+    #[allow(clippy::too_many_arguments)] // One call site; a struct would only rename them.
+    fn open_worker(
+        &mut self,
+        env: &str,
+        slug: &str,
+        ticket: &str,
+        choice: &WorkChoice,
+        path: PathBuf,
+        branch: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let how = (
+            choice.skill.as_deref().unwrap_or(""),
+            choice.model.as_deref().unwrap_or(""),
+            choice.effort.as_deref().unwrap_or(""),
+        );
+        self.edit_project(
+            env,
+            slug,
+            |dir, p, login| {
+                let t = p
+                    .tickets
+                    .iter()
+                    .find(|t| t.id == ticket)
+                    .ok_or("the ticket is gone")?;
+                pj::start_work(dir, t, branch, login, how)
+            },
+            window,
+            cx,
+        )?;
+        let p = self
+            .find_project(env, slug)
+            .ok_or("the project is gone")?
+            .clone();
+        let t = p
+            .tickets
+            .iter()
+            .find(|t| t.id == ticket)
+            .ok_or("the ticket is gone")?
+            .clone();
+        let dir = self.project_dir(env, slug).ok_or("the project is gone")?;
+        let shell = self.shell();
+        let mut request = PaneRequest::new(env, path, shell);
+        let mut argv = vec!["claude".to_string()];
+        if let Some(m) = &choice.model {
+            argv.extend(["--model".to_string(), m.clone()]);
+        }
+        if let Some(e) = &choice.effort {
+            argv.extend(["--effort".to_string(), e.clone()]);
+        }
+        argv.push(work_prompt(
+            &p,
+            &t,
+            branch,
+            &choice.repo,
+            choice.skill.as_deref(),
+        ));
+        request.command = Some(command_line(shell, &argv));
+        let id = self
+            .open_terminal_beside(env, request, window, cx)
+            .ok_or_else(|| format!("Open the {env} environment first, then try again."))?;
         let view = self
             .panes
             .get(&id)
             .cloned()
             .ok_or("its terminal didn't open")?;
         view.update(cx, |v, cx| {
-            v.set_name(Some(format!("new project · {}", p.file.name)), cx)
+            v.set_name(Some(format!("{} · {}", t.id, t.meta.title)), cx)
         });
         let token = view
             .read(cx)
@@ -333,97 +930,41 @@ impl Workspace {
             .map(str::to_string)
             .ok_or("its terminal has no MCP token")?;
         let sv = server::get().ok_or("hydraui's MCP server isn't running")?;
-        server::lock(sv.registry()).drafts.insert(
+        server::lock(sv.registry()).project_sessions.insert(
             token,
-            Draft {
-                dir: dir.to_path_buf(),
-                login,
+            Session::Work {
+                dir,
+                ticket: ticket.to_string(),
             },
         );
-        self.projects_data.sessions.insert(dir.to_path_buf(), id);
+        self.projects_data
+            .workers
+            .insert((env.to_string(), slug.to_string(), ticket.to_string()), id);
+        window.push_notification(
+            Notification::success(format!(
+                "{ticket} is being worked on in its own terminal ({branch})."
+            )),
+            cx,
+        );
         Ok(())
     }
 
-    fn end_draft_session(&mut self, dir: &Path) {
-        self.projects_data.sessions.remove(dir);
-        if let Some(sv) = server::get() {
-            server::lock(sv.registry())
-                .drafts
-                .retain(|_, d| d.dir != dir);
-        }
-        self.projects_data.preview = None;
-    }
+    // ---- Resources ----
 
-    fn create_project(
-        &mut self,
-        env: String,
-        dir: PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(checkout) = self
-            .projects_data
-            .envs
-            .get(&env)
-            .map(|e| e.checkout.clone())
-        else {
-            return;
-        };
-        match pj::create_from_draft(&dir, &checkout) {
-            Ok(slug) => {
-                self.end_draft_session(&dir);
-                self.reload_env(&env, cx);
-                window.push_notification(
-                    Notification::success(
-                        "Project created. Set its members, repos and sync times here; \
-                         it's sent to the repo once sending comes (not sent yet).",
-                    ),
-                    cx,
-                );
-                self.go(Page::Settings { env, slug }, cx);
-            }
-            Err(e) => window.push_notification(Notification::error(e), cx),
-        }
-    }
-
-    fn discard_draft(&mut self, env: String, dir: PathBuf, cx: &mut Context<Self>) {
-        self.end_draft_session(&dir);
-        let _ = std::fs::remove_dir_all(&dir);
-        self.reload_env(&env, cx);
-        self.go(Page::Home, cx);
-    }
-
-    /// The folder `target`'s resources live under.
-    fn target_dir(&self, target: &LinkTarget) -> Option<PathBuf> {
-        match target {
-            LinkTarget::Draft(dir) => Some(dir.clone()),
-            LinkTarget::Project(env, slug) => self
-                .projects_data
-                .envs
-                .get(env)
-                .map(|e| e.checkout.join(slug)),
-        }
-    }
-
-    /// `target`'s resources changed: show them.
-    fn resources_changed(&mut self, target: &LinkTarget, cx: &mut Context<Self>) {
-        if let LinkTarget::Project(env, _) = target {
-            self.reload_env(env, cx);
-        }
-        self.projects_data.preview = None;
-        cx.notify();
+    fn resources_changed(&mut self, target: &Target, cx: &mut Context<Self>) {
+        self.reload_env(&target.env, cx);
     }
 
     /// Attaches `paths`. One file is named first (its own name offered); several keep their
     /// names, to rename from the list.
     fn add_files(
         &mut self,
-        target: LinkTarget,
+        target: Target,
         paths: &[PathBuf],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(dir) = self.target_dir(&target) else {
+        let Some(dir) = self.project_dir(&target.env, &target.slug) else {
             return;
         };
         let files: Vec<PathBuf> = paths.iter().filter(|p| p.is_file()).cloned().collect();
@@ -468,20 +1009,44 @@ impl Workspace {
         self.resources_changed(&target, cx);
     }
 
-    fn pick_file(&mut self, target: LinkTarget, window: &mut Window, cx: &mut Context<Self>) {
+    fn pick_file(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         self.open_dialog_path(false, window, cx, move |ws, path, window, cx| {
             ws.add_files(target, &[path], window, cx)
         })
     }
 
+    fn add_link_dialog(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        self.fields_dialog(
+            "Add a link".into(),
+            vec![
+                ("Link", "https://…", String::new()),
+                (
+                    "What is it?",
+                    "a title, e.g. Figma: share dialog",
+                    String::new(),
+                ),
+            ],
+            move |ws, v, _window, cx| {
+                let dir = ws
+                    .project_dir(&target.env, &target.slug)
+                    .ok_or("This project isn't in the repo any more.")?;
+                pj::add_link(&dir, &v[0], &v[1])?;
+                ws.resources_changed(&target, cx);
+                Ok(())
+            },
+            window,
+            cx,
+        );
+    }
+
     fn rename_file_dialog(
         &mut self,
-        target: LinkTarget,
+        target: Target,
         name: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(dir) = self.target_dir(&target) else {
+        let Some(dir) = self.project_dir(&target.env, &target.slug) else {
             return;
         };
         let stem = Path::new(&name)
@@ -504,13 +1069,13 @@ impl Workspace {
 
     fn rename_link_dialog(
         &mut self,
-        target: LinkTarget,
+        target: Target,
         url: String,
         title: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(dir) = self.target_dir(&target) else {
+        let Some(dir) = self.project_dir(&target.env, &target.slug) else {
             return;
         };
         self.text_dialog(
@@ -527,14 +1092,97 @@ impl Workspace {
         );
     }
 
-    /// Resources as a list: each file and link opens on click and has Rename (spec §8.2).
-    fn resource_list(
-        &self,
-        target: &LinkTarget,
-        p: &Project,
-        files_dir: &Path,
+    /// A dialog with a labelled box per field, each `(label, placeholder, initial)`; Save runs
+    /// `save` with every value, and the dialog stays open showing what's wrong until it
+    /// succeeds. (Two dialogs one after the other don't work: the first's Save closes the
+    /// second.)
+    fn fields_dialog(
+        &mut self,
+        title: String,
+        fields: Vec<(&'static str, &'static str, String)>,
+        save: impl Fn(&mut Self, Vec<String>, &mut Window, &mut Context<Self>) -> Result<(), String>
+        + 'static,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) {
+        let inputs: Vec<(&'static str, Entity<InputState>)> = fields
+            .into_iter()
+            .map(|(label, placeholder, initial)| {
+                let input = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder(placeholder)
+                        .default_value(initial)
+                });
+                (label, input)
+            })
+            .collect();
+        let problem = cx.new(|_| None::<String>);
+        let workspace = cx.entity();
+        let save = std::rc::Rc::new(save);
+        let focused = std::cell::Cell::new(false);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if !focused.replace(true)
+                && let Some((_, first)) = inputs.first()
+            {
+                first.update(cx, |s, cx| s.focus(window, cx));
+            }
+            let shown = problem.read(cx).clone();
+            let (all, p, ws, save) = (
+                inputs.clone(),
+                problem.clone(),
+                workspace.clone(),
+                save.clone(),
+            );
+            let mut body = v_flex().gap_2();
+            for (label, input) in &inputs {
+                body = body
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(color(theme::TEXT_SECONDARY))
+                            .child(*label),
+                    )
+                    .child(Input::new(input));
+            }
+            dialog
+                .title(title.clone())
+                .w(px(640.))
+                .child(body.when_some(shown, |d, e| {
+                    d.child(div().text_sm().text_color(color(theme::RED)).child(e))
+                }))
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(Button::new("save").label("Save").primary().on_click(
+                            move |_, window, cx| {
+                                let values: Vec<String> = all
+                                    .iter()
+                                    .map(|(_, i)| i.read(cx).value().trim().to_string())
+                                    .collect();
+                                match ws.update(cx, |ws, cx| save(ws, values, window, cx)) {
+                                    Ok(()) => window.close_dialog(cx),
+                                    Err(e) => p.update(cx, |p, cx| {
+                                        *p = Some(e);
+                                        cx.notify();
+                                    }),
+                                }
+                            },
+                        )),
+                )
+        });
+    }
+
+    /// Resources as a list: each file and link opens on click and has Rename (spec §8.2).
+    fn resource_list(&self, target: &Target, p: &Project, cx: &mut Context<Self>) -> gpui::Div {
+        let Some(dir) = self.project_dir(&target.env, &target.slug) else {
+            return div();
+        };
         let mut list = v_flex().gap_1();
         let row = |id: String,
                    icon: &'static str,
@@ -567,7 +1215,7 @@ impl Workspace {
                 )
         };
         for f in &p.files {
-            let path = files_dir.join("resources").join(f);
+            let path = dir.join("resources").join(f);
             let (t, name) = (target.clone(), f.clone());
             list = list.child(row(
                 format!("file-{f}"),
@@ -597,123 +1245,37 @@ impl Workspace {
         list
     }
 
-    fn add_link_dialog(&mut self, target: LinkTarget, window: &mut Window, cx: &mut Context<Self>) {
-        self.two_field_dialog(
-            "Add a link".into(),
-            ("Link", "https://…", String::new()),
-            (
-                "What is it?",
-                "a title, e.g. Figma: share dialog",
-                String::new(),
-            ),
-            move |ws, url, title, _window, cx| {
-                let dir = match &target {
-                    LinkTarget::Draft(dir) => dir.clone(),
-                    LinkTarget::Project(env, slug) => ws
-                        .projects_data
-                        .envs
-                        .get(env)
-                        .map(|e| e.checkout.join(slug))
-                        .ok_or("This project isn't in the repo any more.")?,
-                };
-                pj::add_link(&dir, &url, &title)?;
-                if let LinkTarget::Project(env, _) = &target {
-                    ws.reload_env(env, cx);
-                }
-                ws.projects_data.preview = None;
-                cx.notify();
-                Ok(())
-            },
-            window,
-            cx,
-        );
-    }
-
-    /// A dialog with two labelled boxes, each `(label, placeholder, initial)`; Save runs
-    /// `save` with both, and the dialog stays open showing what's wrong until it succeeds.
-    /// (Two dialogs one after the other don't work: the first's Save closes the second.)
-    fn two_field_dialog(
-        &mut self,
-        title: String,
-        first: (&'static str, &'static str, String),
-        second: (&'static str, &'static str, String),
-        save: impl Fn(&mut Self, String, String, &mut Window, &mut Context<Self>) -> Result<(), String>
-        + 'static,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let input = |(_, placeholder, initial): &(&'static str, &'static str, String),
-                     window: &mut Window,
-                     cx: &mut Context<Self>| {
-            let (placeholder, initial) = (*placeholder, initial.clone());
-            cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder(placeholder)
-                    .default_value(initial)
-            })
-        };
-        let (a, b) = (input(&first, window, cx), input(&second, window, cx));
-        let (label_a, label_b) = (first.0, second.0);
-        let problem = cx.new(|_| None::<String>);
-        let workspace = cx.entity();
-        let save = std::rc::Rc::new(save);
-        let focused = std::cell::Cell::new(false);
-        window.open_dialog(cx, move |dialog, window, cx| {
-            if !focused.replace(true) {
-                a.update(cx, |s, cx| s.focus(window, cx));
-            }
-            let shown = problem.read(cx).clone();
-            let (a2, b2, p, ws, save) = (
-                a.clone(),
-                b.clone(),
-                problem.clone(),
-                workspace.clone(),
-                save.clone(),
-            );
-            let label = |text: &'static str| {
-                div()
-                    .text_sm()
-                    .text_color(color(theme::TEXT_SECONDARY))
-                    .child(text)
-            };
-            dialog
-                .title(title.clone())
-                .w(px(640.))
+    fn resources_block(&self, target: &Target, p: &Project, cx: &mut Context<Self>) -> gpui::Div {
+        let mut block = v_flex()
+            .gap_1()
+            .child(section_title("Resources"))
+            .child(self.resource_list(target, p, cx));
+        if p.files.is_empty() && p.links.is_empty() {
+            block = block.child(muted("None yet."));
+        }
+        let (ft, lt) = (target.clone(), target.clone());
+        block.child(
+            h_flex()
+                .gap_2()
                 .child(
-                    v_flex()
-                        .gap_2()
-                        .child(label(label_a))
-                        .child(Input::new(&a))
-                        .child(label(label_b))
-                        .child(Input::new(&b))
-                        .when_some(shown, |d, e| {
-                            d.child(div().text_sm().text_color(color(theme::RED)).child(e))
-                        }),
+                    Button::new("project-add-file")
+                        .label("Add file…")
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.pick_file(ft.clone(), window, cx)
+                        })),
                 )
-                .footer(
-                    h_flex()
-                        .gap_2()
-                        .justify_end()
-                        .child(
-                            Button::new("cancel")
-                                .label("Cancel")
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(Button::new("save").label("Save").primary().on_click(
-                            move |_, window, cx| {
-                                let first = a2.read(cx).value().trim().to_string();
-                                let second = b2.read(cx).value().trim().to_string();
-                                match ws.update(cx, |ws, cx| save(ws, first, second, window, cx)) {
-                                    Ok(()) => window.close_dialog(cx),
-                                    Err(e) => p.update(cx, |p, cx| {
-                                        *p = Some(e);
-                                        cx.notify();
-                                    }),
-                                }
-                            },
-                        )),
-                )
-        });
+                .child(
+                    Button::new("project-add-link")
+                        .label("Add link…")
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.add_link_dialog(lt.clone(), window, cx)
+                        })),
+                ),
+        )
     }
 
     // ---- Rendering ----
@@ -729,23 +1291,64 @@ impl Workspace {
             Page::Milestone { env, slug, id } => self.milestone_page(env, slug, id, cx),
             Page::Settings { env, slug } => self.project_settings_page(env, slug, cx),
             Page::Waiting => self.waiting_page(cx),
-            Page::Draft { env, dir } => return self.draft_page(env, dir, cx),
         };
+        // The planning session sits beside its project's pages.
+        let planner = match &page {
+            Page::Project { env, slug } | Page::Milestone { env, slug, .. }
+                if self.projects.as_ref().is_some_and(|t| t.show_claude) =>
+            {
+                self.planner(env, slug)
+                    .and_then(|id| self.panes.get(&id).cloned())
+            }
+            _ => None,
+        };
+        let main = div()
+            .id("projects-page")
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_y_scroll()
+            .px_6()
+            .py_5()
+            .child(body);
+        let mut row = h_flex().flex_1().min_h_0().child(main);
+        if let Some(view) = planner {
+            row = row.child(
+                v_flex()
+                    .w(px(620.))
+                    .flex_none()
+                    .h_full()
+                    .border_l_1()
+                    .border_color(color(theme::BORDER))
+                    .child(
+                        h_flex()
+                            .px_3()
+                            .py_2()
+                            .gap_2()
+                            .bg(color(theme::SURFACE))
+                            .border_b_1()
+                            .border_color(color(theme::BORDER))
+                            .child(div().text_sm().child("Planning session"))
+                            .child(div().flex_1())
+                            .child(
+                                Button::new("hide-claude")
+                                    .label("Hide")
+                                    .ghost()
+                                    .xsmall()
+                                    .on_click(cx.listener(|ws, _, _, cx| {
+                                        ws.tab_flag(cx, |t| t.show_claude = false)
+                                    })),
+                            ),
+                    )
+                    .child(div().flex_1().min_h_0().child(view)),
+            );
+        }
         v_flex()
             .size_full()
             .bg(color(theme::PANEL))
             .text_color(color(theme::TEXT))
             .child(self.projects_header(&page, cx))
-            .child(
-                div()
-                    .id("projects-page")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px_6()
-                    .py_5()
-                    .child(body),
-            )
+            .child(row)
             .into_any_element()
     }
 
@@ -782,25 +1385,6 @@ impl Workspace {
                         .child(sep())
                         .child(crumb("crumb-w", "Waiting on you".into(), None, cx))
             }
-            Page::Draft { dir, .. } => {
-                let name = self
-                    .projects_data
-                    .preview
-                    .as_ref()
-                    .and_then(|(_, p)| p.as_ref().ok())
-                    .map(|p| p.file.name.clone())
-                    .unwrap_or_else(|| {
-                        dir.file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default()
-                    });
-                trail = trail.child(sep()).child(crumb(
-                    "crumb-d",
-                    format!("New project: {name}"),
-                    None,
-                    cx,
-                ))
-            }
             Page::Project { env, slug } => {
                 trail = trail
                     .child(sep())
@@ -820,7 +1404,7 @@ impl Workspace {
                     .child(sep())
                     .child(crumb("crumb-p", name_of(env, slug), Some(back), cx))
                     .child(sep())
-                    .child(crumb("crumb-m", title, None, cx))
+                    .child(crumb("crumb-m", title, None, cx));
             }
             Page::Settings { env, slug } => {
                 let back = Page::Project {
@@ -831,10 +1415,17 @@ impl Workspace {
                     .child(sep())
                     .child(crumb("crumb-p", name_of(env, slug), Some(back), cx))
                     .child(sep())
-                    .child(crumb("crumb-s", "Settings".into(), None, cx))
+                    .child(crumb("crumb-s", "Settings".into(), None, cx));
             }
         }
         let waiting = self.projects_data.waiting_count();
+        let planner_hidden = match page {
+            Page::Project { env, slug } | Page::Milestone { env, slug, .. } => {
+                self.planner(env, slug).is_some()
+                    && self.projects.as_ref().is_some_and(|t| !t.show_claude)
+            }
+            _ => false,
+        };
         h_flex()
             .px_6()
             .py_3()
@@ -850,6 +1441,17 @@ impl Workspace {
                         .text_xs()
                         .text_color(color(theme::TEXT_MUTED))
                         .child("Fetching…"),
+                )
+            })
+            .when(planner_hidden, |d| {
+                d.child(
+                    Button::new("show-claude")
+                        .label("Show planning session")
+                        .ghost()
+                        .small()
+                        .on_click(
+                            cx.listener(|ws, _, _, cx| ws.tab_flag(cx, |t| t.show_claude = true)),
+                        ),
                 )
             })
             .child(
@@ -874,27 +1476,17 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn find_project(&self, env: &str, slug: &str) -> Option<&Project> {
-        self.projects_data
-            .envs
-            .get(env)?
-            .projects
-            .iter()
-            .find(|p| p.slug == slug)
-    }
-
     fn projects_home(&self, show_all: bool, cx: &mut Context<Self>) -> AnyElement {
         let mut out = v_flex().gap_6();
         if self.projects_data.envs.is_empty() {
             return out
                 .child(
-                    v_flex()
-                        .gap_2()
-                        .child(div().text_lg().child("No projects repo yet"))
-                        .child(div().text_color(color(theme::TEXT_SECONDARY)).child(
-                            "Set one in Settings → an environment → Projects (owner/name on \
-                                 GitHub, e.g. iov42/iov-projects). Its projects show here.",
-                        )),
+                    v_flex().gap_2().child(div().text_lg().child("No projects repo yet")).child(
+                        div().text_color(color(theme::TEXT_SECONDARY)).child(
+                            "Set one in Settings → an environment → Projects (owner/name on GitHub, e.g. \
+                             iov42/iov-projects). Its projects show here.",
+                        ),
+                    ),
                 )
                 .into_any_element();
         }
@@ -935,35 +1527,12 @@ impl Workspace {
             } else if !e.fetched {
                 section = section.child(muted("Fetching the repo…"));
             }
-            for dir in &e.draft_dirs {
-                let (env_d, dir_d) = (env.clone(), dir.clone());
-                let name = repo::load(dir)
-                    .map(|p| p.file.name)
-                    .unwrap_or_else(|_| dir.display().to_string());
-                section = section.child(
-                    h_flex()
-                        .id(SharedString::from(format!("draft-{}", dir.display())))
-                        .gap_3()
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(color(theme::AMBER))
-                        .bg(color(theme::AMBER_TINT))
-                        .cursor_pointer()
-                        .child(div().child(format!("Draft: {name}")))
-                        .child(muted("not created yet: open it to carry on"))
-                        .on_click(cx.listener(move |ws, _, window, cx| {
-                            ws.open_draft(env_d.clone(), dir_d.clone(), false, window, cx)
-                        })),
-                );
-            }
             let shown: Vec<&Project> = e
                 .projects
                 .iter()
                 .filter(|p| show_all || p.file.status == ProjectStatus::Active)
                 .collect();
-            if e.fetched && shown.is_empty() && e.draft_dirs.is_empty() {
+            if e.fetched && shown.is_empty() {
                 section = section.child(muted("No active projects. New project starts one."));
             }
             let mut grid = h_flex().flex_wrap().gap_4().items_start();
@@ -991,12 +1560,9 @@ impl Workspace {
                 } else {
                     "Show paused and done projects too"
                 })
-                .on_click(cx.listener(|ws, _, _, cx| {
-                    if let Some(t) = &mut ws.projects {
-                        t.show_all = !t.show_all;
-                    }
-                    cx.notify();
-                })),
+                .on_click(
+                    cx.listener(|ws, _, _, cx| ws.tab_flag(cx, |t| t.show_all = !t.show_all)),
+                ),
         )
         .into_any_element()
     }
@@ -1017,6 +1583,7 @@ impl Workspace {
             .iter()
             .filter(|d| d.is_open() && d.meta.assigned_to.eq_ignore_ascii_case(login))
             .count();
+        let (rm, rt) = pj::to_review(p);
         let unsent = pj::project_unsent(&e.pending, &p.slug);
         let role = if p.file.lead.eq_ignore_ascii_case(login) {
             "you lead".to_string()
@@ -1067,10 +1634,19 @@ impl Workspace {
                     .text_color(color(theme::TEXT_SECONDARY))
                     .child(role),
             );
-        if p.milestones.is_empty() {
-            card = card.child(muted("No milestones yet."));
+        let live: Vec<&Milestone> = p
+            .milestones
+            .iter()
+            .filter(|m| m.review != Review::Rejected)
+            .collect();
+        if live.is_empty() {
+            card = card.child(muted(if p.spec.trim().is_empty() {
+                "Not started: attach resources, then Start project."
+            } else {
+                "No milestones yet."
+            }));
         }
-        for m in &p.milestones {
+        for m in live {
             let c = counts.get(&m.id).copied().unwrap_or_default();
             card = card.child(
                 v_flex()
@@ -1085,6 +1661,13 @@ impl Workspace {
                                     .truncate()
                                     .child(format!("{} {}", m.id, m.title)),
                             )
+                            .when(m.review != Review::Approved, |d| {
+                                d.child(
+                                    div()
+                                        .text_color(color(theme::AMBER))
+                                        .child(m.review.label()),
+                                )
+                            })
                             .when(is_late(m, &c, today), |d| {
                                 d.child(div().text_color(color(theme::RED)).child("late"))
                             })
@@ -1099,12 +1682,20 @@ impl Workspace {
         }
         let mut foot = h_flex()
             .gap_3()
+            .flex_wrap()
             .text_xs()
             .text_color(color(theme::TEXT_SECONDARY));
         foot = foot.child(format!(
             "{open} open question{}",
             if open == 1 { "" } else { "s" }
         ));
+        if rm + rt > 0 {
+            foot = foot.child(
+                div()
+                    .text_color(color(theme::AMBER))
+                    .child(format!("{} to review", rm + rt)),
+            );
+        }
         if mine > 0 {
             foot = foot.child(
                 div()
@@ -1130,13 +1721,21 @@ impl Workspace {
             return muted("This project isn't in the repo any more.").into_any_element();
         };
         let login = e.login.clone().unwrap_or_default();
+        let lead = p.file.lead.eq_ignore_ascii_case(&login);
+        let show_rejected = self.projects.as_ref().is_some_and(|t| t.show_rejected);
         let today = today();
         let counts = milestone_counts(p, |t| t.meta.status);
         let (env_s, slug_s) = (env.to_string(), slug.to_string());
+        let target = Target {
+            env: env_s.clone(),
+            slug: slug_s.clone(),
+        };
+        let planning = self.planner(env, slug).is_some();
 
         let title = h_flex()
             .gap_3()
             .items_baseline()
+            .flex_wrap()
             .child(div().text_2xl().child(p.file.name.clone()))
             .child(
                 div()
@@ -1199,74 +1798,169 @@ impl Workspace {
                     .on_click(cx.listener(move |ws, _, _, cx| ws.go(page.clone(), cx)))
             });
 
-        // Milestones, in order (spec §8.2).
-        let mut row = h_flex().gap_3().items_start().flex_wrap();
-        for m in &p.milestones {
-            let c = counts.get(&m.id).copied().unwrap_or_default();
-            let late = is_late(m, &c, &today);
-            let page = Page::Milestone {
-                env: env_s.clone(),
-                slug: slug_s.clone(),
-                id: m.id.clone(),
-            };
-            let done = m.status == MilestoneStatus::Done || (c.total() > 0 && c.done == c.total());
-            row = row.child(
+        let mut page = v_flex().gap_6().max_w(px(1200.)).child(title);
+
+        // Not started: resources first, then Start project (spec §14).
+        let started = !p.spec.trim().is_empty() || !p.milestones.is_empty();
+        if !started {
+            let (env_b, slug_b) = (env_s.clone(), slug_s.clone());
+            page = page.child(
                 v_flex()
-                    .id(SharedString::from(format!("milestone-{}", m.id)))
-                    .w(px(250.))
-                    .gap_2()
-                    .p_3()
+                    .gap_3()
+                    .p_4()
                     .rounded_lg()
-                    .bg(color(if m.status == MilestoneStatus::Active {
-                        theme::RAISED
-                    } else {
-                        theme::SURFACE
-                    }))
+                    .bg(color(theme::TEAL_TINT))
                     .border_1()
-                    .border_color(color(if late {
-                        theme::RED_BORDER
-                    } else if m.status == MilestoneStatus::Active {
-                        theme::TEAL_BORDER
-                    } else {
-                        theme::BORDER
-                    }))
-                    .cursor_pointer()
-                    .hover(|s| s.border_color(color(theme::TEAL)))
-                    .on_click(cx.listener(move |ws, _, _, cx| ws.go(page.clone(), cx)))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_family("monospace")
-                                    .text_color(color(theme::TEXT_MUTED))
-                                    .child(m.id.clone()),
-                            )
-                            .child(div().flex_1())
-                            .when(done, |d| {
-                                d.child(pill("done", theme::GREEN, theme::GREEN_TINT))
-                            })
-                            .when(late, |d| d.child(pill("late", theme::RED, theme::RED_TINT))),
-                    )
-                    .child(div().child(m.title.clone()))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(color(theme::TEXT_SECONDARY))
-                            .child(
-                                m.target
-                                    .map(|t| format!("target {t}"))
-                                    .unwrap_or_else(|| "no target date".into()),
+                    .border_color(color(theme::TEAL_BORDER))
+                    .id("start-project")
+                    .drag_over::<ExternalPaths>(|s, _, _, _| s.border_color(color(theme::TEAL)))
+                    .on_drop({
+                        let t = target.clone();
+                        cx.listener(move |ws, paths: &ExternalPaths, window, cx| ws.add_files(t.clone(), paths.paths(), window, cx))
+                    })
+                    .child(div().text_lg().child("Start the project"))
+                    .child(div().text_sm().text_color(color(theme::TEXT_SECONDARY)).child(
+                        "1. Attach what Claude should read: files (drop them here) and links. \
+                         2. Start project: a Claude session reads them, writes the spec and proposes \
+                         milestones for you to review here.",
+                    ))
+                    .child(self.resources_block(&target, p, cx))
+                    .when(lead, |d| {
+                        d.child(
+                            h_flex().child(
+                                Button::new("start-project-button")
+                                    .label(if planning { "Start project (session running)" } else { "Start project" })
+                                    .primary()
+                                    .on_click(cx.listener(move |ws, _, window, cx| ws.start_project(env_b.clone(), slug_b.clone(), window, cx))),
                             ),
-                    )
-                    .child(status_bar(&c, 8.))
-                    .child(counts_line(&c)),
+                        )
+                    })
+                    .when(!lead, |d| d.child(muted(&format!("{} (the lead) starts it.", p.file.lead)))),
             );
         }
-        if p.milestones.is_empty() {
-            row = row.child(muted("No milestones yet."));
+
+        // What needs review (spec §14).
+        let (rm, rt) = pj::to_review(p);
+        let changes = p
+            .milestones
+            .iter()
+            .filter(|m| m.review == Review::Changes)
+            .count()
+            + p.tickets
+                .iter()
+                .filter(|t| t.meta.review == Review::Changes)
+                .count();
+        if rm + rt + changes > 0 {
+            let mut where_tickets: BTreeMap<&str, usize> = BTreeMap::new();
+            for t in p.tickets.iter().filter(|t| t.meta.review.waiting()) {
+                *where_tickets.entry(t.meta.milestone.as_str()).or_default() += 1;
+            }
+            let mut bar = h_flex()
+                .gap_3()
+                .flex_wrap()
+                .px_4()
+                .py_3()
+                .rounded_lg()
+                .bg(color(theme::AMBER_TINT))
+                .border_1()
+                .border_color(color(theme::AMBER))
+                .child(div().text_color(color(theme::AMBER)).child(format!(
+                    "To review: {rm} milestone{} · {rt} ticket{}",
+                    if rm == 1 { "" } else { "s" },
+                    if rt == 1 { "" } else { "s" }
+                )));
+            if changes > 0 {
+                bar = bar.child(
+                    div()
+                        .text_sm()
+                        .text_color(color(theme::TEXT_SECONDARY))
+                        .child(format!("{changes} with Claude for changes")),
+                );
+            }
+            for (mid, n) in where_tickets {
+                let page = Page::Milestone {
+                    env: env_s.clone(),
+                    slug: slug_s.clone(),
+                    id: mid.to_string(),
+                };
+                bar = bar.child(
+                    Button::new(SharedString::from(format!("review-in-{mid}")))
+                        .label(format!(
+                            "{mid}: {n} ticket{}",
+                            if n == 1 { "" } else { "s" }
+                        ))
+                        .xsmall()
+                        .on_click(cx.listener(move |ws, _, _, cx| ws.go(page.clone(), cx))),
+                );
+            }
+            page = page.child(bar);
         }
+
+        // Milestones, in order (spec §8.2).
+        let mut row = h_flex().gap_3().items_start().flex_wrap();
+        let rejected = p
+            .milestones
+            .iter()
+            .filter(|m| m.review == Review::Rejected)
+            .count();
+        for m in p
+            .milestones
+            .iter()
+            .filter(|m| show_rejected || m.review != Review::Rejected)
+        {
+            let c = counts.get(&m.id).copied().unwrap_or_default();
+            row = row.child(self.milestone_card(env, p, m, &c, &today, lead, cx));
+        }
+        if p.milestones.is_empty() && started {
+            row = row.child(muted(if planning {
+                "Claude is working on them…"
+            } else {
+                "No milestones yet."
+            }));
+        }
+        let mut ms_section =
+            v_flex()
+                .gap_2()
+                .child(h_flex().gap_3().child(section_title("Milestones")).when(
+                    rejected > 0,
+                    |d| {
+                        d.child(
+                            div()
+                                .id("toggle-rejected")
+                                .text_xs()
+                                .text_color(color(theme::TEXT_MUTED))
+                                .cursor_pointer()
+                                .child(if show_rejected {
+                                    format!("hide {rejected} rejected")
+                                } else {
+                                    format!("show {rejected} rejected")
+                                })
+                                .on_click(cx.listener(|ws, _, _, cx| {
+                                    ws.tab_flag(cx, |t| t.show_rejected = !t.show_rejected)
+                                })),
+                        )
+                    },
+                ));
+        ms_section = ms_section.child(row);
+        if started && lead && !planning {
+            let (env_b, slug_b) = (env_s.clone(), slug_s.clone());
+            ms_section = ms_section.child(
+                h_flex().child(
+                    Button::new("resume-planning")
+                        .label("Open planning session")
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            let prompt = "Pick up planning this project: call plan_show, sum up what's \
+                                          approved, what's waiting for review and what had changes asked, \
+                                          and act on any notes."
+                                .to_string();
+                            ws.tell_planner(&env_b, &slug_b, prompt, window, cx)
+                        })),
+                ),
+            );
+        }
+        page = page.child(ms_section);
 
         // Decisions at a glance (spec §8.2).
         let now = pj::now_secs();
@@ -1276,7 +1970,9 @@ impl Workspace {
         answered.sort_by_key(|d| {
             std::cmp::Reverse(d.meta.decided_at.map(|t| t.to_string()).unwrap_or_default())
         });
-        let mut decisions = v_flex().gap_2().child(section_title("Outstanding"));
+        let mut decisions = v_flex()
+            .gap_2()
+            .child(section_title("Outstanding questions"));
         if open.is_empty() {
             decisions = decisions.child(muted("Nothing waiting."));
         }
@@ -1381,79 +2077,181 @@ impl Workspace {
             );
         }
 
-        // Spec and resources.
-        let target = LinkTarget::Project(env_s.clone(), slug_s.clone());
-        let mut resources = v_flex()
-            .gap_1()
-            .child(section_title("Resources"))
-            .child(self.resource_list(&target, p, &e.checkout.join(&p.slug), cx));
-        if p.files.is_empty() && p.links.is_empty() {
-            resources = resources.child(muted("None yet."));
+        let mut side = v_flex().w(px(380.)).flex_none().gap_6().child(progress);
+        if started {
+            side = side.child(self.resources_block(&target, p, cx));
         }
-        let (file_target, link_target) = (target.clone(), target);
-        resources = resources.child(
+        page = page.child(
             h_flex()
-                .gap_2()
-                .child(
-                    Button::new("project-add-file")
-                        .label("Add file…")
-                        .ghost()
-                        .small()
-                        .on_click(cx.listener(move |ws, _, window, cx| {
-                            ws.pick_file(file_target.clone(), window, cx)
-                        })),
-                )
-                .child(
-                    Button::new("project-add-link")
-                        .label("Add link…")
-                        .ghost()
-                        .small()
-                        .on_click(cx.listener(move |ws, _, window, cx| {
-                            ws.add_link_dialog(link_target.clone(), window, cx)
-                        })),
-                ),
+                .gap_6()
+                .items_start()
+                .child(v_flex().flex_1().min_w_0().child(decisions))
+                .child(side),
         );
-        let spec =
-            v_flex()
-                .gap_2()
-                .child(section_title("Spec"))
-                .child(if p.spec.trim().is_empty() {
-                    muted("No spec yet.").into_any_element()
+        page.child(v_flex().gap_2().child(section_title("Spec")).child(
+            if p.spec.trim().is_empty() {
+                muted(if planning {
+                    "Claude is writing it…"
                 } else {
-                    gpui_base::TextView::markdown(
-                        SharedString::from(format!("spec-{slug}")),
-                        p.spec.clone(),
-                    )
-                    .selectable(true)
-                    .into_any_element()
-                });
+                    "No spec yet."
+                })
+                .into_any_element()
+            } else {
+                gpui_base::TextView::markdown(
+                    SharedString::from(format!("spec-{slug}")),
+                    p.spec.clone(),
+                )
+                .selectable(true)
+                .into_any_element()
+            },
+        ))
+        .into_any_element()
+    }
 
-        v_flex()
-            .gap_6()
-            .max_w(px(1200.))
-            .child(title)
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(section_title("Milestones"))
-                    .child(row),
-            )
+    #[allow(clippy::too_many_arguments)] // The card's inputs, all read-only.
+    fn milestone_card(
+        &self,
+        env: &str,
+        p: &Project,
+        m: &Milestone,
+        c: &Counts,
+        today: &str,
+        lead: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (env_s, slug_s) = (env.to_string(), p.slug.clone());
+        let late = is_late(m, c, today);
+        let done = m.status == MilestoneStatus::Done || (c.total() > 0 && c.done == c.total());
+        let waiting = m.review.waiting();
+        let page = Page::Milestone {
+            env: env_s.clone(),
+            slug: slug_s.clone(),
+            id: m.id.clone(),
+        };
+        let edge = if waiting {
+            theme::AMBER
+        } else if m.review == Review::Rejected {
+            theme::BORDER_SUBTLE
+        } else if late {
+            theme::RED_BORDER
+        } else if m.status == MilestoneStatus::Active {
+            theme::TEAL_BORDER
+        } else {
+            theme::BORDER
+        };
+        let mut card = v_flex()
+            .id(SharedString::from(format!("milestone-{}", m.id)))
+            .w(px(270.))
+            .gap_2()
+            .p_3()
+            .rounded_lg()
+            .bg(color(if m.status == MilestoneStatus::Active {
+                theme::RAISED
+            } else {
+                theme::SURFACE
+            }))
+            .border_1()
+            .border_color(color(edge))
+            .when(m.review == Review::Rejected, |d| d.opacity(0.6))
             .child(
                 h_flex()
-                    .gap_6()
-                    .items_start()
-                    .child(v_flex().flex_1().min_w_0().child(decisions))
+                    .gap_2()
                     .child(
-                        v_flex()
-                            .w(px(380.))
-                            .flex_none()
-                            .gap_6()
-                            .child(progress)
-                            .child(resources),
+                        div()
+                            .text_xs()
+                            .font_family("monospace")
+                            .text_color(color(theme::TEXT_MUTED))
+                            .child(m.id.clone()),
+                    )
+                    .child(div().flex_1())
+                    .when(m.review != Review::Approved, |d| {
+                        d.child(review_pill(m.review))
+                    })
+                    .when(done, |d| {
+                        d.child(pill("done", theme::GREEN, theme::GREEN_TINT))
+                    })
+                    .when(late && m.review == Review::Approved, |d| {
+                        d.child(pill("late", theme::RED, theme::RED_TINT))
+                    }),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("open-milestone-{}", m.id)))
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(color(theme::TEAL)))
+                    .child(m.title.clone())
+                    .on_click(cx.listener(move |ws, _, _, cx| ws.go(page.clone(), cx))),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(color(theme::TEXT_SECONDARY))
+                    .child(
+                        m.target
+                            .map(|t| format!("target {t}"))
+                            .unwrap_or_else(|| "no target date".into()),
                     ),
             )
-            .child(spec)
-            .into_any_element()
+            .when(!m.description.is_empty(), |d| {
+                d.child(
+                    div()
+                        .text_xs()
+                        .text_color(color(theme::TEXT_SECONDARY))
+                        .child(m.description.clone()),
+                )
+            })
+            .when(
+                !m.review_note.is_empty() && m.review != Review::Approved,
+                |d| {
+                    d.child(
+                        div()
+                            .text_xs()
+                            .text_color(color(theme::AMBER))
+                            .child(format!("“{}”", m.review_note)),
+                    )
+                },
+            );
+        if m.review == Review::Approved {
+            card = card.child(status_bar(c, 8.)).child(counts_line(c));
+        }
+        if lead && waiting {
+            let mc = m.clone();
+            let (e, s) = (env_s.clone(), slug_s.clone());
+            card = card.child(self.review_actions(
+                env,
+                &p.slug,
+                Item::Milestone(m.id.clone()),
+                &m.title,
+                move |ws, window, cx| {
+                    ws.edit_milestone_dialog(e.clone(), s.clone(), mc.clone(), window, cx)
+                },
+                cx,
+            ));
+        }
+        if lead && m.review == Review::Approved {
+            let has_tickets = p
+                .tickets
+                .iter()
+                .any(|t| t.meta.milestone == m.id && t.meta.review != Review::Rejected);
+            let mc = m.clone();
+            card = card.child(
+                h_flex().child(
+                    Button::new(SharedString::from(format!("tickets-{}", m.id)))
+                        .label(if has_tickets {
+                            "More tickets"
+                        } else {
+                            "Create tickets"
+                        })
+                        .small()
+                        .when(!has_tickets, |b| b.primary())
+                        .when(has_tickets, |b| b.ghost())
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.create_tickets(env_s.clone(), slug_s.clone(), &mc, window, cx)
+                        })),
+                ),
+            );
+        }
+        card.into_any_element()
     }
 
     fn question_row(
@@ -1574,19 +2372,21 @@ impl Workspace {
             .find_project(&env, &slug)
             .map(|p| p.file.lead.clone())
             .unwrap_or_default();
-        self.two_field_dialog(
+        self.fields_dialog(
             "Ask a question".into(),
-            ("Question", "a decision that needs making", String::new()),
-            (
-                "Who decides?",
-                "their GitHub login; the lead when empty",
-                lead,
-            ),
-            move |ws, question, who, window, cx| {
+            vec![
+                ("Question", "a decision that needs making", String::new()),
+                (
+                    "Who decides?",
+                    "their GitHub login; the lead when empty",
+                    lead,
+                ),
+            ],
+            move |ws, v, window, cx| {
                 ws.edit_project(
                     &env,
                     &slug,
-                    |dir, p, login| pj::ask(dir, p, &question, &who, login).map(|_| ()),
+                    |dir, p, login| pj::ask(dir, p, &v[0], &v[1], login).map(|_| ()),
                     window,
                     cx,
                 )
@@ -1612,6 +2412,10 @@ impl Workspace {
         let Some(m) = p.milestones.iter().find(|m| m.id == id) else {
             return muted("This milestone isn't in the project any more.").into_any_element();
         };
+        let login = e.login.clone().unwrap_or_default();
+        let lead = p.file.lead.eq_ignore_ascii_case(&login);
+        let member = p.file.is_on(&login);
+        let show_rejected = self.projects.as_ref().is_some_and(|t| t.show_rejected);
         let c = milestone_counts(p, |t| t.meta.status)
             .get(id)
             .copied()
@@ -1646,44 +2450,97 @@ impl Workspace {
                     )
                 }))
         };
-        let head = v_flex()
-            .gap_2()
-            .child(
-                h_flex()
-                    .gap_3()
-                    .items_baseline()
-                    .child(div().text_2xl().child(m.title.clone()))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(color(theme::TEXT_SECONDARY))
-                            .child(
-                                m.target
-                                    .map(|t| format!("target {t}"))
-                                    .unwrap_or_else(|| "no target date".into()),
-                            ),
-                    )
-                    .when(late, |d| d.child(pill("late", theme::RED, theme::RED_TINT)))
-                    .child(div().flex_1())
-                    .child(new_button("New ticket", TicketKind::Feature, cx))
-                    .child(new_button("New bug", TicketKind::Bug, cx)),
-            )
-            .when(!m.description.is_empty(), |d| {
-                d.child(
+        let (rm_t, rejected) = (
+            p.tickets
+                .iter()
+                .filter(|t| t.meta.milestone == id && t.meta.review.waiting())
+                .count(),
+            p.tickets
+                .iter()
+                .filter(|t| t.meta.milestone == id && t.meta.review == Review::Rejected)
+                .count(),
+        );
+        let mut head = v_flex().gap_2().child(
+            h_flex()
+                .gap_3()
+                .items_baseline()
+                .flex_wrap()
+                .child(div().text_2xl().child(m.title.clone()))
+                .child(
                     div()
                         .text_sm()
                         .text_color(color(theme::TEXT_SECONDARY))
-                        .child(m.description.clone()),
+                        .child(
+                            m.target
+                                .map(|t| format!("target {t}"))
+                                .unwrap_or_else(|| "no target date".into()),
+                        ),
                 )
-            })
+                .when(m.review != Review::Approved, |d| {
+                    d.child(review_pill(m.review))
+                })
+                .when(late, |d| d.child(pill("late", theme::RED, theme::RED_TINT)))
+                .child(div().flex_1())
+                .when(lead && m.review == Review::Approved, |d| {
+                    let (e2, s2, mc) = (env.to_string(), slug.to_string(), m.clone());
+                    d.child(
+                        Button::new("milestone-create-tickets")
+                            .label("Create tickets")
+                            .small()
+                            .primary()
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                ws.create_tickets(e2.clone(), s2.clone(), &mc, window, cx)
+                            })),
+                    )
+                })
+                .child(new_button("New ticket", TicketKind::Feature, cx))
+                .child(new_button("New bug", TicketKind::Bug, cx)),
+        );
+        if !m.description.is_empty() {
+            head = head.child(
+                div()
+                    .text_sm()
+                    .text_color(color(theme::TEXT_SECONDARY))
+                    .child(m.description.clone()),
+            );
+        }
+        head = head
             .child(div().w(px(480.)).child(status_bar(&c, 10.)))
             .child(counts_line(&c));
+        if rm_t > 0 {
+            head = head.child(notice(
+                &format!(
+                    "{rm_t} ticket{} to review: they're in Todo, marked to review.",
+                    if rm_t == 1 { "" } else { "s" }
+                ),
+                theme::AMBER,
+                theme::AMBER_TINT,
+            ));
+        }
+        if rejected > 0 {
+            head = head.child(
+                div()
+                    .id("toggle-rejected-tickets")
+                    .text_xs()
+                    .text_color(color(theme::TEXT_MUTED))
+                    .cursor_pointer()
+                    .child(if show_rejected {
+                        format!("hide {rejected} rejected")
+                    } else {
+                        format!("show {rejected} rejected")
+                    })
+                    .on_click(cx.listener(|ws, _, _, cx| {
+                        ws.tab_flag(cx, |t| t.show_rejected = !t.show_rejected)
+                    })),
+            );
+        }
         let mut board = h_flex().gap_3().items_start();
         for status in TicketStatus::BOARD {
             let tickets: Vec<&Ticket> = p
                 .tickets
                 .iter()
                 .filter(|t| t.meta.milestone == id && t.meta.status == status)
+                .filter(|t| show_rejected || t.meta.review != Review::Rejected)
                 .collect();
             let mut column = v_flex()
                 .flex_1()
@@ -1711,19 +2568,22 @@ impl Workspace {
                         ),
                 );
             for t in tickets {
-                column = column.child(self.ticket_card(env, e, p, t, cx));
+                column = column.child(self.ticket_card(env, e, p, t, lead, member, cx));
             }
             board = board.child(column);
         }
         v_flex().gap_5().child(head).child(board).into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)] // The card's inputs, all read-only.
     fn ticket_card(
         &self,
         env: &str,
         e: &EnvProjects,
         p: &Project,
         t: &Ticket,
+        lead: bool,
+        member: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let unsent = pj::ticket_unsent(&e.pending, &p.slug, &t.id);
@@ -1732,20 +2592,24 @@ impl Workspace {
             .iter()
             .filter(|d| d.is_open() && d.meta.ticket == t.id)
             .count();
+        let waiting = t.meta.review.waiting();
         let ws = cx.entity();
-        let (env, slug, ticket) = (env.to_string(), p.slug.clone(), t.clone());
-        v_flex()
+        let (env_s, slug_s) = (env.to_string(), p.slug.clone());
+        let mut card = v_flex()
             .id(SharedString::from(format!("ticket-{}", t.id)))
             .gap_1()
             .p_2()
             .rounded_md()
             .bg(color(theme::RAISED))
             .border_1()
-            .border_color(color(if unsent {
+            .border_color(color(if waiting {
+                theme::AMBER
+            } else if unsent {
                 theme::TEAL_BORDER
             } else {
                 theme::BORDER_SUBTLE
             }))
+            .when(t.meta.review == Review::Rejected, |d| d.opacity(0.6))
             .child(
                 h_flex()
                     .gap_2()
@@ -1763,7 +2627,10 @@ impl Workspace {
                         d.child(pill("chore", theme::TEXT_SECONDARY, theme::SURFACE))
                     })
                     .child(div().flex_1())
-                    .when(unsent, |d| {
+                    .when(t.meta.review != Review::Approved, |d| {
+                        d.child(review_pill(t.meta.review))
+                    })
+                    .when(unsent && t.meta.review == Review::Approved, |d| {
                         d.child(
                             div()
                                 .text_xs()
@@ -1773,6 +2640,25 @@ impl Workspace {
                     }),
             )
             .child(div().text_sm().child(t.meta.title.clone()))
+            .when(waiting && !t.body.trim().is_empty(), |d| {
+                d.child(
+                    div()
+                        .text_xs()
+                        .text_color(color(theme::TEXT_SECONDARY))
+                        .child(first_line(&t.body)),
+                )
+            })
+            .when(
+                !t.meta.review_note.is_empty() && t.meta.review != Review::Approved,
+                |d| {
+                    d.child(
+                        div()
+                            .text_xs()
+                            .text_color(color(theme::AMBER))
+                            .child(format!("“{}”", t.meta.review_note)),
+                    )
+                },
+            )
             .child(
                 h_flex()
                     .gap_2()
@@ -1783,73 +2669,141 @@ impl Workspace {
                     } else {
                         t.meta.assignee.clone()
                     })
+                    .when(!t.meta.branch.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .font_family("monospace")
+                                .truncate()
+                                .child(t.meta.branch.clone()),
+                        )
+                    })
                     .when(questions > 0, |d| {
                         d.child(div().text_color(color(theme::AMBER)).child(format!(
                             "{questions} open question{}",
                             if questions == 1 { "" } else { "s" }
                         )))
                     }),
-            )
-            .context_menu(move |menu, _, _| {
-                let mut menu = menu;
-                for status in [
-                    TicketStatus::Todo,
-                    TicketStatus::InProgress,
-                    TicketStatus::InReview,
-                    TicketStatus::Done,
-                    TicketStatus::Dropped,
-                ] {
-                    if status == ticket.meta.status {
-                        continue;
-                    }
-                    let (ws, env, slug, t) =
-                        (ws.clone(), env.clone(), slug.clone(), ticket.clone());
-                    menu = menu.item(
-                        PopupMenuItem::new(format!("Move to {}", status.label())).on_click(
-                            move |_, window, cx| {
-                                ws.update(cx, |ws, cx| {
-                                    let t = t.clone();
-                                    let _ = ws.edit_project(
-                                        &env,
-                                        &slug,
-                                        |dir, _, _| pj::move_ticket(dir, &t, status),
-                                        window,
-                                        cx,
-                                    );
-                                })
-                            },
+            );
+        for (i, url) in t.meta.prs.iter().enumerate() {
+            let u = url.clone();
+            card = card.child(
+                div()
+                    .id(SharedString::from(format!("pr-{}-{i}", t.id)))
+                    .text_xs()
+                    .text_color(color(theme::TEAL))
+                    .cursor_pointer()
+                    .hover(|s| s.underline())
+                    .truncate()
+                    .child(pr_label(url))
+                    .on_click(move |_, _, cx| cx.open_url(&u)),
+            );
+        }
+        if lead && waiting {
+            let (e2, s2, tc) = (env_s.clone(), slug_s.clone(), t.clone());
+            card = card.child(self.review_actions(
+                env,
+                &p.slug,
+                Item::Ticket(t.id.clone()),
+                &t.meta.title,
+                move |ws, window, cx| {
+                    ws.edit_ticket_dialog(e2.clone(), s2.clone(), tc.clone(), window, cx)
+                },
+                cx,
+            ));
+        }
+        let live = self.worker(env, &p.slug, &t.id);
+        if let Some(id) = live {
+            card = card.child(
+                h_flex().child(
+                    Button::new(SharedString::from(format!("session-{}", t.id)))
+                        .label("Open session")
+                        .xsmall()
+                        .on_click(
+                            cx.listener(move |ws, _, window, cx| ws.show_terminal(id, window, cx)),
                         ),
-                    );
+                ),
+            );
+        } else if member
+            && pj::can_start(p, t)
+            && matches!(t.meta.status, TicketStatus::Todo | TicketStatus::InProgress)
+        {
+            let (e3, s3, id3) = (env_s.clone(), slug_s.clone(), t.id.clone());
+            card = card.child(
+                h_flex().child(
+                    Button::new(SharedString::from(format!("work-{}", t.id)))
+                        .label(if t.meta.status == TicketStatus::Todo {
+                            "Start work"
+                        } else {
+                            "Start again"
+                        })
+                        .xsmall()
+                        .primary()
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.start_work_dialog(e3.clone(), s3.clone(), id3.clone(), window, cx)
+                        })),
+                ),
+            );
+        }
+        let ticket = t.clone();
+        card.context_menu(move |menu, _, _| {
+            let mut menu = menu;
+            for status in [
+                TicketStatus::Todo,
+                TicketStatus::InProgress,
+                TicketStatus::InReview,
+                TicketStatus::Done,
+                TicketStatus::Dropped,
+            ] {
+                if status == ticket.meta.status {
+                    continue;
                 }
-                let (ws2, env2, slug2, t2) =
-                    (ws.clone(), env.clone(), slug.clone(), ticket.clone());
-                menu.separator()
-                    .item(
-                        PopupMenuItem::new("Assign…").on_click(move |_, window, cx| {
-                            let (env, slug, t) = (env2.clone(), slug2.clone(), t2.clone());
-                            ws2.update(cx, |ws, cx| {
-                                ws.text_dialog(
-                                    format!("Who works on {}?", t.id),
-                                    t.meta.assignee.clone(),
-                                    "a GitHub login; empty for nobody",
-                                    move |ws, who, window, cx| {
-                                        let t = t.clone();
-                                        ws.edit_project(
-                                            &env,
-                                            &slug,
-                                            |dir, _, _| pj::assign_ticket(dir, &t, &who),
-                                            window,
-                                            cx,
-                                        )
-                                    },
+                let (ws, env, slug, t) =
+                    (ws.clone(), env_s.clone(), slug_s.clone(), ticket.clone());
+                menu = menu.item(
+                    PopupMenuItem::new(format!("Move to {}", status.label())).on_click(
+                        move |_, window, cx| {
+                            ws.update(cx, |ws, cx| {
+                                let t = t.clone();
+                                let _ = ws.edit_project(
+                                    &env,
+                                    &slug,
+                                    |dir, _, _| pj::move_ticket(dir, &t, status),
+                                    window,
+                                    cx,
+                                );
+                            })
+                        },
+                    ),
+                );
+            }
+            let (ws2, env2, slug2, t2) =
+                (ws.clone(), env_s.clone(), slug_s.clone(), ticket.clone());
+            menu.separator().item(
+                PopupMenuItem::new("Assign…").on_click(move |_, window, cx| {
+                    let (env, slug, t) = (env2.clone(), slug2.clone(), t2.clone());
+                    ws2.update(cx, |ws, cx| {
+                        ws.text_dialog(
+                            format!("Who works on {}?", t.id),
+                            t.meta.assignee.clone(),
+                            "a GitHub login; empty for nobody",
+                            move |ws, who, window, cx| {
+                                let t = t.clone();
+                                ws.edit_project(
+                                    &env,
+                                    &slug,
+                                    |dir, _, _| pj::assign_ticket(dir, &t, &who),
                                     window,
                                     cx,
                                 )
-                            })
-                        }),
-                    )
-            })
-            .into_any_element()
+                            },
+                            window,
+                            cx,
+                        )
+                    })
+                }),
+            )
+        })
+        .into_any_element()
     }
 
     fn waiting_page(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1863,6 +2817,39 @@ impl Workspace {
             let Some(login) = e.login.as_deref() else {
                 continue;
             };
+            for p in e
+                .projects
+                .iter()
+                .filter(|p| p.file.lead.eq_ignore_ascii_case(login))
+            {
+                let (rm, rt) = pj::to_review(p);
+                if rm + rt == 0 {
+                    continue;
+                }
+                any = true;
+                let page = Page::Project {
+                    env: env.clone(),
+                    slug: p.slug.clone(),
+                };
+                out = out.child(
+                    h_flex()
+                        .id(SharedString::from(format!("review-{env}-{}", p.slug)))
+                        .gap_3()
+                        .p_3()
+                        .rounded_md()
+                        .bg(color(theme::AMBER_TINT))
+                        .border_1()
+                        .border_color(color(theme::AMBER))
+                        .cursor_pointer()
+                        .child(div().child(format!(
+                            "Review {}: {rm} milestone{} · {rt} ticket{}",
+                            p.file.name,
+                            if rm == 1 { "" } else { "s" },
+                            if rt == 1 { "" } else { "s" }
+                        )))
+                        .on_click(cx.listener(move |ws, _, _, cx| ws.go(page.clone(), cx))),
+                );
+            }
             for (p, d) in pj::questions_for(login, &e.projects) {
                 any = true;
                 out = out
@@ -1877,7 +2864,7 @@ impl Workspace {
         }
         if !any {
             out = out.child(muted(
-                "Nothing waits on you. Questions assigned to you show here.",
+                "Nothing waits on you. Reviews and questions for you show here.",
             ));
         }
         out.into_any_element()
@@ -1974,289 +2961,38 @@ impl Workspace {
             }
             row
         };
+        let root = self.hydra.paths.root().to_path_buf();
+        let clones = f.repos.iter().map(|r| match pj::clone_of(&root, r) {
+            Some(path) => format!("{r} → {}", path.display()),
+            None => format!("{r} → asked on first Start work"),
+        });
         v_flex()
             .gap_1()
             .max_w(px(900.))
-            .child(
-                div()
-                    .text_2xl()
-                    .pb_3()
-                    .child(format!("{} settings", f.name)),
-            )
-            .when(!lead, |d| {
-                d.child(notice(
-                    &format!("Only the lead, {}, changes these.", f.lead),
-                    theme::TEXT_SECONDARY,
-                    theme::SURFACE,
-                ))
-            })
+            .child(div().text_2xl().pb_3().child(format!("{} settings", f.name)))
+            .when(!lead, |d| d.child(notice(&format!("Only the lead, {}, changes these.", f.lead), theme::TEXT_SECONDARY, theme::SURFACE)))
             .child(field("Name", f.name.clone(), Field::Name, cx))
             .child(field("Key", f.key.clone(), Field::Key, cx))
             .child(field("Lead", f.lead.clone(), Field::Lead, cx))
             .child(field("Members", f.members.join(", "), Field::Members, cx))
             .child(field("Code repos", f.repos.join(", "), Field::Repos, cx))
-            .child(field(
-                "Sync times",
-                f.sync.times.join(", "),
-                Field::Sync,
-                cx,
-            ))
+            .child(field("Sync times", f.sync.times.join(", "), Field::Sync, cx))
             .child(
                 h_flex()
                     .gap_4()
                     .py_2()
-                    .child(
-                        div()
-                            .w(px(160.))
-                            .flex_none()
-                            .text_color(color(theme::TEXT_SECONDARY))
-                            .child("Status"),
-                    )
+                    .child(div().w(px(160.)).flex_none().text_color(color(theme::TEXT_SECONDARY)).child("Status"))
                     .child(status_buttons),
             )
+            .child(div().pt_3().child(section_title("Local clones (this Mac)")))
+            .children(clones.map(|c| div().text_sm().font_family("monospace").child(c)))
             .child(div().pt_3().child(muted(
-                "Sync times are when each member's hydraui sends the day's progress to the repo \
-                 (once or twice a day). Sending comes in the next slice; until then changes stay \
-                 on this machine, marked not sent yet.",
+                "Code repos are where work happens: Start work makes a worktree of one. Sync times are \
+                 when each member's hydraui sends the day's progress to the repo (once or twice a day); \
+                 sending comes in the next slice.",
             )))
             .into_any_element()
     }
-
-    fn draft_page(&mut self, env: &str, dir: &Path, cx: &mut Context<Self>) -> AnyElement {
-        let terminal = self
-            .projects_data
-            .sessions
-            .get(dir)
-            .and_then(|id| self.panes.get(id))
-            .cloned();
-        let preview = match self
-            .projects_data
-            .preview
-            .as_ref()
-            .filter(|(d, _)| d == dir)
-        {
-            Some((_, Ok(p))) => self.draft_preview(env, dir, p, cx),
-            Some((_, Err(e))) => notice(e, theme::RED, theme::RED_TINT).into_any_element(),
-            None => muted("Reading the draft…").into_any_element(),
-        };
-        let (env_c, dir_c) = (env.to_string(), dir.to_path_buf());
-        let (env_d, dir_d) = (env.to_string(), dir.to_path_buf());
-        let (env_r, dir_r) = (env.to_string(), dir.to_path_buf());
-        let dir_f = dir.to_path_buf();
-        let dir_drop = dir.to_path_buf();
-        let target = LinkTarget::Draft(dir.to_path_buf());
-        let actions = h_flex()
-            .gap_2()
-            .flex_wrap()
-            .child(
-                Button::new("draft-create")
-                    .label("Create project")
-                    .primary()
-                    .small()
-                    .on_click(cx.listener(move |ws, _, window, cx| {
-                        ws.create_project(env_c.clone(), dir_c.clone(), window, cx)
-                    })),
-            )
-            .child(
-                Button::new("draft-add-file")
-                    .label("Add file…")
-                    .small()
-                    .ghost()
-                    .on_click(cx.listener(move |ws, _, window, cx| {
-                        ws.pick_file(LinkTarget::Draft(dir_f.clone()), window, cx)
-                    })),
-            )
-            .child(
-                Button::new("draft-add-link")
-                    .label("Add link…")
-                    .small()
-                    .ghost()
-                    .on_click(cx.listener(move |ws, _, window, cx| {
-                        ws.add_link_dialog(target.clone(), window, cx)
-                    })),
-            )
-            .when(terminal.is_none(), |d| {
-                d.child(
-                    Button::new("draft-restart")
-                        .label("Start Claude")
-                        .small()
-                        .ghost()
-                        .on_click(cx.listener(move |ws, _, window, cx| {
-                            ws.open_draft(env_r.clone(), dir_r.clone(), false, window, cx)
-                        })),
-                )
-            })
-            .child(div().flex_1())
-            .child(
-                Button::new("draft-discard")
-                    .label("Discard")
-                    .small()
-                    .danger()
-                    .on_click(cx.listener(move |ws, _, _, cx| {
-                        ws.discard_draft(env_d.clone(), dir_d.clone(), cx)
-                    })),
-            );
-        let right = v_flex()
-            .id("draft-preview")
-            .w(px(460.))
-            .flex_none()
-            .h_full()
-            .border_l_1()
-            .border_color(color(theme::BORDER))
-            .bg(color(theme::SURFACE))
-            .drag_over::<ExternalPaths>(|s, _, _, _| s.bg(color(theme::TEAL_TINT)))
-            .on_drop(cx.listener(move |ws, paths: &ExternalPaths, window, cx| {
-                ws.add_files(LinkTarget::Draft(dir_drop.clone()), paths.paths(), window, cx)
-            }))
-            .child(v_flex().p_3().gap_2().border_b_1().border_color(color(theme::BORDER)).child(actions).child(muted(
-                "Talk the project through with Claude on the left; the draft fills in here. \
-                 Drop files here to attach them.",
-            )))
-            .child(div().id("draft-preview-body").flex_1().min_h_0().overflow_y_scroll().p_4().child(preview));
-        let left = match terminal {
-            Some(view) => div()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .child(view)
-                .into_any_element(),
-            None => div()
-                .flex_1()
-                .p_6()
-                .child(muted(
-                    "Claude isn't running for this draft. Start Claude picks it up again.",
-                ))
-                .into_any_element(),
-        };
-        v_flex()
-            .size_full()
-            .bg(color(theme::PANEL))
-            .text_color(color(theme::TEXT))
-            .child(self.projects_header(
-                &Page::Draft {
-                    env: env.to_string(),
-                    dir: dir.to_path_buf(),
-                },
-                cx,
-            ))
-            .child(h_flex().flex_1().min_h_0().child(left).child(right))
-            .into_any_element()
-    }
-
-    fn draft_preview(
-        &self,
-        _env: &str,
-        dir: &Path,
-        p: &Project,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let mut out = v_flex().gap_4().child(
-            h_flex()
-                .gap_2()
-                .items_baseline()
-                .child(div().text_xl().child(p.file.name.clone()))
-                .child(
-                    div()
-                        .font_family("monospace")
-                        .text_color(color(theme::TEXT_MUTED))
-                        .child(p.file.key.clone()),
-                ),
-        );
-        let mut ms = v_flex().gap_2().child(section_title("Milestones"));
-        if p.milestones.is_empty() {
-            ms = ms.child(muted("None yet."));
-        }
-        for m in &p.milestones {
-            let mut block = v_flex()
-                .gap_1()
-                .p_2()
-                .rounded_md()
-                .bg(color(theme::RAISED))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_family("monospace")
-                                .text_color(color(theme::TEXT_MUTED))
-                                .child(m.id.clone()),
-                        )
-                        .child(div().text_sm().child(m.title.clone()))
-                        .child(div().flex_1())
-                        .when_some(m.target, |d, t| {
-                            d.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(color(theme::TEXT_SECONDARY))
-                                    .child(t.to_string()),
-                            )
-                        }),
-                );
-            for t in p.tickets.iter().filter(|t| t.meta.milestone == m.id) {
-                block = block.child(
-                    h_flex()
-                        .gap_2()
-                        .pl_3()
-                        .text_xs()
-                        .child(
-                            div()
-                                .font_family("monospace")
-                                .text_color(color(theme::TEXT_MUTED))
-                                .child(t.id.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_color(color(theme::TEXT_SECONDARY))
-                                .child(t.meta.title.clone()),
-                        )
-                        .when(t.meta.kind == TicketKind::Bug, |d| {
-                            d.child(pill("bug", theme::RED, theme::RED_TINT))
-                        }),
-                );
-            }
-            ms = ms.child(block);
-        }
-        out = out.child(ms);
-        let mut qs = v_flex().gap_1().child(section_title("Open questions"));
-        if p.decisions.is_empty() {
-            qs = qs.child(muted("None yet."));
-        }
-        for d in &p.decisions {
-            qs = qs.child(div().text_sm().child(format!(
-                "{} · {} (for {})",
-                d.id, d.meta.question, d.meta.assigned_to
-            )));
-        }
-        out = out.child(qs);
-        let mut res = v_flex()
-            .gap_1()
-            .child(section_title("Resources"))
-            .child(self.resource_list(&LinkTarget::Draft(dir.to_path_buf()), p, dir, cx));
-        if p.files.is_empty() && p.links.is_empty() {
-            res = res.child(muted("None yet: drop files here, or Add file… / Add link…"));
-        }
-        out = out.child(res);
-        out.child(v_flex().gap_2().child(section_title("Spec")).child(
-            if p.spec.trim().is_empty() {
-                muted("Not written yet.").into_any_element()
-            } else {
-                gpui_base::TextView::markdown("draft-spec", p.spec.clone())
-                    .selectable(true)
-                    .into_any_element()
-            },
-        ))
-        .into_any_element()
-    }
-}
-
-/// What a resource row's Rename does.
-type Rename = dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>);
-
-#[derive(Clone)]
-enum LinkTarget {
-    Draft(PathBuf),
-    Project(String, String),
 }
 
 /// A project setting the lead changes (spec §9.1, step 5).
@@ -2277,7 +3013,7 @@ impl Field {
             Field::Key => "the ticket prefix, e.g. PG; fixed once tickets exist",
             Field::Lead => "the new lead's GitHub login: hands the project over",
             Field::Members => "GitHub logins, separated by commas",
-            Field::Repos => "owner/name, separated by commas: a hint for the checks",
+            Field::Repos => "owner/name, separated by commas: where work happens",
             Field::Sync => "one or two times a day, e.g. 12:30, 17:30",
         }
     }
@@ -2309,10 +3045,24 @@ fn set_field(dir: &Path, p: &Project, field: Field, text: &str) -> Result<(), St
             f.lead = lead.to_string();
         }
         Field::Members => f.members = pj::list_of(text),
-        Field::Repos => f.repos = pj::list_of(text),
+        Field::Repos => {
+            let repos = pj::list_of(text);
+            if let Some(bad) = repos.iter().find(|r| !pj::is_github(r)) {
+                return Err(format!(
+                    "{bad} isn't owner/name, e.g. iov42/version2-frontend."
+                ));
+            }
+            f.repos = repos;
+        }
         Field::Sync => f.sync.times = pj::sync_times(text)?,
     }
     repo::write_project_file(dir, &f).map_err(|e| e.to_string())
+}
+
+fn hydra_exe() -> PathBuf {
+    server::get()
+        .and_then(|sv| server::lock(sv.registry()).hydra_exe.clone())
+        .unwrap_or_else(|| PathBuf::from("hydra"))
 }
 
 /// Reads one environment's checkout: login and pull first, then the projects (off the UI
@@ -2327,7 +3077,6 @@ fn fetch_env(
     let mut e = EnvProjects {
         repo: repo.to_string(),
         checkout: pj::checkout_dir(state, repo),
-        drafts: pj::drafts_dir(state),
         login,
         ..Default::default()
     };
@@ -2359,46 +3108,48 @@ fn read_checkout(e: &mut EnvProjects) {
     }
     e.pending = pj::pending(&e.checkout);
     e.sent = pj::sent_projects(&e.checkout);
-    e.draft_dirs = std::fs::read_dir(&e.drafts)
-        .map(|entries| {
-            entries
-                .flatten()
-                .map(|d| d.path())
-                .filter(|d| d.join(repo::PROJECT_FILE).is_file())
-                .collect()
-        })
-        .unwrap_or_default();
-    e.draft_dirs.sort();
     e.fetched = true;
 }
 
-fn draft_prompt(p: &Project, login: &str, fresh: bool) -> String {
-    let start = if fresh {
-        "Start by calling draft_show, then ask the user to describe the project in their own words."
-    } else {
-        "The draft already has work in it: call draft_show, sum up where it stands, and ask the \
-         user what's next."
-    };
+/// The planning session's first prompt (spec §14).
+fn start_prompt(p: &Project) -> String {
     format!(
-        "You're helping {login} start a new project, \"{name}\" (ticket key {key}), in hydraui's \
-         Projects tab. The user sees a live preview of the draft beside you.\n\n\
-         Talk it through with them: what it's for and who for, goals and non-goals, \
-         constraints, and any links or files they have. Then write the draft with the draft \
-         tools only (never create files yourself):\n\
-         - draft_set_spec: the spec, in short numbered sections in plain words, with the \
-         decisions and their reasons;\n\
-         - draft_add_milestone: milestones in order, with target dates where the user gives \
-         them;\n\
-         - draft_add_ticket: tickets under each milestone, each small enough to finish in a \
-         few days;\n\
-         - draft_add_question: decisions still to be made, assigned to whoever should decide \
-         (a GitHub login; {login} by default).\n\
-         The user can drop files and add links beside you; draft_show lists them and \
-         draft_read_resource reads them. Keep the draft and the conversation in step: show \
-         what you changed after each round. When the user is happy, tell them to press \
-         Create project.\n\n{start}",
+        "You're planning the project \"{name}\" (ticket key {key}, lead {lead}) in hydraui's \
+         Projects tab. The lead sees what you write in hydraui beside you and reviews each \
+         proposal there: approve, edit, ask you for changes, or reject.\n\n\
+         1. Call plan_show, then read every attached resource (plan_read_resource; Read for \
+         PDFs and images).\n\
+         2. Ask the lead here about anything unclear: goals, who it's for, constraints, what's \
+         out of scope.\n\
+         3. Write the spec with plan_set_spec: short numbered sections in plain words, with \
+         the decisions and their reasons.\n\
+         4. Propose the milestones in order with plan_propose_milestone, each with what's true \
+         when it's done and a target date where you know one. Put decisions still to be made \
+         as questions with plan_add_question.\n\
+         Don't propose tickets yet: the lead asks for them per milestone once it's approved. \
+         Use only the plan tools to change the project; never write its files yourself. When \
+         you've proposed the milestones, tell the lead they're ready to review.",
         name = p.file.name,
         key = p.file.key,
+        lead = p.file.lead,
+    )
+}
+
+/// A work session's prompt (spec §14).
+fn work_prompt(p: &Project, t: &Ticket, branch: &str, repo: &str, skill: Option<&str>) -> String {
+    let skill = skill
+        .map(|s| format!("Use the /{s} skill for the work.\n"))
+        .unwrap_or_default();
+    format!(
+        "You're doing ticket {id} \"{title}\" of the project \"{name}\", in a fresh worktree of \
+         {repo} on branch {branch}. Call ticket_show first: the ticket, its milestone and \
+         where the project's spec is.\n{skill}\
+         Do the work here, commit it on this branch, push it and open a pull request (gh pr \
+         create) with {id} in its title. Finish by calling ticket_report with the pull request \
+         URL(s) and a short summary. If you're blocked, say so here rather than guess.",
+        id = t.id,
+        title = t.meta.title,
+        name = p.file.name,
     )
 }
 
@@ -2439,6 +3190,27 @@ fn pill(text: &str, fg: u32, bg: u32) -> gpui::Div {
         .bg(color(bg))
         .text_color(color(fg))
         .child(text.to_string())
+}
+
+fn review_pill(r: Review) -> gpui::Div {
+    match r {
+        Review::Proposed => pill("to review", theme::AMBER, theme::AMBER_TINT),
+        Review::Changes => pill("with Claude", theme::TEAL, theme::TEAL_TINT),
+        Review::Rejected => pill("rejected", theme::RED, theme::RED_TINT),
+        Review::Approved => pill("approved", theme::GREEN, theme::GREEN_TINT),
+    }
+}
+
+/// `iov42/fe#12` for a GitHub pull request URL, else the URL.
+fn pr_label(url: &str) -> String {
+    url.strip_prefix("https://github.com/")
+        .and_then(|rest| {
+            let mut parts = rest.split('/');
+            let (owner, repo, pull, n) =
+                (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+            (pull == "pull").then(|| format!("{owner}/{repo}#{n}"))
+        })
+        .unwrap_or_else(|| url.to_string())
 }
 
 fn status_word(s: ProjectStatus) -> &'static str {
@@ -2508,4 +3280,72 @@ fn first_line(text: &str) -> String {
         .find(|l| !l.is_empty())
         .unwrap_or("")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pull_request_links_read_shortly() {
+        assert_eq!(
+            pr_label("https://github.com/iov42/fe/pull/12"),
+            "iov42/fe#12"
+        );
+        assert_eq!(
+            pr_label("https://gitlab.com/x/-/merge_requests/3"),
+            "https://gitlab.com/x/-/merge_requests/3"
+        );
+    }
+
+    #[test]
+    fn prompts_name_the_ticket_and_the_report() {
+        let p: Project = Project {
+            slug: "pg".into(),
+            file: toml::from_str("name = \"Product Groups\"\nkey = \"PG\"\nlead = \"me\"").unwrap(),
+            spec: String::new(),
+            milestones: vec![],
+            tickets: vec![],
+            decisions: vec![],
+            meetings: vec![],
+            files: vec![],
+            links: vec![],
+            progress: vec![],
+        };
+        let t = Ticket {
+            id: "PG-3".into(),
+            meta: hydraui_projects::TicketMeta {
+                title: "Share dialog".into(),
+                ..Default::default()
+            },
+            body: String::new(),
+        };
+        let w = work_prompt(&p, &t, "pg-3-share-dialog", "iov42/fe", Some("angular"));
+        assert!(
+            w.contains("/angular skill")
+                && w.contains("ticket_report")
+                && w.contains("pg-3-share-dialog")
+        );
+        assert!(!work_prompt(&p, &t, "b", "r", None).contains("skill"));
+        assert!(start_prompt(&p).contains("plan_propose_milestone"));
+    }
+
+    #[test]
+    fn code_repos_must_be_github_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("pg");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("project.toml"),
+            "name = \"PG\"\nkey = \"PG\"\nlead = \"me\"\n",
+        )
+        .unwrap();
+        let p = repo::load(&dir).unwrap();
+        assert!(set_field(&dir, &p, Field::Repos, "/Users/me/fe").is_err());
+        set_field(&dir, &p, Field::Repos, "iov42/fe, iov42/be").unwrap();
+        assert_eq!(
+            repo::load(&dir).unwrap().file.repos,
+            ["iov42/fe", "iov42/be"]
+        );
+    }
 }

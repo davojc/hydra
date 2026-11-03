@@ -58,7 +58,11 @@ pub fn milestone_counts(
         .iter()
         .map(|m| (m.id.clone(), Counts::default()))
         .collect();
-    for t in &project.tickets {
+    for t in project
+        .tickets
+        .iter()
+        .filter(|t| t.meta.review != Review::Rejected)
+    {
         out.entry(t.meta.milestone.clone())
             .or_default()
             .add(status_of(t));
@@ -188,8 +192,7 @@ mod tests {
                 milestone: milestone.into(),
                 assignee: String::new(),
                 created_by: String::new(),
-                created: None,
-                extra: Default::default(),
+                ..Default::default()
             },
             body: String::new(),
         }
@@ -201,7 +204,7 @@ mod tests {
             title: id.into(),
             target: target.map(|t| t.parse().unwrap()),
             status: MilestoneStatus::Active,
-            description: String::new(),
+            ..Default::default()
         }
     }
 

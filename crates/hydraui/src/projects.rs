@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use hydraui_projects::{
-    Decision, DecisionMeta, Project, ProjectFile, Ticket, TicketKind, TicketMeta, TicketStatus,
-    next_id, progress, repo,
+    Decision, DecisionMeta, Project, ProjectFile, Review, Ticket, TicketKind, TicketMeta,
+    TicketStatus, next_id, progress, repo,
 };
 
 /// How long a clone or pull may take before it's given up on.
@@ -296,7 +296,7 @@ pub fn new_ticket(
             assignee: String::new(),
             created_by: login.to_string(),
             created: Some(progress::now()),
-            extra: Default::default(),
+            ..Default::default()
         },
         body: String::new(),
     };
@@ -337,22 +337,31 @@ pub fn assign_ticket(dir: &Path, ticket: &Ticket, assignee: &str) -> Result<(), 
     repo::write_ticket(dir, &t).map_err(|e| e.to_string())
 }
 
-/// Starts a draft for a project called `name`, led by `login` (spec §9.1). Returns its folder.
-pub fn start_draft(drafts: &Path, name: &str, login: &str) -> Result<PathBuf, String> {
+/// Makes project `name` in checkout `checkout`, led by `login` (spec §14): just its
+/// `project.toml`, for resources to be attached before planning starts. Returns its slug.
+pub fn new_project(checkout: &Path, name: &str, login: &str) -> Result<String, String> {
     let name = name.trim();
     let slug = repo::slug_for(name);
     if slug.is_empty() {
         return Err("Give the project a name with letters or numbers in it.".into());
     }
-    let dir = drafts.join(&slug);
-    if dir.exists() {
-        return Err(format!(
-            "There's already a draft called {slug}: open it, or discard it first."
-        ));
+    if checkout.join(&slug).exists() {
+        return Err(format!("The repo already has a project folder {slug}."));
+    }
+    let key = repo::key_for(name);
+    let mut key_used = key.clone();
+    let taken: Vec<String> = repo::load_all(checkout)
+        .into_iter()
+        .filter_map(|(_, p)| p.ok().map(|p| p.file.key.to_ascii_uppercase()))
+        .collect();
+    let mut n = 2;
+    while taken.contains(&key_used) {
+        key_used = format!("{key}{n}");
+        n += 1;
     }
     let file = ProjectFile {
         name: name.to_string(),
-        key: repo::key_for(name),
+        key: key_used,
         lead: login.to_string(),
         members: vec![login.to_string()],
         status: Default::default(),
@@ -360,48 +369,259 @@ pub fn start_draft(drafts: &Path, name: &str, login: &str) -> Result<PathBuf, St
         sync: Default::default(),
         extra: Default::default(),
     };
-    repo::write_project_file(&dir, &file).map_err(|e| e.to_string())?;
-    Ok(dir)
+    repo::write_project_file(&checkout.join(&slug), &file).map_err(|e| e.to_string())?;
+    Ok(slug)
 }
 
-/// Moves draft `draft` into the checkout `checkout` as a project (spec §9.1's Create). Returns
-/// its slug. Refused if the checkout already has a project by that name or key.
-pub fn create_from_draft(draft: &Path, checkout: &Path) -> Result<String, String> {
-    let p = repo::load(draft).map_err(|e| e.to_string())?;
-    let target = checkout.join(&p.slug);
-    if target.exists() {
-        return Err(format!("The repo already has a project folder {}.", p.slug));
-    }
-    for (slug, other) in repo::load_all(checkout) {
-        if let Ok(other) = other
-            && other.file.key.eq_ignore_ascii_case(&p.file.key)
-        {
-            return Err(format!(
-                "{slug} already uses the key {}; change this project's key first.",
-                p.file.key
-            ));
+/// A milestone or ticket, by id (spec §14).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Item {
+    Milestone(String),
+    Ticket(String),
+}
+
+impl Item {
+    pub fn id(&self) -> &str {
+        match self {
+            Item::Milestone(id) | Item::Ticket(id) => id,
         }
     }
-    std::fs::create_dir_all(checkout).map_err(|e| e.to_string())?;
-    if std::fs::rename(draft, &target).is_err() {
-        copy_dir(draft, &target).map_err(|e| e.to_string())?;
-        std::fs::remove_dir_all(draft).map_err(|e| e.to_string())?;
-    }
-    Ok(p.slug)
 }
 
-fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(to)?;
-    for entry in std::fs::read_dir(from)? {
-        let entry = entry?;
-        let dest = to.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir(&entry.path(), &dest)?;
+/// Records the lead's review of `item` in project folder `dir`: approved, changes asked with
+/// `note`, or rejected with `note` as the reason.
+pub fn review(dir: &Path, item: &Item, to: Review, note: &str, login: &str) -> Result<(), String> {
+    let note = note.trim();
+    if matches!(to, Review::Changes | Review::Rejected) && note.is_empty() {
+        return Err(match to {
+            Review::Rejected => "Say why, so Claude doesn't propose it again.".into(),
+            _ => "Write what should change.".into(),
+        });
+    }
+    let p = repo::load(dir).map_err(|e| e.to_string())?;
+    let stamp = |r: &mut Review,
+                 n: &mut String,
+                 by: &mut String,
+                 at: &mut Option<toml::value::Datetime>| {
+        *r = to;
+        *n = note.to_string();
+        *by = login.to_string();
+        *at = Some(progress::now());
+    };
+    match item {
+        Item::Milestone(id) => {
+            let mut ms = p.milestones.clone();
+            let m = ms
+                .iter_mut()
+                .find(|m| &m.id == id)
+                .ok_or_else(|| format!("There's no milestone {id}."))?;
+            stamp(
+                &mut m.review,
+                &mut m.review_note,
+                &mut m.reviewed_by,
+                &mut m.reviewed_at,
+            );
+            repo::write_milestones(dir, &ms).map_err(|e| e.to_string())
+        }
+        Item::Ticket(id) => {
+            let mut t = p
+                .tickets
+                .iter()
+                .find(|t| &t.id == id)
+                .cloned()
+                .ok_or_else(|| format!("There's no ticket {id}."))?;
+            let m = &mut t.meta;
+            stamp(
+                &mut m.review,
+                &mut m.review_note,
+                &mut m.reviewed_by,
+                &mut m.reviewed_at,
+            );
+            repo::write_ticket(dir, &t).map_err(|e| e.to_string())
+        }
+    }
+}
+
+/// Edits milestone `id` in place: its title, target date (`YYYY-MM-DD`, empty for none) and
+/// description. Its review stays as it is.
+pub fn edit_milestone(
+    dir: &Path,
+    id: &str,
+    title: &str,
+    target: &str,
+    description: &str,
+) -> Result<(), String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("Give the milestone a title.".into());
+    }
+    let target = match target.trim() {
+        "" => None,
+        t => Some(date(t)?),
+    };
+    let mut ms = repo::load(dir).map_err(|e| e.to_string())?.milestones;
+    let m = ms
+        .iter_mut()
+        .find(|m| m.id == id)
+        .ok_or_else(|| format!("There's no milestone {id}."))?;
+    m.title = title.to_string();
+    m.target = target;
+    m.description = description.trim().to_string();
+    repo::write_milestones(dir, &ms).map_err(|e| e.to_string())
+}
+
+/// Edits ticket `ticket`'s title and description in place.
+pub fn edit_ticket(
+    dir: &Path,
+    ticket: &Ticket,
+    title: &str,
+    description: &str,
+) -> Result<(), String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("Give the ticket a title.".into());
+    }
+    let mut t = ticket.clone();
+    t.meta.title = title.to_string();
+    t.body = description.trim().to_string();
+    repo::write_ticket(dir, &t).map_err(|e| e.to_string())
+}
+
+/// A `YYYY-MM-DD` date.
+pub fn date(text: &str) -> Result<toml::value::Datetime, String> {
+    let bad = || format!("{text} isn't a date like 2026-12-01");
+    let d: toml::value::Datetime = text.trim().parse().map_err(|_| bad())?;
+    if d.date.is_none() || d.time.is_some() {
+        return Err(bad());
+    }
+    Ok(d)
+}
+
+/// What needs the lead's review in `p`: milestones and tickets proposed and not yet decided.
+pub fn to_review(p: &Project) -> (usize, usize) {
+    (
+        p.milestones.iter().filter(|m| m.review.waiting()).count(),
+        p.tickets.iter().filter(|t| t.meta.review.waiting()).count(),
+    )
+}
+
+/// Whether work can start on `ticket`: it and its milestone are approved, and it isn't done.
+pub fn can_start(p: &Project, ticket: &Ticket) -> bool {
+    ticket.meta.review == Review::Approved
+        && !matches!(
+            ticket.meta.status,
+            TicketStatus::Done | TicketStatus::Dropped
+        )
+        && p.milestones
+            .iter()
+            .any(|m| m.id == ticket.meta.milestone && m.review == Review::Approved)
+}
+
+/// Where `repo` is cloned on this machine, as remembered (`[clones]`, spec §14).
+pub fn clone_of(hydra_root: &Path, repo: &str) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(config_file(hydra_root)).ok()?;
+    let table: toml::Table = toml::from_str(&text).ok()?;
+    let path = PathBuf::from(table.get("clones")?.get(repo)?.as_str()?);
+    path.join(".git").exists().then_some(path)
+}
+
+/// Remembers that `repo` is cloned at `path`, after checking it's a git repo.
+pub fn set_clone(hydra_root: &Path, repo: &str, path: &Path) -> Result<(), String> {
+    if !path.join(".git").exists() {
+        return Err(format!("{} isn't a git repository.", path.display()));
+    }
+    let file = config_file(hydra_root);
+    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|e| format!("{}: {e}", file.display()))?;
+    if !doc.contains_key("clones") {
+        doc.insert("clones", toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    doc.get_mut("clones")
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .ok_or("clones in projects.toml isn't a table")?
+        .insert(repo, toml_edit::value(path.display().to_string()));
+    hydraui_sets::layout::write_atomic(&file, &doc.to_string()).map_err(|e| e.to_string())
+}
+
+/// The branch for work on `ticket`: its id and a few words of its title, lower case
+/// (`pg-12-share-dialog`), so the local check sees the key (§6.1).
+pub fn branch_for(ticket: &Ticket) -> String {
+    let words = crate::worktrees::slug(&ticket.meta.title);
+    format!("{}-{words}", ticket.id.to_ascii_lowercase())
+}
+
+/// Makes a worktree of `clone` for work on `ticket`: branch [`branch_for`] from the remote's
+/// default branch (fetched first, as `env`), in `<clone>-worktrees/<branch>`. An existing
+/// worktree on that branch is reused. Returns its folder and branch. Blocks.
+pub fn ticket_worktree(
+    hydra: &Path,
+    env: &str,
+    clone: &Path,
+    ticket: &Ticket,
+) -> Result<(PathBuf, String), String> {
+    let branch = branch_for(ticket);
+    let name = clone
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or("the clone has no folder name")?;
+    let parent = clone.parent().ok_or("the clone has no parent folder")?;
+    let path = parent.join(format!("{name}-worktrees")).join(&branch);
+    if path.join(".git").exists() {
+        return Ok((path, branch));
+    }
+    let c = clone.display().to_string();
+    // Best effort: without the network the local default branch still works.
+    let _ = env_git(hydra, env, &["-C", &c, "fetch", "origin"]);
+    let local = |args: &[&str]| -> Result<String, String> {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C")
+            .arg(clone)
+            .args(args)
+            .stdin(std::process::Stdio::null());
+        let out = hydra_platform::process::hide_window(&mut cmd)
+            .output()
+            .map_err(|e| format!("git didn't run: {e}"))?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
         } else {
-            std::fs::copy(entry.path(), dest)?;
+            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
         }
+    };
+    let base =
+        local(&["rev-parse", "--abbrev-ref", "origin/HEAD"]).unwrap_or_else(|_| "HEAD".into());
+    let target = path.display().to_string();
+    let head = format!("refs/heads/{branch}");
+    if local(&["rev-parse", "--verify", "--quiet", &head]).is_ok() {
+        local(&["worktree", "add", &target, &branch])?;
+    } else {
+        local(&["worktree", "add", "-b", &branch, &target, &base])?;
     }
-    Ok(())
+    Ok((path, branch))
+}
+
+/// Records that work on `ticket` started: in progress, on `branch`, with how it was started.
+pub fn start_work(
+    dir: &Path,
+    ticket: &Ticket,
+    branch: &str,
+    login: &str,
+    how: (&str, &str, &str),
+) -> Result<(), String> {
+    let mut t = ticket.clone();
+    let (skill, model, effort) = how;
+    t.meta.status = TicketStatus::InProgress;
+    if t.meta.assignee.is_empty() {
+        t.meta.assignee = login.to_string();
+    }
+    t.meta.branch = branch.to_string();
+    t.meta.started_by = login.to_string();
+    t.meta.started_at = Some(progress::now());
+    t.meta.skill = skill.to_string();
+    t.meta.model = model.to_string();
+    t.meta.effort = effort.to_string();
+    repo::write_ticket(dir, &t).map_err(|e| e.to_string())
 }
 
 /// Parses a comma- or space-separated list (members, repos), dropping blanks and `@`s.
@@ -662,28 +882,165 @@ mod tests {
     }
 
     #[test]
-    fn a_draft_becomes_a_project_once() {
+    fn a_new_project_gets_a_free_key() {
         let tmp = tempfile::tempdir().unwrap();
-        let drafts = tmp.path().join("drafts");
-        let checkout = tmp.path().join("checkout");
-        let draft = start_draft(&drafts, "Product Groups", "me").unwrap();
-        assert!(
-            start_draft(&drafts, "product groups", "me").is_err(),
-            "same slug"
-        );
+        let checkout = tmp.path();
         assert_eq!(
-            create_from_draft(&draft, &checkout).unwrap(),
+            new_project(checkout, "Product Groups", "me").unwrap(),
             "product-groups"
         );
-        assert!(!draft.exists());
-        let p = repo::load(&checkout.join("product-groups")).unwrap();
-        assert_eq!((p.file.key.as_str(), p.file.lead.as_str()), ("PG", "me"));
-        // Another project with the same key is refused.
-        let again = start_draft(&drafts, "Payment Gateway", "me").unwrap();
         assert!(
-            create_from_draft(&again, &checkout)
-                .unwrap_err()
-                .contains("key PG")
+            new_project(checkout, "product groups", "me").is_err(),
+            "same folder"
+        );
+        assert_eq!(
+            new_project(checkout, "Payment Gateway", "me").unwrap(),
+            "payment-gateway"
+        );
+        let p = repo::load(&checkout.join("payment-gateway")).unwrap();
+        assert_eq!((p.file.key.as_str(), p.file.lead.as_str()), ("PG2", "me"));
+    }
+
+    fn planned(dir: &Path) -> Project {
+        let p = project(dir);
+        repo::write_milestones(
+            dir,
+            &[hydraui_projects::Milestone {
+                id: "M1".into(),
+                title: "Model".into(),
+                review: Review::Proposed,
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        new_ticket(dir, &p, "Schema", "M1", TicketKind::Feature, "me").unwrap();
+        repo::load(dir).unwrap()
+    }
+
+    #[test]
+    fn reviews_record_who_and_need_a_reason_to_refuse() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("pg");
+        planned(&dir);
+        let m1 = Item::Milestone("M1".into());
+        assert!(review(&dir, &m1, Review::Rejected, " ", "lead").is_err());
+        assert!(review(&dir, &m1, Review::Changes, "", "lead").is_err());
+        review(&dir, &m1, Review::Changes, "split it", "lead").unwrap();
+        let p = repo::load(&dir).unwrap();
+        let m = &p.milestones[0];
+        assert_eq!(
+            (m.review, m.review_note.as_str(), m.reviewed_by.as_str()),
+            (Review::Changes, "split it", "lead")
+        );
+        assert_eq!(
+            to_review(&p),
+            (0, 0),
+            "changes asked isn't waiting on the lead"
+        );
+        review(
+            &dir,
+            &Item::Ticket("PG-1".into()),
+            Review::Proposed,
+            "",
+            "lead",
+        )
+        .unwrap();
+        assert_eq!(to_review(&repo::load(&dir).unwrap()), (0, 1));
+    }
+
+    #[test]
+    fn work_starts_only_on_approved_tickets_of_approved_milestones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("pg");
+        let p = planned(&dir);
+        assert!(
+            !can_start(&p, &p.tickets[0]),
+            "its milestone is only proposed"
+        );
+        review(
+            &dir,
+            &Item::Milestone("M1".into()),
+            Review::Approved,
+            "",
+            "lead",
+        )
+        .unwrap();
+        let p = repo::load(&dir).unwrap();
+        assert!(can_start(&p, &p.tickets[0]));
+        review(
+            &dir,
+            &Item::Ticket("PG-1".into()),
+            Review::Proposed,
+            "",
+            "lead",
+        )
+        .unwrap();
+        let p = repo::load(&dir).unwrap();
+        assert!(
+            !can_start(&p, &p.tickets[0]),
+            "the ticket itself is only proposed"
+        );
+    }
+
+    #[test]
+    fn edits_check_their_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("pg");
+        let p = planned(&dir);
+        assert!(edit_milestone(&dir, "M1", "Model", "soon", "").is_err());
+        edit_milestone(&dir, "M1", "Data model", "2026-12-01", "tables").unwrap();
+        edit_ticket(&dir, &p.tickets[0], "Schema v2", "the tables").unwrap();
+        let p = repo::load(&dir).unwrap();
+        assert_eq!(p.milestones[0].target.unwrap().to_string(), "2026-12-01");
+        assert_eq!(
+            p.milestones[0].review,
+            Review::Proposed,
+            "an edit isn't an approval"
+        );
+        assert_eq!(
+            (p.tickets[0].meta.title.as_str(), p.tickets[0].body.as_str()),
+            ("Schema v2", "the tables\n")
+        );
+    }
+
+    #[test]
+    fn clones_are_remembered_only_for_git_repos() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, clone) = (tmp.path().join("hydra"), tmp.path().join("frontend"));
+        std::fs::create_dir_all(clone.join(".git")).unwrap();
+        assert!(set_clone(&root, "iov42/fe", tmp.path()).is_err());
+        set_clone(&root, "iov42/fe", &clone).unwrap();
+        set_configured_repo(&root, "iov42", Some("iov42/iov-projects")).unwrap();
+        assert_eq!(clone_of(&root, "iov42/fe"), Some(clone));
+        assert_eq!(
+            configured_repo(&root, "iov42").as_deref(),
+            Some("iov42/iov-projects")
+        );
+    }
+
+    #[test]
+    fn work_branches_carry_the_ticket_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("pg");
+        let p = planned(&dir);
+        assert_eq!(branch_for(&p.tickets[0]), "pg-1-schema");
+        start_work(
+            &dir,
+            &p.tickets[0],
+            "pg-1-schema",
+            "me",
+            ("angular", "opus", "high"),
+        )
+        .unwrap();
+        let t = repo::load(&dir).unwrap().tickets.remove(0);
+        assert_eq!(t.meta.status, TicketStatus::InProgress);
+        assert_eq!(
+            (
+                t.meta.assignee.as_str(),
+                t.meta.skill.as_str(),
+                t.meta.effort.as_str()
+            ),
+            ("me", "angular", "high")
         );
     }
 

@@ -487,15 +487,17 @@ mod tests {
                 "stage_report",
                 "stage_ask",
                 "stage_answer",
-                "draft_show",
-                "draft_set_spec",
-                "draft_add_milestone",
-                "draft_add_ticket",
-                "draft_add_question",
-                "draft_add_link",
-                "draft_read_resource",
-                "draft_edit",
-                "draft_remove"
+                "plan_show",
+                "plan_set_spec",
+                "plan_propose_milestone",
+                "plan_propose_ticket",
+                "plan_revise",
+                "plan_withdraw",
+                "plan_add_question",
+                "plan_add_link",
+                "plan_read_resource",
+                "ticket_show",
+                "ticket_report"
             ]
         );
         assert_eq!(names, hydra_providers::claude_files::HYDRAUI_TOOLS);

@@ -1,39 +1,49 @@
-//! The draft tools (Projects spec §10): a New project session writes the spec, milestones,
-//! tickets, questions and links of its own draft, and nothing else.
+//! The Projects sessions' tools (Projects spec §14): a planning session writes its project's
+//! spec and proposes milestones and tickets for the lead to review; a work session reads its
+//! ticket and reports the pull requests it opened. Each sees only its own project or ticket.
 
 use std::path::{Path, PathBuf};
 
 use hydraui_projects::{
-    Decision, DecisionMeta, Link, Milestone, MilestoneStatus, Ticket, TicketKind, TicketMeta,
-    next_id, progress, repo,
+    Decision, DecisionMeta, Milestone, MilestoneStatus, Project, Review, Ticket, TicketKind,
+    TicketMeta, TicketStatus, next_id, progress, repo,
 };
 use serde_json::{Value, json};
 
 use super::registry::Registry;
 use super::tools::Outcome;
 
-/// A New project session's draft: its folder and who is drafting it.
+/// A session hydraui started for a project, by what it may touch.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Draft {
-    pub dir: PathBuf,
-    /// The drafter's GitHub login: the lead, and who asked the draft's questions.
-    pub login: String,
+pub enum Session {
+    /// Plans project folder `dir` for `login` (the lead, who asked).
+    Plan { dir: PathBuf, login: String },
+    /// Works on ticket `ticket` of project folder `dir`.
+    Work { dir: PathBuf, ticket: String },
 }
 
-/// The tools this module answers, in the order `tools/list` shows them.
-pub const NAMES: [&str; 9] = [
-    "draft_show",
-    "draft_set_spec",
-    "draft_add_milestone",
-    "draft_add_ticket",
-    "draft_add_question",
-    "draft_add_link",
-    "draft_read_resource",
-    "draft_edit",
-    "draft_remove",
+/// The planning tools, in the order `tools/list` shows them.
+pub const PLAN: [&str; 9] = [
+    "plan_show",
+    "plan_set_spec",
+    "plan_propose_milestone",
+    "plan_propose_ticket",
+    "plan_revise",
+    "plan_withdraw",
+    "plan_add_question",
+    "plan_add_link",
+    "plan_read_resource",
 ];
 
-/// The `tools/list` entries for `NAMES`.
+/// The work tools.
+pub const WORK: [&str; 2] = ["ticket_show", "ticket_report"];
+
+/// Every tool this module answers.
+pub fn names() -> impl Iterator<Item = &'static str> {
+    PLAN.into_iter().chain(WORK)
+}
+
+/// The `tools/list` entries for `names()`.
 pub fn schemas() -> Vec<Value> {
     let s = |what: &str| json!({ "type": "string", "description": what });
     let tool = |name: &str, description: &str, properties: Value, required: Vec<&str>| {
@@ -45,45 +55,69 @@ pub fn schemas() -> Vec<Value> {
     };
     vec![
         tool(
-            "draft_show",
-            "New project: show the draft project as it stands: its name and key, the spec, \
-             milestones, tickets, open questions and resources (attached files and links). \
-             The user sees the same draft beside you, updated as you write.",
+            "plan_show",
+            "Planning: the project as it stands: spec, milestones and tickets with their review \
+             state (to review, changes asked with the lead's note, approved, rejected with the \
+             reason), open questions and resources. Call it first, and after the lead writes.",
             json!({}),
             vec![],
         ),
         tool(
-            "draft_set_spec",
-            "New project: replace the draft's spec (Markdown). Write it with the user: why, \
-             goals, non-goals, decisions and their reasons, in short numbered sections.",
+            "plan_set_spec",
+            "Planning: replace the project's spec (Markdown): why, goals, non-goals, decisions \
+             and their reasons, in short numbered sections in plain words.",
             json!({"text": s("The whole spec, Markdown.")}),
             vec!["text"],
         ),
         tool(
-            "draft_add_milestone",
-            "New project: add a milestone at the end. Returns its id (M1, M2, ...).",
+            "plan_propose_milestone",
+            "Planning: propose a milestone, added at the end for the lead to review. Returns \
+             its id (M1, M2, ...). Don't propose again what was rejected.",
             json!({
                 "title": s("The milestone, in a few words."),
                 "target": s("Target date, YYYY-MM-DD (optional)."),
-                "description": s("What is done when it is done (optional)."),
+                "description": s("What is true when it is done."),
             }),
-            vec!["title"],
+            vec!["title", "description"],
         ),
         tool(
-            "draft_add_ticket",
-            "New project: add a ticket. Returns its id (the project key and a number).",
+            "plan_propose_ticket",
+            "Planning: propose a ticket in an approved milestone, for the lead to review. Each \
+             should be finishable in a few days, with how to tell it's done. Returns its id.",
             json!({
+                "milestone": s("The approved milestone's id, e.g. M1."),
                 "title": s("The ticket, in one line."),
-                "milestone": s("The milestone id it belongs to, e.g. M1."),
                 "kind": s("feature, bug or chore (default feature)."),
-                "description": s("What to do and how to tell it's done (Markdown, optional)."),
+                "description": s("What to do and how to tell it's done (Markdown)."),
             }),
-            vec!["title", "milestone"],
+            vec!["milestone", "title", "description"],
         ),
         tool(
-            "draft_add_question",
-            "New project: add an open question (a decision still to be made). Returns its id \
-             (D1, D2, ...). Assign it to the GitHub login who should decide; the user by default.",
+            "plan_revise",
+            "Planning: revise a milestone (M..) or ticket (KEY-..) that is still to review or \
+             had changes asked; it goes back to the lead to review. Only the fields given \
+             change. Use the lead's note (plan_show shows it).",
+            json!({
+                "id": s("What to revise."),
+                "title": s("New title."),
+                "target": s("A milestone's target date, YYYY-MM-DD."),
+                "description": s("New description."),
+                "milestone": s("A ticket's milestone id."),
+                "kind": s("A ticket's kind: feature, bug or chore."),
+            }),
+            vec!["id"],
+        ),
+        tool(
+            "plan_withdraw",
+            "Planning: withdraw a proposal that hasn't been approved (e.g. after splitting it \
+             into two). Approved and rejected items stay.",
+            json!({"id": s("The milestone or ticket.")}),
+            vec!["id"],
+        ),
+        tool(
+            "plan_add_question",
+            "Planning: add an open question, a decision still to be made, for whoever should \
+             decide (a GitHub login; the lead by default). Returns its id.",
             json!({
                 "question": s("The question."),
                 "assigned_to": s("GitHub login of who decides (optional)."),
@@ -93,81 +127,88 @@ pub fn schemas() -> Vec<Value> {
             vec!["question"],
         ),
         tool(
-            "draft_add_link",
-            "New project: attach a link as a resource (a Figma file, a doc, a thread).",
+            "plan_add_link",
+            "Planning: attach a link to the project's resources.",
             json!({"title": s("What it is."), "url": s("The link.")}),
             vec!["title", "url"],
         ),
         tool(
-            "draft_read_resource",
-            "New project: read an attached file by name (as draft_show lists it). Returns its \
-             text, or for a file that isn't text (a PDF, an image) its path, to open with your \
-             Read tool.",
+            "plan_read_resource",
+            "Planning: read an attached file by name (as plan_show lists it): its text, or for \
+             a file that isn't text its path, to open with your Read tool.",
             json!({"name": s("The file's name under resources/.")}),
             vec!["name"],
         ),
         tool(
-            "draft_edit",
-            "New project: change a milestone (M..), ticket (KEY-..) or question (D..). Only the \
-             fields given change.",
-            json!({
-                "id": s("What to change."),
-                "title": s("Milestone or ticket title."),
-                "target": s("Milestone target date, YYYY-MM-DD."),
-                "description": s("Milestone or ticket description."),
-                "milestone": s("A ticket's milestone id."),
-                "kind": s("A ticket's kind: feature, bug or chore."),
-                "question": s("A question's text."),
-                "assigned_to": s("A question's GitHub login."),
-            }),
-            vec!["id"],
+            "ticket_show",
+            "Work: your ticket: its description, milestone, the project's spec and its open \
+             questions about it.",
+            json!({}),
+            vec![],
         ),
         tool(
-            "draft_remove",
-            "New project: remove a milestone (only once no ticket is in it), ticket, question \
-             or link (by its url).",
-            json!({"id": s("The id, or a link's url.")}),
-            vec!["id"],
+            "ticket_report",
+            "Work: finish the ticket: the pull requests you opened for it and what you did. The \
+             ticket moves to in review and the people on the project see the links.",
+            json!({
+                "prs": {"type": "array", "items": {"type": "string"},
+                    "description": "The pull request URLs."},
+                "summary": s("What you did, and anything a reviewer should know."),
+            }),
+            vec!["prs", "summary"],
         ),
     ]
 }
 
-/// Runs tool `name` for the terminal holding `token`; `None` for a name not in `NAMES`.
+/// Runs tool `name` for the terminal holding `token`; `None` for a name this module doesn't
+/// answer.
 pub fn call(reg: &Registry, token: &str, name: &str, args: &Value) -> Option<Outcome> {
-    if !NAMES.contains(&name) {
+    if !names().any(|n| n == name) {
         return None;
     }
-    let Some(draft) = reg.drafts.get(token) else {
-        return Some(Outcome::err(
-            "Only a New project session can use the draft tools: start one from hydraui's \
-             Projects tab.",
-        ));
+    let session = reg.project_sessions.get(token);
+    let out = match (session, PLAN.contains(&name)) {
+        (Some(Session::Plan { dir, login }), true) => plan(dir, login, name, args),
+        (Some(Session::Work { dir, ticket }), false) => work(dir, ticket, name, args),
+        _ if PLAN.contains(&name) => Err("Only a project's planning session can use the plan \
+             tools: start one from the project in hydraui's Projects tab."
+            .into()),
+        _ => Err(
+            "Only a ticket's work session can use the ticket tools: start one with Start \
+             work on the ticket in hydraui's Projects tab."
+                .into(),
+        ),
     };
-    Some(match apply(draft, name, args) {
+    Some(match out {
         Ok(text) => Outcome::ok(text),
         Err(e) => Outcome::err(e),
     })
 }
 
-fn apply(draft: &Draft, name: &str, args: &Value) -> Result<String, String> {
-    let arg = |key: &str| {
-        args.get(key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_string)
-    };
-    let need = |key: &str| arg(key).ok_or_else(|| format!("{key} is required"));
-    let dir = &draft.dir;
+fn get<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+}
+
+fn need(args: &Value, key: &str) -> Result<String, String> {
+    get(args, key)
+        .map(str::to_string)
+        .ok_or_else(|| format!("{key} is required"))
+}
+
+fn plan(dir: &Path, login: &str, name: &str, args: &Value) -> Result<String, String> {
     let p = repo::load(dir).map_err(|e| e.to_string())?;
+    let e = |e: hydraui_projects::Error| e.to_string();
     match name {
-        "draft_show" => Ok(show(dir, &p)),
-        "draft_set_spec" => {
+        "plan_show" => Ok(show(dir, &p)),
+        "plan_set_spec" => {
             let text = args.get("text").and_then(Value::as_str).unwrap_or("");
-            repo::write_spec(dir, text).map_err(|e| e.to_string())?;
+            repo::write_spec(dir, text).map_err(e)?;
             Ok("Spec saved.".into())
         }
-        "draft_add_milestone" => {
+        "plan_propose_milestone" => {
             let id = format!(
                 "M{}",
                 p.milestones
@@ -177,45 +218,79 @@ fn apply(draft: &Draft, name: &str, args: &Value) -> Result<String, String> {
                     .unwrap_or(0)
                     + 1
             );
-            let mut milestones = p.milestones.clone();
-            milestones.push(Milestone {
+            let mut ms = p.milestones.clone();
+            ms.push(Milestone {
                 id: id.clone(),
-                title: need("title")?,
-                target: arg("target").map(|t| date(&t)).transpose()?,
-                status: if milestones.is_empty() {
-                    MilestoneStatus::Active
-                } else {
-                    MilestoneStatus::Planned
-                },
-                description: arg("description").unwrap_or_default(),
+                title: need(args, "title")?,
+                target: get(args, "target").map(crate::projects::date).transpose()?,
+                status: MilestoneStatus::Planned,
+                description: need(args, "description")?,
+                review: Review::Proposed,
+                ..Default::default()
             });
-            repo::write_milestones(dir, &milestones).map_err(|e| e.to_string())?;
-            Ok(format!("Added {id}."))
+            repo::write_milestones(dir, &ms).map_err(e)?;
+            Ok(format!("Proposed {id}; the lead reviews it in hydraui."))
         }
-        "draft_add_ticket" => {
-            let milestone = need("milestone")?;
-            if !p.milestones.iter().any(|m| m.id == milestone) {
-                return Err(format!("There's no milestone {milestone}; add it first."));
+        "plan_propose_ticket" => {
+            let milestone = need(args, "milestone")?;
+            match p.milestones.iter().find(|m| m.id == milestone) {
+                None => return Err(format!("There's no milestone {milestone}.")),
+                Some(m) if m.review != Review::Approved => {
+                    return Err(format!(
+                        "{milestone} isn't approved yet ({}); tickets come once it is.",
+                        m.review.label()
+                    ));
+                }
+                Some(_) => {}
             }
             let id = next_id(&p.file.key, p.tickets.iter().map(|t| t.id.as_str()));
-            let ticket = Ticket {
+            let t = Ticket {
                 id: id.clone(),
                 meta: TicketMeta {
-                    title: need("title")?,
-                    kind: kind(arg("kind").as_deref())?,
-                    status: Default::default(),
+                    title: need(args, "title")?,
+                    kind: kind(get(args, "kind"))?,
+                    status: TicketStatus::Todo,
                     milestone,
-                    assignee: String::new(),
-                    created_by: draft.login.clone(),
+                    created_by: login.to_string(),
                     created: Some(progress::now()),
-                    extra: Default::default(),
+                    review: Review::Proposed,
+                    ..Default::default()
                 },
-                body: arg("description").unwrap_or_default(),
+                body: need(args, "description")?,
             };
-            repo::write_ticket(dir, &ticket).map_err(|e| e.to_string())?;
-            Ok(format!("Added {id}."))
+            repo::write_ticket(dir, &t).map_err(e)?;
+            Ok(format!("Proposed {id}; the lead reviews it in hydraui."))
         }
-        "draft_add_question" => {
+        "plan_revise" => revise(dir, &p, &need(args, "id")?, args),
+        "plan_withdraw" => {
+            let id = need(args, "id")?;
+            let open = |r: Review| matches!(r, Review::Proposed | Review::Changes);
+            if let Some(m) = p.milestones.iter().find(|m| m.id == id) {
+                if !open(m.review) {
+                    return Err(format!("{id} is {}; it stays.", m.review.label()));
+                }
+                if p.tickets.iter().any(|t| t.meta.milestone == id) {
+                    return Err(format!("{id} has tickets; it stays."));
+                }
+                let ms: Vec<_> = p
+                    .milestones
+                    .iter()
+                    .filter(|m| m.id != id)
+                    .cloned()
+                    .collect();
+                repo::write_milestones(dir, &ms).map_err(e)?;
+            } else if let Some(t) = p.tickets.iter().find(|t| t.id == id) {
+                if !open(t.meta.review) {
+                    return Err(format!("{id} is {}; it stays.", t.meta.review.label()));
+                }
+                std::fs::remove_file(dir.join("tickets").join(format!("{id}.md")))
+                    .map_err(|e| e.to_string())?;
+            } else {
+                return Err(format!("There's no {id}."));
+            }
+            Ok(format!("Withdrew {id}."))
+        }
+        "plan_add_question" => {
             let id = next_id("D", p.decisions.iter().map(|d| d.id.as_str()));
             let options = args
                 .get("options")
@@ -227,126 +302,169 @@ fn apply(draft: &Draft, name: &str, args: &Value) -> Result<String, String> {
                         .collect()
                 })
                 .unwrap_or_default();
-            let decision = Decision {
+            let d = Decision {
                 id: id.clone(),
                 meta: DecisionMeta {
-                    question: need("question")?,
-                    asked_by: draft.login.clone(),
+                    question: need(args, "question")?,
+                    asked_by: login.to_string(),
                     asked_at: Some(progress::now()),
-                    assigned_to: arg("assigned_to").unwrap_or_else(|| draft.login.clone()),
+                    assigned_to: get(args, "assigned_to")
+                        .map(|w| w.trim_start_matches('@').to_string())
+                        .unwrap_or_else(|| p.file.lead.clone()),
                     options,
-                    ticket: String::new(),
-                    milestone: String::new(),
-                    answer: String::new(),
-                    decided_by: String::new(),
-                    decided_at: None,
-                    replaces: String::new(),
-                    extra: Default::default(),
+                    ..Default::default()
                 },
                 body: String::new(),
             };
-            repo::write_decision(dir, &decision).map_err(|e| e.to_string())?;
-            Ok(format!("Added {id}."))
+            repo::write_decision(dir, &d).map_err(e)?;
+            Ok(format!("Asked {id}."))
         }
-        "draft_add_link" => {
-            let mut links = p.links.clone();
-            links.push(Link {
-                title: need("title")?,
-                url: need("url")?,
-            });
-            repo::write_links(dir, &links).map_err(|e| e.to_string())?;
+        "plan_add_link" => {
+            crate::projects::add_link(dir, &need(args, "url")?, &need(args, "title")?)?;
             Ok("Link added.".into())
         }
-        "draft_read_resource" => read_resource(dir, &need("name")?),
-        "draft_edit" => edit(dir, &p, &need("id")?, &arg),
-        "draft_remove" => remove(dir, &p, &need("id")?),
+        "plan_read_resource" => read_resource(dir, &need(args, "name")?),
         _ => Err(format!("unknown tool {name}")),
     }
 }
 
-fn edit(
-    dir: &Path,
-    p: &hydraui_projects::Project,
-    id: &str,
-    arg: &dyn Fn(&str) -> Option<String>,
-) -> Result<String, String> {
+fn revise(dir: &Path, p: &Project, id: &str, args: &Value) -> Result<String, String> {
+    let e = |e: hydraui_projects::Error| e.to_string();
+    let open = |r: Review| matches!(r, Review::Proposed | Review::Changes);
     if let Some(i) = p.milestones.iter().position(|m| m.id == id) {
-        let mut milestones = p.milestones.clone();
-        let m = &mut milestones[i];
-        if let Some(v) = arg("title") {
-            m.title = v;
-        }
-        if let Some(v) = arg("target") {
-            m.target = Some(date(&v)?);
-        }
-        if let Some(v) = arg("description") {
-            m.description = v;
-        }
-        repo::write_milestones(dir, &milestones).map_err(|e| e.to_string())?;
-    } else if let Some(t) = p.tickets.iter().find(|t| t.id == id) {
-        let mut t = t.clone();
-        if let Some(v) = arg("title") {
-            t.meta.title = v;
-        }
-        if let Some(v) = arg("description") {
-            t.body = v;
-        }
-        if let Some(v) = arg("milestone") {
-            if !p.milestones.iter().any(|m| m.id == v) {
-                return Err(format!("There's no milestone {v}."));
-            }
-            t.meta.milestone = v;
-        }
-        if let Some(v) = arg("kind") {
-            t.meta.kind = kind(Some(&v))?;
-        }
-        repo::write_ticket(dir, &t).map_err(|e| e.to_string())?;
-    } else if let Some(d) = p.decisions.iter().find(|d| d.id == id) {
-        let mut d = d.clone();
-        if let Some(v) = arg("question") {
-            d.meta.question = v;
-        }
-        if let Some(v) = arg("assigned_to") {
-            d.meta.assigned_to = v;
-        }
-        repo::write_decision(dir, &d).map_err(|e| e.to_string())?;
-    } else {
-        return Err(format!("There's no {id} in the draft."));
-    }
-    Ok(format!("Changed {id}."))
-}
-
-fn remove(dir: &Path, p: &hydraui_projects::Project, id: &str) -> Result<String, String> {
-    let gone = |path: PathBuf| std::fs::remove_file(path).map_err(|e| e.to_string());
-    if p.milestones.iter().any(|m| m.id == id) {
-        if p.tickets.iter().any(|t| t.meta.milestone == id) {
+        let mut ms = p.milestones.clone();
+        let m = &mut ms[i];
+        if !open(m.review) {
             return Err(format!(
-                "{id} still has tickets; move or remove them first."
+                "{id} is {}; only proposals are revised.",
+                m.review.label()
             ));
         }
-        let milestones: Vec<_> = p
-            .milestones
-            .iter()
-            .filter(|m| m.id != id)
-            .cloned()
-            .collect();
-        repo::write_milestones(dir, &milestones).map_err(|e| e.to_string())?;
-    } else if p.tickets.iter().any(|t| t.id == id) {
-        gone(dir.join("tickets").join(format!("{id}.md")))?;
-    } else if p.decisions.iter().any(|d| d.id == id) {
-        gone(dir.join("decisions").join(format!("{id}.md")))?;
-    } else if p.links.iter().any(|l| l.url == id) {
-        let links: Vec<_> = p.links.iter().filter(|l| l.url != id).cloned().collect();
-        repo::write_links(dir, &links).map_err(|e| e.to_string())?;
+        if let Some(v) = get(args, "title") {
+            m.title = v.to_string();
+        }
+        if let Some(v) = get(args, "target") {
+            m.target = Some(crate::projects::date(v)?);
+        }
+        if let Some(v) = get(args, "description") {
+            m.description = v.to_string();
+        }
+        m.review = Review::Proposed;
+        repo::write_milestones(dir, &ms).map_err(e)?;
+    } else if let Some(t) = p.tickets.iter().find(|t| t.id == id) {
+        let mut t = t.clone();
+        if !open(t.meta.review) {
+            return Err(format!(
+                "{id} is {}; only proposals are revised.",
+                t.meta.review.label()
+            ));
+        }
+        if let Some(v) = get(args, "title") {
+            t.meta.title = v.to_string();
+        }
+        if let Some(v) = get(args, "description") {
+            t.body = v.to_string();
+        }
+        if let Some(v) = get(args, "milestone") {
+            if !p
+                .milestones
+                .iter()
+                .any(|m| m.id == v && m.review == Review::Approved)
+            {
+                return Err(format!("{v} isn't an approved milestone."));
+            }
+            t.meta.milestone = v.to_string();
+        }
+        if let Some(v) = get(args, "kind") {
+            t.meta.kind = kind(Some(v))?;
+        }
+        t.meta.review = Review::Proposed;
+        repo::write_ticket(dir, &t).map_err(e)?;
     } else {
-        return Err(format!("There's no {id} in the draft."));
+        return Err(format!("There's no {id}."));
     }
-    Ok(format!("Removed {id}."))
+    Ok(format!("Revised {id}; it's back with the lead to review."))
+}
+
+fn work(dir: &Path, ticket: &str, name: &str, args: &Value) -> Result<String, String> {
+    let p = repo::load(dir).map_err(|e| e.to_string())?;
+    let t = p
+        .tickets
+        .iter()
+        .find(|t| t.id == ticket)
+        .ok_or_else(|| format!("Ticket {ticket} isn't in the project any more."))?;
+    match name {
+        "ticket_show" => {
+            let m = p.milestones.iter().find(|m| m.id == t.meta.milestone);
+            let mut out = format!(
+                "{} · {}\nProject: {} ({})\nMilestone: {}\nBranch: {}\n\n{}\n",
+                t.id,
+                t.meta.title,
+                p.file.name,
+                dir.display(),
+                m.map(|m| format!("{} {}: {}", m.id, m.title, m.description))
+                    .unwrap_or_default(),
+                t.meta.branch,
+                t.body.trim(),
+            );
+            let questions: Vec<_> = p
+                .decisions
+                .iter()
+                .filter(|d| d.meta.ticket == t.id)
+                .collect();
+            if !questions.is_empty() {
+                out.push_str("\nQuestions about it:\n");
+                for d in questions {
+                    let answer = if d.is_open() {
+                        "(open)".to_string()
+                    } else {
+                        d.meta.answer.clone()
+                    };
+                    out.push_str(&format!("- {}: {answer}\n", d.meta.question));
+                }
+            }
+            out.push_str(&format!(
+                "\nThe project's spec is {}.\n",
+                dir.join("spec.md").display()
+            ));
+            Ok(out)
+        }
+        "ticket_report" => {
+            let prs: Vec<String> = args
+                .get("prs")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(|u| u.trim().to_string())
+                        .filter(|u| !u.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if prs.is_empty() {
+                return Err("Give the pull request URLs you opened for the ticket.".into());
+            }
+            if let Some(bad) = prs.iter().find(|u| !u.starts_with("https://")) {
+                return Err(format!("{bad} isn't a pull request URL."));
+            }
+            let summary = need(args, "summary")?;
+            let mut t = t.clone();
+            t.meta.prs = prs;
+            t.meta.status = TicketStatus::InReview;
+            t.body = format!("{}\n\n## Work\n\n{summary}\n", t.body.trim_end());
+            repo::write_ticket(dir, &t).map_err(|e| e.to_string())?;
+            Ok(format!(
+                "Reported: {} is in review with its pull requests.",
+                t.id
+            ))
+        }
+        _ => Err(format!("unknown tool {name}")),
+    }
 }
 
 fn read_resource(dir: &Path, name: &str) -> Result<String, String> {
     if name.contains(['/', '\\']) || name.starts_with('.') {
-        return Err("Give the file's name as draft_show lists it.".into());
+        return Err("Give the file's name as plan_show lists it.".into());
     }
     let path = dir.join("resources").join(name);
     let bytes = std::fs::read(&path).map_err(|_| format!("There's no file {name}."))?;
@@ -359,10 +477,10 @@ fn read_resource(dir: &Path, name: &str) -> Result<String, String> {
     }
 }
 
-/// The draft as `draft_show` tells it.
-fn show(dir: &Path, p: &hydraui_projects::Project) -> String {
+/// The project as `plan_show` tells it.
+fn show(dir: &Path, p: &Project) -> String {
     let mut out = format!(
-        "Draft project \"{}\" (key {}, lead {}), in {}\n\n## Spec\n{}\n\n## Milestones\n",
+        "Project \"{}\" (key {}, lead {}), in {}\n\n## Spec\n{}\n\n## Milestones\n",
         p.file.name,
         p.file.key,
         p.file.lead,
@@ -373,23 +491,40 @@ fn show(dir: &Path, p: &hydraui_projects::Project) -> String {
             p.spec.trim()
         },
     );
+    let note = |r: Review, n: &str| match r {
+        Review::Changes => format!(" [changes asked: {n}]"),
+        Review::Rejected => format!(" [rejected: {n}]"),
+        other => format!(" [{}]", other.label()),
+    };
     for m in &p.milestones {
         let target = m
             .target
             .map(|t| format!(", target {t}"))
             .unwrap_or_default();
-        out.push_str(&format!("- {}: {}{target}\n", m.id, m.title));
+        out.push_str(&format!(
+            "- {}: {}{target}{}\n  {}\n",
+            m.id,
+            m.title,
+            note(m.review, &m.review_note),
+            m.description
+        ));
         for t in p.tickets.iter().filter(|t| t.meta.milestone == m.id) {
             let kind = match t.meta.kind {
                 TicketKind::Feature => "",
-                TicketKind::Bug => " [bug]",
-                TicketKind::Chore => " [chore]",
+                TicketKind::Bug => " (bug)",
+                TicketKind::Chore => " (chore)",
             };
-            out.push_str(&format!("  - {}: {}{kind}\n", t.id, t.meta.title));
+            out.push_str(&format!(
+                "  - {}: {}{kind}{} · {}\n",
+                t.id,
+                t.meta.title,
+                note(t.meta.review, &t.meta.review_note),
+                t.meta.status.label()
+            ));
         }
     }
     out.push_str("\n## Open questions\n");
-    for d in &p.decisions {
+    for d in p.decisions.iter().filter(|d| d.is_open()) {
         out.push_str(&format!(
             "- {}: {} (for {})\n",
             d.id, d.meta.question, d.meta.assigned_to
@@ -405,16 +540,6 @@ fn show(dir: &Path, p: &hydraui_projects::Project) -> String {
     out
 }
 
-fn date(text: &str) -> Result<toml::value::Datetime, String> {
-    let d: toml::value::Datetime = text
-        .parse()
-        .map_err(|_| format!("{text} isn't a date like 2026-12-01"))?;
-    if d.date.is_none() || d.time.is_some() {
-        return Err(format!("{text} isn't a date like 2026-12-01"));
-    }
-    Ok(d)
-}
-
 fn kind(text: Option<&str>) -> Result<TicketKind, String> {
     match text.map(str::to_ascii_lowercase).as_deref() {
         None | Some("feature") => Ok(TicketKind::Feature),
@@ -427,159 +552,172 @@ fn kind(text: Option<&str>) -> Result<TicketKind, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::projects::{Item, review};
 
-    fn draft() -> (tempfile::TempDir, Registry) {
+    fn setup() -> (tempfile::TempDir, Registry, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("product-groups");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("project.toml"),
-            "name = \"Product Groups\"\nkey = \"PG\"\nlead = \"me\"\n",
+            "name = \"Product Groups\"\nkey = \"PG\"\nlead = \"lead\"\n",
         )
         .unwrap();
         let mut reg = Registry::default();
-        reg.drafts.insert(
-            "tok".into(),
-            Draft {
-                dir,
-                login: "me".into(),
+        reg.project_sessions.insert(
+            "plan".into(),
+            Session::Plan {
+                dir: dir.clone(),
+                login: "lead".into(),
             },
         );
-        (tmp, reg)
+        (tmp, reg, dir)
     }
 
-    fn run(reg: &Registry, name: &str, args: Value) -> Outcome {
-        call(reg, "tok", name, &args).expect("a draft tool")
+    fn run(reg: &Registry, token: &str, name: &str, args: Value) -> Outcome {
+        call(reg, token, name, &args).expect("a project tool")
+    }
+
+    fn approve(dir: &Path, id: &str) {
+        let item = if id.starts_with('M') {
+            Item::Milestone(id.into())
+        } else {
+            Item::Ticket(id.into())
+        };
+        review(dir, &item, Review::Approved, "", "lead").unwrap();
     }
 
     #[test]
-    fn a_session_builds_a_draft() {
-        let (_tmp, reg) = draft();
-        assert!(!run(&reg, "draft_set_spec", json!({"text": "# PG\n"})).is_error);
-        assert_eq!(
-            run(
-                &reg,
-                "draft_add_milestone",
-                json!({"title": "Model", "target": "2026-12-01"})
-            )
-            .text,
-            "Added M1."
+    fn a_plan_is_proposed_then_reviewed() {
+        let (_tmp, reg, dir) = setup();
+        assert!(!run(&reg, "plan", "plan_set_spec", json!({"text": "# PG"})).is_error);
+        let out = run(
+            &reg,
+            "plan",
+            "plan_propose_milestone",
+            json!({"title": "Model", "description": "tables", "target": "2026-12-01"}),
         );
-        assert_eq!(
-            run(
-                &reg,
-                "draft_add_ticket",
-                json!({"title": "Schema", "milestone": "M1"})
-            )
-            .text,
-            "Added PG-1."
+        assert!(out.text.starts_with("Proposed M1"), "{}", out.text);
+        let ticket = json!({"milestone": "M1", "title": "Schema", "description": "x"});
+        let early = run(&reg, "plan", "plan_propose_ticket", ticket.clone());
+        assert!(
+            early.is_error && early.text.contains("isn't approved"),
+            "{}",
+            early.text
         );
-        assert_eq!(
-            run(
-                &reg,
-                "draft_add_ticket",
-                json!({"title": "Crash", "milestone": "M1", "kind": "bug"})
-            )
-            .text,
-            "Added PG-2."
-        );
-        assert_eq!(
-            run(
-                &reg,
-                "draft_add_question",
-                json!({"question": "Postgres?", "options": ["yes", "no"]})
-            )
-            .text,
-            "Added D-1."
+        approve(&dir, "M1");
+        let ok = run(&reg, "plan", "plan_propose_ticket", ticket);
+        assert!(ok.text.starts_with("Proposed PG-1"), "{}", ok.text);
+        let shown = run(&reg, "plan", "plan_show", json!({})).text;
+        assert!(
+            shown.contains("- M1: Model, target 2026-12-01 [approved]"),
+            "{shown}"
         );
         assert!(
-            !run(
-                &reg,
-                "draft_add_link",
-                json!({"title": "Figma", "url": "https://figma.com/x"})
-            )
-            .is_error
-        );
-        let shown = run(&reg, "draft_show", json!({})).text;
-        assert!(shown.contains("- M1: Model, target 2026-12-01"), "{shown}");
-        assert!(shown.contains("  - PG-2: Crash [bug]"), "{shown}");
-        assert!(shown.contains("- D-1: Postgres? (for me)"), "{shown}");
-        assert!(
-            shown.contains("- link: Figma <https://figma.com/x>"),
+            shown.contains("  - PG-1: Schema [to review] · Todo"),
             "{shown}"
         );
     }
 
     #[test]
-    fn edits_and_removals_check_what_they_name() {
-        let (_tmp, reg) = draft();
-        run(&reg, "draft_add_milestone", json!({"title": "Model"}));
+    fn revising_answers_a_note_and_goes_back_for_review() {
+        let (_tmp, reg, dir) = setup();
         run(
             &reg,
-            "draft_add_ticket",
-            json!({"title": "Schema", "milestone": "M1"}),
+            "plan",
+            "plan_propose_milestone",
+            json!({"title": "Model", "description": "x"}),
         );
+        let m1 = Item::Milestone("M1".into());
+        review(&dir, &m1, Review::Changes, "give it a date", "lead").unwrap();
+        let shown = run(&reg, "plan", "plan_show", json!({})).text;
+        assert!(shown.contains("[changes asked: give it a date]"), "{shown}");
+        let revise = json!({"id": "M1", "target": "2026-12-01"});
+        assert!(!run(&reg, "plan", "plan_revise", revise).is_error);
+        let m = repo::load(&dir).unwrap().milestones.remove(0);
+        assert_eq!(m.review, Review::Proposed);
+        assert_eq!(m.target.unwrap().to_string(), "2026-12-01");
+        approve(&dir, "M1");
+        let late = json!({"id": "M1", "title": "x"});
         assert!(
-            run(
-                &reg,
-                "draft_add_ticket",
-                json!({"title": "x", "milestone": "M9"})
-            )
-            .is_error
+            run(&reg, "plan", "plan_revise", late).is_error,
+            "approved stays"
         );
-        assert!(
-            run(&reg, "draft_remove", json!({"id": "M1"})).is_error,
-            "M1 has a ticket"
-        );
-        assert!(
-            !run(
-                &reg,
-                "draft_edit",
-                json!({"id": "PG-1", "title": "Schema v2"})
-            )
-            .is_error
-        );
-        assert!(run(&reg, "draft_edit", json!({"id": "M1", "target": "soon"})).is_error);
-        assert!(!run(&reg, "draft_remove", json!({"id": "PG-1"})).is_error);
-        assert!(!run(&reg, "draft_remove", json!({"id": "M1"})).is_error);
-        assert!(
-            run(&reg, "draft_show", json!({}))
-                .text
-                .contains("## Milestones\n\n")
-        );
+        assert!(run(&reg, "plan", "plan_withdraw", json!({"id": "M1"})).is_error);
     }
 
     #[test]
-    fn only_a_draft_session_may_call_them() {
-        let (_tmp, reg) = draft();
-        let out = call(&reg, "someone-else", "draft_show", &json!({})).unwrap();
-        assert!(out.is_error);
-        assert!(call(&reg, "tok", "tasks_read", &json!({})).is_none());
+    fn a_rejection_is_shown_with_its_reason_and_stays() {
+        let (_tmp, reg, dir) = setup();
+        run(
+            &reg,
+            "plan",
+            "plan_propose_milestone",
+            json!({"title": "Mobile", "description": "x"}),
+        );
+        let m1 = Item::Milestone("M1".into());
+        review(&dir, &m1, Review::Rejected, "out of scope", "lead").unwrap();
+        let shown = run(&reg, "plan", "plan_show", json!({})).text;
+        assert!(shown.contains("[rejected: out of scope]"), "{shown}");
+        assert!(run(&reg, "plan", "plan_withdraw", json!({"id": "M1"})).is_error);
     }
 
     #[test]
-    fn resources_are_read_by_name_only() {
-        let (tmp, reg) = draft();
-        let res = tmp.path().join("product-groups/resources");
-        std::fs::create_dir_all(&res).unwrap();
-        std::fs::write(res.join("notes.md"), "kickoff").unwrap();
-        std::fs::write(res.join("flow.png"), [0xff, 0xd8, 0x00]).unwrap();
-        assert_eq!(
-            run(&reg, "draft_read_resource", json!({"name": "notes.md"})).text,
-            "kickoff"
+    fn a_work_session_reports_its_pull_requests() {
+        let (_tmp, mut reg, dir) = setup();
+        run(
+            &reg,
+            "plan",
+            "plan_propose_milestone",
+            json!({"title": "Model", "description": "x"}),
+        );
+        approve(&dir, "M1");
+        let ticket =
+            json!({"milestone": "M1", "title": "Schema", "description": "Make the tables."});
+        run(&reg, "plan", "plan_propose_ticket", ticket);
+        reg.project_sessions.insert(
+            "work".into(),
+            Session::Work {
+                dir: dir.clone(),
+                ticket: "PG-1".into(),
+            },
         );
         assert!(
-            run(&reg, "draft_read_resource", json!({"name": "flow.png"}))
+            run(&reg, "work", "ticket_show", json!({}))
                 .text
-                .contains("Read tool")
+                .contains("Make the tables.")
         );
-        assert!(
-            run(
-                &reg,
-                "draft_read_resource",
-                json!({"name": "../project.toml"})
-            )
-            .is_error
+        let empty = json!({"prs": [], "summary": "x"});
+        assert!(run(&reg, "work", "ticket_report", empty).is_error);
+        let junk = json!({"prs": ["not a url"], "summary": "x"});
+        assert!(run(&reg, "work", "ticket_report", junk).is_error);
+        let pr = "https://github.com/iov42/fe/pull/1";
+        let out = run(
+            &reg,
+            "work",
+            "ticket_report",
+            json!({"prs": [pr], "summary": "Added the tables."}),
         );
+        assert!(!out.is_error, "{}", out.text);
+        let t = repo::load(&dir).unwrap().tickets.remove(0);
+        assert_eq!(t.meta.status, TicketStatus::InReview);
+        assert_eq!(t.meta.prs, [pr]);
+        assert!(t.body.contains("## Work\n\nAdded the tables."));
+    }
+
+    #[test]
+    fn each_session_uses_only_its_own_tools() {
+        let (_tmp, mut reg, dir) = setup();
+        reg.project_sessions.insert(
+            "work".into(),
+            Session::Work {
+                dir,
+                ticket: "PG-1".into(),
+            },
+        );
+        assert!(run(&reg, "work", "plan_show", json!({})).is_error);
+        assert!(run(&reg, "plan", "ticket_show", json!({})).is_error);
+        assert!(run(&reg, "stranger", "plan_show", json!({})).is_error);
+        assert!(call(&reg, "plan", "tasks_read", &json!({})).is_none());
     }
 }

@@ -443,6 +443,27 @@ title = "Sharing"
     }
 
     #[test]
+    fn items_without_a_review_count_as_approved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("pg");
+        sample(&dir);
+        let p = load(&dir).unwrap();
+        assert_eq!(p.milestones[0].review, Review::Approved);
+        assert_eq!(p.tickets[0].meta.review, Review::Approved);
+        let mut t = p.tickets[0].clone();
+        t.meta.review = Review::Rejected;
+        t.meta.review_note = "out of scope".into();
+        write_ticket(&dir, &t).unwrap();
+        let text = std::fs::read_to_string(dir.join("tickets/PG-1.md")).unwrap();
+        assert!(
+            text.contains("review = \"rejected\"")
+                && text.contains("review_note = \"out of scope\"")
+        );
+        let counts = crate::progress::milestone_counts(&load(&dir).unwrap(), |t| t.meta.status);
+        assert_eq!(counts["M1"].total(), 2, "a rejected ticket doesn't count");
+    }
+
+    #[test]
     fn a_missing_optional_file_is_empty_not_an_error() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("bare");

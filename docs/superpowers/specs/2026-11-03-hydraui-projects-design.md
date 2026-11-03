@@ -493,3 +493,62 @@ These are marked "our call" above. In addition:
 - questions raised by the check going to the lead;
 - milestone progress counted by tickets done, with no weighting;
 - the key suggested from the name, and fixed once tickets exist.
+
+## 14. Planning by review (added 2026-11-03, after trying the prototype)
+
+Jordan tried slice 1 and changed how a project is planned and built. The changes replace §9.1
+(drafts and Create) and add work sessions for tickets. The rest of the spec stands.
+
+Decisions (Jordan, 2026-11-03):
+
+- **Starting.** New project asks for a name and makes the project at once, in hydra's
+  checkout. The user attaches resources (files and links), then presses **Start project**.
+- **Planning session.** Start project opens a Claude session that works on that project's
+  folder. It reads the resources, writes the spec and **proposes** milestones. Nothing it
+  proposes counts until a person approves it.
+- **Review.** Every proposed milestone and ticket can be:
+  - **approved**;
+  - **updated**, in either of two ways: edit its fields in hydraui, or write a note that goes
+    back to the Claude session, which revises it and proposes it again;
+  - **rejected**, with a reason.
+
+  A rejected item stays in the repo, marked rejected with its reason and hidden by default, so
+  Claude sees it and doesn't propose it again.
+- **Tickets per milestone.** On an approved milestone, **Create tickets** has the planning
+  session propose that milestone's tickets, which are reviewed the same way.
+- **Who.** Only the lead approves, updates and rejects. Any member can start work.
+- **What needs review.** The project page always shows how many milestones and tickets are
+  waiting for review, and where they are.
+- **Work.**
+  - Once its milestone is approved, an approved ticket has **Start work**. It asks for a
+    skill, a model and an effort level, and which of the project's code repos to work in.
+  - hydra makes a fresh worktree of the local clone of that repo, on a branch named after the
+    ticket (`pg-12-share-dialog`), and starts Claude there with that skill, model and effort.
+  - The session finishes by reporting its pull request URLs. They show on the ticket, and the
+    ticket moves to **in review**.
+- **Local clones.** The first time a repo is used, hydraui asks where it is cloned on this
+  machine and remembers it.
+
+Format additions (§2):
+
+- Milestones and tickets get these fields:
+  - `review`: `proposed`, `changes`, `approved` or `rejected`. Missing means `approved`, so
+    hand-written files keep working.
+  - `review_note`: the update note or the rejection reason.
+  - `reviewed_by` and `reviewed_at`.
+- Tickets also get `branch`, `prs`, `started_by`, `started_at`, `skill`, `model` and `effort`.
+
+Tools (§10). These replace the draft tools:
+
+- **Planning session**: `plan_show`, `plan_set_spec`, `plan_propose_milestone`,
+  `plan_propose_ticket`, `plan_revise`, `plan_withdraw`, `plan_add_question`, `plan_add_link`
+  and `plan_read_resource`.
+  - It can propose and revise. It can never approve.
+  - It proposes tickets only for approved milestones.
+- **Work session**: `ticket_show` and `ticket_report(prs, summary)`.
+
+Calls made without the user:
+- Notes are typed into the planning session, so it acts on them at once.
+- A rejection isn't typed into the session. `plan_show` shows it with its reason.
+- Dropped tickets and rejected items don't count towards milestone progress.
+- Local clones are remembered per machine in `hydraui/projects.toml`, under `[clones]`.

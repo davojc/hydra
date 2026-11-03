@@ -144,6 +144,31 @@ pub fn sync_checkout(hydra: &Path, env: &str, repo: &str, dir: &Path) -> Result<
     .map(|_| ())
 }
 
+/// Project `slug`'s folder on GitHub, for a GitHub repo (`HEAD` is its default branch).
+pub fn github_url(repo: &str, slug: &str) -> Option<String> {
+    is_github(repo).then(|| format!("https://github.com/{repo}/tree/HEAD/{slug}"))
+}
+
+/// The projects in checkout `dir` that are in the repo already, not only on this machine: their
+/// `project.toml` is tracked. Blocks.
+pub fn sent_projects(dir: &Path) -> BTreeSet<String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
+        .arg(dir)
+        .args(["ls-files", "-z", "--", "*/project.toml"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let Ok(out) = hydra_platform::process::hide_window(&mut cmd).output() else {
+        return BTreeSet::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter_map(|p| p.strip_suffix("/project.toml"))
+        .filter(|slug| !slug.contains('/'))
+        .map(str::to_string)
+        .collect()
+}
+
 /// The files changed in `dir` and not sent yet, relative to it with `/`. Blocks.
 pub fn pending(dir: &Path) -> BTreeSet<String> {
     let mut cmd = std::process::Command::new("git");
@@ -496,6 +521,38 @@ mod tests {
                 .unwrap()
                 .starts_with("# mine")
         );
+    }
+
+    #[test]
+    fn github_links_point_at_the_project_folder() {
+        assert_eq!(
+            github_url("iov42/iov-projects", "mapping-ux").as_deref(),
+            Some("https://github.com/iov42/iov-projects/tree/HEAD/mapping-ux")
+        );
+        assert_eq!(github_url("/tmp/projects", "x"), None);
+    }
+
+    #[test]
+    fn only_tracked_projects_count_as_sent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        for slug in ["sent", "local"] {
+            std::fs::create_dir_all(dir.join(slug)).unwrap();
+            std::fs::write(dir.join(slug).join("project.toml"), "name = \"x\"").unwrap();
+        }
+        git(&["add", "sent/project.toml"]);
+        assert_eq!(sent_projects(dir).into_iter().collect::<Vec<_>>(), ["sent"]);
     }
 
     #[test]

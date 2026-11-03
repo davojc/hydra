@@ -76,6 +76,8 @@ pub(super) struct EnvProjects {
     broken: Vec<(String, String)>,
     /// Files changed and not sent yet (slice 1: the checkout's working tree).
     pending: BTreeSet<String>,
+    /// Projects already in the repo, not only on this machine.
+    sent: BTreeSet<String>,
     /// Drafts waiting in `drafts`, by folder.
     draft_dirs: Vec<PathBuf>,
 }
@@ -1155,6 +1157,26 @@ impl Workspace {
                     )),
             )
             .child(div().flex_1())
+            .child({
+                let folder = e.checkout.join(&p.slug);
+                Button::new("project-files")
+                    .label("Show files")
+                    .small()
+                    .ghost()
+                    .tooltip("The project's folder in hydra's checkout of the repo")
+                    .on_click(move |_, _, cx| cx.reveal_path(&folder))
+            })
+            .child(match pj::github_url(&e.repo, &p.slug) {
+                Some(url) if e.sent.contains(&p.slug) => Button::new("project-github")
+                    .label("Open on GitHub")
+                    .small()
+                    .ghost()
+                    .on_click(move |_, _, cx| cx.open_url(&url))
+                    .into_any_element(),
+                Some(_) => pill("not on GitHub yet", theme::TEXT_SECONDARY, theme::SURFACE)
+                    .into_any_element(),
+                None => div().into_any_element(),
+            })
             .child({
                 let (env_s, slug_s) = (env_s.clone(), slug_s.clone());
                 Button::new("project-ask")
@@ -2336,6 +2358,7 @@ fn read_checkout(e: &mut EnvProjects) {
         }
     }
     e.pending = pj::pending(&e.checkout);
+    e.sent = pj::sent_projects(&e.checkout);
     e.draft_dirs = std::fs::read_dir(&e.drafts)
         .map(|entries| {
             entries

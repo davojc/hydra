@@ -90,7 +90,8 @@ milestone really touches:
 4. **Frontend**: the screens and the flow, in product words: "Partners see shared groups in
    their group list". One ticket per screen or step a user would recognise; a big screen
    splits by what the user does on it.
-5. **End-to-end tests**: when a user flow is new or changes, the scenario that proves it.
+5. **End-to-end tests**: when a user flow is new or changes, the scenario that proves it, in
+   `version2-frontend/e2e` (never interu-playwright).
 6. **Release**: turning the feature flag on, data back-fills, removing the old path. Only
    when the milestone needs them.
 

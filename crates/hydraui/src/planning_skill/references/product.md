@@ -53,7 +53,7 @@ GraphQL.
 | `iov42/solutions-notification-v2` | The notification and email service. Java, Spring Boot. Shared with the older Timberchain product, so a change must not break either. | README, build.gradle |
 | `iov42/svc-usage` | Usage metering and limit warnings per organisation. It observes and notifies, and never blocks. .NET 10. Has its own API rules (ADR-0047). | README, CLAUDE.md |
 | `iov42/interu-admin-console` | The internal admin console: Next.js and React. It only reads: new data for it needs a report endpoint in identity-platform or the backend first. | README |
-| `iov42/interu-playwright` | An end-to-end suite (Playwright BDD), untouched since 2026-08-14; `version2-frontend/e2e` has the same kind of suite. **Ask which one new scenarios go in.** | git log |
+| `iov42/interu-playwright` | The older end-to-end suite (Playwright BDD). Don't add to it: new scenarios go in `version2-frontend/e2e`. | Jordan, 2026-11-04 |
 | `iov42/cypress-bdd-pom` | The Cypress suite a backend pull request's `/re-run` runs against its branch deployment. | backend trigger-run-qa-tests.yaml |
 | `iov42/interu-localisation` | Translations. The frontend's English strings are pushed here by CI and translated here. | frontend .github/workflows/update-locales.yaml |
 
@@ -88,8 +88,10 @@ GraphQL.
   - Strings that exist already come from `TextConstants`.
 - **Tests:**
   - Unit tests are Vitest specs next to the code.
-  - End-to-end tests are Playwright with Gherkin features in `e2e/features/`. `@smoke` marks
-    the ones run on pull requests.
+  - End-to-end tests are Playwright with Gherkin features in `e2e/features/`, steps in
+    `e2e/features/steps/` and page objects in `e2e/pages/`. **Every new end-to-end scenario
+    goes here** (Jordan, 2026-11-04), as a ticket in this repo. `@smoke` marks the ones run on
+    pull requests.
 - **Conventions:**
   - The repo's `CLAUDE.md` and `.claude/skills/` (architecture, data-layer, design-system,
     ag-grid, i18n, unit-testing) are the rules for the work itself.

@@ -1268,14 +1268,19 @@ impl Workspace {
         Ok(())
     }
 
-    /// The planning skill's SKILL.md for `env`'s repo.
-    fn planning_skill(&self, env: &str) -> Result<PathBuf, String> {
+    /// What a planning session for project `slug` follows: the skill this engineer picked in
+    /// its settings, or hydraui's built-in guide (spec §14.2).
+    fn planning_guide(&self, env: &str, slug: &str) -> Result<pj::PlanningGuide, String> {
         let e = self
             .projects_data
             .envs
             .get(env)
             .ok_or_else(|| format!("{env} has no projects repo"))?;
-        pj::planning_skill(&e.checkout)
+        let state = e
+            .checkout
+            .parent()
+            .ok_or("the checkout has no parent folder")?;
+        pj::planning_guide(self.hydra.paths.root(), state, &e.repo, slug)
     }
 
     fn start_project(
@@ -1288,14 +1293,14 @@ impl Workspace {
         let Some(p) = self.find_project(&env, &slug) else {
             return;
         };
-        let skill = match self.planning_skill(&env) {
-            Ok(skill) => skill,
+        let guide = match self.planning_guide(&env, &slug) {
+            Ok(guide) => guide,
             Err(why) => {
                 window.push_notification(Notification::error(why), cx);
                 return;
             }
         };
-        let prompt = start_prompt(p, &skill);
+        let prompt = start_prompt(p, &guide.instruction());
         self.tell_planner(&env, &slug, prompt, window, cx);
     }
 
@@ -1307,8 +1312,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let skill = match self.planning_skill(&env) {
-            Ok(skill) => skill,
+        let guide = match self.planning_guide(&env, &slug) {
+            Ok(guide) => guide,
             Err(why) => {
                 window.push_notification(Notification::error(why), cx);
                 return;
@@ -1316,15 +1321,15 @@ impl Workspace {
         };
         let prompt = format!(
             "The lead approved milestone {} \"{}\" ({}). Propose its tickets now with \
-             plan_propose_ticket, following the Tickets section of the project-planning skill \
-             ({}; read it and its references/product.md if you haven't): each one repo, a few \
-             days' work, with what to do, where, and how to tell it's done. Call plan_show first \
-             to see what exists and what was rejected. Ask anything you need decided with \
-             plan_add_question, not here. Then tell the lead they're ready to review in hydraui.",
+             plan_propose_ticket, breaking it down as the planning guide says (if you haven't \
+             yet: {}): each one repo, a few days' work, with what to do, where, and how to tell \
+             it's done, then review them. Call plan_show first to see what exists and what was \
+             rejected. Ask anything you need decided with plan_add_question, not here. Then tell \
+             the lead they're ready to review in hydraui.",
             m.id,
             m.title,
             m.description,
-            skill.display()
+            guide.instruction()
         );
         self.tell_planner(&env, &slug, prompt, window, cx);
     }
@@ -1762,18 +1767,7 @@ impl Workspace {
         let repos = p.file.repos.clone();
         let dir = self.project_dir(&env, &slug).unwrap_or_default();
         let mut skills = vec!["none".to_string()];
-        let env_claude = EnvName::parse(&env)
-            .ok()
-            .map(|n| self.hydra.paths.state_dir(&n).join("claude"));
-        let mut found: BTreeSet<String> =
-            crate::skills_list::installed(env_claude.as_deref(), &dir)
-                .into_iter()
-                .collect();
-        found.extend(crate::skills_list::installed(
-            Some(&self.hydra.user_home.join(".claude")),
-            &dir,
-        ));
-        skills.extend(found);
+        skills.extend(self.installed_skills(&env, &dir));
         let select = |items: Vec<String>, window: &mut Window, cx: &mut Context<Self>| {
             cx.new(|cx| {
                 SelectState::new(items, Some(IndexPath::new(0)), window, cx).searchable(true)
@@ -1824,6 +1818,102 @@ impl Workspace {
                             let (env, slug, ticket) = (env.clone(), slug.clone(), ticket.clone());
                             ws.update(cx, |ws, cx| ws.begin_work(env, slug, ticket, choice, window, cx));
                         })),
+                )
+        });
+    }
+
+    /// The Claude Code skills this engineer has for `env`: the environment's, their own, and the
+    /// folder `dir`'s, by name, once.
+    fn installed_skills(&self, env: &str, dir: &Path) -> BTreeSet<String> {
+        let env_claude = EnvName::parse(env)
+            .ok()
+            .map(|n| self.hydra.paths.state_dir(&n).join("claude"));
+        let mut found: BTreeSet<String> = crate::skills_list::installed(env_claude.as_deref(), dir)
+            .into_iter()
+            .collect();
+        found.extend(crate::skills_list::installed(
+            Some(&self.hydra.user_home.join(".claude")),
+            dir,
+        ));
+        found
+    }
+
+    /// Picks the skill this engineer's planning sessions follow for project `slug` (spec
+    /// §14.2): one of their installed skills, or hydraui's built-in guide.
+    fn planning_skill_dialog(
+        &mut self,
+        env: String,
+        slug: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(e) = self.projects_data.envs.get(&env) else {
+            return;
+        };
+        let (repo, dir) = (e.repo.clone(), e.checkout.join(&slug));
+        let root = self.hydra.paths.root().to_path_buf();
+        let current = pj::planning_skill_of(&root, &repo, &slug);
+        let mut items = vec![BUILT_IN_GUIDE_LABEL.to_string()];
+        items.extend(self.installed_skills(&env, &dir));
+        if let Some(c) = current.as_ref().filter(|c| !items.contains(c)) {
+            // Picked once, gone since: still shown, so it isn't silently dropped.
+            items.push(c.clone());
+        }
+        let at = current
+            .as_ref()
+            .and_then(|c| items.iter().position(|i| i == c))
+            .unwrap_or(0);
+        let select = cx.new(|cx| {
+            SelectState::new(items, Some(IndexPath::new(at)), window, cx).searchable(true)
+        });
+        let workspace = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (select2, ws, root, repo, slug) = (
+                select.clone(),
+                workspace.clone(),
+                root.clone(),
+                repo.clone(),
+                slug.clone(),
+            );
+            dialog
+                .title("Planning skill")
+                .w(px(560.))
+                .child(
+                    v_flex()
+                        .gap_3()
+                        .child(Select::new(&select).small())
+                        .child(muted(
+                            "The Claude Code skill this project's planning sessions follow on this \
+                             Mac: what a milestone is, how to break one down, how to check the \
+                             work. It's yours: install it in ~/.claude/skills (or the \
+                             environment's) and share it with the team as you like.",
+                        )),
+                )
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(Button::new("save").label("Save").primary().on_click(
+                            move |_, window, cx| {
+                                let pick = select2
+                                    .read(cx)
+                                    .selected_value()
+                                    .cloned()
+                                    .filter(|v| v != BUILT_IN_GUIDE_LABEL);
+                                match pj::set_planning_skill(&root, &repo, &slug, pick.as_deref()) {
+                                    Ok(()) => {
+                                        window.close_dialog(cx);
+                                        ws.update(cx, |_, cx| cx.notify());
+                                    }
+                                    Err(e) => window.push_notification(Notification::error(e), cx),
+                                }
+                            },
+                        )),
                 )
         });
     }
@@ -3229,21 +3319,19 @@ impl Workspace {
                         .ghost()
                         .small()
                         .on_click(cx.listener(move |ws, _, window, cx| {
-                            let skill = match ws.planning_skill(&env_b) {
-                                Ok(skill) => skill,
+                            let guide = match ws.planning_guide(&env_b, &slug_b) {
+                                Ok(guide) => guide,
                                 Err(why) => {
                                     window.push_notification(Notification::error(why), cx);
                                     return;
                                 }
                             };
                             let prompt = format!(
-                                "Pick up planning this project. Read the project-planning \
-                                 skill first, {}, and the files it points to. Then call \
-                                 plan_show, sum up what's approved, what's waiting for review \
-                                 and what had changes asked, and act on any notes. Rewrite \
-                                 with plan_revise any milestone still to review that doesn't \
-                                 meet the skill's rules.",
-                                skill.display()
+                                "Pick up planning this project. {} Then call plan_show, sum up \
+                                 what's approved, what's waiting for review and what had \
+                                 changes asked, and act on any notes. Rewrite with plan_revise \
+                                 any milestone still to review that doesn't meet its rules.",
+                                guide.instruction()
                             );
                             ws.tell_planner(&env_b, &slug_b, prompt, window, cx)
                         })),
@@ -4507,6 +4595,35 @@ impl Workspace {
             row
         };
         let root = self.hydra.paths.root().to_path_buf();
+        let planning = pj::planning_skill_of(&root, &e.repo, slug);
+        let planning_row = {
+            let (env, slug) = (env.to_string(), slug.to_string());
+            h_flex()
+                .gap_4()
+                .py_2()
+                .border_b_1()
+                .border_color(color(theme::BORDER_SUBTLE))
+                .child(
+                    div()
+                        .w(px(160.))
+                        .flex_none()
+                        .text_color(color(theme::TEXT_SECONDARY))
+                        .child("Planning skill"),
+                )
+                .child(div().flex_1().min_w_0().child(match &planning {
+                    Some(name) => format!("/{name}"),
+                    None => BUILT_IN_GUIDE_LABEL.to_string(),
+                }))
+                .child(
+                    Button::new("set-planning-skill")
+                        .label("Change…")
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.planning_skill_dialog(env.clone(), slug.clone(), window, cx)
+                        })),
+                )
+        };
         let clones = f.repos.iter().map(|r| match pj::clone_of(&root, r) {
             Some(path) => format!("{r} → {}", path.display()),
             None => format!("{r} → asked on first Start work"),
@@ -4529,7 +4646,9 @@ impl Workspace {
                     .child(div().w(px(160.)).flex_none().text_color(color(theme::TEXT_SECONDARY)).child("Status"))
                     .child(status_buttons),
             )
-            .child(div().pt_3().child(section_title("Local clones (this Mac)")))
+            .child(div().pt_3().child(section_title("On this Mac")))
+            .child(planning_row)
+            .child(div().pt_3().child(section_title("Local clones")))
             .children(clones.map(|c| div().text_sm().font_family("monospace").child(c)))
             .child(div().pt_3().child(muted(
                 "Code repos are where work happens: Start work makes a worktree of one. Sync times are \
@@ -4539,6 +4658,9 @@ impl Workspace {
             .into_any_element()
     }
 }
+
+/// How the settings name hydraui's built-in planning guide, the choice when no skill is picked.
+const BUILT_IN_GUIDE_LABEL: &str = "hydraui's built-in guide";
 
 /// A project setting the lead changes (spec §9.1, step 5).
 #[derive(Debug, Clone, Copy)]
@@ -4680,14 +4802,12 @@ fn read_checkout(e: &mut EnvProjects) {
 }
 
 /// The planning session's first prompt (spec §14).
-fn start_prompt(p: &Project, skill: &Path) -> String {
+fn start_prompt(p: &Project, guide: &str) -> String {
     format!(
         "You're planning the project \"{name}\" (ticket key {key}, lead {lead}) in hydraui's \
          Projects tab. The lead sees what you write in hydraui beside you and reviews each \
          proposal there: approve, edit, ask you for changes, or reject.\n\n\
-         First read the project-planning skill, {skill}, and the files it points to: what a \
-         milestone is and isn't, what makes a good ticket and question, the repo's files, and \
-         what we build where. Follow it throughout.\n\n\
+         {guide}\n\n\
          1. Call plan_show, then read every attached resource (plan_read_resource; Read for \
          PDFs and images).\n\
          2. Ask about anything unclear (goals, who it's for, constraints, what's out of \
@@ -4708,7 +4828,6 @@ fn start_prompt(p: &Project, skill: &Path) -> String {
         name = p.file.name,
         key = p.file.key,
         lead = p.file.lead,
-        skill = skill.display(),
     )
 }
 
@@ -4984,8 +5103,8 @@ mod tests {
                 && w.contains("pg-3-share-dialog")
         );
         assert!(!work_prompt(&p, &t, "b", "r", None).contains("skill"));
-        let started = start_prompt(&p, Path::new("/s/SKILL.md"));
-        assert!(started.contains("plan_propose_milestone") && started.contains("/s/SKILL.md"));
+        let started = start_prompt(&p, "Use the /our-planning skill throughout.");
+        assert!(started.contains("plan_propose_milestone") && started.contains("/our-planning"));
     }
 
     #[test]

@@ -575,19 +575,21 @@ want.
   If that session isn't running, the answer waits in the repo, where `plan_show` and
   `ticket_show` list it.
 
-### 14.2 The planning skill (added 2026-11-04)
+### 14.2 The planning skill (added 2026-11-04, revised the same day)
 
-What a milestone is and isn't, what makes a good ticket and question, the repo's file formats
-and what we build in which repo live in one Claude Code skill, `project-planning`, kept in the
-projects repo at `.claude/skills/project-planning/`. Every planning prompt tells the session to
-read it first.
+How we plan lives in a Claude Code skill that each planning prompt tells the session to follow
+first. It covers what a milestone is and isn't, breaking one into tickets layer by layer, a
+scored self-review, the repo's files, and what we build in which repo.
 
-- hydraui ships a first version. A send adds it to a repo that doesn't have it yet, with the
-  rest of the change; from then on it's the team's, changed by pull request in the repo, and
-  hydraui never overwrites it.
-- Until the repo has it, a planning session reads hydraui's copy, written next to the checkout.
-- The plan tools keep their checks (title and point lengths, a detail per point) as the floor;
-  the skill says what good looks like above it.
-
-This is our call (Jordan, 2026-11-04): the team can sharpen the rules and the product picture
-without a hydra release, and every engineer's planning sessions use the same version.
+- **It's the engineer's, not the repo's.** Each engineer installs a planning skill like any
+  other (`~/.claude/skills`, or the environment's), and picks it per project under the
+  project's Settings → On this Mac → Planning skill. The choice is stored locally in
+  `hydraui/projects.toml` (`[planning] "<owner/repo>/<slug>" = "<skill>"`), so it never
+  reaches the repo.
+- **Sharing it is manual.** The lead shares the team's skill however they like. Jordan's
+  call, 2026-11-04: an earlier version kept the skill in the projects repo and sent it with
+  the first change; that's gone.
+- **The default is built in.** With no skill picked, a session follows hydraui's built-in
+  guide, written out next to the checkout each time so it matches the build. That guide is
+  also the starting point to copy and share.
+- The plan tools keep their checks (title and point lengths, a detail per point) as the floor.

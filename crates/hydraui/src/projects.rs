@@ -626,27 +626,122 @@ pub fn start_work(
     repo::write_ticket(dir, &t).map_err(|e| e.to_string())
 }
 
-/// The planning skill a planning session reads (spec §14): the repo's own copy when it has
-/// one, the team's to change; else hydraui's, written next to the checkout. Returns its
-/// SKILL.md.
-pub fn planning_skill(checkout: &Path) -> Result<PathBuf, String> {
-    use crate::project_send::{PLANNING_SKILL, PLANNING_SKILL_DIR};
-    let in_repo = checkout.join(PLANNING_SKILL_DIR).join("SKILL.md");
-    if in_repo.is_file() {
-        return Ok(in_repo);
+/// hydraui's built-in planning guide, a Claude Code skill: what a milestone is and isn't, the
+/// layer-by-layer breakdown, the self-review and the product. A planning session follows it
+/// when its engineer hasn't picked a skill of their own (spec §14.2).
+pub const BUILT_IN_GUIDE: [(&str, &str); 4] = [
+    ("SKILL.md", include_str!("planning_skill/SKILL.md")),
+    (
+        "references/format.md",
+        include_str!("planning_skill/references/format.md"),
+    ),
+    (
+        "references/product.md",
+        include_str!("planning_skill/references/product.md"),
+    ),
+    (
+        "checklists/devils-advocate.md",
+        include_str!("planning_skill/checklists/devils-advocate.md"),
+    ),
+];
+
+/// What a planning session follows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanningGuide {
+    /// A skill the engineer installed and picked for the project, by name.
+    Skill(String),
+    /// hydraui's built-in guide, written out at this SKILL.md.
+    BuiltIn(PathBuf),
+}
+
+impl PlanningGuide {
+    /// The line a planning prompt starts with.
+    pub fn instruction(&self) -> String {
+        match self {
+            PlanningGuide::Skill(name) => format!(
+                "Use the /{name} skill throughout: read it, and the files it points to, before \
+                 anything else. It says how we plan: what a milestone is and isn't, how to break \
+                 one into tickets, how to check your own work, and what we build where."
+            ),
+            PlanningGuide::BuiltIn(path) => format!(
+                "First read the planning guide, {}, and the files it points to: what a milestone \
+                 is and isn't, how to break one into tickets, how to check your own work, and \
+                 what we build where. Follow it throughout.",
+                path.display()
+            ),
+        }
     }
-    let dir = checkout
-        .parent()
-        .ok_or("the checkout has no parent folder")?
-        .join("planning-skill");
-    for (name, text) in PLANNING_SKILL {
+}
+
+/// The skill this engineer picked for planning project `slug` of `repo`, if any (`[planning]`
+/// in projects.toml: local, so each engineer plugs in their own).
+pub fn planning_skill_of(hydra_root: &Path, repo: &str, slug: &str) -> Option<String> {
+    let text = std::fs::read_to_string(config_file(hydra_root)).ok()?;
+    let table: toml::Table = toml::from_str(&text).ok()?;
+    table
+        .get("planning")?
+        .get(format!("{repo}/{slug}"))?
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Picks `skill` for planning project `slug` of `repo`, or with `None` goes back to the
+/// built-in guide, keeping the rest of the file.
+pub fn set_planning_skill(
+    hydra_root: &Path,
+    repo: &str,
+    slug: &str,
+    skill: Option<&str>,
+) -> Result<(), String> {
+    let file = config_file(hydra_root);
+    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|e| format!("{}: {e}", file.display()))?;
+    if !doc.contains_key("planning") {
+        doc.insert("planning", toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    let table = doc
+        .get_mut("planning")
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .ok_or("planning in projects.toml isn't a table")?;
+    let key = format!("{repo}/{slug}");
+    match skill.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => {
+            table.insert(&key, toml_edit::value(s));
+        }
+        None => {
+            table.remove(&key);
+        }
+    }
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    hydraui_sets::layout::write_atomic(&file, &doc.to_string()).map_err(|e| e.to_string())
+}
+
+/// What a planning session for project `slug` of `repo` follows: the engineer's skill, or the
+/// built-in guide written out under `state` (refreshed each time, so it's this build's).
+pub fn planning_guide(
+    hydra_root: &Path,
+    state: &Path,
+    repo: &str,
+    slug: &str,
+) -> Result<PlanningGuide, String> {
+    if let Some(skill) = planning_skill_of(hydra_root, repo, slug) {
+        return Ok(PlanningGuide::Skill(skill));
+    }
+    let dir = state.join("planning-guide");
+    for (name, text) in BUILT_IN_GUIDE {
         let file = dir.join(name);
         if let Some(parent) = file.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         std::fs::write(&file, text).map_err(|e| e.to_string())?;
     }
-    Ok(dir.join("SKILL.md"))
+    Ok(PlanningGuide::BuiltIn(dir.join("SKILL.md")))
 }
 
 /// `text` without a leading bullet ("- ", "* ", "• ") and surrounding space.
@@ -818,27 +913,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_planning_session_reads_the_repos_skill_or_hydrauis() {
+    fn each_engineer_picks_a_planning_skill_per_project_or_gets_the_built_in_guide() {
         let tmp = tempfile::tempdir().unwrap();
-        let checkout = tmp.path().join("o-r");
-        std::fs::create_dir_all(&checkout).unwrap();
-        let shipped = planning_skill(&checkout).unwrap();
-        assert_eq!(shipped, tmp.path().join("planning-skill/SKILL.md"));
+        let root = tmp.path();
+        let state = root.join("state");
+        let guide = planning_guide(root, &state, "o/r", "pg").unwrap();
+        let PlanningGuide::BuiltIn(path) = &guide else {
+            panic!("{guide:?}")
+        };
+        assert_eq!(path, &state.join("planning-guide/SKILL.md"));
         assert!(
-            std::fs::read_to_string(&shipped)
+            std::fs::read_to_string(path)
                 .unwrap()
                 .contains("name: project-planning")
         );
         assert!(
-            tmp.path()
-                .join("planning-skill/references/product.md")
+            state
+                .join("planning-guide/checklists/devils-advocate.md")
                 .is_file()
         );
+        assert!(guide.instruction().contains(&path.display().to_string()));
 
-        let ours = checkout.join(".claude/skills/project-planning/SKILL.md");
-        std::fs::create_dir_all(ours.parent().unwrap()).unwrap();
-        std::fs::write(&ours, "the team's\n").unwrap();
-        assert_eq!(planning_skill(&checkout).unwrap(), ours);
+        set_planning_skill(root, "o/r", "pg", Some("our-planning")).unwrap();
+        let guide = planning_guide(root, &state, "o/r", "pg").unwrap();
+        assert_eq!(guide, PlanningGuide::Skill("our-planning".into()));
+        assert!(guide.instruction().contains("/our-planning skill"));
+        // Only that project.
+        assert!(matches!(
+            planning_guide(root, &state, "o/r", "mx").unwrap(),
+            PlanningGuide::BuiltIn(_)
+        ));
+        set_planning_skill(root, "o/r", "pg", None).unwrap();
+        assert_eq!(planning_skill_of(root, "o/r", "pg"), None);
     }
 
     #[test]

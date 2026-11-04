@@ -19,9 +19,28 @@ use serde::Deserialize;
 const NETWORK_LIMIT: Duration = Duration::from_secs(120);
 
 /// What the README of a new projects repo says.
-const README: &str = "# Projects\n\nOne folder per project: its spec, milestones, tickets, \
-decisions, meeting notes and resources. hydraui writes this repo; change projects in \
-hydraui's Projects tab rather than here.\n";
+/// What a new projects repo starts with: its README, and the merge gate that lets anyone start a
+/// project but only its lead change it (spec §14.4). `{admins}` in CODEOWNERS becomes the
+/// person who starts the repo. The gate's own tests stay in hydra.
+pub const REPO_FILES: [(&str, &str); 5] = [
+    ("README.md", include_str!("projects_repo/README.md")),
+    (
+        ".github/CODEOWNERS",
+        include_str!("projects_repo/.github/CODEOWNERS"),
+    ),
+    (
+        ".github/workflows/projects-gate.yml",
+        include_str!("projects_repo/.github/workflows/projects-gate.yml"),
+    ),
+    (
+        ".github/scripts/projects_gate.py",
+        include_str!("projects_repo/.github/scripts/projects_gate.py"),
+    ),
+    (
+        ".github/projects-ruleset.json",
+        include_str!("projects_repo/.github/projects-ruleset.json"),
+    ),
+];
 
 /// Runs git and gh for a send. The real one runs local git directly and anything that talks
 /// to GitHub as the environment; tests use a fake GitHub.
@@ -218,6 +237,8 @@ pub enum Sent {
     Waiting(String),
     /// Sent and merged: the lead's own change.
     Merged(String),
+    /// The lead's own change, sent and set to merge as soon as the repo's gate check passes.
+    Queued(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -271,7 +292,7 @@ pub fn send(r: &dyn Runner, s: &Send) -> Result<Sent, SendError> {
     r.remote_git(dir, &["fetch", "origin", "--prune"])?;
     let default = match default_branch(r, dir)? {
         Some(b) => b,
-        None => start_repo(r, dir)?,
+        None => start_repo(r, dir, s.login)?,
     };
     let upstream = format!("origin/{default}");
     let has_head = rev(r, dir, "HEAD").is_some();
@@ -376,8 +397,15 @@ pub fn send(r: &dyn Runner, s: &Send) -> Result<Sent, SendError> {
                 .to_string()
         }
     };
-    if s.lead.eq_ignore_ascii_case(s.login) {
-        merge(r, dir, &url, &branch)?;
+    if lead_on(r, dir, &upstream, s.slug)
+        .as_deref()
+        .unwrap_or(s.lead)
+        .eq_ignore_ascii_case(s.login)
+    {
+        if !merge(r, dir, &url, &branch)? {
+            remember_sent(r, dir, s.slug);
+            return Ok(Sent::Queued(url));
+        }
         settle(r, dir, &default)?;
         forget_sent(dir, s.slug);
         return Ok(Sent::Merged(url));
@@ -422,21 +450,68 @@ fn push(r: &dyn Runner, dir: &Path, refspec: &str, force: bool) -> Result<(), St
     }
 }
 
+/// Project `slug`'s lead as `upstream` has it, or None for a project the repo doesn't have yet
+/// (a new project: its creator leads it). Who may merge is decided from the repo, never from
+/// the sender's own copy, where `lead` could be anyone.
+fn lead_on(r: &dyn Runner, dir: &Path, upstream: &str, slug: &str) -> Option<String> {
+    let text = r
+        .git(
+            dir,
+            &["show", &format!("{upstream}:{slug}/project.toml")],
+            None,
+        )
+        .ok()?;
+    // In the repo but unreadable: nobody counts as its lead, rather than whoever sends.
+    Some(
+        toml::from_str::<hydraui_projects::ProjectFile>(&text)
+            .map(|f| f.lead)
+            .unwrap_or_default(),
+    )
+}
+
 /// Squash-merges pull request `url` and deletes its `branch`.
-fn merge(r: &dyn Runner, dir: &Path, url: &str, branch: &str) -> Result<(), String> {
-    r.gh(&["pr", "merge", url, "--squash"])?;
+/// Whether gh refused a merge because the repo's rules aren't met yet (the gate check still
+/// running), rather than for good.
+fn merge_waits(err: &str) -> bool {
+    [
+        "base branch policy",
+        "required status check",
+        "Required status check",
+        "is not mergeable",
+        "Merging is blocked",
+    ]
+    .iter()
+    .any(|s| err.contains(s))
+}
+
+/// Squash-merges pull request `url` and deletes its `branch`: true when it merged now. When
+/// the repo's gate check hasn't passed yet, it's queued to merge as soon as it does (GitHub's
+/// auto-merge) and this returns false.
+fn merge(r: &dyn Runner, dir: &Path, url: &str, branch: &str) -> Result<bool, String> {
+    if let Err(e) = r.gh(&["pr", "merge", url, "--squash"]) {
+        if !merge_waits(&e) {
+            return Err(e);
+        }
+        r.gh(&["pr", "merge", url, "--squash", "--auto"])
+            .map_err(|auto| format!("{e}; and it can't merge when ready: {auto}"))?;
+        return Ok(false);
+    }
     // Best effort: a leftover branch is harmless; the next send of the day reuses the name.
     let _ = r.remote_git(dir, &["push", "origin", "--delete", branch]);
     r.remote_git(dir, &["fetch", "origin", "--prune"])?;
-    Ok(())
+    Ok(true)
 }
 
 /// The lead approves `pr` and merges it (spec §5.2). Blocks.
-pub fn approve(r: &dyn Runner, dir: &Path, pr: &OpenPr) -> Result<(), String> {
+/// Returns true when it merged now, false when it's queued for the repo's gate check.
+pub fn approve(r: &dyn Runner, dir: &Path, pr: &OpenPr) -> Result<bool, String> {
     r.gh(&["pr", "review", &pr.url, "--approve"])?;
-    merge(r, dir, &pr.url, &pr.branch)?;
+    if !merge(r, dir, &pr.url, &pr.branch)? {
+        return Ok(false);
+    }
     let default = default_branch(r, dir)?.ok_or("the repo has no default branch")?;
-    settle(r, dir, &default)
+    settle(r, dir, &default)?;
+    Ok(true)
 }
 
 /// The lead sends `pr` back to its author with `note` (spec §5.2). Blocks.
@@ -503,28 +578,32 @@ pub fn default_branch(r: &dyn Runner, dir: &Path) -> Result<Option<String>, Stri
     }))
 }
 
-/// Gives an empty repo its first commit, a README on `main`, and returns `main`.
-fn start_repo(r: &dyn Runner, dir: &Path) -> Result<String, String> {
-    let readme = git_dir(dir).join("hydra-readme.md");
-    std::fs::write(&readme, README).map_err(|e| e.to_string())?;
-    let sha = line(r.git(
-        dir,
-        &["hash-object", "-w", &readme.display().to_string()],
-        None,
-    )?);
-    let _ = std::fs::remove_file(&readme);
+/// Gives an empty repo its first commit on `main` ([`REPO_FILES`]: README and merge gate),
+/// with `login` as the admin who owns the gate, and returns `main`.
+fn start_repo(r: &dyn Runner, dir: &Path, login: &str) -> Result<String, String> {
     let index = git_dir(dir).join("hydra-send.index");
     let _ = std::fs::remove_file(&index);
-    r.git(
-        dir,
-        &[
-            "update-index",
-            "--add",
-            "--cacheinfo",
-            &format!("100644,{sha},README.md"),
-        ],
-        Some(&index),
-    )?;
+    let tmp = git_dir(dir).join("hydra-repo-file");
+    for (path, text) in REPO_FILES {
+        std::fs::write(&tmp, text.replace("{admins}", &format!("@{login}")))
+            .map_err(|e| e.to_string())?;
+        let sha = line(r.git(
+            dir,
+            &["hash-object", "-w", &tmp.display().to_string()],
+            None,
+        )?);
+        r.git(
+            dir,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("100644,{sha},{path}"),
+            ],
+            Some(&index),
+        )?;
+    }
+    let _ = std::fs::remove_file(&tmp);
     let tree = line(r.git(dir, &["write-tree"], Some(&index))?);
     let _ = std::fs::remove_file(&index);
     let commit = line(r.git(
@@ -802,6 +881,10 @@ mod tests {
         calls: RefCell<Vec<String>>,
         /// Pushes GitHub fails with a server error before taking one.
         failing_pushes: RefCell<u32>,
+        /// The repo's gate check hasn't passed: a plain merge is refused, auto-merge is queued.
+        gated: RefCell<bool>,
+        /// Pull requests queued to merge when the check passes.
+        queued: RefCell<Vec<String>>,
     }
 
     fn git_cmd(dir: &Path, args: &[&str], index: Option<&Path>) -> Result<String, String> {
@@ -880,6 +963,13 @@ mod tests {
                     p.body = flag("--body");
                     Ok(String::new())
                 }
+                ["pr", "merge"] if *self.gated.borrow() => {
+                    if args.contains(&"--auto") {
+                        self.queued.borrow_mut().push(args[2].to_string());
+                        return Ok(String::new());
+                    }
+                    Err("X Pull request o/r#1 is not mergeable: the base branch policy prohibits the merge.".into())
+                }
                 ["pr", "merge"] => {
                     let mut prs = self.prs.borrow_mut();
                     let i = prs.iter().position(|p| p.url == args[2]).unwrap();
@@ -918,6 +1008,8 @@ mod tests {
             prs: RefCell::new(Vec::new()),
             calls: RefCell::new(Vec::new()),
             failing_pushes: RefCell::new(0),
+            gated: RefCell::new(false),
+            queued: RefCell::new(Vec::new()),
         };
         (tmp, fake, checkout)
     }
@@ -947,7 +1039,11 @@ mod tests {
 
     /// The lead creates project `pg` with a spec, sent and merged.
     fn lead_creates(fake: &Fake, dir: &Path) {
-        write(dir, "pg/project.toml", "name = \"Product Groups\"\n");
+        write(
+            dir,
+            "pg/project.toml",
+            "name = \"Product Groups\"\nkey = \"PG\"\nlead = \"lead\"\n",
+        );
         write(dir, "pg/spec.md", "one\ntwo\nthree\n");
         let none = BTreeSet::new();
         assert!(matches!(
@@ -962,6 +1058,16 @@ mod tests {
         write(&dir, "other/project.toml", "name = \"Other\"\n");
         lead_creates(&fake, &dir);
         assert!(on_main(&fake, "README.md").unwrap().contains("# Projects"));
+        // The repo starts with its merge gate, its creator as the admin who owns it.
+        assert!(on_main(&fake, ".github/workflows/projects-gate.yml").is_some());
+        assert!(on_main(&fake, ".github/scripts/projects_gate.py").is_some());
+        assert!(on_main(&fake, ".github/projects-ruleset.json").is_some());
+        assert!(
+            on_main(&fake, ".github/CODEOWNERS")
+                .unwrap()
+                .contains("/.github/ @lead")
+        );
+        assert!(on_main(&fake, ".github/scripts/test_projects_gate.py").is_none());
         assert_eq!(on_main(&fake, "pg/spec.md").unwrap(), "one\ntwo\nthree\n");
         // Only the project sent: another project's files stay pending, here only.
         assert_eq!(on_main(&fake, "other/project.toml"), None);
@@ -1010,6 +1116,37 @@ mod tests {
         settle(&fake, &member, "main").unwrap();
         assert!(pending_in(&fake, &member).unwrap().is_empty());
         assert!(dir.join("pg/tickets/PG-2.md").is_file());
+    }
+
+    #[test]
+    fn who_leads_comes_from_the_repo_not_the_senders_copy() {
+        let (tmp, mut fake, dir) = setup("lead");
+        lead_creates(&fake, &dir);
+        fake.login = "aza".into();
+        let member = tmp.path().join("member");
+        git_cmd(
+            tmp.path(),
+            &["clone", "-q", &fake.bare.display().to_string(), "member"],
+            None,
+        )
+        .unwrap();
+        // aza makes themself lead in their own copy, then sends.
+        write(
+            &member,
+            "pg/project.toml",
+            "name = \"Product Groups\"\nkey = \"PG\"\nlead = \"aza\"\n",
+        );
+        let none = BTreeSet::new();
+        let mut s = sending(&member, "aza", &none);
+        s.lead = "aza";
+        let sent = send(&fake, &s).unwrap();
+        assert!(matches!(sent, Sent::Waiting(_)), "{sent:?}");
+        assert!(
+            on_main(&fake, "pg/project.toml")
+                .unwrap()
+                .contains("Product Groups")
+        );
+        assert!(!on_main(&fake, "pg/project.toml").unwrap().contains("aza"));
     }
 
     #[test]
@@ -1097,6 +1234,20 @@ mod tests {
             "! [remote rejected] main (protected branch hook declined)"
         ));
         assert!(is_transient("error: RPC failed; HTTP 502 curl 22"));
+    }
+
+    #[test]
+    fn with_the_gate_on_a_merge_waits_for_the_check() {
+        let (_tmp, fake, dir) = setup("lead");
+        lead_creates(&fake, &dir);
+        *fake.gated.borrow_mut() = true;
+        write(&dir, "pg/spec.md", "one\ntwo\nthree, again\n");
+        let none = BTreeSet::new();
+        let sent = send(&fake, &sending(&dir, "lead", &none)).unwrap();
+        assert!(matches!(sent, Sent::Queued(_)), "{sent:?}");
+        assert_eq!(fake.queued.borrow().len(), 1);
+        // A refusal that isn't the check waiting fails as before.
+        assert!(!merge_waits("could not resolve to a PullRequest"));
     }
 
     #[test]

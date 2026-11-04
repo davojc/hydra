@@ -613,3 +613,36 @@ grow as it's planned (Jordan's call):
 - Stored in `project.toml`: `repos` (confirmed), `suggested_repos` (`repo`, `why`) and
   `dismissed_repos`.
 
+### 14.4 Who may merge, enforced by GitHub (added 2026-11-04)
+
+This settles §11's open question on GitHub-side enforcement (Jordan's call). Until now only
+hydraui decided who merges, and it read the lead from the sender's own copy of
+`project.toml`, which a member could edit.
+
+- **The rule:**
+  - anyone may start a project (a new folder whose `project.toml` names them lead);
+  - a project's lead changes it freely;
+  - anyone else's change to a project needs the lead's approval of its latest commit;
+  - the lead is always read from the default branch;
+  - files outside project folders need an admin.
+- **GitHub enforces it** with a required check, `projects-gate`
+  (`.github/workflows/projects-gate.yml` running `.github/scripts/projects_gate.py`), plus a
+  ruleset on the default branch: pull requests only, the check required, code-owner review
+  (CODEOWNERS covers only `/.github/` and `/README.md`), no force pushes or deletion, no
+  bypass.
+  - The workflow runs `pull_request_target` from the base branch, and again on reviews.
+  - Changing `.github/` needs an admin, so a pull request can't weaken its own check.
+  - Per-folder code owners alone wouldn't do: GitHub doesn't let you approve your own pull
+    request, so a lead couldn't merge their own changes.
+- **What hydraui does:**
+  - **Merge or wait:** it decides from the default branch's `project.toml`, and a project
+    there that doesn't read counts as led by nobody.
+  - **Merging:** when the check hasn't passed yet, it queues the merge with GitHub's
+    auto-merge, so it lands as soon as the check passes.
+  - **A new repo** starts with the README, the gate and the ruleset file, with its creator
+    owning `.github/`.
+  - **Turning it on** is a one-time admin step described in the repo's README: allow
+    auto-merge, then create the ruleset (`gh api … --input .github/projects-ruleset.json`).
+- The gate's unit tests live in hydra (`projects_repo/.github/scripts/test_projects_gate.py`),
+  not in the projects repo.
+

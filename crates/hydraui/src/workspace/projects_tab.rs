@@ -699,6 +699,9 @@ impl Workspace {
                 data.keep_mine.remove(&key);
                 match sent {
                     Sent::Merged(_) => Some(Notification::success("Sent: it's in the repo.")),
+                    Sent::Queued(_) => Some(Notification::success(
+                        "Sent: it merges as soon as the repo's check passes.",
+                    )),
                     Sent::Waiting(_) => Some(Notification::success(format!(
                         "Sent to {lead} for approval."
                     ))),
@@ -790,8 +793,11 @@ impl Workspace {
                 ws.projects_data.reviewing.remove(&url);
                 ws.projects_data.next_fetch = None;
                 let n = match result {
-                    Ok(()) => Notification::success(format!(
+                    Ok(true) => Notification::success(format!(
                         "Approved {author}'s change: it's in the repo."
+                    )),
+                    Ok(false) => Notification::success(format!(
+                        "Approved {author}'s change: it merges as soon as the repo's check passes."
                     )),
                     Err(why) => Notification::error(format!("Couldn't approve it: {why}")),
                 };
@@ -970,6 +976,8 @@ impl Workspace {
         let waiting = e.sent_for_lead.contains(&p.slug);
         let status = if sending {
             "Sending…".to_string()
+        } else if unsent > 0 && waiting && lead {
+            "Sent: it merges as soon as the repo's check passes.".to_string()
         } else if unsent > 0 && waiting {
             format!("Sent to {} for approval.", p.file.lead)
         } else if unsent > 0 {

@@ -15,7 +15,7 @@ from hydraui, as a pull request they merge; other people's changes wait for the 
   resources/<file>        attached files (at most 10 MB each)
   resources/links.toml    attached links, with titles
   progress/<login>/<date>.md
-.claude/skills/project-planning/   this skill
+.claude/skills/project-planning/   this skill: SKILL.md, references/, checklists/
 ```
 
 ## Milestones (`milestones.toml`)

@@ -14,6 +14,8 @@ Read these before you propose anything:
 
 - `references/format.md`: the repo's files. You never write them yourself; the plan tools do.
 - `references/product.md`: what we build, for whom, and which repo holds what.
+- `checklists/devils-advocate.md`: the review you run on your own work before the lead sees
+  it. It isn't optional.
 
 ## The order
 
@@ -22,7 +24,10 @@ Read these before you propose anything:
    depend on the answer.
 3. The spec (`plan_set_spec`).
 4. The milestones (`plan_propose_milestone`), in the order they'll be done.
-5. Stop. Tickets come later, one milestone at a time, when the lead asks.
+5. **Review them** with `checklists/devils-advocate.md` (part A), fix what it finds with
+   `plan_revise`, and tell the lead what you changed and what you're still unsure of.
+6. Stop. Tickets come later, one milestone at a time, when the lead asks: break the milestone
+   down (see From milestone to tickets), propose them, then review them (part B) the same way.
 
 ## Milestones
 
@@ -63,18 +68,54 @@ Bad: "Groups backend + API + UI (PRE-2155..2160)": three layers, ticket numbers,
 
 If the lead's note says a milestone is too big, split it into two outcomes, not two layers.
 
-## Tickets
+## From milestone to tickets
 
 Proposed per approved milestone, when the lead asks. A ticket is the engineering detail the
-milestone left out.
+milestone left out, and each one lands in **one repo** (`references/product.md` says which
+repo holds what).
 
-- One piece of work one engineer can finish in a few days, in **one repo**: say which.
+**Walk the layers in the order the work has to happen**, and write a ticket for each layer the
+milestone really touches:
+
+1. **Agree the API** when an endpoint is new or changes shape. It goes in `api-designs` for
+   identity-platform and the newer services. For the Interu backend, the backend ticket
+   itself states the request and response, since its API is defined in code. Backend and
+   frontend both build to it.
+2. **Backend**: the data (entities, a migration), the rules, the endpoint (or GraphQL query),
+   what a shared record carries, and its tests.
+   Split by capability rather than by class: "Save a product group's members" and "List the
+   groups shared with a partner", not "GroupRepository".
+3. **Other services** the change reaches: sign-in and organisations, notification emails,
+   usage, documents.
+4. **Frontend**: the screens and the flow, in product words: "Partners see shared groups in
+   their group list". One ticket per screen or step a user would recognise; a big screen
+   splits by what the user does on it.
+5. **End-to-end tests**: when a user flow is new or changes, the scenario that proves it.
+6. **Release**: turning the feature flag on, data back-fills, removing the old path. Only
+   when the milestone needs them.
+
+**Then check what's easy to forget** and add it to a ticket, or as its own:
+
+- a feature flag, when it replaces something customers use today: GrowthBook in the web
+  app, a Spring property in the backend, often both;
+- a database migration, and what happens to existing data;
+- permissions: who may see and do it, across organisations and shares;
+- copy: every new string translatable, plurals as ICU;
+- empty, loading, error and large-volume states;
+- emails or notifications the change should send, or stop sending;
+- what the change does to sharing: does a shared record carry the new data;
+- tests at each layer: unit, integration, end to end.
+
+**Each ticket:**
+
+- One piece of work one engineer can finish in a few days.
 - The title says what changes, in one line: "Show shared groups in the partner's group list".
 - The description says what to do, where (the repo, and the area or files when you know
-  them), and **how to tell it's done**: the checks a reviewer would make.
+  them), what it depends on ("after MUE-3"), and **how to tell it's done**: the checks a
+  reviewer would make.
 - `kind`: feature, bug or chore. A chore changes nothing a user sees.
-- Work that needs another team or repo first gets its own ticket, first.
-- Don't propose what already exists: check `references/product.md` and ask when unsure.
+- Propose them in the order they'll be built, dependencies first.
+- Don't propose what already exists: check `references/product.md`, and ask when unsure.
 
 ## Questions
 
@@ -91,6 +132,14 @@ decision for one person, and the answer comes back to you.
 
 Short numbered sections in plain words: why, goals, non-goals, decisions and their reasons
 (with D-n), open questions. Not a design doc: the tickets carry the how.
+
+## Checking your own work
+
+Before you tell the lead anything is ready, run `checklists/devils-advocate.md` on it: part A
+after milestones, part B after a milestone's tickets. Argue against your own proposal as a
+sceptical lead would, score it, fix what fails with `plan_revise`, and score it again. Only
+hand over at the checklist's bar. Then tell the lead in two or three lines what the review
+changed and what you're still unsure of; turn anything they must decide into a question.
 
 ## Changing your mind
 

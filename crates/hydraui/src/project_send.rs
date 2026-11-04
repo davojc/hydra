@@ -28,7 +28,7 @@ pub const PLANNING_SKILL_DIR: &str = ".claude/skills/project-planning";
 /// The planning skill as hydraui ships it: what a milestone is and isn't, the repo's files and
 /// the product. A send adds it to a repo that doesn't have it; from then on it's the team's,
 /// changed by pull request in the repo, and hydraui leaves it alone.
-pub const PLANNING_SKILL: [(&str, &str); 3] = [
+pub const PLANNING_SKILL: [(&str, &str); 4] = [
     ("SKILL.md", include_str!("planning_skill/SKILL.md")),
     (
         "references/format.md",
@@ -37,6 +37,10 @@ pub const PLANNING_SKILL: [(&str, &str); 3] = [
     (
         "references/product.md",
         include_str!("planning_skill/references/product.md"),
+    ),
+    (
+        "checklists/devils-advocate.md",
+        include_str!("planning_skill/checklists/devils-advocate.md"),
     ),
 ];
 

@@ -568,6 +568,18 @@ picture. These have no Raw view and aren't edited here. An `.svg` is text: it
 opens like Markdown, in Rendered (the picture, drawn from the editor's text,
 so it follows edits) with Raw to edit it. An SVG that doesn't draw says so.
 
+**PDFs.** A `.pdf` file shows its pages one under another, each fitted to the
+pane's width (never drawn bigger than it was rendered) on a grey background,
+with a scrollbar and "PDF, 12 pages, 340 KB" in the header. hayro (pure Rust,
+so there is no PDF library to ship) draws the pages off the UI thread at 1.5
+pixels a point (a page's longest side at most 4000 px), and they show as they
+come; only the pages in view are on screen. The first 300 pages are drawn, and
+the header says when there are more. One that isn't really a PDF (no `%PDF-` in
+its first 1 KB), is over 100 MB, is password-protected or doesn't parse says
+why it can't be shown. A change on disk draws it again, the old pages staying
+until the new ones come. Text can't be selected or searched here; Open in
+editor opens it in the configured editor, or the system's PDF reader if none is set.
+
 **Reading.** A file over 5 MB, or binary (a NUL byte in the first 8 KB, or not
 valid UTF-8), shows "can't show this file" with Open in editor; so does one
 that can't be read, with the reason. A file's line endings (CRLF or LF) and

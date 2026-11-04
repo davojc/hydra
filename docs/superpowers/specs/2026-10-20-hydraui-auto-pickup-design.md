@@ -94,6 +94,15 @@ loaded when a card arrives.
 
 On arrival hydraui looks for a free session (§5).
 
+### 4.1 Cards from the phone
+
+Amended by the phone link (docs/superpowers/specs/2026-10-23-hydra-mobile-design.md §4): a
+card the phone puts into Pickup (added there, or moved there from another column) arrives
+too. It is offered by the window holding the phone link, and only that one, whether or not
+a Tasks tab there has the board loaded. The user is away from the desktop, so no session
+counts as focused (§5.1, 4); every other rule stands. The phone is told where the card went
+("Sent to <terminal> in <env>"), or that no free session took it and it stays in Pickup.
+
 ## 5. Which sessions are free
 
 ### 5.1 Facts, always checked

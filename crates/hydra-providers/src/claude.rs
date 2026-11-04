@@ -381,10 +381,15 @@ impl Provider for Claude {
                 over_settings.display()
             ));
         }
-        let allowed = if hydraui_registered(&exclude) {
-            with_status_hooks(with_hydraui_allow(merged.text, ctx.warnings), ctx.warnings)
+        let merged_text = if ctx.env.claude.as_ref().is_some_and(|c| c.remote_control) {
+            with_remote_control(merged.text, ctx.warnings)
         } else {
             merged.text
+        };
+        let allowed = if hydraui_registered(&exclude) {
+            with_status_hooks(with_hydraui_allow(merged_text, ctx.warnings), ctx.warnings)
+        } else {
+            merged_text
         };
         let settings = if ctx.guards {
             with_guard_hook(allowed, ctx.warnings)
@@ -494,6 +499,27 @@ fn with_hydraui_allow(text: String, warnings: &Warnings) -> String {
             warnings.push(format!(
                 "hydra: claude: hydraui tools not pre-approved ({e})"
             ));
+            text
+        }
+    }
+}
+
+/// Turns Remote Control on at startup (`remoteControlAtStartup`, which Claude Code reads
+/// from settings.json). Skipped with a warning when the settings can't take it.
+fn with_remote_control(text: String, warnings: &Warnings) -> String {
+    let set = |t: &str| -> Result<String, String> {
+        let mut root: serde_json::Value = serde_json::from_str(t).map_err(|e| e.to_string())?;
+        root.as_object_mut()
+            .ok_or("settings.json isn't a JSON object")?
+            .insert("remoteControlAtStartup".into(), true.into());
+        let mut out = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+        out.push('\n');
+        Ok(out)
+    };
+    match set(&text) {
+        Ok(with_setting) => with_setting,
+        Err(e) => {
+            warnings.push(format!("hydra: claude: Remote Control not turned on ({e})"));
             text
         }
     }
@@ -694,6 +720,46 @@ mod tests {
             "the base account is never copied"
         );
         assert!(dir.join("README-hydra.txt").is_file());
+    }
+
+    #[test]
+    fn remote_control_env_writes_the_setting() {
+        let settings = |f: &Fixture| -> serde_json::Value {
+            let text = std::fs::read_to_string(cfg_dir(f).join("settings.json")).unwrap();
+            serde_json::from_str(&text).unwrap()
+        };
+        let f = Fixture::new(
+            "[claude]
+remote_control = true
+",
+        );
+        with_base(&f);
+        Claude.materialise(&f.ctx()).unwrap();
+        assert_eq!(settings(&f)["remoteControlAtStartup"], true);
+        assert_eq!(settings(&f)["model"], "opus");
+
+        let f = Fixture::new(
+            "[claude]
+",
+        );
+        with_base(&f);
+        Claude.materialise(&f.ctx()).unwrap();
+        assert!(settings(&f).get("remoteControlAtStartup").is_none());
+
+        // A setting from the user's own base settings is left as the user had it.
+        let f = Fixture::new(
+            "[claude]
+",
+        );
+        let base = f.home.join(".claude");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(
+            base.join("settings.json"),
+            r#"{"remoteControlAtStartup":true}"#,
+        )
+        .unwrap();
+        Claude.materialise(&f.ctx()).unwrap();
+        assert_eq!(settings(&f)["remoteControlAtStartup"], true);
     }
 
     #[test]

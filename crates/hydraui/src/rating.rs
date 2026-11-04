@@ -310,18 +310,18 @@ mod tests {
         assert_eq!(r.outcome, Outcome::Check);
         assert!(r.check.starts_with("Open the nl page"));
         assert!(!passes(&r, 0));
-        a["screenshots"] = json!(["/tmp/nl.png", "/tmp/en.JPG"]);
-        assert_eq!(
-            from_args(&a).unwrap().screenshots,
-            ["/tmp/nl.png", "/tmp/en.JPG"]
-        );
-        a["screenshots"] = json!(["shot.png", "/tmp/notes.txt"]);
+        // Absolute on every OS: "/tmp/x.png" has no drive on Windows.
+        let at = |name: &str| std::env::temp_dir().join(name).display().to_string();
+        let shots = [at("nl.png"), at("en.JPG")];
+        a["screenshots"] = json!(shots);
+        assert_eq!(from_args(&a).unwrap().screenshots, shots);
+        a["screenshots"] = json!(["shot.png", at("notes.txt")]);
         let e = from_args(&a).unwrap_err();
         assert!(
             e.contains("screenshot 1") && e.contains("screenshot 2"),
             "{e}"
         );
-        a["screenshots"] = json!(vec!["/tmp/a.png"; 7]);
+        a["screenshots"] = json!(vec![at("a.png"); 7]);
         assert!(from_args(&a).unwrap_err().contains("at most 6"));
         a.as_object_mut().unwrap().remove("screenshots");
         a["check"] = json!("x".repeat(MAX_CHECK + 1));

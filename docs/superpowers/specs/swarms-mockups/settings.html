@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Swarms</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#09090b;--panel:#0c0c0e;--line:#27272a;--soft:#1c1c1f;--text:#fafafa;--muted:#a1a1aa;--dim:#71717a;--teal:#2dd4bf;--amber:#fbbf24;--green:#4ade80;--red:#f87171}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,"Segoe UI",system-ui,sans-serif;padding:24px}
+h2.cap{font-size:13px;color:var(--muted);font-weight:500;margin:28px 0 10px}
+.win{display:grid;grid-template-columns:220px 1fr;border:1px solid var(--line);border-radius:10px;overflow:hidden;min-height:700px;max-width:1080px}
+.side{border-right:1px solid var(--line);padding:10px 8px;background:var(--bg)}
+.side .t{display:flex;justify-content:space-between;padding:0 8px 6px;font-weight:600}
+.side .t span{color:var(--muted);font-weight:400;font-size:12px}
+.hd{font-size:11px;font-weight:600;letter-spacing:.6px;color:var(--muted);padding:14px 8px 4px}
+.it{padding:5px 8px;border-radius:6px;font-size:13px;display:flex;align-items:center;gap:8px}
+.it.on{background:#1f1f23}
+.it .n{margin-left:auto;font-size:11px;color:var(--amber)}
+.add{padding:5px 8px;color:var(--muted);font-size:13px}
+.main{padding:24px 32px;display:flex;flex-direction:column;gap:22px}
+.title{display:flex;align-items:center;gap:12px}
+.title h1{font-size:20px;margin:0;font-weight:600}
+.pill{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px;border-radius:12px;border:1px solid var(--line);font-size:12px;color:#d4d4d8}
+.dot{width:8px;height:8px;border-radius:50%;flex:none}
+.sec{display:flex;flex-direction:column;gap:8px}
+.lbl{font-size:11px;font-weight:600;letter-spacing:.6px;color:var(--muted)}
+.row{display:flex;align-items:center;gap:10px}
+.box{border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+.line{display:flex;align-items:center;gap:12px;padding:10px 14px;border-bottom:1px solid var(--soft)}
+.line:last-child{border-bottom:0}
+.mono{font-family:"JetBrains Mono",Consolas,monospace;font-size:12.5px}
+.muted{color:var(--muted)}
+.small{font-size:12px}
+.btn{display:inline-flex;align-items:center;height:30px;padding:0 12px;border-radius:7px;border:1px solid #3f3f46;background:#18181b;color:var(--text);font:inherit;font-size:13px;cursor:pointer;white-space:nowrap}
+.btn.primary{background:var(--text);color:var(--bg);border-color:var(--text)}
+.btn.ghost{background:transparent;border-color:transparent;color:var(--muted)}
+.btn.danger{color:var(--red)}
+.chip{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 9px;border-radius:12px;border:1px solid #3f3f46;font-size:12px}
+.role{font-size:11px;padding:1px 7px;border-radius:9px;border:1px solid #3f3f46;color:#d4d4d8}
+.role.w{border-color:#115e59;color:var(--teal)}
+.role.o{border-color:#a78bfa;color:#c4b5fd}
+.warn{border-color:#78350f;background:#1c1408}
+.warn .line{border-bottom-color:#2a1d0b}
+.r{margin-left:auto;display:flex;gap:6px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:24px;max-width:1080px}
+.card{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:18px;display:flex;flex-direction:column;gap:12px}
+.code{padding:10px 12px;border-radius:8px;border:1px dashed #3f3f46;background:var(--bg);word-break:break-all}
+.seg{display:inline-grid;grid-template-columns:1fr 1fr;padding:3px;border:1px solid var(--line);border-radius:8px;gap:3px}
+.seg span{padding:4px 14px;border-radius:6px;font-size:13px;color:var(--muted);text-align:center}
+.seg span.on{background:#1f1f23;color:var(--text);box-shadow:inset 0 0 0 1px #3f3f46}
+.input{height:32px;border-radius:7px;border:1px solid #3f3f46;background:var(--bg);padding:0 10px;display:flex;align-items:center;color:var(--muted);font-size:13px}
+.toast{display:flex;gap:12px;align-items:flex-start;padding:12px 14px;border-radius:10px;border:1px solid #3f3f46;background:#18181b;max-width:380px;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+</style>
+</head>
+<body>
+
+<h2 class="cap">1 · Settings › Swarms › a swarm (you are a writer)</h2>
+<div class="win">
+  <aside class="side">
+    <div class="t">Settings <span>Close</span></div>
+    <div class="hd">HYDRAUI</div>
+    <div class="it">General</div>
+    <div class="it">Phone</div>
+    <div class="hd">SWARMS</div>
+    <div class="it">You and this machine</div>
+    <div class="it on"><span class="dot" style="background:var(--green)"></span>team-skills<span class="n">2</span></div>
+    <div class="it"><span class="dot" style="background:var(--dim)"></span>home-notes</div>
+    <div class="add">+ New swarm</div>
+    <div class="add">Join a swarm…</div>
+    <div class="hd">ENVIRONMENTS</div>
+    <div class="it"><span class="dot" style="background:#1f9a8a"></span>work</div>
+    <div class="it"><span class="dot" style="background:#a78bfa"></span>personal</div>
+    <div class="add">+ New environment</div>
+    <div class="hd">SECURITY</div>
+    <div class="it">Credentials</div>
+  </aside>
+
+  <main class="main">
+    <div class="title">
+      <h1>team-skills</h1>
+      <span class="pill"><span class="dot" style="background:var(--green)"></span>Up to date · 3 of 5 machines online</span>
+      <span class="role o" style="margin-left:auto">You're an owner</span>
+    </div>
+
+    <div class="sec">
+      <span class="lbl">FOLDER ON THIS MACHINE</span>
+      <div class="row"><span class="mono">E:\Shared\team-skills</span><button class="btn">Open</button><button class="btn ghost">Change…</button></div>
+      <span class="muted small">Last change from <b style="color:#d4d4d8">Alice's laptop</b> at 13:02 · 41 files</span>
+    </div>
+
+    <div class="sec">
+      <span class="lbl">NEEDS ATTENTION</span>
+      <div class="box warn">
+        <div class="line">
+          <span class="dot" style="background:var(--amber)"></span>
+          <div><div>Conflict in <span class="mono">skills/review/SKILL.md</span></div>
+          <div class="muted small">You and Bob's PC both changed it. Bob's version (newer) kept the name; yours is beside it as <span class="mono">SKILL (conflict, Davo's desktop, 27 Oct 13.05).md</span></div></div>
+          <div class="r"><button class="btn">Compare</button><button class="btn">Keep theirs</button><button class="btn">Keep mine</button></div>
+        </div>
+        <div class="line">
+          <span class="dot" style="background:var(--amber)"></span>
+          <div><div>Edited after a delete: <span class="mono">notes/old-idea.md</span></div>
+          <div class="muted small">Carol deleted it at 12:40; your later edit is kept on this machine only.</div></div>
+          <div class="r"><button class="btn">Share it again</button><button class="btn">Delete it</button></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sec">
+      <div class="row"><span class="lbl">MEMBERS</span><button class="btn primary" style="margin-left:auto">Invite…</button></div>
+      <div class="box">
+        <div class="line"><span class="dot" style="background:var(--green)"></span><div><div>Davo <span class="muted">· Davo's desktop (this machine), Davo's laptop · last seen 3 days ago</span></div></div><span class="r"><span class="role o">owner</span></span></div>
+        <div class="line"><span class="dot" style="background:var(--green)"></span><div>Alice <span class="muted">· Alice's laptop</span></div><span class="r"><span class="role w">writer</span><button class="btn ghost">⋯</button></span></div>
+        <div class="line"><span class="dot" style="background:var(--green)"></span><div>Bob <span class="muted">· Bob's PC</span></div><span class="r"><span class="role">reader</span></span></div>
+        <div class="line"><span class="dot" style="background:var(--dim)"></span><div>Carol <span class="muted">· Carol's Mac · last seen yesterday</span></div><span class="r"><span class="role w">writer</span></span></div>
+        <div class="line muted small"><span>Invite for a <b>reader</b>, made 26 Oct, unused, expires 2 Nov</span><span class="r"><button class="btn ghost">Cancel invite</button></span></div>
+      </div>
+    </div>
+
+    <div class="sec">
+      <span class="lbl">FILE TYPES THAT SYNC</span>
+      <div class="row"><span class="chip mono">.md</span><span class="chip mono">.py ×</span><button class="btn ghost">+ Add</button></div>
+      <span class="muted small">Other files stay on each machine and never leave it. Files over 10 MB don't sync.</span>
+    </div>
+
+    <div class="row" style="border-top:1px solid var(--line);padding-top:16px">
+      <span class="muted small">Leaving keeps the folder's files here, but stops syncing them.</span>
+      <button class="btn danger" style="margin-left:auto">Leave swarm…</button>
+    </div>
+  </main>
+</div>
+
+<h2 class="cap">2 · Invite, join, and the alerts</h2>
+<div class="grid2">
+  <div class="card">
+    <b>Invite to team-skills</b>
+    <div class="seg"><span>Writer</span><span class="on">Reader</span></div>
+    <span class="muted small">Readers get every change but can't send any.</span>
+    <div class="code mono">hydra-swarm:eyJncm91cCI6InRlYW0tc2tpbGxzIiwiaG9zdCI6Ijk0ZjJ…</div>
+    <div class="row"><button class="btn primary">Copy invite</button><span class="muted small">Works once · expires in 7 days · your hydraui must be running when they join</span></div>
+  </div>
+
+  <div class="card">
+    <b>Join a swarm</b>
+    <div class="sec"><span class="lbl">INVITE</span><div class="input mono">hydra-swarm:eyJncm91cC…</div></div>
+    <div class="muted small">You'll join as <b style="color:#d4d4d8">Davo</b> on <b style="color:#d4d4d8">Davo's desktop</b>. <a style="color:#7dd3c8">Change</a></div>
+    <div class="sec"><span class="lbl">FOLDER ON THIS MACHINE</span><div class="row"><div class="input mono" style="flex:1;color:var(--text)">E:\Shared\team-skills</div><button class="btn">Browse…</button></div>
+    <span class="muted small">Pick an empty folder, or a new one.</span></div>
+    <div class="row"><button class="btn primary">Join</button><button class="btn ghost">Cancel</button></div>
+  </div>
+
+  <div class="toast">
+    <span class="dot" style="background:var(--amber);margin-top:6px"></span>
+    <div><b>team-skills: a conflict</b><div class="muted small">You and Bob's PC both changed skills/review/SKILL.md. Both copies are kept.</div>
+    <div style="margin-top:8px"><button class="btn">Show</button></div></div>
+  </div>
+
+  <div class="toast">
+    <span class="dot" style="background:var(--amber);margin-top:6px"></span>
+    <div><b>team-skills: your change isn't shared</b><div class="muted small">You're a reader, so skills/review/SKILL.md stopped syncing on this machine.</div>
+    <div style="margin-top:8px;display:flex;gap:6px"><button class="btn">Use the swarm's version</button><button class="btn ghost">Later</button></div></div>
+  </div>
+</div>
+
+<h2 class="cap">3 · Settings › Swarms › You and this machine (set once, used in every swarm)</h2>
+<div class="card" style="max-width:640px">
+  <b>You and this machine</b>
+  <span class="muted small">Every swarm you're in shows these. Changing them updates all your swarms.</span>
+  <div class="sec"><span class="lbl">YOUR NAME</span><div class="input" style="color:var(--text);max-width:320px">Davo</div></div>
+  <div class="sec"><span class="lbl">THIS MACHINE'S NAME</span><div class="input" style="color:var(--text);max-width:320px">Davo's desktop</div>
+  <span class="muted small">Starts as the computer's name (DAVO-PC). Pick something your teammates will recognise.</span></div>
+  <div class="row"><button class="btn primary">Save</button></div>
+  <div class="sec" style="border-top:1px solid var(--line);padding-top:12px"><span class="lbl">YOUR MACHINES</span>
+  <div class="box"><div class="line">Davo's desktop <span class="muted small">this machine</span></div><div class="line">Davo's laptop <span class="muted small">last seen 3 days ago</span><span class="r"><button class="btn ghost">Remove…</button></span></div></div>
+  <div class="row"><button class="btn">Add another machine of mine…</button><span class="muted small">A single-use code; the new machine joins every swarm you're in.</span></div></div>
+  <span class="muted small">The first time you make or join a swarm, hydraui asks for these if they aren't set yet.</span>
+</div>
+
+</body>
+</html>

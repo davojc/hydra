@@ -162,7 +162,11 @@ impl Workspace {
         if self.pending_wakes.contains_key(&id) {
             self.send_wakes(window, cx);
         }
-        if let Some(alert) = alert_for(before, state) {
+        let alert = alert_for(before, state);
+        // The phone hears of it whether or not the terminal is in sight.
+        let changed = view.read(cx).claude() != before;
+        self.phone_session_changed(id, alert, changed, cx);
+        if let Some(alert) = alert {
             self.alert(id, alert, window, cx);
         }
     }

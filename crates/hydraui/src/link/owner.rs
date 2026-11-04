@@ -76,6 +76,20 @@ pub fn held_elsewhere_named(paths: &HydraPaths, name: &str) -> bool {
 }
 
 #[cfg(test)]
+/// Whether `held` stops being true within a second. A process another test starts while a
+/// lock is held inherits its file until it execs, so a let-go lock can look held for a few
+/// milliseconds when tests run in parallel.
+pub(crate) fn released(held: impl Fn() -> bool) -> bool {
+    (0..100).any(|_| {
+        if !held() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        false
+    })
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -91,19 +105,6 @@ mod tests {
         assert!(released(|| held_elsewhere(&paths)));
         let again = try_own(&paths);
         assert!(again.is_some(), "free again once dropped");
-    }
-
-    /// Whether `held` stops being true within a second. A process another test starts while a
-    /// lock is held inherits its file until it execs, so a let-go lock can look held for a few
-    /// milliseconds when tests run in parallel.
-    fn released(held: impl Fn() -> bool) -> bool {
-        (0..100).any(|_| {
-            if !held() {
-                return true;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            false
-        })
     }
 
     #[test]

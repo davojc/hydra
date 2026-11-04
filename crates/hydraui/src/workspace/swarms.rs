@@ -519,7 +519,9 @@ mod tests {
         // The service's events end once it has closed every swarm.
         drop(service);
         assert_eq!(fwd.as_mut().poll(&mut cx), Poll::Ready(()));
-        assert!(!owner::held_elsewhere_named(&paths, LOCK));
+        assert!(owner::released(|| owner::held_elsewhere_named(
+            &paths, LOCK
+        )));
     }
 
     #[test]

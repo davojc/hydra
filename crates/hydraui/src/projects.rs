@@ -722,6 +722,38 @@ pub fn set_planning_skill(
     hydraui_sets::layout::write_atomic(&file, &doc.to_string()).map_err(|e| e.to_string())
 }
 
+/// The last sync slot run for project `slug` of `repo` on this machine (`[synced]` in
+/// projects.toml, local `YYYY-MM-DD HH:MM`), spec §7.
+pub fn synced_at(hydra_root: &Path, repo: &str, slug: &str) -> Option<String> {
+    let text = std::fs::read_to_string(config_file(hydra_root)).ok()?;
+    let table: toml::Table = toml::from_str(&text).ok()?;
+    table
+        .get("synced")?
+        .get(format!("{repo}/{slug}"))?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Records `slot` as the last sync slot run for project `slug` of `repo`.
+pub fn set_synced(hydra_root: &Path, repo: &str, slug: &str, slot: &str) -> Result<(), String> {
+    let file = config_file(hydra_root);
+    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|e| format!("{}: {e}", file.display()))?;
+    if !doc.contains_key("synced") {
+        doc.insert("synced", toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    doc.get_mut("synced")
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .ok_or("synced in projects.toml isn't a table")?
+        .insert(&format!("{repo}/{slug}"), toml_edit::value(slot));
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    hydraui_sets::layout::write_atomic(&file, &doc.to_string()).map_err(|e| e.to_string())
+}
+
 /// What a planning session for project `slug` of `repo` follows: the engineer's skill, or the
 /// built-in guide written out under `state` (refreshed each time, so it's this build's).
 pub fn planning_guide(
@@ -911,6 +943,19 @@ pub fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_last_sync_is_remembered_per_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(synced_at(tmp.path(), "o/r", "pg"), None);
+        set_synced(tmp.path(), "o/r", "pg", "2026-11-04 12:30").unwrap();
+        set_planning_skill(tmp.path(), "o/r", "pg", Some("x")).unwrap();
+        assert_eq!(
+            synced_at(tmp.path(), "o/r", "pg").as_deref(),
+            Some("2026-11-04 12:30")
+        );
+        assert_eq!(synced_at(tmp.path(), "o/r", "mx"), None);
+    }
 
     #[test]
     fn each_engineer_picks_a_planning_skill_per_project_or_gets_the_built_in_guide() {

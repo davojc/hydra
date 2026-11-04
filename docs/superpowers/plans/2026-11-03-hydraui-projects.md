@@ -78,9 +78,29 @@ built in slices that each run in hydraui on their own.
 
 ### Slice 3: the local check and the repo sync
 
-- The 5-minute git/gh check (§6.1), using `progress::ticket_ids_in` and `move_for`.
-- The hourly Claude pass and the check tools (§6.2), with the 30% usage rule.
-- The repo sync at the project's times, with the write-up in `progress/` (§7).
+- **Done (`project_check.rs`, 6 tests):**
+  - **The check (§6.1)** runs after each 5-minute fetch, for every project you're on. For each
+    code repo it reads:
+    - your pull requests, through the environment's gh (`--author @me`): open means in review,
+      merged means done;
+    - in the local clone, when there is one: its branch names, and your last 14 days of commit
+      subjects, matched by the environment's git email (in progress).
+
+    Ticket keys in any of them move tickets forward only; pull request links are recorded on
+    the ticket. The moves are local edits, so they're part of the pending change. The
+    projects page says when the check last ran, and what it couldn't read.
+  - **The repo sync (§7)** runs at each project's sync times, and once on start for a time
+    missed today. It writes `progress/<login>/<date>.md`: what moved, then what else changed;
+    a second sync that day adds a section. Then it sends the pending change, quietly. A project
+    hydraui sees for the first time starts from its next sync time.
+- **Different from the spec, for now:**
+  - The write-up is built from the pending change, not written by Claude. That comes with the
+    hourly pass.
+  - Only the latest missed time today runs: a time missed yesterday is caught up by today's
+    first sync.
+  - The check is stateless rather than "since the last check": moves only go forward, so
+    seeing the same pull request again changes nothing.
+- **Next:** the hourly Claude pass and the check tools (§6.2), with the 30% usage rule.
 
 ### Slice 4: meeting notes
 

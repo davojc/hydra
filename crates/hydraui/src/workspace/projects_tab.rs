@@ -29,7 +29,7 @@ use crate::hydra::{PaneRequest, command_line};
 use crate::mcp::project_tools::{ASKED_BY_CLAUDE, Session};
 use crate::mcp::server;
 use crate::orchestrator_theme::{self as theme, color};
-use crate::project_send::{self as ps, OpenPr, SendError, Sent};
+use crate::project_send::{self as ps, OpenPr, Runner as _, SendError, Sent};
 use crate::projects::{self as pj, Item};
 
 /// How often the checkouts are brought up to date while hydraui is open (spec §3).
@@ -119,6 +119,10 @@ pub(super) struct EnvProjects {
     prs: Vec<OpenPr>,
     /// Projects whose pending change is exactly what was sent for the lead's approval.
     sent_for_lead: BTreeSet<String>,
+    /// When the local check last ran (local `HH:MM`), spec §6.1.
+    checked: Option<String>,
+    /// What the last check couldn't read (a code repo gh can't see), if anything.
+    check_problem: Option<String>,
 }
 
 impl EnvProjects {
@@ -403,12 +407,14 @@ impl Workspace {
         }
         self.projects_data.fetching = true;
         let exe = hydra_exe();
+        let root = root.clone();
         cx.spawn_in(window, async move |this, cx| {
             let fetched = cx
                 .background_spawn(async move {
                     jobs.into_iter()
                         .map(|(env, repo, state, login)| {
-                            let read = fetch_env(&exe, &env, &repo, &state, login);
+                            let mut read = fetch_env(&exe, &env, &repo, &state, login);
+                            check_env(&exe, &root, &env, &state, &mut read);
                             (env, read)
                         })
                         .collect::<Vec<_>>()
@@ -421,10 +427,72 @@ impl Workspace {
                 ws.projects_data.fetching = false;
                 ws.projects_data.next_fetch = Some(Instant::now() + FETCH_EVERY);
                 ws.announce_questions(window, cx);
+                ws.run_due_syncs(window, cx);
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// The repo sync (spec §7): for each project you're on whose sync time has passed since its
+    /// last sync, writes the pending change's write-up to `progress/<you>/<date>.md` and sends
+    /// it, quietly. A project with nothing pending is only marked as synced.
+    fn run_due_syncs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.hydra.paths.root().to_path_buf();
+        let now = crate::action_log::now();
+        let Some(now) = now.get(..16) else {
+            return;
+        };
+        let mut sends = Vec::new();
+        for (env, e) in &self.projects_data.envs {
+            let Some(login) = e.login.as_deref() else {
+                continue;
+            };
+            if !pj::is_github(&e.repo) {
+                continue;
+            }
+            for p in e.projects.iter().filter(|p| p.file.is_on(login)) {
+                let last = pj::synced_at(&root, &e.repo, &p.slug);
+                if last.is_none() {
+                    // First sight: start from the next time, rather than sending at once.
+                    let _ = pj::set_synced(&root, &e.repo, &p.slug, now);
+                    continue;
+                }
+                let Some(slot) =
+                    crate::project_check::sync_due(&p.file.sync.times, last.as_deref(), now)
+                else {
+                    continue;
+                };
+                let _ = pj::set_synced(&root, &e.repo, &p.slug, &slot);
+                if pj::project_unsent(&e.pending, &p.slug) == 0 {
+                    continue;
+                }
+                let moved = crate::project_check::pending_moves(&ps::Local, &e.checkout, p);
+                let moved_paths: Vec<String> = moved
+                    .iter()
+                    .map(|(id, ..)| format!("{}/tickets/{id}.md", p.slug))
+                    .collect();
+                let other: Vec<String> = ps::pending_changes(&e.status, &p.slug)
+                    .into_iter()
+                    .filter(|(_, path)| !moved_paths.contains(path) && !path.contains("/progress/"))
+                    .map(|(words, _)| words)
+                    .collect();
+                let section = crate::project_check::write_up(&slot[11..], &moved, &other);
+                if let Err(why) = crate::project_check::add_progress(
+                    &e.checkout.join(&p.slug),
+                    login,
+                    &slot[..10],
+                    &section,
+                ) {
+                    eprintln!("projects: the {} write-up failed: {why}", p.slug);
+                }
+                sends.push((env.clone(), p.slug.clone()));
+            }
+        }
+        for (env, slug) in sends {
+            self.reload_env(&env, cx);
+            self.send_project(&env, &slug, true, window, cx);
+        }
     }
 
     /// A toast for each question that started waiting on you since the last read (spec §8.4).
@@ -2663,6 +2731,14 @@ impl Workspace {
                         .child(format!("you: {login}")),
                 );
             }
+            if let Some(at) = &e.checked {
+                header = header.child(
+                    div()
+                        .text_sm()
+                        .text_color(color(theme::TEXT_MUTED))
+                        .child(format!("progress checked {at}")),
+                );
+            }
             header = header.child(div().flex_1()).child(
                 Button::new(SharedString::from(format!("new-project-{env}")))
                     .label("New project")
@@ -2673,6 +2749,9 @@ impl Workspace {
                     })),
             );
             let mut section = v_flex().gap_3().child(header);
+            if let Some(problem) = &e.check_problem {
+                section = section.child(notice(problem, theme::AMBER, theme::AMBER_TINT));
+            }
             if let Some(problem) = &e.problem {
                 section = section.child(notice(problem, theme::RED, theme::RED_TINT));
             } else if !e.fetched {
@@ -4810,6 +4889,61 @@ fn fetch_env(
     }
     read_checkout(&mut e);
     e
+}
+
+/// The local check (spec §6.1), after a fetch: for each project `e`'s login is on, what they
+/// did in its code repos moves tickets forward in the checkout. Blocks.
+fn check_env(exe: &Path, root: &Path, env: &str, state: &Path, e: &mut EnvProjects) {
+    let Some(login) = e.login.clone() else {
+        return;
+    };
+    if !pj::is_github(&e.repo) {
+        return;
+    }
+    let r = ps::EnvRunner {
+        hydra: exe,
+        env,
+        cwd: state,
+    };
+    let email = r
+        .remote_git(state, &["config", "user.email"])
+        .ok()
+        .map(|s| s.trim().to_string());
+    let mut problems = Vec::new();
+    let mut seen_repos: BTreeMap<String, Vec<crate::project_check::Observation>> = BTreeMap::new();
+    let mut moved = false;
+    for p in e.projects.iter().filter(|p| p.file.is_on(&login)) {
+        let mut seen = Vec::new();
+        for repo in &p.file.repos {
+            if !seen_repos.contains_key(repo) {
+                let clone = pj::clone_of(root, repo);
+                match crate::project_check::observe(&r, repo, clone.as_deref(), email.as_deref()) {
+                    Ok(o) => {
+                        seen_repos.insert(repo.clone(), o);
+                    }
+                    Err(why) => {
+                        problems.push(format!("{repo}: {}", why.lines().next().unwrap_or("")));
+                        seen_repos.insert(repo.clone(), Vec::new());
+                    }
+                }
+            }
+            seen.extend(seen_repos[repo].iter().cloned());
+        }
+        let moves = crate::project_check::moves(p, &seen);
+        if moves.is_empty() {
+            continue;
+        }
+        match crate::project_check::apply(&e.checkout.join(&p.slug), p, &moves) {
+            Ok(()) => moved = true,
+            Err(why) => problems.push(format!("{}: {why}", p.slug)),
+        }
+    }
+    if moved {
+        read_checkout(e);
+    }
+    e.checked = crate::action_log::now().get(11..16).map(str::to_string);
+    e.check_problem = (!problems.is_empty())
+        .then(|| format!("The progress check couldn't read {}", problems.join("; ")));
 }
 
 fn read_checkout(e: &mut EnvProjects) {

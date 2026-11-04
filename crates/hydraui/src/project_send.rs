@@ -357,15 +357,7 @@ pub fn send(r: &dyn Runner, s: &Send) -> Result<Sent, SendError> {
         .as_ref()
         .map(|p| p.branch.clone())
         .unwrap_or_else(|| format!("hydra/{}/{}/{}", s.login, s.slug, s.today));
-    r.remote_git(
-        dir,
-        &[
-            "push",
-            "--force",
-            "origin",
-            &format!("{commit}:refs/heads/{branch}"),
-        ],
-    )?;
+    push(r, dir, &format!("{commit}:refs/heads/{branch}"), true)?;
     let url = match &open {
         Some(p) => {
             r.gh(&["pr", "edit", &p.url, "--title", &title, "--body", &body])?;
@@ -391,6 +383,42 @@ pub fn send(r: &dyn Runner, s: &Send) -> Result<Sent, SendError> {
     }
     remember_sent(r, dir, s.slug);
     Ok(Sent::Waiting(url))
+}
+
+/// Whether a push failed on GitHub's side (a server error), so trying again may work.
+fn is_transient(err: &str) -> bool {
+    [
+        "Internal Server Error",
+        "HTTP 500",
+        "HTTP 502",
+        "HTTP 503",
+        "HTTP 504",
+        "Bad Gateway",
+        "Service Unavailable",
+    ]
+    .iter()
+    .any(|s| err.contains(s))
+}
+
+/// Pushes `refspec` to origin (`force` replaces the branch), trying again twice when GitHub
+/// fails on its side: a new repo answered its first pushes with Internal Server Error.
+fn push(r: &dyn Runner, dir: &Path, refspec: &str, force: bool) -> Result<(), String> {
+    let mut args = vec!["push"];
+    if force {
+        args.push("--force");
+    }
+    args.extend(["origin", refspec]);
+    let mut tries = 0;
+    loop {
+        match r.remote_git(dir, &args) {
+            Ok(_) => return Ok(()),
+            Err(e) if tries < 2 && is_transient(&e) => {
+                tries += 1;
+                std::thread::sleep(Duration::from_secs(tries));
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Squash-merges pull request `url` and deletes its `branch`.
@@ -503,10 +531,7 @@ fn start_repo(r: &dyn Runner, dir: &Path) -> Result<String, String> {
         &["commit-tree", &tree, "-m", "Start the projects repo"],
         None,
     )?);
-    r.remote_git(
-        dir,
-        &["push", "origin", &format!("{commit}:refs/heads/main")],
-    )?;
+    push(r, dir, &format!("{commit}:refs/heads/main"), false)?;
     r.remote_git(dir, &["fetch", "origin"])?;
     Ok("main".into())
 }
@@ -754,6 +779,8 @@ mod tests {
         login: String,
         prs: RefCell<Vec<OpenPr>>,
         calls: RefCell<Vec<String>>,
+        /// Pushes GitHub fails with a server error before taking one.
+        failing_pushes: RefCell<u32>,
     }
 
     fn git_cmd(dir: &Path, args: &[&str], index: Option<&Path>) -> Result<String, String> {
@@ -780,6 +807,10 @@ mod tests {
         }
 
         fn remote_git(&self, dir: &Path, args: &[&str]) -> Result<String, String> {
+            if args[0] == "push" && *self.failing_pushes.borrow() > 0 {
+                *self.failing_pushes.borrow_mut() -= 1;
+                return Err(" ! [remote rejected] x -> y (Internal Server Error)".into());
+            }
             git_cmd(dir, args, None)
         }
 
@@ -865,6 +896,7 @@ mod tests {
             login: login.into(),
             prs: RefCell::new(Vec::new()),
             calls: RefCell::new(Vec::new()),
+            failing_pushes: RefCell::new(0),
         };
         (tmp, fake, checkout)
     }
@@ -1026,6 +1058,24 @@ mod tests {
             on_main(&fake, "pg/spec.md").unwrap(),
             "ONE\nTWO, mine\nTHREE\n"
         );
+    }
+
+    #[test]
+    fn a_server_error_on_push_is_tried_again() {
+        let (_tmp, fake, dir) = setup("lead");
+        lead_creates(&fake, &dir);
+        write(&dir, "pg/spec.md", "one\ntwo\nthree, again\n");
+        *fake.failing_pushes.borrow_mut() = 1;
+        let none = BTreeSet::new();
+        assert!(matches!(
+            send(&fake, &sending(&dir, "lead", &none)),
+            Ok(Sent::Merged(_))
+        ));
+        // A refusal that isn't GitHub's fault isn't retried.
+        assert!(!is_transient(
+            "! [remote rejected] main (protected branch hook declined)"
+        ));
+        assert!(is_transient("error: RPC failed; HTTP 502 curl 22"));
     }
 
     #[test]

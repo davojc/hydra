@@ -1268,6 +1268,16 @@ impl Workspace {
         Ok(())
     }
 
+    /// The planning skill's SKILL.md for `env`'s repo.
+    fn planning_skill(&self, env: &str) -> Result<PathBuf, String> {
+        let e = self
+            .projects_data
+            .envs
+            .get(env)
+            .ok_or_else(|| format!("{env} has no projects repo"))?;
+        pj::planning_skill(&e.checkout)
+    }
+
     fn start_project(
         &mut self,
         env: String,
@@ -1278,7 +1288,14 @@ impl Workspace {
         let Some(p) = self.find_project(&env, &slug) else {
             return;
         };
-        let prompt = start_prompt(p);
+        let skill = match self.planning_skill(&env) {
+            Ok(skill) => skill,
+            Err(why) => {
+                window.push_notification(Notification::error(why), cx);
+                return;
+            }
+        };
+        let prompt = start_prompt(p, &skill);
         self.tell_planner(&env, &slug, prompt, window, cx);
     }
 
@@ -1290,13 +1307,24 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let skill = match self.planning_skill(&env) {
+            Ok(skill) => skill,
+            Err(why) => {
+                window.push_notification(Notification::error(why), cx);
+                return;
+            }
+        };
         let prompt = format!(
             "The lead approved milestone {} \"{}\" ({}). Propose its tickets now with \
-             plan_propose_ticket: each small enough to finish in a few days, each with what to \
-             do and how to tell it's done. Call plan_show first to see what exists and what \
-             was rejected. Ask anything you need decided with plan_add_question, not here. Then \
-             tell the lead they're ready to review in hydraui.",
-            m.id, m.title, m.description
+             plan_propose_ticket, following the Tickets section of the project-planning skill \
+             ({}; read it and its references/product.md if you haven't): each one repo, a few \
+             days' work, with what to do, where, and how to tell it's done. Call plan_show first \
+             to see what exists and what was rejected. Ask anything you need decided with \
+             plan_add_question, not here. Then tell the lead they're ready to review in hydraui.",
+            m.id,
+            m.title,
+            m.description,
+            skill.display()
         );
         self.tell_planner(&env, &slug, prompt, window, cx);
     }
@@ -3201,14 +3229,22 @@ impl Workspace {
                         .ghost()
                         .small()
                         .on_click(cx.listener(move |ws, _, window, cx| {
-                            let prompt = "Pick up planning this project: call plan_show, sum up \
-                                          what's approved, what's waiting for review and what had \
-                                          changes asked, and act on any notes. Milestones are short \
-                                          and purpose-driven, in plain words anyone can read: \
-                                          rewrite with plan_revise any still to review that are \
-                                          technical, have a title over 60 characters, or aren't \
-                                          1 to 4 short points (give points)."
-                                .to_string();
+                            let skill = match ws.planning_skill(&env_b) {
+                                Ok(skill) => skill,
+                                Err(why) => {
+                                    window.push_notification(Notification::error(why), cx);
+                                    return;
+                                }
+                            };
+                            let prompt = format!(
+                                "Pick up planning this project. Read the project-planning \
+                                 skill first, {}, and the files it points to. Then call \
+                                 plan_show, sum up what's approved, what's waiting for review \
+                                 and what had changes asked, and act on any notes. Rewrite \
+                                 with plan_revise any milestone still to review that doesn't \
+                                 meet the skill's rules.",
+                                skill.display()
+                            );
                             ws.tell_planner(&env_b, &slug_b, prompt, window, cx)
                         })),
                 ),
@@ -4644,11 +4680,14 @@ fn read_checkout(e: &mut EnvProjects) {
 }
 
 /// The planning session's first prompt (spec §14).
-fn start_prompt(p: &Project) -> String {
+fn start_prompt(p: &Project, skill: &Path) -> String {
     format!(
         "You're planning the project \"{name}\" (ticket key {key}, lead {lead}) in hydraui's \
          Projects tab. The lead sees what you write in hydraui beside you and reviews each \
          proposal there: approve, edit, ask you for changes, or reject.\n\n\
+         First read the project-planning skill, {skill}, and the files it points to: what a \
+         milestone is and isn't, what makes a good ticket and question, the repo's files, and \
+         what we build where. Follow it throughout.\n\n\
          1. Call plan_show, then read every attached resource (plan_read_resource; Read for \
          PDFs and images).\n\
          2. Ask about anything unclear (goals, who it's for, constraints, what's out of \
@@ -4669,6 +4708,7 @@ fn start_prompt(p: &Project) -> String {
         name = p.file.name,
         key = p.file.key,
         lead = p.file.lead,
+        skill = skill.display(),
     )
 }
 
@@ -4944,7 +4984,8 @@ mod tests {
                 && w.contains("pg-3-share-dialog")
         );
         assert!(!work_prompt(&p, &t, "b", "r", None).contains("skill"));
-        assert!(start_prompt(&p).contains("plan_propose_milestone"));
+        let started = start_prompt(&p, Path::new("/s/SKILL.md"));
+        assert!(started.contains("plan_propose_milestone") && started.contains("/s/SKILL.md"));
     }
 
     #[test]

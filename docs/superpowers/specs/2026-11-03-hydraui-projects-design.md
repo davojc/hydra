@@ -574,3 +574,20 @@ want.
 
   If that session isn't running, the answer waits in the repo, where `plan_show` and
   `ticket_show` list it.
+
+### 14.2 The planning skill (added 2026-11-04)
+
+What a milestone is and isn't, what makes a good ticket and question, the repo's file formats
+and what we build in which repo live in one Claude Code skill, `project-planning`, kept in the
+projects repo at `.claude/skills/project-planning/`. Every planning prompt tells the session to
+read it first.
+
+- hydraui ships a first version. A send adds it to a repo that doesn't have it yet, with the
+  rest of the change; from then on it's the team's, changed by pull request in the repo, and
+  hydraui never overwrites it.
+- Until the repo has it, a planning session reads hydraui's copy, written next to the checkout.
+- The plan tools keep their checks (title and point lengths, a detail per point) as the floor;
+  the skill says what good looks like above it.
+
+This is our call (Jordan, 2026-11-04): the team can sharpen the rules and the product picture
+without a hydra release, and every engineer's planning sessions use the same version.

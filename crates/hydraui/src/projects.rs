@@ -626,6 +626,29 @@ pub fn start_work(
     repo::write_ticket(dir, &t).map_err(|e| e.to_string())
 }
 
+/// The planning skill a planning session reads (spec §14): the repo's own copy when it has
+/// one, the team's to change; else hydraui's, written next to the checkout. Returns its
+/// SKILL.md.
+pub fn planning_skill(checkout: &Path) -> Result<PathBuf, String> {
+    use crate::project_send::{PLANNING_SKILL, PLANNING_SKILL_DIR};
+    let in_repo = checkout.join(PLANNING_SKILL_DIR).join("SKILL.md");
+    if in_repo.is_file() {
+        return Ok(in_repo);
+    }
+    let dir = checkout
+        .parent()
+        .ok_or("the checkout has no parent folder")?
+        .join("planning-skill");
+    for (name, text) in PLANNING_SKILL {
+        let file = dir.join(name);
+        if let Some(parent) = file.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&file, text).map_err(|e| e.to_string())?;
+    }
+    Ok(dir.join("SKILL.md"))
+}
+
 /// `text` without a leading bullet ("- ", "* ", "• ") and surrounding space.
 pub fn strip_point(text: &str) -> &str {
     let t = text.trim();
@@ -793,6 +816,30 @@ pub fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_planning_session_reads_the_repos_skill_or_hydrauis() {
+        let tmp = tempfile::tempdir().unwrap();
+        let checkout = tmp.path().join("o-r");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let shipped = planning_skill(&checkout).unwrap();
+        assert_eq!(shipped, tmp.path().join("planning-skill/SKILL.md"));
+        assert!(
+            std::fs::read_to_string(&shipped)
+                .unwrap()
+                .contains("name: project-planning")
+        );
+        assert!(
+            tmp.path()
+                .join("planning-skill/references/product.md")
+                .is_file()
+        );
+
+        let ours = checkout.join(".claude/skills/project-planning/SKILL.md");
+        std::fs::create_dir_all(ours.parent().unwrap()).unwrap();
+        std::fs::write(&ours, "the team's\n").unwrap();
+        assert_eq!(planning_skill(&checkout).unwrap(), ours);
+    }
 
     #[test]
     fn points_are_bullet_lines_only() {

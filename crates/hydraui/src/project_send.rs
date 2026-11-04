@@ -22,6 +22,24 @@ const README: &str = "# Projects\n\nOne folder per project: its spec, milestones
 decisions, meeting notes and resources. hydraui writes this repo; change projects in \
 hydraui's Projects tab rather than here.\n";
 
+/// Where the planning skill lives in the repo, so Claude Code finds it in planning sessions.
+pub const PLANNING_SKILL_DIR: &str = ".claude/skills/project-planning";
+
+/// The planning skill as hydraui ships it: what a milestone is and isn't, the repo's files and
+/// the product. A send adds it to a repo that doesn't have it; from then on it's the team's,
+/// changed by pull request in the repo, and hydraui leaves it alone.
+pub const PLANNING_SKILL: [(&str, &str); 3] = [
+    ("SKILL.md", include_str!("planning_skill/SKILL.md")),
+    (
+        "references/format.md",
+        include_str!("planning_skill/references/format.md"),
+    ),
+    (
+        "references/product.md",
+        include_str!("planning_skill/references/product.md"),
+    ),
+];
+
 /// Runs git and gh for a send. The real one runs local git directly and anything that talks
 /// to GitHub as the environment; tests use a fake GitHub.
 pub trait Runner {
@@ -321,6 +339,9 @@ pub fn send(r: &dyn Runner, s: &Send) -> Result<Sent, SendError> {
         let _ = std::fs::remove_file(&index);
         return Err(SendError::Clash(clashes));
     }
+    if rev(r, dir, &format!("{upstream}:{PLANNING_SKILL_DIR}/SKILL.md")).is_none() {
+        add_planning_skill(r, dir, &index)?;
+    }
     let tree = line(r.git(dir, &["write-tree"], Some(&index))?);
     let _ = std::fs::remove_file(&index);
     let up_tree = line(r.git(dir, &["rev-parse", &format!("{upstream}^{{tree}}")], None)?);
@@ -502,6 +523,31 @@ pub fn default_branch(r: &dyn Runner, dir: &Path) -> Result<Option<String>, Stri
     }))
 }
 
+/// Adds hydraui's planning skill to the tree being built in `index`.
+fn add_planning_skill(r: &dyn Runner, dir: &Path, index: &Path) -> Result<(), String> {
+    let tmp = git_dir(dir).join("hydra-skill-file");
+    for (name, text) in PLANNING_SKILL {
+        std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
+        let sha = line(r.git(
+            dir,
+            &["hash-object", "-w", &tmp.display().to_string()],
+            None,
+        )?);
+        r.git(
+            dir,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("100644,{sha},{PLANNING_SKILL_DIR}/{name}"),
+            ],
+            Some(index),
+        )?;
+    }
+    let _ = std::fs::remove_file(&tmp);
+    Ok(())
+}
+
 /// Gives an empty repo its first commit, a README on `main`, and returns `main`.
 fn start_repo(r: &dyn Runner, dir: &Path) -> Result<String, String> {
     let readme = git_dir(dir).join("hydra-readme.md");
@@ -663,6 +709,13 @@ pub fn is_sent(r: &dyn Runner, dir: &Path, slug: &str) -> bool {
 fn change_words(status: &str, path: &str) -> String {
     let rest = path.split_once('/').map(|(_, r)| r).unwrap_or(path);
     let (added, removed) = (status.starts_with('A'), status.starts_with('D'));
+    if path.starts_with(PLANNING_SKILL_DIR) {
+        return if added {
+            "Planning skill added".into()
+        } else {
+            "Planning skill updated".into()
+        };
+    }
     let stem = |p: &str| {
         Path::new(p)
             .file_stem()
@@ -1079,6 +1132,52 @@ mod tests {
     }
 
     #[test]
+    fn the_first_send_adds_the_planning_skill_and_keeps_the_teams_edits() {
+        let (tmp, fake, dir) = setup("lead");
+        lead_creates(&fake, &dir);
+        let skill = on_main(&fake, ".claude/skills/project-planning/SKILL.md").unwrap();
+        assert!(skill.contains("name: project-planning"));
+        assert!(
+            on_main(
+                &fake,
+                ".claude/skills/project-planning/references/product.md"
+            )
+            .is_some()
+        );
+        assert!(
+            dir.join(".claude/skills/project-planning/SKILL.md")
+                .is_file()
+        );
+        assert!(pending_in(&fake, &dir).unwrap().is_empty());
+
+        // Someone improves it on GitHub; later sends leave their version alone.
+        let other = tmp.path().join("other");
+        git_cmd(
+            tmp.path(),
+            &["clone", "-q", &fake.bare.display().to_string(), "other"],
+            None,
+        )
+        .unwrap();
+        write(
+            &other,
+            ".claude/skills/project-planning/SKILL.md",
+            "ours now\n",
+        );
+        git_cmd(&other, &["commit", "-qam", "edit"], None).unwrap();
+        git_cmd(&other, &["push", "-q", "origin", "main"], None).unwrap();
+        write(&dir, "pg/spec.md", "one\ntwo\nthree, again\n");
+        let none = BTreeSet::new();
+        assert!(matches!(
+            send(&fake, &sending(&dir, "lead", &none)),
+            Ok(Sent::Merged(_))
+        ));
+        assert_eq!(
+            on_main(&fake, ".claude/skills/project-planning/SKILL.md").unwrap(),
+            "ours now\n"
+        );
+    }
+
+    #[test]
     fn nothing_to_send_is_nothing() {
         let (_tmp, fake, dir) = setup("lead");
         lead_creates(&fake, &dir);
@@ -1143,8 +1242,17 @@ mod tests {
         let (title, _) = describe(
             "Product Groups",
             "aza",
-            "A\tpg/project.toml\nA\tpg/spec.md\n",
+            "A\t.claude/skills/project-planning/SKILL.md\nA\t.claude/skills/project-planning/references/format.md\nA\tpg/project.toml\nA\tpg/spec.md\n",
         );
         assert_eq!(title, "Product Groups: new project");
+        let (_, body) = describe(
+            "Product Groups",
+            "aza",
+            "A\t.claude/skills/project-planning/SKILL.md\nA\tpg/project.toml\n",
+        );
+        assert!(
+            body.contains("- Planning skill added\n- Project created"),
+            "{body}"
+        );
     }
 }

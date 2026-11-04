@@ -1067,6 +1067,61 @@ pub fn skill_folder(picked: &Path) -> Result<PathBuf, String> {
     }
 }
 
+/// Where a work or testing session's skill comes from (spec §14.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillSource {
+    /// None chosen: the session follows the repo's own CLAUDE.md and `.claude/skills`.
+    RepoOwn,
+    /// A skill inside the code repo, by its path in the repo: read from the ticket's
+    /// worktree, so it matches the code being changed.
+    InRepo(PathBuf),
+    /// The engineer's own skill, outside the repo: read where it is.
+    Yours(PathBuf),
+}
+
+impl SkillSource {
+    /// Where `chosen` comes from, given where the ticket's repo is cloned (if known).
+    pub fn of(chosen: Option<&Path>, clone: Option<&Path>) -> Self {
+        let Some(chosen) = chosen else {
+            return Self::RepoOwn;
+        };
+        let inside = |c: &Path, s: &Path| s.strip_prefix(c).ok().map(Path::to_path_buf);
+        let rel = clone.and_then(|c| {
+            inside(c, chosen).or_else(|| {
+                // Through symlinks too (e.g. /tmp vs /private/tmp on macOS).
+                inside(&c.canonicalize().ok()?, &chosen.canonicalize().ok()?)
+            })
+        });
+        match rel {
+            Some(rel) => Self::InRepo(rel),
+            None => Self::Yours(chosen.to_path_buf()),
+        }
+    }
+
+    /// The skill folder a session in `worktree` reads; None for the repo's own.
+    pub fn folder_in(&self, worktree: &Path) -> Option<PathBuf> {
+        match self {
+            Self::RepoOwn => None,
+            Self::InRepo(rel) => Some(worktree.join(rel)),
+            Self::Yours(path) => Some(path.clone()),
+        }
+    }
+
+    /// How Settings shows it.
+    pub fn label(&self) -> String {
+        let name = |p: &Path| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.display().to_string())
+        };
+        match self {
+            Self::RepoOwn => "The repo's own (CLAUDE.md and .claude/skills)".to_string(),
+            Self::InRepo(rel) => format!("{}, from the repo ({})", name(rel), rel.display()),
+            Self::Yours(path) => format!("{}, yours ({})", name(path), path.display()),
+        }
+    }
+}
+
 /// The last sync slot run for project `slug` of `repo` on this machine (`[synced]` in
 /// projects.toml, local `YYYY-MM-DD HH:MM`), spec §7.
 pub fn synced_at(hydra_root: &Path, repo: &str, slug: &str) -> Option<String> {
@@ -1357,6 +1412,50 @@ mod tests {
         assert_eq!(
             skill_folder(&tmp.path().join("SKILL.md")).unwrap(),
             tmp.path()
+        );
+    }
+
+    #[test]
+    fn a_skill_inside_the_repo_is_read_from_the_worktree() {
+        let clone = Path::new("/code/fe");
+        let wt = Path::new("/wt/pg-3");
+        assert_eq!(SkillSource::of(None, Some(clone)), SkillSource::RepoOwn);
+        assert_eq!(SkillSource::RepoOwn.folder_in(wt), None);
+        let mine = SkillSource::of(Some(Path::new("/code/fe/.claude/skills/ng")), Some(clone));
+        assert_eq!(mine, SkillSource::InRepo(".claude/skills/ng".into()));
+        assert_eq!(
+            mine.folder_in(wt),
+            Some(PathBuf::from("/wt/pg-3/.claude/skills/ng"))
+        );
+        assert!(mine.label().starts_with("ng, from the repo"));
+        // A skill of your own stays where it is, clone known or not.
+        let yours = SkillSource::of(Some(Path::new("/me/skills/rust")), Some(clone));
+        assert_eq!(yours, SkillSource::Yours("/me/skills/rust".into()));
+        assert_eq!(yours.folder_in(wt), Some(PathBuf::from("/me/skills/rust")));
+        assert_eq!(
+            SkillSource::of(Some(Path::new("/code/fe/x")), None),
+            SkillSource::Yours("/code/fe/x".into())
+        );
+        // A sibling folder that only shares a prefix isn't inside the repo.
+        assert!(matches!(
+            SkillSource::of(Some(Path::new("/code/fe-old/s")), Some(clone)),
+            SkillSource::Yours(_)
+        ));
+    }
+
+    #[test]
+    fn a_skill_reached_through_a_symlink_is_still_in_the_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(real.join(".claude/skills/ng")).unwrap();
+        let link = tmp.path().join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&real, &link).unwrap();
+        assert_eq!(
+            SkillSource::of(Some(&link.join(".claude/skills/ng")), Some(&real)),
+            SkillSource::InRepo(".claude/skills/ng".into())
         );
     }
 

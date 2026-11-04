@@ -75,16 +75,6 @@ pub fn next_step(
         if t.meta.repo.is_empty() {
             return Step::Pause(format!("{} doesn't name its repo: set it with Edit…", t.id));
         }
-        if !setup
-            .skills
-            .keys()
-            .any(|r| r.eq_ignore_ascii_case(&t.meta.repo))
-        {
-            return Step::Pause(format!(
-                "No skill for {} yet: choose one in Settings → On this Mac",
-                t.meta.repo
-            ));
-        }
         if !cloned(&t.meta.repo) {
             return Step::NeedClone(t.meta.repo.clone());
         }
@@ -209,10 +199,9 @@ mod tests {
         let mut p = project(vec![ticket("PG-1", "", TicketStatus::Todo)]);
         let s = setup(false);
         assert!(matches!(next_step(&p, "M1", &s, |_| true), Step::Pause(w) if w.contains("repo")));
+        // A repo with no skill chosen goes ahead with the repo's own CLAUDE.md and skills.
         p.tickets[0].meta.repo = "iov42/svc-usage".into();
-        assert!(
-            matches!(next_step(&p, "M1", &s, |_| true), Step::Pause(w) if w.contains("No skill"))
-        );
+        assert_eq!(next_step(&p, "M1", &s, |_| true), Step::Work("PG-1".into()));
         p.tickets[0].meta.repo = BE.into();
         assert_eq!(
             next_step(&p, "M1", &s, |_| false),

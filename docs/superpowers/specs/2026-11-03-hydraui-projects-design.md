@@ -660,6 +660,14 @@ was wrong). Work starts on a milestone and runs its tickets one after another.
 
   Every skill is chosen with a folder picker: the folder that holds its `SKILL.md`. The
   planning skill is chosen the same way.
+- **A repo's own setup comes first.** Every session runs inside the repo, so its `CLAUDE.md`
+  and `.claude/skills` always load.
+  - **No skill chosen for a repo** means the session follows the repo's own setup alone; the
+    run doesn't pause for it.
+  - **A skill chosen from inside the repo's clone** is read from the ticket's worktree, so it
+    matches the code being changed rather than whatever the clone has checked out.
+  - **A skill of the engineer's own** is read where it is, on top of the repo's. The prompt
+    says the repo's own win where they disagree on how the repo is built or tested.
 - **Start milestone** on an approved milestone runs its approved tickets in id order, one at a
   time. Nothing asks for a repo: a ticket names its own. The only question is where a repo
   is cloned on this Mac, the first time.
@@ -673,7 +681,7 @@ was wrong). Work starts on a milestone and runs its tickets one after another.
   runs in the ticket's worktree and reports with `ticket_checked`: passed, or failed with
   what's wrong. A failed check pauses the run.
 - **The run pauses when it needs you:**
-  - a ticket has no repo, or its repo has no skill;
+  - a ticket has no repo;
   - a repo isn't cloned here yet;
   - a check failed;
   - **the milestone is finished.**

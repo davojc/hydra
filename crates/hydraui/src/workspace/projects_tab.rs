@@ -2548,18 +2548,27 @@ impl Workspace {
             .find(|t| t.id == ticket)
             .ok_or("the ticket is gone")?
             .clone();
-        let skill = match phase {
+        let chosen = match phase {
             Phase::Work => setup
                 .skills
                 .iter()
                 .find(|(r, _)| r.eq_ignore_ascii_case(&t.meta.repo))
                 .map(|(_, s)| s.clone()),
-            Phase::Check => setup.testing.clone(),
-        }
-        .ok_or("its skill isn't set any more")?;
+            Phase::Check => Some(
+                setup
+                    .testing
+                    .clone()
+                    .ok_or("its testing skill isn't set any more")?,
+            ),
+        };
+        let clone = pj::clone_of(self.hydra.paths.root(), &t.meta.repo);
+        let skill = pj::SkillSource::of(chosen.as_deref(), clone.as_deref()).folder_in(&path);
         if phase == Phase::Work {
             let how = (
-                skill.display().to_string(),
+                skill
+                    .as_ref()
+                    .map(|s| s.display().to_string())
+                    .unwrap_or_else(|| "the repo's own".to_string()),
                 setup.model.clone().unwrap_or_default(),
                 setup.effort.clone().unwrap_or_default(),
             );
@@ -2593,8 +2602,8 @@ impl Workspace {
             argv.extend(["--effort".to_string(), e.clone()]);
         }
         argv.push(match phase {
-            Phase::Work => work_prompt(&p, &t, branch, &skill),
-            Phase::Check => check_prompt(&p, &t, &skill),
+            Phase::Work => work_prompt(&p, &t, branch, skill.as_deref()),
+            Phase::Check => check_prompt(&p, &t, skill.as_deref()),
         });
         request.command = Some(command_line(shell, &argv));
         let id = self
@@ -5251,7 +5260,9 @@ impl Workspace {
             .child(div().pt_3().child(section_title("On this Mac")))
             .child(muted(
                 "Yours, for this project: the skills Claude follows and how it works. Choose a \
-                 skill by its folder, the one holding its SKILL.md.",
+                 skill by its folder, the one holding its SKILL.md. A repo's own CLAUDE.md and \
+                 .claude/skills always apply; a skill chosen from inside a repo is read from the \
+                 ticket's worktree, so it matches the code.",
             ))
             .child(self.skill_row(
                 env,
@@ -5261,12 +5272,19 @@ impl Workspace {
                 shown(planning, BUILT_IN_GUIDE_LABEL),
                 cx,
             ));
+        let clones: Vec<PathBuf> = f
+            .repos
+            .iter()
+            .filter_map(|r| pj::clone_of(&root, r))
+            .collect();
         for code_repo in pj::check_repos(p) {
-            let value = setup
+            let chosen = setup
                 .skills
                 .iter()
                 .find(|(r, _)| r.eq_ignore_ascii_case(&code_repo))
-                .map(|(_, s)| s.display().to_string());
+                .map(|(_, s)| s.clone());
+            let clone = pj::clone_of(&root, &code_repo);
+            let value = pj::SkillSource::of(chosen.as_deref(), clone.as_deref()).label();
             let label = format!(
                 "Skill for {}",
                 code_repo
@@ -5274,27 +5292,28 @@ impl Workspace {
                     .map(|(_, n)| n)
                     .unwrap_or(&code_repo)
             );
-            mine = mine.child(self.skill_row(
-                env,
-                slug,
-                Slot::Repo(code_repo),
-                &label,
-                shown(value, "none: a run pauses for it"),
-                cx,
-            ));
+            mine = mine.child(self.skill_row(env, slug, Slot::Repo(code_repo), &label, value, cx));
         }
         mine = mine
-            .child(self.skill_row(
-                env,
-                slug,
-                Slot::Testing,
-                "Testing skill",
-                shown(
-                    setup.testing.as_ref().map(|t| t.display().to_string()),
-                    "none: pull requests aren't checked",
+            .child(
+                self.skill_row(
+                    env,
+                    slug,
+                    Slot::Testing,
+                    "Testing skill",
+                    match setup.testing.as_deref() {
+                        // In whichever of the project's repos holds it, if any.
+                        Some(t) => clones
+                            .iter()
+                            .map(|c| pj::SkillSource::of(Some(t), Some(c)))
+                            .find(|s| matches!(s, pj::SkillSource::InRepo(_)))
+                            .unwrap_or_else(|| pj::SkillSource::Yours(t.to_path_buf()))
+                            .label(),
+                        None => "None: pull requests aren't checked".to_string(),
+                    },
+                    cx,
                 ),
-                cx,
-            ))
+            )
             .child(self.choice_row(env, slug, "Model", &MODELS, setup.model.as_deref(), cx))
             .child(self.choice_row(env, slug, "Effort", &EFFORTS, setup.effort.as_deref(), cx));
         let clones = f.repos.iter().map(|r| match pj::clone_of(&root, r) {
@@ -5568,11 +5587,10 @@ fn start_prompt(p: &Project, guide: &str) -> String {
 }
 
 /// A work session's prompt (spec §14.5): one ticket, in its worktree, following `skill`.
-fn work_prompt(p: &Project, t: &Ticket, branch: &str, skill: &Path) -> String {
+fn work_prompt(p: &Project, t: &Ticket, branch: &str, skill: Option<&Path>) -> String {
     format!(
         "You're doing ticket {id} \"{title}\" of the project \"{name}\", in a worktree of \
-         {repo} on branch {branch}. First read the skill for this work, {skill} (its SKILL.md and \
-         the files it points to), and follow it. Then call ticket_show: the ticket, its \
+         {repo} on branch {branch}. {follow} Then call ticket_show: the ticket, its \
          milestone and where the project's spec is.\n\
          Do the work here, commit it on this branch, push it and open a pull request (gh pr \
          create) with {id} in its title. Finish by calling ticket_report with the pull request \
@@ -5583,16 +5601,15 @@ fn work_prompt(p: &Project, t: &Ticket, branch: &str, skill: &Path) -> String {
         title = t.meta.title,
         name = p.file.name,
         repo = t.meta.repo,
-        skill = skill.display(),
+        follow = follow(skill, "skill for this work"),
     )
 }
 
 /// A testing session's prompt (spec §14.5): check one ticket's pull requests with `skill`.
-fn check_prompt(p: &Project, t: &Ticket, skill: &Path) -> String {
+fn check_prompt(p: &Project, t: &Ticket, skill: Option<&Path>) -> String {
     format!(
         "You're checking ticket {id} \"{title}\" of the project \"{name}\": its pull \
-         request(s) {prs}, checked out in this worktree. First read the testing skill, {skill} \
-         (its SKILL.md and the files it points to), and follow it. Call ticket_show for what \
+         request(s) {prs}, checked out in this worktree. {follow} Call ticket_show for what \
          the ticket asks and how to tell it's done.\n\
          Check that the work does what the ticket says and passes the skill's checks. You may \
          fix small problems within the ticket's scope: commit and push them to this branch. \
@@ -5602,8 +5619,25 @@ fn check_prompt(p: &Project, t: &Ticket, skill: &Path) -> String {
         title = t.meta.title,
         name = p.file.name,
         prs = t.meta.prs.join(", "),
-        skill = skill.display(),
+        follow = follow(skill, "testing skill"),
     )
+}
+
+/// The prompt's line on which skill to follow: the repo's own CLAUDE.md and skills always
+/// apply, and win over a skill of the engineer's on how the repo works (spec §14.5).
+fn follow(skill: Option<&Path>, what: &str) -> String {
+    const REPO_OWN: &str = "the repo's own CLAUDE.md and its skills in .claude/skills";
+    match skill {
+        None => format!(
+            "Follow {REPO_OWN}: read the CLAUDE.md files and use the skills that fit the work."
+        ),
+        Some(s) => format!(
+            "First read the {what}, {} (its SKILL.md and the files it points to), and follow \
+             it, along with {REPO_OWN}. Where they disagree on how this repo is built or \
+             tested, the repo's own win.",
+            s.display()
+        ),
+    }
 }
 
 // ---- Small pieces ----
@@ -5860,18 +5894,31 @@ mod tests {
         let mut t = t;
         t.meta.repo = "iov42/fe".into();
         t.meta.prs = vec!["https://github.com/iov42/fe/pull/7".into()];
-        let w = work_prompt(&p, &t, "pg-3-share-dialog", Path::new("/skills/angular"));
+        let w = work_prompt(
+            &p,
+            &t,
+            "pg-3-share-dialog",
+            Some(Path::new("/skills/angular")),
+        );
         assert!(
             w.contains("/skills/angular")
                 && w.contains("ticket_report")
                 && w.contains("pg-3-share-dialog")
                 && w.contains("iov42/fe")
         );
-        let c = check_prompt(&p, &t, Path::new("/skills/qa"));
+        let c = check_prompt(&p, &t, Some(Path::new("/skills/qa")));
         assert!(
             c.contains("/skills/qa")
                 && c.contains("ticket_checked")
                 && c.contains("https://github.com/iov42/fe/pull/7")
+        );
+        // The repo's own CLAUDE.md and skills always apply; with no skill chosen, only them.
+        assert!(w.contains("CLAUDE.md") && w.contains("the repo's own win"));
+        let own = work_prompt(&p, &t, "pg-3-share-dialog", None);
+        assert!(
+            own.contains("CLAUDE.md")
+                && own.contains(".claude/skills")
+                && !own.contains("SKILL.md")
         );
         let started = start_prompt(&p, "Use the /our-planning skill throughout.");
         assert!(started.contains("plan_propose_milestone") && started.contains("/our-planning"));

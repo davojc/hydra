@@ -1902,26 +1902,7 @@ impl Workspace {
                     .on_click(cx.listener(|ws, _, window, cx| ws.pick_env(window, cx))),
             )
             .child(div().flex_1())
-            .child({
-                let waiting = self.projects_data.waiting_count();
-                Button::new("open-projects")
-                    .label(if waiting > 0 {
-                        format!("Projects · {waiting}")
-                    } else {
-                        "Projects".to_string()
-                    })
-                    .ghost()
-                    .small()
-                    .selected(self.projects.is_some())
-                    .tooltip("Projects")
-                    .on_click(cx.listener(|ws, _, window, cx| {
-                        if ws.projects_shown() {
-                            ws.close_projects(window, cx)
-                        } else {
-                            ws.open_projects(window, cx)
-                        }
-                    }))
-            })
+            .child(self.projects_button(cx))
             .child(
                 Button::new("open-settings")
                     .icon(IconName::Settings)

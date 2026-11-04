@@ -247,6 +247,55 @@ impl Workspace {
         self.projects.is_some()
     }
 
+    /// The tab strip's way into Projects: a bordered tab, teal while open, with an amber
+    /// count of what waits on you, so it stands out from the icon buttons beside it.
+    pub(super) fn projects_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.projects.is_some();
+        let waiting = self.projects_data.waiting_count();
+        h_flex()
+            .id("open-projects")
+            .flex_none()
+            .gap_2()
+            .items_center()
+            .h(px(26.))
+            .px_3()
+            .mr_1()
+            .rounded_md()
+            .border_1()
+            .text_sm()
+            .cursor_pointer()
+            .border_color(color(if open {
+                theme::TEAL
+            } else {
+                theme::BORDER_STRONG
+            }))
+            .bg(color(if open {
+                theme::TEAL_TINT
+            } else {
+                theme::RAISED
+            }))
+            .text_color(color(if open { theme::TEAL } else { theme::TEXT }))
+            .hover(|s| s.border_color(color(theme::TEAL)))
+            .child("Projects")
+            .when(waiting > 0, |d| d.child(count_badge(waiting, true)))
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(if waiting > 0 {
+                    format!("Projects: {waiting} waiting on you")
+                } else {
+                    "Projects".to_string()
+                })
+                .build(window, cx)
+            })
+            .on_click(cx.listener(|ws, _, window, cx| {
+                if ws.projects_shown() {
+                    ws.close_projects(window, cx)
+                } else {
+                    ws.open_projects(window, cx)
+                }
+            }))
+            .into_any_element()
+    }
+
     pub(super) fn open_projects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings = None;
         if self.projects.is_none() {

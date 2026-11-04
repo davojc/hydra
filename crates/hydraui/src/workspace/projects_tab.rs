@@ -520,6 +520,7 @@ impl Workspace {
         };
         let r = edit(&dir, &project, &login);
         if let Err(e) = &r {
+            eprintln!("projects: editing {env}/{slug} failed: {e}");
             window.push_notification(Notification::error(e.clone()), cx);
         }
         self.reload_env(env, cx);
@@ -644,6 +645,7 @@ impl Workspace {
                 None
             }
             Err(SendError::Failed(why)) => {
+                eprintln!("projects: sending {}/{} failed: {why}", key.0, key.1);
                 Some(Notification::error(format!("Couldn't send: {why}")))
             }
         };

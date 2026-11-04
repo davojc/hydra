@@ -105,3 +105,19 @@ built in slices that each run in hydraui on their own.
 ### Slice 4: meeting notes
 
 - Notes with Claude's suggestions, each one ticked before it's added (§9.2).
+
+### Milestone runs (spec §14.5), added 2026-11-04
+
+- **Done:**
+  - `project_run.rs` (5 tests): the next step of a run. Work the next approved ticket by
+    number, check an in-review one with the testing skill, pause, ask for a clone, or finish.
+    It also works out the branch a ticket stacks on.
+  - Testing sessions (`Session::Check`) report with `ticket_checked`.
+  - Work settings per project, on this machine.
+  - Folder pickers for every skill.
+  - Start milestone, Carry on, Open session and Stop on the milestone page and its row.
+  - Per-ticket Start work is gone.
+- **Not yet:** a run lives only in memory. After hydraui restarts, Start milestone picks it
+  back up from the tickets' state. A ticket that was in progress starts again in its existing
+  worktree.
+

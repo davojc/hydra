@@ -15,6 +15,8 @@ pub enum Step {
     Check(String),
     /// Wait for the lead: why, in a line.
     Pause(String),
+    /// Wait for the lead to say where this code repo is cloned on this machine.
+    NeedClone(String),
     /// Every ticket is done, in review and checked, or dropped.
     Finished,
 }
@@ -84,10 +86,7 @@ pub fn next_step(
             ));
         }
         if !cloned(&t.meta.repo) {
-            return Step::Pause(format!(
-                "Where is {} cloned on this Mac? Carry on asks for its folder",
-                t.meta.repo
-            ));
+            return Step::NeedClone(t.meta.repo.clone());
         }
         return Step::Work(t.id.clone());
     }
@@ -215,8 +214,9 @@ mod tests {
             matches!(next_step(&p, "M1", &s, |_| true), Step::Pause(w) if w.contains("No skill"))
         );
         p.tickets[0].meta.repo = BE.into();
-        assert!(
-            matches!(next_step(&p, "M1", &s, |_| false), Step::Pause(w) if w.contains("cloned"))
+        assert_eq!(
+            next_step(&p, "M1", &s, |_| false),
+            Step::NeedClone(BE.into())
         );
         p.decisions.push(Decision {
             id: "D-4".into(),

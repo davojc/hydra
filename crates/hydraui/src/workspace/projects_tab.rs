@@ -14,8 +14,7 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::notification::Notification;
-use gpui_component::select::{Select, SelectState};
-use gpui_component::{Disableable, IndexPath, Selectable, Sizable, WindowExt, h_flex, v_flex};
+use gpui_component::{Disableable, Selectable, Sizable, WindowExt, h_flex, v_flex};
 use hydra_core::name::EnvName;
 use hydraui_projects::progress::{Counts, is_late, milestone_counts, today};
 use hydraui_projects::{
@@ -29,6 +28,7 @@ use crate::hydra::{PaneRequest, command_line};
 use crate::mcp::project_tools::{ASKED_BY_CLAUDE, Session};
 use crate::mcp::server;
 use crate::orchestrator_theme::{self as theme, color};
+use crate::project_run::Step;
 use crate::project_send::{self as ps, OpenPr, Runner as _, SendError, Sent};
 use crate::projects::{self as pj, Item};
 
@@ -174,6 +174,8 @@ pub(super) struct ProjectsData {
     keep_mine: BTreeMap<(String, String), BTreeSet<String>>,
     /// Pull requests being approved or sent back, by URL.
     reviewing: BTreeSet<String>,
+    /// Milestone runs, by (environment, project): one at a time per project (spec §14.5).
+    runs: BTreeMap<(String, String), Run>,
 }
 
 impl ProjectsData {
@@ -241,12 +243,26 @@ struct Target {
 /// What a resource row's Rename does.
 type Rename = dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>);
 
-/// The choices Start work asks for.
-struct WorkChoice {
-    skill: Option<String>,
-    model: Option<String>,
-    effort: Option<String>,
-    repo: String,
+/// A milestone run's state in this hydraui (spec §14.5).
+pub(super) struct Run {
+    milestone: String,
+    /// The ticket a session is on now.
+    current: Option<Current>,
+    /// Why it waits for the lead.
+    paused: Option<String>,
+}
+
+pub(super) struct Current {
+    ticket: String,
+    phase: Phase,
+    /// The session's terminal, once its worktree is made.
+    pane: Option<PaneId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Phase {
+    Work,
+    Check,
 }
 
 impl Workspace {
@@ -389,6 +405,7 @@ impl Workspace {
 
     pub(super) fn projects_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_finished_planners(window, cx);
+        self.tick_runs(window, cx);
         // Sessions ask and propose while the tab is closed too.
         let sessions =
             !self.projects_data.planners.is_empty() || !self.projects_data.workers.is_empty();
@@ -2036,295 +2053,491 @@ impl Workspace {
             .filter(|id| self.panes.contains_key(id))
     }
 
-    fn start_work_dialog(
+    /// Asks for a skill's folder (the one holding its SKILL.md), then runs `then` with it.
+    fn pick_skill_folder(
         &mut self,
-        env: String,
-        slug: String,
-        ticket: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, PathBuf, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        self.open_dialog_path(
+            true,
+            window,
+            cx,
+            move |ws, picked, window, cx| match pj::skill_folder(&picked) {
+                Ok(dir) => then(ws, dir, window, cx),
+                Err(e) => window.push_notification(Notification::error(e), cx),
+            },
+        );
+    }
+
+    /// Sets one of project `slug`'s work settings on this machine, then shows it.
+    fn set_work_setting(
+        &mut self,
+        env: &str,
+        slug: &str,
+        setting: pj::WorkSetting,
+        value: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(p) = self.find_project(&env, &slug) else {
+        let Some(repo) = self.projects_data.envs.get(env).map(|e| e.repo.clone()) else {
             return;
         };
-        let mut repos = pj::check_repos(p);
-        if let Some(t) = p.tickets.iter().find(|t| t.id == ticket)
-            && let Some(i) = repos
-                .iter()
-                .position(|r| r.eq_ignore_ascii_case(&t.meta.repo))
-        {
-            // The ticket's own repo first: it's the one picked unless you change it.
-            let own = repos.remove(i);
-            repos.insert(0, own);
+        if let Err(e) = pj::set_work(self.hydra.paths.root(), &repo, slug, setting, value) {
+            window.push_notification(Notification::error(e), cx);
         }
-        if repos.is_empty() {
+        cx.notify();
+    }
+
+    /// A skill setting's row: what's chosen, Choose folder…, and Clear.
+    fn skill_row(
+        &self,
+        env: &str,
+        slug: &str,
+        slot: Slot,
+        label: &str,
+        value: String,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let id = match &slot {
+            Slot::Planning => "planning".to_string(),
+            Slot::Repo(r) => format!("repo-{r}"),
+            Slot::Testing => "testing".to_string(),
+        };
+        let (e1, s1, slot1) = (env.to_string(), slug.to_string(), slot.clone());
+        let (e2, s2, slot2) = (env.to_string(), slug.to_string(), slot);
+        h_flex()
+            .gap_4()
+            .py_2()
+            .items_center()
+            .border_b_1()
+            .border_color(color(theme::BORDER_SUBTLE))
+            .child(
+                div()
+                    .w(px(160.))
+                    .flex_none()
+                    .text_color(color(theme::TEXT_SECONDARY))
+                    .child(label.to_string()),
+            )
+            .child(div().flex_1().min_w_0().truncate().text_sm().child(value))
+            .child(
+                Button::new(SharedString::from(format!("choose-{id}")))
+                    .label("Choose folder…")
+                    .ghost()
+                    .small()
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        let (e, s, slot) = (e1.clone(), s1.clone(), slot1.clone());
+                        ws.pick_skill_folder(window, cx, move |ws, dir, window, cx| {
+                            ws.set_skill_slot(&e, &s, &slot, Some(&dir), window, cx)
+                        });
+                    })),
+            )
+            .child(
+                Button::new(SharedString::from(format!("clear-{id}")))
+                    .label("Clear")
+                    .ghost()
+                    .small()
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.set_skill_slot(&e2, &s2, &slot2, None, window, cx)
+                    })),
+            )
+    }
+
+    fn set_skill_slot(
+        &mut self,
+        env: &str,
+        slug: &str,
+        slot: &Slot,
+        dir: Option<&Path>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value = dir.map(|d| d.display().to_string());
+        match slot {
+            Slot::Planning => {
+                let Some(repo) = self.projects_data.envs.get(env).map(|e| e.repo.clone()) else {
+                    return;
+                };
+                if let Err(e) =
+                    pj::set_planning_skill(self.hydra.paths.root(), &repo, slug, value.as_deref())
+                {
+                    window.push_notification(Notification::error(e), cx);
+                }
+                cx.notify();
+            }
+            Slot::Repo(r) => self.set_work_setting(
+                env,
+                slug,
+                pj::WorkSetting::Skill(r),
+                value.as_deref(),
+                window,
+                cx,
+            ),
+            Slot::Testing => self.set_work_setting(
+                env,
+                slug,
+                pj::WorkSetting::Testing,
+                value.as_deref(),
+                window,
+                cx,
+            ),
+        }
+    }
+
+    /// Model or effort: one button per choice, `default` meaning Claude's own.
+    fn choice_row(
+        &self,
+        env: &str,
+        slug: &str,
+        label: &'static str,
+        options: &[&str],
+        current: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let mut row = h_flex().gap_1();
+        for opt in options {
+            let chosen = current.unwrap_or("default") == *opt;
+            let (e, s, value) = (env.to_string(), slug.to_string(), opt.to_string());
+            row = row.child(
+                Button::new(SharedString::from(format!("{label}-{opt}")))
+                    .label(opt.to_string())
+                    .small()
+                    .selected(chosen)
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        let setting = if label == "Model" {
+                            pj::WorkSetting::Model
+                        } else {
+                            pj::WorkSetting::Effort
+                        };
+                        let v = (value != "default").then_some(value.as_str());
+                        ws.set_work_setting(&e, &s, setting, v, window, cx)
+                    })),
+            );
+        }
+        h_flex()
+            .gap_4()
+            .py_2()
+            .items_center()
+            .border_b_1()
+            .border_color(color(theme::BORDER_SUBTLE))
+            .child(
+                div()
+                    .w(px(160.))
+                    .flex_none()
+                    .text_color(color(theme::TEXT_SECONDARY))
+                    .child(label),
+            )
+            .child(row)
+    }
+
+    // ---- Milestone runs (spec §14.5) ----
+
+    /// What a milestone's run is doing, with Start milestone, Carry on, Open session and Stop.
+    /// None for a milestone that can't run (not approved) or for someone not on the project.
+    fn run_controls(
+        &self,
+        env: &str,
+        p: &Project,
+        m: &Milestone,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let login = self.login_of(env)?;
+        if !p.file.is_on(&login) || m.review != Review::Approved {
+            return None;
+        }
+        let key = (env.to_string(), p.slug.clone());
+        let run = self.projects_data.runs.get(&key);
+        let (e, s, mid) = (env.to_string(), p.slug.clone(), m.id.clone());
+        let mut row = h_flex().gap_2().items_center().flex_wrap();
+        match run {
+            Some(run) if run.milestone == m.id => {
+                let status = match (&run.current, &run.paused) {
+                    (_, Some(why)) => why.clone(),
+                    (Some(c), None) if c.pane.is_none() => {
+                        format!("Getting {} ready…", c.ticket)
+                    }
+                    (Some(c), None) => match c.phase {
+                        Phase::Work => format!("Working on {}", c.ticket),
+                        Phase::Check => format!("Checking {}'s pull request", c.ticket),
+                    },
+                    (None, None) => "Starting…".to_string(),
+                };
+                let paused = run.paused.is_some();
+                row = row.child(
+                    div()
+                        .text_sm()
+                        .text_color(color(if paused { theme::AMBER } else { theme::TEAL }))
+                        .child(status),
+                );
+                if paused {
+                    let (e, s) = (e.clone(), s.clone());
+                    row = row.child(
+                        Button::new(SharedString::from(format!("carry-on-{mid}")))
+                            .label("Carry on")
+                            .small()
+                            .primary()
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                ws.carry_on_run(&e, &s, window, cx)
+                            })),
+                    );
+                }
+                if let Some(id) = run.current.as_ref().and_then(|c| c.pane) {
+                    row = row.child(
+                        Button::new(SharedString::from(format!("run-session-{mid}")))
+                            .label("Open session")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                ws.show_terminal(id, window, cx)
+                            })),
+                    );
+                }
+                row = row.child(
+                    Button::new(SharedString::from(format!("stop-run-{mid}")))
+                        .label("Stop")
+                        .small()
+                        .ghost()
+                        .tooltip("Stops starting new tickets; a session that's working carries on")
+                        .on_click(cx.listener(move |ws, _, _, cx| ws.stop_run(&e, &s, cx))),
+                );
+            }
+            Some(run) => {
+                row = row.child(muted(&format!(
+                    "{} is running; one milestone at a time.",
+                    pj::milestone_name(&run.milestone)
+                )));
+            }
+            None => {
+                let left = crate::project_run::queue(p, &m.id)
+                    .iter()
+                    .filter(|t| {
+                        !matches!(t.meta.status, TicketStatus::Done | TicketStatus::Dropped)
+                    })
+                    .count();
+                if left == 0 {
+                    return None;
+                }
+                row = row.child(
+                    Button::new(SharedString::from(format!("start-run-{mid}")))
+                        .label("Start milestone")
+                        .small()
+                        .primary()
+                        .tooltip(
+                            "Works its approved tickets one at a time, each with its repo's \
+                             skill from Settings",
+                        )
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.start_run(&e, &s, &mid, window, cx)
+                        })),
+                );
+            }
+        }
+        Some(row.into_any_element())
+    }
+
+    fn work_setup(&self, env: &str, slug: &str) -> pj::WorkSetup {
+        self.projects_data
+            .envs
+            .get(env)
+            .map(|e| pj::work_setup(self.hydra.paths.root(), &e.repo, slug))
+            .unwrap_or_default()
+    }
+
+    /// Starts (or picks back up) the run of milestone `milestone`.
+    fn start_run(
+        &mut self,
+        env: &str,
+        slug: &str,
+        milestone: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.projects_data.runs.insert(
+            (env.to_string(), slug.to_string()),
+            Run {
+                milestone: milestone.to_string(),
+                current: None,
+                paused: None,
+            },
+        );
+        self.advance_run(env, slug, window, cx);
+    }
+
+    /// Carry on: asks where a repo is cloned when that's what the run waits for, then goes on.
+    fn carry_on_run(&mut self, env: &str, slug: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let key = (env.to_string(), slug.to_string());
+        let Some(run) = self.projects_data.runs.get_mut(&key) else {
+            return;
+        };
+        run.paused = None;
+        let milestone = run.milestone.clone();
+        let step = self.run_step(env, slug, &milestone);
+        if let Some(Step::NeedClone(repo)) = step {
             window.push_notification(
-                Notification::error("Add the project's code repos first (Overview → Repos): work happens in a worktree of one of them."),
+                Notification::info(format!(
+                    "Where is {repo} cloned on this Mac? Pick its folder."
+                )),
                 cx,
             );
-            return;
-        }
-        let dir = self.project_dir(&env, &slug).unwrap_or_default();
-        let mut skills = vec!["none".to_string()];
-        skills.extend(self.installed_skills(&env, &dir));
-        let select = |items: Vec<String>, window: &mut Window, cx: &mut Context<Self>| {
-            cx.new(|cx| {
-                SelectState::new(items, Some(IndexPath::new(0)), window, cx).searchable(true)
-            })
-        };
-        let skill = select(skills, window, cx);
-        let model = select(MODELS.iter().map(|s| s.to_string()).collect(), window, cx);
-        let effort = select(EFFORTS.iter().map(|s| s.to_string()).collect(), window, cx);
-        let repo = select(repos, window, cx);
-        let workspace = cx.entity();
-        window.open_dialog(cx, move |dialog, _, _| {
-            let row = |label: &'static str, select: &Entity<SelectState<Vec<String>>>| {
-                h_flex()
-                    .gap_3()
-                    .child(div().w(px(90.)).flex_none().text_sm().text_color(color(theme::TEXT_SECONDARY)).child(label))
-                    .child(div().flex_1().child(Select::new(select).small()))
-            };
-            let (skill2, model2, effort2, repo2, ws) = (skill.clone(), model.clone(), effort.clone(), repo.clone(), workspace.clone());
-            let (env, slug, ticket) = (env.clone(), slug.clone(), ticket.clone());
-            dialog
-                .title(format!("Start work on {ticket}"))
-                .w(px(560.))
-                .child(
-                    v_flex()
-                        .gap_3()
-                        .child(row("Skill", &skill))
-                        .child(row("Model", &model))
-                        .child(row("Effort", &effort))
-                        .child(row("Repo", &repo))
-                        .child(muted("hydra makes a fresh worktree of the repo on a branch named after the ticket, and starts Claude there. The session ends by reporting its pull requests here.")),
-                )
-                .footer(
-                    h_flex()
-                        .gap_2()
-                        .justify_end()
-                        .child(Button::new("cancel").label("Cancel").on_click(|_, window, cx| window.close_dialog(cx)))
-                        .child(Button::new("start").label("Start work").primary().on_click(move |_, window, cx| {
-                            let pick = |s: &Entity<SelectState<Vec<String>>>, cx: &gpui::App| {
-                                s.read(cx).selected_value().cloned().filter(|v| v != "none" && v != "default")
-                            };
-                            let choice = WorkChoice {
-                                skill: pick(&skill2, cx),
-                                model: pick(&model2, cx),
-                                effort: pick(&effort2, cx),
-                                repo: repo2.read(cx).selected_value().cloned().unwrap_or_default(),
-                            };
-                            window.close_dialog(cx);
-                            let (env, slug, ticket) = (env.clone(), slug.clone(), ticket.clone());
-                            ws.update(cx, |ws, cx| ws.begin_work(env, slug, ticket, choice, window, cx));
-                        })),
-                )
-        });
-    }
-
-    /// The Claude Code skills this engineer has for `env`: the environment's, their own, and the
-    /// folder `dir`'s, by name, once.
-    fn installed_skills(&self, env: &str, dir: &Path) -> BTreeSet<String> {
-        let env_claude = EnvName::parse(env)
-            .ok()
-            .map(|n| self.hydra.paths.state_dir(&n).join("claude"));
-        let mut found: BTreeSet<String> = crate::skills_list::installed(env_claude.as_deref(), dir)
-            .into_iter()
-            .collect();
-        found.extend(crate::skills_list::installed(
-            Some(&self.hydra.user_home.join(".claude")),
-            dir,
-        ));
-        found
-    }
-
-    /// Picks the skill this engineer's planning sessions follow for project `slug` (spec
-    /// §14.2): one of their installed skills, or hydraui's built-in guide.
-    fn planning_skill_dialog(
-        &mut self,
-        env: String,
-        slug: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(e) = self.projects_data.envs.get(&env) else {
-            return;
-        };
-        let (repo, dir) = (e.repo.clone(), e.checkout.join(&slug));
-        let root = self.hydra.paths.root().to_path_buf();
-        let current = pj::planning_skill_of(&root, &repo, &slug);
-        let mut items = vec![BUILT_IN_GUIDE_LABEL.to_string()];
-        items.extend(self.installed_skills(&env, &dir));
-        if let Some(c) = current.as_ref().filter(|c| !items.contains(c)) {
-            // Picked once, gone since: still shown, so it isn't silently dropped.
-            items.push(c.clone());
-        }
-        let at = current
-            .as_ref()
-            .and_then(|c| items.iter().position(|i| i == c))
-            .unwrap_or(0);
-        let select = cx.new(|cx| {
-            SelectState::new(items, Some(IndexPath::new(at)), window, cx).searchable(true)
-        });
-        let workspace = cx.entity();
-        window.open_dialog(cx, move |dialog, _, _| {
-            let (select2, ws, root, repo, slug) = (
-                select.clone(),
-                workspace.clone(),
-                root.clone(),
-                repo.clone(),
-                slug.clone(),
+            let root = self.hydra.paths.root().to_path_buf();
+            let (env, slug) = key;
+            self.open_dialog_path(
+                true,
+                window,
+                cx,
+                move |ws, path, window, cx| match pj::set_clone(&root, &repo, &path) {
+                    Ok(()) => ws.advance_run(&env, &slug, window, cx),
+                    Err(e) => window.push_notification(Notification::error(e), cx),
+                },
             );
-            dialog
-                .title("Planning skill")
-                .w(px(560.))
-                .child(
-                    v_flex()
-                        .gap_3()
-                        .child(Select::new(&select).small())
-                        .child(muted(
-                            "The Claude Code skill this project's planning sessions follow on this \
-                             Mac: what a milestone is, how to break one down, how to check the \
-                             work. It's yours: install it in ~/.claude/skills (or the \
-                             environment's) and share it with the team as you like.",
-                        )),
-                )
-                .footer(
-                    h_flex()
-                        .gap_2()
-                        .justify_end()
-                        .child(
-                            Button::new("cancel")
-                                .label("Cancel")
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(Button::new("save").label("Save").primary().on_click(
-                            move |_, window, cx| {
-                                let pick = select2
-                                    .read(cx)
-                                    .selected_value()
-                                    .cloned()
-                                    .filter(|v| v != BUILT_IN_GUIDE_LABEL);
-                                match pj::set_planning_skill(&root, &repo, &slug, pick.as_deref()) {
-                                    Ok(()) => {
-                                        window.close_dialog(cx);
-                                        ws.update(cx, |_, cx| cx.notify());
-                                    }
-                                    Err(e) => window.push_notification(Notification::error(e), cx),
-                                }
-                            },
-                        )),
-                )
-        });
+            return;
+        }
+        self.advance_run(env, slug, window, cx);
     }
 
-    fn begin_work(
-        &mut self,
-        env: String,
-        slug: String,
-        ticket: String,
-        choice: WorkChoice,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn stop_run(&mut self, env: &str, slug: &str, cx: &mut Context<Self>) {
+        self.projects_data
+            .runs
+            .remove(&(env.to_string(), slug.to_string()));
+        cx.notify();
+    }
+
+    fn run_step(&self, env: &str, slug: &str, milestone: &str) -> Option<Step> {
+        let p = self.find_project(env, slug)?;
+        let setup = self.work_setup(env, slug);
         let root = self.hydra.paths.root().to_path_buf();
-        match pj::clone_of(&root, &choice.repo) {
-            Some(clone) => self.work_in(env, slug, ticket, choice, clone, window, cx),
-            None => {
+        Some(crate::project_run::next_step(p, milestone, &setup, |r| {
+            pj::clone_of(&root, r).is_some()
+        }))
+    }
+
+    /// Moves project `slug`'s run on, unless a session is still working: starts the next
+    /// ticket's work or check, or pauses, or finishes the milestone.
+    fn advance_run(&mut self, env: &str, slug: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let key = (env.to_string(), slug.to_string());
+        let Some(run) = self.projects_data.runs.get(&key) else {
+            return;
+        };
+        if run.current.is_some() || run.paused.is_some() {
+            return;
+        }
+        let milestone = run.milestone.clone();
+        let Some(step) = self.run_step(env, slug, &milestone) else {
+            self.projects_data.runs.remove(&key);
+            return;
+        };
+        match step {
+            Step::Work(ticket) => self.run_session(env, slug, &ticket, Phase::Work, window, cx),
+            Step::Check(ticket) => self.run_session(env, slug, &ticket, Phase::Check, window, cx),
+            Step::Pause(why) => {
+                if let Some(run) = self.projects_data.runs.get_mut(&key) {
+                    run.paused = Some(why);
+                }
+            }
+            Step::NeedClone(repo) => {
+                if let Some(run) = self.projects_data.runs.get_mut(&key) {
+                    run.paused = Some(format!(
+                        "Where is {repo} cloned on this Mac? Carry on asks for its folder."
+                    ));
+                }
+            }
+            Step::Finished => {
+                self.projects_data.runs.remove(&key);
                 window.push_notification(
-                    Notification::info(format!(
-                        "Where is {} cloned on this Mac? Pick its folder.",
-                        choice.repo
+                    Notification::success(format!(
+                        "{} is done: every ticket is in review or done. Start the next \
+                         milestone when you're ready.",
+                        pj::milestone_name(&milestone)
                     )),
                     cx,
                 );
-                self.open_dialog_path(true, window, cx, move |ws, path, window, cx| {
-                    match pj::set_clone(&root, &choice.repo, &path) {
-                        Ok(()) => ws.work_in(env, slug, ticket, choice, path, window, cx),
-                        Err(e) => window.push_notification(Notification::error(e), cx),
-                    }
-                });
             }
         }
+        cx.notify();
     }
 
-    #[allow(clippy::too_many_arguments)] // One call site; a struct would only rename them.
-    fn work_in(
+    /// Makes (or reuses) ticket `ticket`'s worktree in the background, then opens its work or
+    /// testing session there.
+    fn run_session(
         &mut self,
-        env: String,
-        slug: String,
-        ticket: String,
-        choice: WorkChoice,
-        clone: PathBuf,
+        env: &str,
+        slug: &str,
+        ticket: &str,
+        phase: Phase,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(t) = self
-            .find_project(&env, &slug)
-            .and_then(|p| p.tickets.iter().find(|t| t.id == ticket))
-            .cloned()
-        else {
+        let key = (env.to_string(), slug.to_string());
+        let Some(p) = self.find_project(env, slug).cloned() else {
             return;
         };
-        window.push_notification(
-            Notification::info(format!("Making a worktree for {ticket}…")),
-            cx,
-        );
+        let Some(t) = p.tickets.iter().find(|t| t.id == ticket).cloned() else {
+            return;
+        };
+        let Some(clone) = pj::clone_of(self.hydra.paths.root(), &t.meta.repo) else {
+            return;
+        };
+        let Some(run) = self.projects_data.runs.get_mut(&key) else {
+            return;
+        };
+        let base = crate::project_run::stack_base(&p, &run.milestone, ticket);
+        run.current = Some(Current {
+            ticket: ticket.to_string(),
+            phase,
+            pane: None,
+        });
+        cx.notify();
         let exe = hydra_exe();
-        let env_bg = env.clone();
+        let (env_s, slug_s, ticket_s) = (env.to_string(), slug.to_string(), ticket.to_string());
+        let env_bg = env_s.clone();
         cx.spawn_in(window, async move |this, cx| {
             let made = cx
-                .background_spawn(
-                    async move { pj::ticket_worktree(&exe, &env_bg, &clone, &t, None) },
-                )
+                .background_spawn(async move {
+                    pj::ticket_worktree(&exe, &env_bg, &clone, &t, base.as_deref())
+                })
                 .await;
-            let _ = this.update_in(cx, |ws, window, cx| match made {
-                Ok((path, branch)) => {
-                    if let Err(e) =
-                        ws.open_worker(&env, &slug, &ticket, &choice, path, &branch, window, cx)
-                    {
-                        window.push_notification(Notification::error(e), cx);
+            let _ = this.update_in(cx, |ws, window, cx| {
+                let opened = made.and_then(|(path, branch)| {
+                    ws.open_run_session(
+                        &env_s, &slug_s, &ticket_s, phase, path, &branch, window, cx,
+                    )
+                });
+                let run = ws
+                    .projects_data
+                    .runs
+                    .get_mut(&(env_s.clone(), slug_s.clone()));
+                match (opened, run) {
+                    (Ok(id), Some(run)) => {
+                        if let Some(c) = run.current.as_mut() {
+                            c.pane = Some(id);
+                        }
                     }
+                    (Err(e), Some(run)) => {
+                        run.current = None;
+                        run.paused = Some(format!("Couldn't start {ticket_s}: {e}"));
+                    }
+                    _ => {}
                 }
-                Err(e) => window.push_notification(
-                    Notification::error(format!("Can't make the worktree: {e}")),
-                    cx,
-                ),
+                cx.notify();
             });
         })
         .detach();
     }
 
     #[allow(clippy::too_many_arguments)] // One call site; a struct would only rename them.
-    fn open_worker(
+    fn open_run_session(
         &mut self,
         env: &str,
         slug: &str,
         ticket: &str,
-        choice: &WorkChoice,
+        phase: Phase,
         path: PathBuf,
         branch: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Result<(), String> {
-        let how = (
-            choice.skill.as_deref().unwrap_or(""),
-            choice.model.as_deref().unwrap_or(""),
-            choice.effort.as_deref().unwrap_or(""),
-        );
-        self.edit_project(
-            env,
-            slug,
-            |dir, p, login| {
-                let t = p
-                    .tickets
-                    .iter()
-                    .find(|t| t.id == ticket)
-                    .ok_or("the ticket is gone")?;
-                pj::start_work(dir, t, branch, login, how)
-            },
-            window,
-            cx,
-        )?;
+    ) -> Result<PaneId, String> {
+        let setup = self.work_setup(env, slug);
         let p = self
             .find_project(env, slug)
             .ok_or("the project is gone")?
@@ -2335,23 +2548,54 @@ impl Workspace {
             .find(|t| t.id == ticket)
             .ok_or("the ticket is gone")?
             .clone();
+        let skill = match phase {
+            Phase::Work => setup
+                .skills
+                .iter()
+                .find(|(r, _)| r.eq_ignore_ascii_case(&t.meta.repo))
+                .map(|(_, s)| s.clone()),
+            Phase::Check => setup.testing.clone(),
+        }
+        .ok_or("its skill isn't set any more")?;
+        if phase == Phase::Work {
+            let how = (
+                skill.display().to_string(),
+                setup.model.clone().unwrap_or_default(),
+                setup.effort.clone().unwrap_or_default(),
+            );
+            self.edit_project(
+                env,
+                slug,
+                |dir, p, login| {
+                    let t = p
+                        .tickets
+                        .iter()
+                        .find(|t| t.id == ticket)
+                        .ok_or("the ticket is gone")?;
+                    if t.meta.status == TicketStatus::Todo || t.meta.branch != branch {
+                        pj::start_work(dir, t, branch, login, (&how.0, &how.1, &how.2))
+                    } else {
+                        Ok(())
+                    }
+                },
+                window,
+                cx,
+            )?;
+        }
         let dir = self.project_dir(env, slug).ok_or("the project is gone")?;
         let shell = self.shell();
         let mut request = PaneRequest::new(env, path, shell);
         let mut argv = vec!["claude".to_string(), NO_TERMINAL_QUESTIONS.to_string()];
-        if let Some(m) = &choice.model {
+        if let Some(m) = &setup.model {
             argv.extend(["--model".to_string(), m.clone()]);
         }
-        if let Some(e) = &choice.effort {
+        if let Some(e) = &setup.effort {
             argv.extend(["--effort".to_string(), e.clone()]);
         }
-        argv.push(work_prompt(
-            &p,
-            &t,
-            branch,
-            &choice.repo,
-            choice.skill.as_deref(),
-        ));
+        argv.push(match phase {
+            Phase::Work => work_prompt(&p, &t, branch, &skill),
+            Phase::Check => check_prompt(&p, &t, &skill),
+        });
         request.command = Some(command_line(shell, &argv));
         let id = self
             .open_terminal_beside(env, request, window, cx)
@@ -2361,32 +2605,85 @@ impl Workspace {
             .get(&id)
             .cloned()
             .ok_or("its terminal didn't open")?;
-        view.update(cx, |v, cx| {
-            v.set_name(Some(format!("{} · {}", t.id, t.meta.title)), cx)
-        });
+        let label = match phase {
+            Phase::Work => format!("{} · {}", t.id, t.meta.title),
+            Phase::Check => format!("{} · checking", t.id),
+        };
+        view.update(cx, |v, cx| v.set_name(Some(label), cx));
         let token = view
             .read(cx)
             .mcp_token()
             .map(str::to_string)
             .ok_or("its terminal has no MCP token")?;
         let sv = server::get().ok_or("hydraui's MCP server isn't running")?;
+        let ticket_s = ticket.to_string();
         server::lock(sv.registry()).project_sessions.insert(
             token,
-            Session::Work {
-                dir,
-                ticket: ticket.to_string(),
+            match phase {
+                Phase::Work => Session::Work {
+                    dir,
+                    ticket: ticket_s.clone(),
+                },
+                Phase::Check => Session::Check {
+                    dir,
+                    ticket: ticket_s.clone(),
+                },
             },
         );
         self.projects_data
             .workers
-            .insert((env.to_string(), slug.to_string(), ticket.to_string()), id);
-        window.push_notification(
-            Notification::success(format!(
-                "{ticket} is being worked on in its own terminal ({branch})."
-            )),
-            cx,
-        );
-        Ok(())
+            .insert((env.to_string(), slug.to_string(), ticket_s), id);
+        Ok(id)
+    }
+
+    /// Each run's session that has finished (its ticket reported, or checked) is closed and
+    /// the run moves on; one whose terminal was closed pauses the run (spec §14.5).
+    fn tick_runs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let keys: Vec<(String, String)> = self.projects_data.runs.keys().cloned().collect();
+        for key in keys {
+            let (env, slug) = (&key.0, &key.1);
+            let Some(run) = self.projects_data.runs.get(&key) else {
+                continue;
+            };
+            let Some(cur) = run.current.as_ref() else {
+                if run.paused.is_none() {
+                    self.advance_run(env, slug, window, cx);
+                }
+                continue;
+            };
+            let Some(id) = cur.pane else {
+                continue; // its worktree is still being made
+            };
+            let finished = self
+                .find_project(env, slug)
+                .and_then(|p| p.tickets.iter().find(|t| t.id == cur.ticket))
+                .is_some_and(|t| match cur.phase {
+                    Phase::Work => {
+                        matches!(t.meta.status, TicketStatus::InReview | TicketStatus::Done)
+                            && !t.meta.prs.is_empty()
+                    }
+                    Phase::Check => !t.meta.check.is_empty(),
+                });
+            let alive = self.panes.contains_key(&id);
+            let ticket = cur.ticket.clone();
+            if finished {
+                if alive {
+                    self.close_terminal_now(id, window, cx);
+                }
+                if let Some(run) = self.projects_data.runs.get_mut(&key) {
+                    run.current = None;
+                }
+                self.advance_run(env, slug, window, cx);
+            } else if !alive {
+                if let Some(run) = self.projects_data.runs.get_mut(&key) {
+                    run.current = None;
+                    run.paused = Some(format!(
+                        "{ticket}'s session closed before it finished. Carry on starts it again."
+                    ));
+                }
+                cx.notify();
+            }
+        }
     }
 
     // ---- Resources ----
@@ -4004,6 +4301,7 @@ impl Workspace {
                         .child(actions),
                 )
             })
+            .children(self.run_controls(env, p, m, cx))
             .into_any_element()
     }
 
@@ -4505,7 +4803,12 @@ impl Workspace {
             }
             board = board.child(column);
         }
-        v_flex().gap_5().child(head).child(board).into_any_element()
+        v_flex()
+            .gap_5()
+            .child(head)
+            .children(self.run_controls(env, p, m, cx))
+            .child(board)
+            .into_any_element()
     }
 
     #[allow(clippy::too_many_arguments)] // The card's inputs, all read-only.
@@ -4516,7 +4819,7 @@ impl Workspace {
         p: &Project,
         t: &Ticket,
         lead: bool,
-        member: bool,
+        _member: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let unsent = pj::ticket_unsent(&e.pending, &p.slug, &t.id);
@@ -4670,26 +4973,6 @@ impl Workspace {
                         .on_click(
                             cx.listener(move |ws, _, window, cx| ws.show_terminal(id, window, cx)),
                         ),
-                ),
-            );
-        } else if member
-            && pj::can_start(p, t)
-            && matches!(t.meta.status, TicketStatus::Todo | TicketStatus::InProgress)
-        {
-            let (e3, s3, id3) = (env_s.clone(), slug_s.clone(), t.id.clone());
-            card = card.child(
-                h_flex().child(
-                    Button::new(SharedString::from(format!("work-{}", t.id)))
-                        .label(if t.meta.status == TicketStatus::Todo {
-                            "Start work"
-                        } else {
-                            "Start again"
-                        })
-                        .xsmall()
-                        .primary()
-                        .on_click(cx.listener(move |ws, _, window, cx| {
-                            ws.start_work_dialog(e3.clone(), s3.clone(), id3.clone(), window, cx)
-                        })),
                 ),
             );
         }
@@ -4962,37 +5245,61 @@ impl Workspace {
         };
         let root = self.hydra.paths.root().to_path_buf();
         let planning = pj::planning_skill_of(&root, &e.repo, slug);
-        let planning_row = {
-            let (env, slug) = (env.to_string(), slug.to_string());
-            h_flex()
-                .gap_4()
-                .py_2()
-                .border_b_1()
-                .border_color(color(theme::BORDER_SUBTLE))
-                .child(
-                    div()
-                        .w(px(160.))
-                        .flex_none()
-                        .text_color(color(theme::TEXT_SECONDARY))
-                        .child("Planning skill"),
-                )
-                .child(div().flex_1().min_w_0().child(match &planning {
-                    Some(name) => format!("/{name}"),
-                    None => BUILT_IN_GUIDE_LABEL.to_string(),
-                }))
-                .child(
-                    Button::new("set-planning-skill")
-                        .label("Change…")
-                        .ghost()
-                        .small()
-                        .on_click(cx.listener(move |ws, _, window, cx| {
-                            ws.planning_skill_dialog(env.clone(), slug.clone(), window, cx)
-                        })),
-                )
-        };
+        let setup = pj::work_setup(&root, &e.repo, slug);
+        let shown = |v: Option<String>, none: &str| v.unwrap_or_else(|| none.to_string());
+        let mut mine = v_flex()
+            .child(div().pt_3().child(section_title("On this Mac")))
+            .child(muted(
+                "Yours, for this project: the skills Claude follows and how it works. Choose a \
+                 skill by its folder, the one holding its SKILL.md.",
+            ))
+            .child(self.skill_row(
+                env,
+                slug,
+                Slot::Planning,
+                "Planning skill",
+                shown(planning, BUILT_IN_GUIDE_LABEL),
+                cx,
+            ));
+        for code_repo in pj::check_repos(p) {
+            let value = setup
+                .skills
+                .iter()
+                .find(|(r, _)| r.eq_ignore_ascii_case(&code_repo))
+                .map(|(_, s)| s.display().to_string());
+            let label = format!(
+                "Skill for {}",
+                code_repo
+                    .split_once('/')
+                    .map(|(_, n)| n)
+                    .unwrap_or(&code_repo)
+            );
+            mine = mine.child(self.skill_row(
+                env,
+                slug,
+                Slot::Repo(code_repo),
+                &label,
+                shown(value, "none: a run pauses for it"),
+                cx,
+            ));
+        }
+        mine = mine
+            .child(self.skill_row(
+                env,
+                slug,
+                Slot::Testing,
+                "Testing skill",
+                shown(
+                    setup.testing.as_ref().map(|t| t.display().to_string()),
+                    "none: pull requests aren't checked",
+                ),
+                cx,
+            ))
+            .child(self.choice_row(env, slug, "Model", &MODELS, setup.model.as_deref(), cx))
+            .child(self.choice_row(env, slug, "Effort", &EFFORTS, setup.effort.as_deref(), cx));
         let clones = f.repos.iter().map(|r| match pj::clone_of(&root, r) {
             Some(path) => format!("{r} → {}", path.display()),
-            None => format!("{r} → asked on first Start work"),
+            None => format!("{r} → asked when a run first needs it"),
         });
         v_flex()
             .gap_1()
@@ -5012,8 +5319,7 @@ impl Workspace {
                     .child(div().w(px(160.)).flex_none().text_color(color(theme::TEXT_SECONDARY)).child("Status"))
                     .child(status_buttons),
             )
-            .child(div().pt_3().child(section_title("On this Mac")))
-            .child(planning_row)
+            .child(mine)
             .child(div().pt_3().child(section_title("Local clones")))
             .children(clones.map(|c| div().text_sm().font_family("monospace").child(c)))
             .child(div().pt_3().child(muted(
@@ -5023,6 +5329,14 @@ impl Workspace {
             )))
             .into_any_element()
     }
+}
+
+/// A skill setting on the project's Settings page.
+#[derive(Debug, Clone)]
+enum Slot {
+    Planning,
+    Repo(String),
+    Testing,
 }
 
 /// How the settings name hydraui's built-in planning guide, the choice when no skill is picked.
@@ -5253,22 +5567,42 @@ fn start_prompt(p: &Project, guide: &str) -> String {
     )
 }
 
-/// A work session's prompt (spec §14).
-fn work_prompt(p: &Project, t: &Ticket, branch: &str, repo: &str, skill: Option<&str>) -> String {
-    let skill = skill
-        .map(|s| format!("Use the /{s} skill for the work.\n"))
-        .unwrap_or_default();
+/// A work session's prompt (spec §14.5): one ticket, in its worktree, following `skill`.
+fn work_prompt(p: &Project, t: &Ticket, branch: &str, skill: &Path) -> String {
     format!(
-        "You're doing ticket {id} \"{title}\" of the project \"{name}\", in a fresh worktree of \
-         {repo} on branch {branch}. Call ticket_show first: the ticket, its milestone and \
-         where the project's spec is.\n{skill}\
+        "You're doing ticket {id} \"{title}\" of the project \"{name}\", in a worktree of \
+         {repo} on branch {branch}. First read the skill for this work, {skill} (its SKILL.md and \
+         the files it points to), and follow it. Then call ticket_show: the ticket, its \
+         milestone and where the project's spec is.\n\
          Do the work here, commit it on this branch, push it and open a pull request (gh pr \
          create) with {id} in its title. Finish by calling ticket_report with the pull request \
-         URL(s) and a short summary. If you need a decision, ask it with ticket_ask, never in \
+         URL(s) and a short summary: hydraui then closes this session and moves on to the \
+         milestone's next ticket. If you need a decision, ask it with ticket_ask, never in \
          this terminal: it shows in hydraui and the answer comes back to you here.",
         id = t.id,
         title = t.meta.title,
         name = p.file.name,
+        repo = t.meta.repo,
+        skill = skill.display(),
+    )
+}
+
+/// A testing session's prompt (spec §14.5): check one ticket's pull requests with `skill`.
+fn check_prompt(p: &Project, t: &Ticket, skill: &Path) -> String {
+    format!(
+        "You're checking ticket {id} \"{title}\" of the project \"{name}\": its pull \
+         request(s) {prs}, checked out in this worktree. First read the testing skill, {skill} \
+         (its SKILL.md and the files it points to), and follow it. Call ticket_show for what \
+         the ticket asks and how to tell it's done.\n\
+         Check that the work does what the ticket says and passes the skill's checks. You may \
+         fix small problems within the ticket's scope: commit and push them to this branch. \
+         Finish with ticket_checked: passed, or not with what's wrong. A failed check pauses \
+         the milestone for the lead. If you need a decision, ask it with ticket_ask.",
+        id = t.id,
+        title = t.meta.title,
+        name = p.file.name,
+        prs = t.meta.prs.join(", "),
+        skill = skill.display(),
     )
 }
 
@@ -5523,13 +5857,22 @@ mod tests {
             },
             body: String::new(),
         };
-        let w = work_prompt(&p, &t, "pg-3-share-dialog", "iov42/fe", Some("angular"));
+        let mut t = t;
+        t.meta.repo = "iov42/fe".into();
+        t.meta.prs = vec!["https://github.com/iov42/fe/pull/7".into()];
+        let w = work_prompt(&p, &t, "pg-3-share-dialog", Path::new("/skills/angular"));
         assert!(
-            w.contains("/angular skill")
+            w.contains("/skills/angular")
                 && w.contains("ticket_report")
                 && w.contains("pg-3-share-dialog")
+                && w.contains("iov42/fe")
         );
-        assert!(!work_prompt(&p, &t, "b", "r", None).contains("skill"));
+        let c = check_prompt(&p, &t, Path::new("/skills/qa"));
+        assert!(
+            c.contains("/skills/qa")
+                && c.contains("ticket_checked")
+                && c.contains("https://github.com/iov42/fe/pull/7")
+        );
         let started = start_prompt(&p, "Use the /our-planning skill throughout.");
         assert!(started.contains("plan_propose_milestone") && started.contains("/our-planning"));
     }

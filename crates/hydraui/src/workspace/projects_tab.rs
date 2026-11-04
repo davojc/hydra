@@ -2923,7 +2923,7 @@ impl Workspace {
                 Button::new("project-files")
                     .label("Show files")
                     .small()
-                    .ghost()
+                    .outline()
                     .tooltip("The project's folder in hydra's checkout of the repo")
                     .on_click(move |_, _, cx| cx.reveal_path(&folder))
             })
@@ -2931,7 +2931,7 @@ impl Workspace {
                 Some(url) if e.sent.contains(&p.slug) => Button::new("project-github")
                     .label("Open on GitHub")
                     .small()
-                    .ghost()
+                    .outline()
                     .on_click(move |_, _, cx| cx.open_url(&url))
                     .into_any_element(),
                 Some(_) => pill("not on GitHub yet", theme::TEXT_SECONDARY, theme::SURFACE)
@@ -2946,7 +2946,7 @@ impl Workspace {
                 Button::new("project-settings")
                     .label("Settings")
                     .small()
-                    .ghost()
+                    .outline()
                     .on_click(cx.listener(move |ws, _, _, cx| ws.go(page.clone(), cx)))
             });
 
@@ -2998,6 +2998,26 @@ impl Workspace {
             );
         }
 
+        {
+            let page = Page::Settings {
+                env: env_s.clone(),
+                slug: slug_s.clone(),
+            };
+            tabs = tabs.child(
+                h_flex()
+                    .id("project-tab-settings")
+                    .gap_2()
+                    .px_4()
+                    .py_2()
+                    .cursor_pointer()
+                    .border_b_2()
+                    .border_color(color(theme::PANEL))
+                    .text_color(color(theme::TEXT_SECONDARY))
+                    .hover(|d| d.text_color(color(theme::TEXT)))
+                    .child("Settings")
+                    .on_click(cx.listener(move |ws, _, _, cx| ws.go(page.clone(), cx))),
+            );
+        }
         let body = match section {
             Section::Overview => self.project_overview(env, p, lead, cx),
             Section::Milestones => self.project_milestones(env, p, lead, cx),

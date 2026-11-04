@@ -15,14 +15,28 @@ pub struct ProjectFile {
     pub members: Vec<String>,
     #[serde(default)]
     pub status: ProjectStatus,
-    /// Code repos, `owner/name`: a hint for the checks.
+    /// Code repos, `owner/name`, that the lead confirmed the project changes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<String>,
+    /// Repos the planning session expects the project to change, not confirmed yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggested_repos: Vec<SuggestedRepo>,
+    /// Suggestions the lead dismissed, so they aren't suggested again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dismissed_repos: Vec<String>,
     #[serde(default)]
     pub sync: Sync,
     /// Keys hydra doesn't know, kept on a rewrite.
     #[serde(flatten)]
     pub extra: toml::Table,
+}
+
+/// A repo the planning session expects the project to change, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuggestedRepo {
+    pub repo: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub why: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +120,9 @@ pub struct TicketMeta {
     pub status: TicketStatus,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub milestone: String,
+    /// The code repo the work lands in, `owner/name`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub repo: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub assignee: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]

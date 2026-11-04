@@ -46,12 +46,14 @@ Then, across all milestones:
 12. **No passengers.** Does every milestone carry real weight? Merge or drop one that
     doesn't.
 13. **Non-goals respected.** Does any milestone build what the spec says is out of scope?
+14. **Repos named.** Have you suggested (`plan_suggest_repo`) every repo the milestones will
+    change, with why? Walk each milestone's points to the repos that make them true.
 
 ## Part B: a milestone's tickets
 
 For each ticket:
 
-1. **One repo**, named, and the right one per `references/product.md`.
+1. **One repo**, set in its `repo` field, and the right one per `references/product.md`.
 2. **A few days** for one engineer. Bigger: split it by what the user or the system does.
 3. **Clear title**: says what changes, in one line.
 4. **Done is testable**: the description says what a reviewer would check.

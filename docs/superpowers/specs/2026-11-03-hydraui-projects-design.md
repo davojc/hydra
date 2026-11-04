@@ -593,3 +593,23 @@ scored self-review, the repo's files, and what we build in which repo.
   guide, written out next to the checkout each time so it matches the build. That guide is
   also the starting point to copy and share.
 - The plan tools keep their checks (title and point lengths, a detail per point) as the floor.
+
+### 14.3 Repos are discovered, not declared (added 2026-11-04)
+
+Whoever starts a project rarely knows every code repo it will touch, so the project's repos
+grow as it's planned (Jordan's call):
+
+- **Every ticket names the repo it lands in** (`repo = "owner/name"`); `plan_propose_ticket`
+  refuses one without it, and Edit… can change it.
+- **The planning session suggests repos** with `plan_suggest_repo` and a reason, as soon as
+  it can tell: during the spec and milestones, before tickets exist.
+- **Overview → Repos** lists the confirmed repos with their tickets. Below them, in amber, are
+  the suggested ones: any repo a live ticket names that isn't confirmed, and the session's
+  suggestions. The lead adds a suggestion with **Add**, or **Dismiss**es one no ticket names.
+  **Add repo…** adds any other. Suggestions count on the Overview tab's badge.
+- **The check is never blind.** It watches the confirmed repos and every repo a live ticket
+  names, so it keeps up as tickets name new ones. Start work offers the same list, with the
+  ticket's own repo first.
+- Stored in `project.toml`: `repos` (confirmed), `suggested_repos` (`repo`, `why`) and
+  `dismissed_repos`.
+

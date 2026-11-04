@@ -491,6 +491,7 @@ mod tests {
                 "plan_set_spec",
                 "plan_propose_milestone",
                 "plan_propose_ticket",
+                "plan_suggest_repo",
                 "plan_revise",
                 "plan_withdraw",
                 "plan_add_question",

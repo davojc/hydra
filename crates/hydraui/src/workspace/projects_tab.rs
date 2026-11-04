@@ -1591,6 +1591,11 @@ impl Workspace {
             vec![
                 ("Title", "the ticket, in one line", t.meta.title.clone()),
                 (
+                    "Repo",
+                    "the code repo it lands in, owner/name",
+                    t.meta.repo.clone(),
+                ),
+                (
                     "Description",
                     "what to do and how to tell it's done",
                     t.body.trim().to_string(),
@@ -1601,7 +1606,7 @@ impl Workspace {
                 ws.edit_project(
                     &env,
                     &slug,
-                    |dir, _, _| pj::edit_ticket(dir, &t, &v[0], &v[1]),
+                    |dir, _, _| pj::edit_ticket(dir, &t, &v[0], &v[2], &v[1]),
                     window,
                     cx,
                 )
@@ -1746,6 +1751,170 @@ impl Workspace {
         list
     }
 
+    /// The code repos the project changes (Overview): the ones the lead confirmed, with their
+    /// tickets, then the ones suggested by tickets or the planning session, which the lead adds
+    /// or dismisses; and Add repo…. Suggestions come back whenever a ticket names a new repo.
+    fn repos_block(
+        &self,
+        env: &str,
+        p: &Project,
+        lead: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (confirmed, suggested) = pj::repos_of(p);
+        let tickets = |ids: &[String]| match ids.len() {
+            0 => String::new(),
+            n if n <= 4 => ids.join(", "),
+            n => format!("{} and {} more", ids[..3].join(", "), n - 3),
+        };
+        let mut block = v_flex().gap_2().child(
+            h_flex()
+                .gap_3()
+                .items_center()
+                .child(section_title("Repos"))
+                .child(div().flex_1())
+                .when(lead, |d| {
+                    let (env, slug) = (env.to_string(), p.slug.clone());
+                    d.child(
+                        Button::new("add-repo")
+                            .label("Add repo…")
+                            .small()
+                            .outline()
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                let (env, slug) = (env.clone(), slug.clone());
+                                ws.text_dialog(
+                                    "Add a code repo".into(),
+                                    String::new(),
+                                    "owner/name or its GitHub link, e.g. iov42/version2-frontend",
+                                    move |ws, text, window, cx| {
+                                        ws.edit_project(
+                                            &env,
+                                            &slug,
+                                            |dir, p, _| pj::add_repo(dir, p, &text),
+                                            window,
+                                            cx,
+                                        )
+                                    },
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    )
+                }),
+        );
+        if confirmed.is_empty() && suggested.is_empty() {
+            block = block.child(muted(
+                "None yet. Tickets name the repo they land in, and the planning session suggests \
+                 repos as it plans; they show here to add.",
+            ));
+        }
+        for r in &confirmed {
+            block = block.child(
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(color(theme::SURFACE))
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family("monospace")
+                            .text_sm()
+                            .child(r.repo.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(color(theme::TEXT_SECONDARY))
+                            .child(if r.tickets.is_empty() {
+                                "no tickets yet".to_string()
+                            } else {
+                                tickets(&r.tickets)
+                            }),
+                    ),
+            );
+        }
+        for r in &suggested {
+            let why = if !r.why.is_empty() {
+                format!("Claude: {}", r.why)
+            } else {
+                format!("named by {}", tickets(&r.tickets))
+            };
+            let mut row = h_flex()
+                .gap_3()
+                .items_center()
+                .px_3()
+                .py_2()
+                .rounded_md()
+                .bg(color(theme::AMBER_TINT))
+                .border_1()
+                .border_color(color(theme::AMBER))
+                .child(
+                    div()
+                        .flex_none()
+                        .font_family("monospace")
+                        .text_sm()
+                        .child(r.repo.clone()),
+                )
+                .child(pill("suggested", theme::AMBER, theme::SURFACE))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        .text_color(color(theme::TEXT_SECONDARY))
+                        .child(why),
+                );
+            if lead {
+                let (e1, s1, r1) = (env.to_string(), p.slug.clone(), r.repo.clone());
+                row = row.child(
+                    Button::new(SharedString::from(format!("add-{}", r.repo)))
+                        .label("Add")
+                        .small()
+                        .primary()
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            let repo = r1.clone();
+                            let _ = ws.edit_project(
+                                &e1,
+                                &s1,
+                                |dir, p, _| pj::add_repo(dir, p, &repo),
+                                window,
+                                cx,
+                            );
+                        })),
+                );
+                // A repo a ticket names stays: the ticket says the work is there.
+                if r.tickets.is_empty() {
+                    let (e2, s2, r2) = (env.to_string(), p.slug.clone(), r.repo.clone());
+                    row = row.child(
+                        Button::new(SharedString::from(format!("dismiss-{}", r.repo)))
+                            .label("Dismiss")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                let repo = r2.clone();
+                                let _ = ws.edit_project(
+                                    &e2,
+                                    &s2,
+                                    |dir, p, _| pj::dismiss_repo(dir, p, &repo),
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    );
+                }
+            }
+            block = block.child(row);
+        }
+        block.into_any_element()
+    }
+
     /// Approve, Edit…, Changes…, Reject…, for the lead on an item still to review.
     fn review_actions(
         &self,
@@ -1825,14 +1994,23 @@ impl Workspace {
         let Some(p) = self.find_project(&env, &slug) else {
             return;
         };
-        if p.file.repos.is_empty() {
+        let mut repos = pj::check_repos(p);
+        if let Some(t) = p.tickets.iter().find(|t| t.id == ticket)
+            && let Some(i) = repos
+                .iter()
+                .position(|r| r.eq_ignore_ascii_case(&t.meta.repo))
+        {
+            // The ticket's own repo first: it's the one picked unless you change it.
+            let own = repos.remove(i);
+            repos.insert(0, own);
+        }
+        if repos.is_empty() {
             window.push_notification(
-                Notification::error("Set the project's code repos in its Settings first: work happens in a worktree of one of them."),
+                Notification::error("Add the project's code repos first (Overview → Repos): work happens in a worktree of one of them."),
                 cx,
             );
             return;
         }
-        let repos = p.file.repos.clone();
         let dir = self.project_dir(&env, &slug).unwrap_or_default();
         let mut skills = vec!["none".to_string()];
         skills.extend(self.installed_skills(&env, &dir));
@@ -3042,7 +3220,8 @@ impl Workspace {
             .prs
             .iter()
             .filter(|pr| pr.slug == p.slug && e.pr_waits_on(&login, pr))
-            .count();
+            .count()
+            + if lead { pj::repos_of(p).1.len() } else { 0 };
         let mut tabs = h_flex()
             .gap_1()
             .border_b_1()
@@ -3420,6 +3599,7 @@ impl Workspace {
             );
         }
         page = page.child(progress);
+        page = page.child(self.repos_block(env, p, lead, cx));
         if started {
             page = page.child(self.resources_block(&target, p, cx));
         }
@@ -4322,6 +4502,16 @@ impl Workspace {
                     .when(t.meta.kind == TicketKind::Chore, |d| {
                         d.child(pill("chore", theme::TEXT_SECONDARY, theme::SURFACE))
                     })
+                    .when(!t.meta.repo.is_empty(), |d| {
+                        let short = t
+                            .meta
+                            .repo
+                            .split_once('/')
+                            .map(|(_, n)| n)
+                            .unwrap_or(&t.meta.repo)
+                            .to_string();
+                        d.child(pill(&short, theme::TEXT_SECONDARY, theme::SURFACE))
+                    })
                     .child(div().flex_1())
                     .when(t.meta.review != Review::Approved, |d| {
                         d.child(review_pill(t.meta.review))
@@ -4914,7 +5104,7 @@ fn check_env(exe: &Path, root: &Path, env: &str, state: &Path, e: &mut EnvProjec
     let mut moved = false;
     for p in e.projects.iter().filter(|p| p.file.is_on(&login)) {
         let mut seen = Vec::new();
-        for repo in &p.file.repos {
+        for repo in &pj::check_repos(p) {
             if !seen_repos.contains_key(repo) {
                 let clone = pj::clone_of(root, repo);
                 match crate::project_check::observe(&r, repo, clone.as_deref(), email.as_deref()) {

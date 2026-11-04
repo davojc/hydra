@@ -24,11 +24,12 @@ pub enum Session {
 }
 
 /// The planning tools, in the order `tools/list` shows them.
-pub const PLAN: [&str; 9] = [
+pub const PLAN: [&str; 10] = [
     "plan_show",
     "plan_set_spec",
     "plan_propose_milestone",
     "plan_propose_ticket",
+    "plan_suggest_repo",
     "plan_revise",
     "plan_withdraw",
     "plan_add_question",
@@ -108,14 +109,28 @@ pub fn schemas() -> Vec<Value> {
         tool(
             "plan_propose_ticket",
             "Planning: propose a ticket in an approved milestone, for the lead to review. Each \
-             should be finishable in a few days, with how to tell it's done. Returns its id.",
+             should be finishable in a few days, in one code repo, with how to tell it's done. \
+             Returns its id.",
             json!({
                 "milestone": s("The approved milestone's id, e.g. M1."),
                 "title": s("The ticket, in one line."),
+                "repo": s("The code repo the work lands in, owner/name, e.g. iov42/version2-frontend."),
                 "kind": s("feature, bug or chore (default feature)."),
                 "description": s("What to do and how to tell it's done (Markdown)."),
             }),
-            vec!["milestone", "title", "description"],
+            vec!["milestone", "title", "repo", "description"],
+        ),
+        tool(
+            "plan_suggest_repo",
+            "Planning: tell the lead a code repo this project will probably change, and why, as \
+             soon as you can tell: while writing the spec or milestones, before any ticket names \
+             it. It shows in hydraui for the lead to add or dismiss. A ticket's repo is \
+             suggested on its own; don't suggest again what plan_show lists.",
+            json!({
+                "repo": s("owner/name, e.g. iov42/api-designs."),
+                "why": s("Why the project changes it, in one short line."),
+            }),
+            vec!["repo", "why"],
         ),
         tool(
             "plan_revise",
@@ -128,6 +143,7 @@ pub fn schemas() -> Vec<Value> {
                 "title": s("New title."),
                 "target": s("A milestone's target date, YYYY-MM-DD."),
                 "description": s("A ticket's new description."),
+                "repo": s("A ticket's code repo, owner/name."),
                 "points": points("A milestone's new points, 1 to 4, each with its full explanation."),
                 "milestone": s("A ticket's milestone id."),
                 "kind": s("A ticket's kind: feature, bug or chore."),
@@ -301,6 +317,9 @@ fn plan(dir: &Path, login: &str, name: &str, args: &Value) -> Result<String, Str
                     kind: kind(get(args, "kind"))?,
                     status: TicketStatus::Todo,
                     milestone,
+                    repo: crate::projects::repo_name(&need(args, "repo").map_err(|_| {
+                        "Say which code repo the ticket lands in (repo: owner/name).".to_string()
+                    })?)?,
                     created_by: login.to_string(),
                     created: Some(progress::now()),
                     review: Review::Proposed,
@@ -310,6 +329,38 @@ fn plan(dir: &Path, login: &str, name: &str, args: &Value) -> Result<String, Str
             };
             repo::write_ticket(dir, &t).map_err(e)?;
             Ok(format!("Proposed {id}; the lead reviews it in hydraui."))
+        }
+        "plan_suggest_repo" => {
+            let repo = crate::projects::repo_name(&need(args, "repo")?)?;
+            let why = need(args, "why")?;
+            if p.file.repos.iter().any(|r| r.eq_ignore_ascii_case(&repo)) {
+                return Ok(format!("{repo} is already one of the project's repos."));
+            }
+            if p.file
+                .dismissed_repos
+                .iter()
+                .any(|r| r.eq_ignore_ascii_case(&repo))
+            {
+                return Err(format!(
+                    "The lead dismissed {repo}; ask a question if you think it's needed after all."
+                ));
+            }
+            let mut file = p.file.clone();
+            match file
+                .suggested_repos
+                .iter_mut()
+                .find(|s| s.repo.eq_ignore_ascii_case(&repo))
+            {
+                Some(s) => s.why = why,
+                None => file.suggested_repos.push(hydraui_projects::SuggestedRepo {
+                    repo: repo.clone(),
+                    why,
+                }),
+            }
+            repo::write_project_file(dir, &file).map_err(e)?;
+            Ok(format!(
+                "Suggested {repo}; the lead adds or dismisses it in hydraui."
+            ))
         }
         "plan_revise" => revise(dir, &p, &need(args, "id")?, args),
         "plan_withdraw" => {
@@ -509,6 +560,9 @@ fn revise(dir: &Path, p: &Project, id: &str, args: &Value) -> Result<String, Str
         if let Some(v) = get(args, "description") {
             t.body = v.to_string();
         }
+        if let Some(v) = get(args, "repo") {
+            t.meta.repo = crate::projects::repo_name(v)?;
+        }
         if let Some(v) = get(args, "milestone") {
             if !p
                 .milestones
@@ -659,14 +713,38 @@ fn show(dir: &Path, p: &Project) -> String {
                 TicketKind::Bug => " (bug)",
                 TicketKind::Chore => " (chore)",
             };
+            let repo = if t.meta.repo.is_empty() {
+                String::new()
+            } else {
+                format!(" · in {}", t.meta.repo)
+            };
             out.push_str(&format!(
-                "  - {}: {}{kind}{} · {}\n",
+                "  - {}: {}{kind}{} · {}{repo}\n",
                 t.id,
                 t.meta.title,
                 note(t.meta.review, &t.meta.review_note),
                 t.meta.status.label()
             ));
         }
+    }
+    out.push_str("\n## Repos\n");
+    let (confirmed, suggested) = crate::projects::repos_of(p);
+    for r in &confirmed {
+        out.push_str(&format!("- {}\n", r.repo));
+    }
+    for r in &suggested {
+        let why = if !r.why.is_empty() {
+            r.why.clone()
+        } else {
+            format!("tickets {}", r.tickets.join(", "))
+        };
+        out.push_str(&format!("- {} (suggested: {why})\n", r.repo));
+    }
+    if !p.file.dismissed_repos.is_empty() {
+        out.push_str(&format!(
+            "- dismissed by the lead: {}\n",
+            p.file.dismissed_repos.join(", ")
+        ));
     }
     out.push_str("\n## Open questions\n");
     for d in p.decisions.iter().filter(|d| d.is_open()) {
@@ -750,7 +828,7 @@ mod tests {
             json!({"title": "Model", "points": [{"point": "tables", "detail": "All of them."}], "target": "2026-12-01"}),
         );
         assert!(out.text.starts_with("Proposed M1"), "{}", out.text);
-        let ticket = json!({"milestone": "M1", "title": "Schema", "description": "x"});
+        let ticket = json!({"milestone": "M1", "title": "Schema", "description": "x", "repo": "iov42/version-2-backend"});
         let early = run(&reg, "plan", "plan_propose_ticket", ticket.clone());
         assert!(
             early.is_error && early.text.contains("isn't approved"),
@@ -824,8 +902,7 @@ mod tests {
             json!({"title": "Model", "points": [{"point": "x", "detail": "y"}]}),
         );
         approve(&dir, "M1");
-        let ticket =
-            json!({"milestone": "M1", "title": "Schema", "description": "Make the tables."});
+        let ticket = json!({"milestone": "M1", "title": "Schema", "description": "Make the tables.", "repo": "iov42/version-2-backend"});
         run(&reg, "plan", "plan_propose_ticket", ticket);
         reg.project_sessions.insert(
             "work".into(),
@@ -904,6 +981,68 @@ mod tests {
             (d.meta.ticket.as_str(), d.meta.assigned_to.as_str()),
             ("PG-1", "aza")
         );
+    }
+
+    #[test]
+    fn tickets_name_their_repo_and_claude_suggests_repos_for_the_lead() {
+        let (_tmp, reg, dir) = setup();
+        run(
+            &reg,
+            "plan",
+            "plan_propose_milestone",
+            json!({"title": "Model", "points": [{"point": "x", "detail": "y"}]}),
+        );
+        let _ = review(
+            &dir,
+            &Item::Milestone("M1".into()),
+            Review::Approved,
+            "",
+            "lead",
+        );
+        let no_repo = run(
+            &reg,
+            "plan",
+            "plan_propose_ticket",
+            json!({"milestone": "M1", "title": "Schema", "description": "x"}),
+        );
+        assert!(
+            no_repo.is_error && no_repo.text.contains("repo"),
+            "{}",
+            no_repo.text
+        );
+        let bad = run(
+            &reg,
+            "plan",
+            "plan_propose_ticket",
+            json!({"milestone": "M1", "title": "Schema", "description": "x", "repo": "the backend"}),
+        );
+        assert!(bad.is_error, "{}", bad.text);
+        let ok = run(
+            &reg,
+            "plan",
+            "plan_propose_ticket",
+            json!({"milestone": "M1", "title": "Schema", "description": "x", "repo": "https://github.com/iov42/version-2-backend"}),
+        );
+        assert!(!ok.is_error, "{}", ok.text);
+        let t = repo::load(&dir).unwrap().tickets.remove(0);
+        assert_eq!(t.meta.repo, "iov42/version-2-backend");
+
+        let s = run(
+            &reg,
+            "plan",
+            "plan_suggest_repo",
+            json!({"repo": "iov42/api-designs", "why": "a new endpoint"}),
+        );
+        assert!(!s.is_error, "{}", s.text);
+        let p = repo::load(&dir).unwrap();
+        assert_eq!(p.file.suggested_repos[0].why, "a new endpoint");
+        let shown = run(&reg, "plan", "plan_show", json!({})).text;
+        assert!(shown.contains("## Repos"), "{shown}");
+        assert!(
+            shown.contains("iov42/api-designs (suggested: a new endpoint)"),
+            "{shown}"
+        );
+        assert!(shown.contains("in iov42/version-2-backend"), "{shown}");
     }
 
     #[test]

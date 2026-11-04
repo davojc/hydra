@@ -3,7 +3,7 @@
 //! waits on whom. Slice 1 leaves edits uncommitted in the checkout: the pending change is the
 //! working tree's diff (plan, slice 1).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -368,11 +368,158 @@ pub fn new_project(checkout: &Path, name: &str, login: &str) -> Result<String, S
         members: vec![login.to_string()],
         status: Default::default(),
         repos: Vec::new(),
+        suggested_repos: Vec::new(),
+        dismissed_repos: Vec::new(),
         sync: Default::default(),
         extra: Default::default(),
     };
     repo::write_project_file(&checkout.join(&slug), &file).map_err(|e| e.to_string())?;
     Ok(slug)
+}
+
+/// A code repo a project changes, with the live tickets in it and, for one the planning session
+/// suggested, why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoUse {
+    pub repo: String,
+    pub tickets: Vec<String>,
+    pub why: String,
+}
+
+/// `text` as an `owner/name` repo, from a name or a GitHub URL.
+pub fn repo_name(text: &str) -> Result<String, String> {
+    let t = text.trim().trim_end_matches('/');
+    let t = t
+        .strip_prefix("https://github.com/")
+        .or_else(|| t.strip_prefix("git@github.com:"))
+        .unwrap_or(t);
+    let t = t.strip_suffix(".git").unwrap_or(t);
+    let ok = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    match t.split_once('/') {
+        Some((owner, name)) if ok(owner) && ok(name) => Ok(format!("{owner}/{name}")),
+        _ => Err(format!(
+            "\"{}\" isn't a repo: write it as owner/name.",
+            text.trim()
+        )),
+    }
+}
+
+/// The repos project `p` changes: those the lead confirmed, and those suggested (named by a live
+/// ticket, or by the planning session and not dismissed) but not confirmed yet. Each with the
+/// live tickets in it, in id order.
+pub fn repos_of(p: &Project) -> (Vec<RepoUse>, Vec<RepoUse>) {
+    let live = |t: &&Ticket| t.meta.review != Review::Rejected && !t.meta.repo.is_empty();
+    let tickets_in = |repo: &str| -> Vec<String> {
+        let mut ids: Vec<String> = p
+            .tickets
+            .iter()
+            .filter(live)
+            .filter(|t| t.meta.repo.eq_ignore_ascii_case(repo))
+            .map(|t| t.id.clone())
+            .collect();
+        ids.sort_by_key(|id| crate_number(id));
+        ids
+    };
+    let confirmed: Vec<RepoUse> = p
+        .file
+        .repos
+        .iter()
+        .map(|r| RepoUse {
+            repo: r.clone(),
+            tickets: tickets_in(r),
+            why: String::new(),
+        })
+        .collect();
+    let known = |r: &str| p.file.repos.iter().any(|c| c.eq_ignore_ascii_case(r));
+    let mut suggested: BTreeMap<String, RepoUse> = BTreeMap::new();
+    for s in &p.file.suggested_repos {
+        if known(&s.repo)
+            || p.file
+                .dismissed_repos
+                .iter()
+                .any(|d| d.eq_ignore_ascii_case(&s.repo))
+        {
+            continue;
+        }
+        suggested.insert(
+            s.repo.to_ascii_lowercase(),
+            RepoUse {
+                repo: s.repo.clone(),
+                tickets: Vec::new(),
+                why: s.why.clone(),
+            },
+        );
+    }
+    for t in p.tickets.iter().filter(live) {
+        if known(&t.meta.repo) {
+            continue;
+        }
+        suggested
+            .entry(t.meta.repo.to_ascii_lowercase())
+            .or_insert_with(|| RepoUse {
+                repo: t.meta.repo.clone(),
+                tickets: Vec::new(),
+                why: String::new(),
+            });
+    }
+    let suggested = suggested
+        .into_values()
+        .map(|mut r| {
+            r.tickets = tickets_in(&r.repo);
+            r
+        })
+        .collect();
+    (confirmed, suggested)
+}
+
+fn crate_number(id: &str) -> u32 {
+    hydraui_projects::number_of(id).unwrap_or(u32::MAX)
+}
+
+/// The repos the progress check watches for project `p` (spec §6.1): the confirmed ones and
+/// every repo a live ticket names, sorted, once.
+pub fn check_repos(p: &Project) -> Vec<String> {
+    let mut out: BTreeSet<String> = p.file.repos.iter().cloned().collect();
+    for t in &p.tickets {
+        if t.meta.review != Review::Rejected && !t.meta.repo.is_empty() {
+            out.insert(t.meta.repo.clone());
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Confirms `repo` (a name or URL) as one project `p` changes.
+pub fn add_repo(dir: &Path, p: &Project, repo: &str) -> Result<(), String> {
+    let repo = repo_name(repo)?;
+    let mut file = p.file.clone();
+    if !file.repos.iter().any(|r| r.eq_ignore_ascii_case(&repo)) {
+        file.repos.push(repo.clone());
+    }
+    file.suggested_repos
+        .retain(|s| !s.repo.eq_ignore_ascii_case(&repo));
+    file.dismissed_repos
+        .retain(|d| !d.eq_ignore_ascii_case(&repo));
+    repo::write_project_file(dir, &file).map_err(|e| e.to_string())
+}
+
+/// Dismisses the planning session's suggestion of `repo`, so it isn't suggested again. A repo a
+/// live ticket names stays suggested: the ticket says the work is there.
+pub fn dismiss_repo(dir: &Path, p: &Project, repo: &str) -> Result<(), String> {
+    let mut file = p.file.clone();
+    file.suggested_repos
+        .retain(|s| !s.repo.eq_ignore_ascii_case(repo));
+    if !file
+        .dismissed_repos
+        .iter()
+        .any(|d| d.eq_ignore_ascii_case(repo))
+    {
+        file.dismissed_repos.push(repo.to_string());
+    }
+    repo::write_project_file(dir, &file).map_err(|e| e.to_string())
 }
 
 /// A milestone or ticket, by id (spec §14).
@@ -478,6 +625,7 @@ pub fn edit_ticket(
     ticket: &Ticket,
     title: &str,
     description: &str,
+    code_repo: &str,
 ) -> Result<(), String> {
     let title = title.trim();
     if title.is_empty() {
@@ -486,6 +634,11 @@ pub fn edit_ticket(
     let mut t = ticket.clone();
     t.meta.title = title.to_string();
     t.body = description.trim().to_string();
+    t.meta.repo = if code_repo.trim().is_empty() {
+        String::new()
+    } else {
+        repo_name(code_repo)?
+    };
     repo::write_ticket(dir, &t).map_err(|e| e.to_string())
 }
 
@@ -945,6 +1098,93 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_projects_repos_are_confirmed_or_suggested_by_its_tickets_and_claude() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let mut file: hydraui_projects::ProjectFile =
+            toml::from_str("name = \"P\"\nkey = \"PG\"\nlead = \"me\"").unwrap();
+        file.repos = vec!["iov42/version2-frontend".into()];
+        file.suggested_repos = vec![
+            hydraui_projects::SuggestedRepo {
+                repo: "iov42/api-designs".into(),
+                why: "a new endpoint".into(),
+            },
+            hydraui_projects::SuggestedRepo {
+                repo: "iov42/svc-usage".into(),
+                why: String::new(),
+            },
+        ];
+        file.dismissed_repos = vec!["iov42/svc-usage".into()];
+        repo::write_project_file(dir, &file).unwrap();
+        let ticket = |id: &str, on: &str, review: Review| Ticket {
+            id: id.into(),
+            meta: hydraui_projects::TicketMeta {
+                title: id.into(),
+                repo: on.into(),
+                review,
+                ..Default::default()
+            },
+            body: String::new(),
+        };
+        for t in [
+            ticket("PG-1", "iov42/version-2-backend", Review::Approved),
+            ticket("PG-2", "iov42/version2-frontend", Review::Proposed),
+            ticket("PG-3", "iov42/version-2-backend", Review::Proposed),
+            ticket("PG-4", "iov42/identity-platform", Review::Rejected),
+        ] {
+            repo::write_ticket(dir, &t).unwrap();
+        }
+        let p = repo::load(dir).unwrap();
+        let (confirmed, suggested) = repos_of(&p);
+        assert_eq!(confirmed.len(), 1);
+        assert_eq!(confirmed[0].tickets, vec!["PG-2".to_string()]);
+        let names: Vec<(&str, Vec<String>, &str)> = suggested
+            .iter()
+            .map(|r| (r.repo.as_str(), r.tickets.clone(), r.why.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("iov42/api-designs", vec![], "a new endpoint"),
+                (
+                    "iov42/version-2-backend",
+                    vec!["PG-1".into(), "PG-3".into()],
+                    ""
+                ),
+            ]
+        );
+        // The check watches the confirmed repos and every repo a live ticket names.
+        assert_eq!(
+            check_repos(&p),
+            vec![
+                "iov42/version-2-backend".to_string(),
+                "iov42/version2-frontend".into()
+            ]
+        );
+
+        add_repo(dir, &p, "https://github.com/iov42/api-designs").unwrap();
+        let p = repo::load(dir).unwrap();
+        assert!(p.file.repos.contains(&"iov42/api-designs".to_string()));
+        assert!(
+            p.file
+                .suggested_repos
+                .iter()
+                .all(|s| s.repo != "iov42/api-designs")
+        );
+        dismiss_repo(dir, &p, "iov42/version-2-backend").unwrap();
+        let p = repo::load(dir).unwrap();
+        // A ticket still names it, so it's still suggested.
+        assert!(
+            repos_of(&p)
+                .1
+                .iter()
+                .any(|r| r.repo == "iov42/version-2-backend")
+        );
+        assert_eq!(repo_name(" iov42/x.git "), Ok("iov42/x".to_string()));
+        assert!(repo_name("not a repo").is_err());
+    }
+
+    #[test]
     fn the_last_sync_is_remembered_per_project() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(synced_at(tmp.path(), "o/r", "pg"), None);
@@ -1048,6 +1288,8 @@ mod tests {
                 members: vec!["me".into()],
                 status: Default::default(),
                 repos: vec![],
+                suggested_repos: vec![],
+                dismissed_repos: vec![],
                 sync: Default::default(),
                 extra: Default::default(),
             },
@@ -1325,8 +1567,26 @@ mod tests {
         let p = planned(&dir);
         assert!(edit_milestone(&dir, "M1", "Model", "soon", "").is_err());
         edit_milestone(&dir, "M1", "Data model", "2026-12-01", "tables").unwrap();
-        edit_ticket(&dir, &p.tickets[0], "Schema v2", "the tables").unwrap();
+        assert!(
+            edit_ticket(
+                &dir,
+                &p.tickets[0],
+                "Schema v2",
+                "the tables",
+                "the backend"
+            )
+            .is_err()
+        );
+        edit_ticket(
+            &dir,
+            &p.tickets[0],
+            "Schema v2",
+            "the tables",
+            "https://github.com/iov42/version-2-backend",
+        )
+        .unwrap();
         let p = repo::load(&dir).unwrap();
+        assert_eq!(p.tickets[0].meta.repo, "iov42/version-2-backend");
         assert_eq!(p.milestones[0].target.unwrap().to_string(), "2026-12-01");
         assert_eq!(
             p.milestones[0].review,

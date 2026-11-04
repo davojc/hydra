@@ -45,12 +45,19 @@ title = "Show shared groups in the partner's group list"
 kind = "feature"              # feature | bug | chore
 status = "todo"               # todo | in progress | in review | done | dropped
 milestone = "M1"
+repo = "iov42/version2-frontend"   # the code repo it lands in
 assignee = ""
 review = "proposed"
 +++
 
 What to do, where, and how to tell it's done.
 ```
+
+## Repos (`project.toml`)
+
+`repos` are the code repos the lead confirmed. `suggested_repos` are the ones you suggested
+(`plan_suggest_repo`, with why) for the lead to add or dismiss; `dismissed_repos` are the
+ones they dismissed: don't suggest those again. A repo a ticket names is suggested on its own.
 
 ## Decisions (`decisions/D-1.md`)
 

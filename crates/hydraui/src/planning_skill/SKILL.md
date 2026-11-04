@@ -24,6 +24,8 @@ Read these before you propose anything:
    depend on the answer.
 3. The spec (`plan_set_spec`).
 4. The milestones (`plan_propose_milestone`), in the order they'll be done.
+   Whenever you can tell a code repo will change, say so with `plan_suggest_repo` and why:
+   the lead rarely knows every repo up front, and sees your suggestions to add.
 5. **Review them** with `checklists/devils-advocate.md` (part A), fix what it finds with
    `plan_revise`, and tell the lead what you changed and what you're still unsure of.
 6. Stop. Tickets come later, one milestone at a time, when the lead asks: break the milestone
@@ -109,6 +111,8 @@ milestone really touches:
 
 **Each ticket:**
 
+- Names its repo (`repo: owner/name`, from `references/product.md`). hydraui suggests any
+  repo a ticket names that the project doesn't list yet, and watches it for progress.
 - One piece of work one engineer can finish in a few days.
 - The title says what changes, in one line: "Show shared groups in the partner's group list".
 - The description says what to do, where (the repo, and the area or files when you know

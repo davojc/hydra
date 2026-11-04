@@ -136,7 +136,8 @@ pub fn schemas() -> Vec<Value> {
             "plan_revise",
             "Planning: revise a milestone (M..) or ticket (KEY-..) that is still to review or \
              had changes asked (a milestone keeps to plain words: title at most 60 characters \
-             and 1 to 4 points of at most 80); it goes back to the lead to review. Only the fields \
+             and 1 to 4 points of at most 80); it goes back to the lead to review. A ticket's \
+             repo alone can be set on any ticket, approved ones too, and it stays approved. Only the fields \
              given change. Use the lead's note (plan_show shows it).",
             json!({
                 "id": s("What to revise."),
@@ -548,6 +549,16 @@ fn revise(dir: &Path, p: &Project, id: &str, args: &Value) -> Result<String, Str
         repo::write_milestones(dir, &ms).map_err(e)?;
     } else if let Some(t) = p.tickets.iter().find(|t| t.id == id) {
         let mut t = t.clone();
+        // A ticket's repo says where the work lands, not what was approved: it can be set on
+        // any live ticket, alone, and the ticket keeps its review.
+        let only_repo = args
+            .as_object()
+            .is_some_and(|o| o.keys().all(|k| k == "id" || k == "repo") && o.contains_key("repo"));
+        if only_repo && t.meta.review != Review::Rejected {
+            t.meta.repo = crate::projects::repo_name(&need(args, "repo")?)?;
+            repo::write_ticket(dir, &t).map_err(e)?;
+            return Ok(format!("{id} is in {} now.", t.meta.repo));
+        }
         if !open(t.meta.review) {
             return Err(format!(
                 "{id} is {}; only proposals are revised.",
@@ -1043,6 +1054,58 @@ mod tests {
             "{shown}"
         );
         assert!(shown.contains("in iov42/version-2-backend"), "{shown}");
+    }
+
+    #[test]
+    fn an_approved_tickets_repo_can_be_set_and_it_stays_approved() {
+        let (_tmp, reg, dir) = setup();
+        run(
+            &reg,
+            "plan",
+            "plan_propose_milestone",
+            json!({"title": "Model", "points": [{"point": "x", "detail": "y"}]}),
+        );
+        let _ = review(
+            &dir,
+            &Item::Milestone("M1".into()),
+            Review::Approved,
+            "",
+            "lead",
+        );
+        run(
+            &reg,
+            "plan",
+            "plan_propose_ticket",
+            json!({"milestone": "M1", "title": "Schema", "description": "x", "repo": "iov42/a"}),
+        );
+        let _ = review(
+            &dir,
+            &Item::Ticket("PG-1".into()),
+            Review::Approved,
+            "",
+            "lead",
+        );
+        // Only the repo: allowed, and still approved.
+        let ok = run(
+            &reg,
+            "plan",
+            "plan_revise",
+            json!({"id": "PG-1", "repo": "iov42/b"}),
+        );
+        assert!(!ok.is_error, "{}", ok.text);
+        let t = repo::load(&dir).unwrap().tickets.remove(0);
+        assert_eq!(
+            (t.meta.repo.as_str(), t.meta.review),
+            ("iov42/b", Review::Approved)
+        );
+        // Anything more on an approved ticket still isn't Claude's to change.
+        let no = run(
+            &reg,
+            "plan",
+            "plan_revise",
+            json!({"id": "PG-1", "repo": "iov42/c", "title": "New"}),
+        );
+        assert!(no.is_error, "{}", no.text);
     }
 
     #[test]

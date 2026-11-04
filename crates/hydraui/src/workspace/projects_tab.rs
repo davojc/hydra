@@ -1495,7 +1495,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.text_dialog(
-            format!("What should change in {}?", item.id()),
+            format!("What should change in {}?", item.name()),
             String::new(),
             "e.g. split it in two; Claude revises it and proposes it again",
             move |ws, note, window, cx| {
@@ -1531,7 +1531,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.text_dialog(
-            format!("Reject {}", item.id()),
+            format!("Reject {}", item.name()),
             String::new(),
             "why; it stays, marked rejected, so it isn't proposed again",
             move |ws, reason, window, cx| {
@@ -1559,7 +1559,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.fields_dialog(
-            format!("Edit {}", m.id),
+            format!("Edit {}", pj::milestone_name(&m.id)),
             vec![
                 ("Title", "the milestone, in a few words", m.title.clone()),
                 (
@@ -2801,7 +2801,7 @@ impl Workspace {
                 let title = self
                     .find_project(env, slug)
                     .and_then(|p| p.milestones.iter().find(|m| &m.id == id))
-                    .map(|m| format!("{} {}", m.id, m.title))
+                    .map(|m| format!("{} · {}", pj::milestone_name(&m.id), m.title))
                     .unwrap_or_else(|| id.clone());
                 let back = Page::Project {
                     env: env.clone(),
@@ -3091,12 +3091,11 @@ impl Workspace {
                     .w(px(210.))
                     .flex_none()
                     .gap_1()
-                    .child(
-                        div()
-                            .text_xs()
-                            .truncate()
-                            .child(format!("{} {}", m.id, m.title)),
-                    )
+                    .child(div().text_xs().truncate().child(format!(
+                        "{} · {}",
+                        pj::milestone_name(&m.id),
+                        m.title
+                    )))
                     .child(status_bar(&c, 6.))
                     .child(
                         h_flex()
@@ -3494,9 +3493,8 @@ impl Workspace {
                                 .w(px(36.))
                                 .flex_none()
                                 .text_xs()
-                                .font_family("monospace")
                                 .text_color(color(theme::TEXT_MUTED))
-                                .child(m.id.clone()),
+                                .child(pj::milestone_name(&m.id)),
                         )
                         .child(
                             div()
@@ -3705,7 +3703,8 @@ impl Workspace {
                 bar = bar.child(
                     Button::new(SharedString::from(format!("review-in-{mid}")))
                         .label(format!(
-                            "{mid}: {n} ticket{}",
+                            "{}: {n} ticket{}",
+                            pj::milestone_name(mid),
                             if n == 1 { "" } else { "s" }
                         ))
                         .xsmall()
@@ -3858,9 +3857,8 @@ impl Workspace {
                 div()
                     .flex_none()
                     .text_xs()
-                    .font_family("monospace")
                     .text_color(color(theme::TEXT_MUTED))
-                    .child(m.id.clone()),
+                    .child(pj::milestone_name(&m.id)),
             )
             .child(
                 div()
@@ -4298,7 +4296,7 @@ impl Workspace {
                 .on_click(cx.listener(move |ws, _, window, cx| {
                     let (env, slug, id) = (env.clone(), slug.clone(), id.clone());
                     ws.text_dialog(
-                        format!("{label} in {id}"),
+                        format!("{label} in {}", pj::milestone_name(&id)),
                         String::new(),
                         "a title, in one line",
                         move |ws, title, window, cx| {

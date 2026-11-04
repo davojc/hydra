@@ -405,6 +405,16 @@ pub fn new_project(checkout: &Path, name: &str, login: &str) -> Result<String, S
     Ok(slug)
 }
 
+/// How a milestone is shown to people: `M3` is "Milestone 3". Files and Claude keep `M3`.
+pub fn milestone_name(id: &str) -> String {
+    match id.strip_prefix('M') {
+        Some(n) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => {
+            format!("Milestone {n}")
+        }
+        _ => id.to_string(),
+    }
+}
+
 /// How a decision is shown to people: `D-7` is "Decision 7". Files and Claude keep `D-7`.
 pub fn decision_name(id: &str) -> String {
     match id.strip_prefix("D-") {
@@ -571,6 +581,14 @@ impl Item {
     pub fn id(&self) -> &str {
         match self {
             Item::Milestone(id) | Item::Ticket(id) => id,
+        }
+    }
+
+    /// How it's shown to people: "Milestone 3", or the ticket's key.
+    pub fn name(&self) -> String {
+        match self {
+            Item::Milestone(id) => milestone_name(id),
+            Item::Ticket(id) => id.clone(),
         }
     }
 }
@@ -1134,6 +1152,14 @@ pub fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_milestone_is_shown_by_its_number() {
+        assert_eq!(milestone_name("M3"), "Milestone 3");
+        assert_eq!(Item::Milestone("M12".into()).name(), "Milestone 12");
+        assert_eq!(Item::Ticket("MUE-3".into()).name(), "MUE-3");
+        assert_eq!(milestone_name("Mx"), "Mx");
+    }
 
     #[test]
     fn a_decision_is_shown_by_its_number() {

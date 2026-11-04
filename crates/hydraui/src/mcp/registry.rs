@@ -47,6 +47,10 @@ pub struct Registry {
     pub closing: bool,
     /// Projects' planning and work sessions, by token (Projects spec §14).
     pub project_sessions: HashMap<String, super::project_tools::Session>,
+    /// Planning sessions that said they're done (`plan_done`), as (token, summary), for
+    /// hydraui to close and report. Locked inside because the project tools only read the
+    /// registry.
+    pub planning_done: std::sync::Mutex<Vec<(String, String)>>,
     /// Claude session ids already written to a run's log, as (run, who, id) (§13).
     logged_claude: std::collections::HashSet<(String, String, String)>,
 }
@@ -61,6 +65,7 @@ impl Default for Registry {
             hydra_root: None,
             logged_claude: Default::default(),
             project_sessions: HashMap::new(),
+            planning_done: Default::default(),
             hydra_exe: None,
             branch_lookup: None,
             closing: false,

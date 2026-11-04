@@ -28,8 +28,11 @@ Read these before you propose anything:
    the lead rarely knows every repo up front, and sees your suggestions to add.
 5. **Review them** with `checklists/devils-advocate.md` (part A), fix what it finds with
    `plan_revise`, and tell the lead what you changed and what you're still unsure of.
-6. Stop. Tickets come later, one milestone at a time, when the lead asks: break the milestone
-   down (see From milestone to tickets), propose them, then review them (part B) the same way.
+6. Call `plan_done` with a two- or three-line summary for the lead. hydraui closes the session;
+   each later job (tickets for a milestone, the lead's notes, an answered decision) starts a
+   fresh one that reads the project as it stands. Tickets come one milestone at a time, when
+   the lead asks: break the milestone down (see From milestone to tickets), propose them,
+   review them (part B) the same way, then `plan_done` again.
 
 ## Milestones
 

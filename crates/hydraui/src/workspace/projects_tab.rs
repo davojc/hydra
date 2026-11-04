@@ -360,7 +360,35 @@ impl Workspace {
 
     /// Every second: the checkouts' files while the tab shows (sessions write to them), and a
     /// fetch when one is due (on open, then every 5 minutes).
+    /// Closes the planning sessions that called `plan_done`, showing each one's summary.
+    fn close_finished_planners(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sv) = server::get() else {
+            return;
+        };
+        let finished = crate::mcp::project_tools::take_finished(&server::lock(sv.registry()));
+        for (token, summary) in finished {
+            let found = self.projects_data.planners.iter().find_map(|(key, id)| {
+                let view = self.panes.get(id)?;
+                (view.read(cx).mcp_token() == Some(token.as_str())).then(|| (key.clone(), *id))
+            });
+            let name = found
+                .as_ref()
+                .and_then(|((env, slug), _)| self.find_project(env, slug))
+                .map(|p| p.file.name.clone())
+                .unwrap_or_else(|| "the project".into());
+            if let Some((key, id)) = found {
+                self.projects_data.planners.remove(&key);
+                self.close_terminal_now(id, window, cx);
+            }
+            window.push_notification(
+                Notification::info(format!("Claude finished planning {name}.\n{summary}")),
+                cx,
+            );
+        }
+    }
+
     pub(super) fn projects_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_finished_planners(window, cx);
         // Sessions ask and propose while the tab is closed too.
         let sessions =
             !self.projects_data.planners.is_empty() || !self.projects_data.workers.is_empty();
@@ -1402,8 +1430,8 @@ impl Workspace {
              plan_propose_ticket, breaking it down as the planning guide says (if you haven't \
              yet: {}): each one repo, a few days' work, with what to do, where, and how to tell \
              it's done, then review them. Call plan_show first to see what exists and what was \
-             rejected. Ask anything you need decided with plan_add_question, not here. Then tell \
-             the lead they're ready to review in hydraui.",
+             rejected. Ask anything you need decided with plan_add_question, not here. When \
+             they're proposed and reviewed, call plan_done with a short summary for the lead.",
             m.id,
             m.title,
             m.description,
@@ -1448,7 +1476,21 @@ impl Workspace {
         } else {
             self.worker(env, slug, &q.meta.ticket)
         };
-        match pane.and_then(|id| self.panes.get(&id).cloned()) {
+        let running = pane.and_then(|id| self.panes.get(&id).cloned());
+        if running.is_none() && q.meta.ticket.is_empty() {
+            // Nobody's waiting on it: a fresh planning session picks the answer up.
+            let guide = self
+                .planning_guide(env, slug)
+                .map(|g| g.instruction())
+                .unwrap_or_default();
+            let prompt = format!(
+                "{text}\n\n{guide} Call plan_show and carry on with what that decision \
+                 unblocks. When that's done, call plan_done with a short summary for the lead."
+            );
+            self.tell_planner(env, slug, prompt, window, cx);
+            return Ok(());
+        }
+        match running {
             Some(view) if view.update(cx, |v, cx| v.type_prompt(&text, cx)) => {
                 window.push_notification(Notification::success(format!("Recorded, and sent to the session that asked for {}.", pj::decision_name(&q.id))), cx);
             }
@@ -1511,7 +1553,7 @@ impl Workspace {
                 let prompt = format!(
                     "The lead asked for changes to {} \"{title}\": {note}\n\nRevise it with \
                      plan_revise (or plan_withdraw it and propose new ones if it should be \
-                     split), then tell the lead it's ready to review again.",
+                     split). Then call plan_done with a short summary for the lead.",
                     item.id()
                 );
                 ws.tell_planner(&env, &slug, prompt, window, cx);
@@ -1723,7 +1765,8 @@ impl Workspace {
                         slug.to_string(),
                         format!(
                             "The lead wants the full explanation of \"{}\" in {}. Call \
-                             plan_show, then give every point of {} its detail with plan_revise.",
+                             plan_show, then give every point of {} its detail with plan_revise, \
+                             then call plan_done with a short summary for the lead.",
                             point.text, m.id, m.id
                         ),
                     );
@@ -3616,9 +3659,13 @@ impl Workspace {
             page = page.child(
                 h_flex().child(
                     Button::new("resume-planning")
-                        .label("Open planning session")
+                        .label("Ask Claude to review the plan…")
                         .ghost()
-                        .small()
+                        .xsmall()
+                        .tooltip(
+                            "Claude reads the plan as it stands, acts on your notes and \
+                             answers, and fixes what doesn't meet the planning guide",
+                        )
                         .on_click(cx.listener(move |ws, _, window, cx| {
                             let guide = match ws.planning_guide(&env_b, &slug_b) {
                                 Ok(guide) => guide,
@@ -3634,7 +3681,8 @@ impl Workspace {
                                  any milestone still to review that doesn't meet its rules, give \
                                  every ticket without a repo its repo (plan_revise), and suggest \
                                  with plan_suggest_repo any repo the project will change that \
-                                 plan_show's Repos doesn't list.",
+                                 plan_show's Repos doesn't list. Then call plan_done with a \
+                                 short summary for the lead.",
                                 guide.instruction()
                             );
                             ws.tell_planner(&env_b, &slug_b, prompt, window, cx)
@@ -5195,7 +5243,8 @@ fn start_prompt(p: &Project, guide: &str) -> String {
          know one. Technical detail belongs in the tickets.\n\
          Don't propose tickets yet: the lead asks for them per milestone once it's approved. \
          Use only the plan tools to change the project; never write its files yourself. When \
-         you've proposed the milestones, tell the lead they're ready to review.",
+         you've proposed and reviewed the milestones, call plan_done with a short summary for \
+         the lead: hydraui closes this session, and each later job starts a fresh one.",
         name = p.file.name,
         key = p.file.key,
         lead = p.file.lead,

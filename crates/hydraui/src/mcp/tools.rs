@@ -497,6 +497,7 @@ mod tests {
                 "plan_add_question",
                 "plan_add_link",
                 "plan_read_resource",
+                "plan_done",
                 "ticket_show",
                 "ticket_ask",
                 "ticket_report"

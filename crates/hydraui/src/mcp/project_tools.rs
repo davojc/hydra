@@ -24,7 +24,7 @@ pub enum Session {
 }
 
 /// The planning tools, in the order `tools/list` shows them.
-pub const PLAN: [&str; 10] = [
+pub const PLAN: [&str; 11] = [
     "plan_show",
     "plan_set_spec",
     "plan_propose_milestone",
@@ -35,6 +35,7 @@ pub const PLAN: [&str; 10] = [
     "plan_add_question",
     "plan_add_link",
     "plan_read_resource",
+    "plan_done",
 ];
 
 /// The work tools.
@@ -187,6 +188,17 @@ pub fn schemas() -> Vec<Value> {
             vec!["name"],
         ),
         tool(
+            "plan_done",
+            "Planning: call when the job you were given is finished (or can't go further until \
+             a decision is made), after reviewing your work. hydraui closes this session and \
+             shows the lead your summary; answering a decision or the next job starts a fresh \
+             session, which reads the project as it stands.",
+            json!({
+                "summary": s("For the lead, two or three short lines: what you did, your review's score, and what waits on them."),
+            }),
+            vec!["summary"],
+        ),
+        tool(
             "ticket_show",
             "Work: your ticket: its description, milestone, the project's spec and its open \
              questions about it.",
@@ -229,6 +241,7 @@ pub fn call(reg: &Registry, token: &str, name: &str, args: &Value) -> Option<Out
     }
     let session = reg.project_sessions.get(token);
     let out = match (session, PLAN.contains(&name)) {
+        (Some(Session::Plan { .. }), true) if name == "plan_done" => done(reg, token, args),
         (Some(Session::Plan { dir, login }), true) => plan(dir, login, name, args),
         (Some(Session::Work { dir, ticket }), false) => work(dir, ticket, name, args),
         _ if PLAN.contains(&name) => Err("Only a project's planning session can use the plan \
@@ -244,6 +257,24 @@ pub fn call(reg: &Registry, token: &str, name: &str, args: &Value) -> Option<Out
         Ok(text) => Outcome::ok(text),
         Err(e) => Outcome::err(e),
     })
+}
+
+/// `plan_done`: the session's job is finished; hydraui closes it and shows the lead `summary`.
+fn done(reg: &Registry, token: &str, args: &Value) -> Result<String, String> {
+    let summary = need(args, "summary")?;
+    reg.planning_done
+        .lock()
+        .map_err(|_| "hydraui's registry is broken".to_string())?
+        .push((token.to_string(), summary));
+    Ok("Done: hydraui closes this session and shows your summary to the lead.".into())
+}
+
+/// The planning sessions that called `plan_done` since the last call, as (token, summary).
+pub fn take_finished(reg: &Registry) -> Vec<(String, String)> {
+    reg.planning_done
+        .lock()
+        .map(|mut v| std::mem::take(&mut *v))
+        .unwrap_or_default()
 }
 
 fn get<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
@@ -1106,6 +1137,28 @@ mod tests {
             json!({"id": "PG-1", "repo": "iov42/c", "title": "New"}),
         );
         assert!(no.is_error, "{}", no.text);
+    }
+
+    #[test]
+    fn a_planning_session_says_when_its_done() {
+        let (_tmp, reg, _dir) = setup();
+        let none = run(&reg, "plan", "plan_done", json!({}));
+        assert!(none.is_error, "{}", none.text);
+        let done = run(
+            &reg,
+            "plan",
+            "plan_done",
+            json!({"summary": "Set the repos on MUE-1 to MUE-8."}),
+        );
+        assert!(!done.is_error, "{}", done.text);
+        assert_eq!(
+            take_finished(&reg),
+            vec![(
+                "plan".to_string(),
+                "Set the repos on MUE-1 to MUE-8.".to_string()
+            )]
+        );
+        assert!(take_finished(&reg).is_empty());
     }
 
     #[test]

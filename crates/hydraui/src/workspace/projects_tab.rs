@@ -74,7 +74,7 @@ pub(super) enum Section {
     #[default]
     Overview,
     Milestones,
-    Questions,
+    Decisions,
 }
 
 pub(super) struct ProjectsTab {
@@ -220,9 +220,9 @@ impl QuestionToasts {
         }
         self.last = Some(now);
         let text = match self.pending.as_slice() {
-            [one] => format!("{one}\nAnswer it in Projects → Waiting on you."),
+            [one] => format!("{one}\nDecide it in Projects → Waiting on you."),
             many => format!(
-                "{} new questions are waiting on you.\nAnswer them in Projects → Waiting on you.",
+                "{} new decisions are waiting on you.\nMake them in Projects → Waiting on you.",
                 many.len()
             ),
         };
@@ -512,9 +512,9 @@ impl Workspace {
                     .is_some_and(|seen| !seen.contains(&key))
                 {
                     let who = if d.meta.asked_by == ASKED_BY_CLAUDE {
-                        "Claude asks".to_string()
+                        "Claude needs a decision".to_string()
                     } else {
-                        format!("{} asks", d.meta.asked_by)
+                        format!("{} needs a decision", d.meta.asked_by)
                     };
                     fresh.push(format!(
                         "{who} ({}, {}): {}",
@@ -1435,7 +1435,7 @@ impl Workspace {
         }
         let who = self.login_of(env).unwrap_or_default();
         let text = format!(
-            "{} was decided in hydraui by {who}.\nQuestion: {}\nAnswer: {}\n\nCarry on with that.",
+            "{} was decided in hydraui by {who}.\nDecision: {}\nAnswer: {}\n\nCarry on with that.",
             q.id,
             q.meta.question,
             answer.trim()
@@ -3040,7 +3040,7 @@ impl Workspace {
             div()
                 .text_color(color(theme::TEXT_SECONDARY))
                 .child(format!(
-                    "{open} open question{}",
+                    "{open} decision{} to make",
                     if open == 1 { "" } else { "s" }
                 )),
         );
@@ -3237,7 +3237,7 @@ impl Workspace {
         for (s, label, count, quiet) in [
             (Section::Overview, "Overview", approvals_waiting, 0),
             (Section::Milestones, "Milestones", review_count, 0),
-            (Section::Questions, "Questions", mine, open_q),
+            (Section::Decisions, "Decisions", mine, open_q),
         ] {
             let selected = s == section;
             tabs = tabs.child(
@@ -3287,7 +3287,7 @@ impl Workspace {
         let body = match section {
             Section::Overview => self.project_overview(env, p, lead, cx),
             Section::Milestones => self.project_milestones(env, p, lead, cx),
-            Section::Questions => self.project_questions(env, p, &login, cx),
+            Section::Decisions => self.project_questions(env, p, &login, cx),
         };
         v_flex()
             .gap_5()
@@ -3462,10 +3462,10 @@ impl Workspace {
                         cx,
                     ))
                     .child(tile(
-                        "Questions",
+                        "Decisions",
                         open_q.to_string(),
-                        "open".into(),
-                        Section::Questions,
+                        "to make".into(),
+                        Section::Decisions,
                         false,
                         cx,
                     )),
@@ -3981,11 +3981,11 @@ impl Workspace {
         let mut page = v_flex().gap_3().child(
             h_flex()
                 .gap_3()
-                .child(section_title(&format!("Outstanding · {}", open.len())))
+                .child(section_title(&format!("To decide · {}", open.len())))
                 .child(div().flex_1())
                 .child(
                     Button::new("project-ask")
-                        .label("Ask a question")
+                        .label("New decision")
                         .small()
                         .ghost()
                         .on_click(cx.listener(move |ws, _, window, cx| {
@@ -4196,7 +4196,7 @@ impl Workspace {
             let (env, slug, q) = (env.to_string(), p.slug.clone(), d.clone());
             let other = Button::new(SharedString::from(format!("answer-{}", d.id)))
                 .label(if d.meta.options.is_empty() {
-                    "Answer…"
+                    "Decide…"
                 } else {
                     "Something else…"
                 })
@@ -4206,7 +4206,7 @@ impl Workspace {
                 .on_click(cx.listener(move |ws, _, window, cx| {
                     let (env, slug, q) = (env.clone(), slug.clone(), q.clone());
                     ws.text_dialog(
-                        format!("Answer {}: {}", q.id, q.meta.question),
+                        format!("Decide {}: {}", q.id, q.meta.question),
                         String::new(),
                         "your answer; it's recorded with your name and the time",
                         move |ws, text, window, cx| {
@@ -4234,9 +4234,13 @@ impl Workspace {
             .map(|p| p.file.lead.clone())
             .unwrap_or_default();
         self.fields_dialog(
-            "Ask a question".into(),
+            "A decision to make".into(),
             vec![
-                ("Question", "a decision that needs making", String::new()),
+                (
+                    "Decision",
+                    "what needs deciding, in one sentence",
+                    String::new(),
+                ),
                 (
                     "Who decides?",
                     "their GitHub login; the lead when empty",
@@ -4576,7 +4580,7 @@ impl Workspace {
                     })
                     .when(questions > 0, |d| {
                         d.child(div().text_color(color(theme::AMBER)).child(format!(
-                            "{questions} open question{}",
+                            "{questions} decision{} to make",
                             if questions == 1 { "" } else { "s" }
                         )))
                     }),
@@ -4811,7 +4815,7 @@ impl Workspace {
         }
         if !any {
             out = out.child(muted(
-                "Nothing waits on you. Reviews and questions for you show here.",
+                "Nothing waits on you. Reviews and decisions for you show here.",
             ));
         }
         out.into_any_element()
@@ -5415,13 +5419,18 @@ mod tests {
         let start = Instant::now();
         let mut t = QuestionToasts::default();
         assert_eq!(t.take(start), None, "nothing new");
-        t.pending.push("Claude asks (PG, D-1): Postgres?".into());
-        assert!(t.take(start).unwrap().starts_with("Claude asks (PG, D-1)"));
+        t.pending
+            .push("Claude needs a decision (PG, D-1): Postgres?".into());
+        assert!(
+            t.take(start)
+                .unwrap()
+                .starts_with("Claude needs a decision (PG, D-1)")
+        );
         t.pending
             .extend(["a".to_string(), "b".to_string(), "c".to_string()]);
         assert_eq!(t.take(start + Duration::from_secs(30)), None, "too soon");
         let later = t.take(start + Duration::from_secs(61)).unwrap();
-        assert!(later.starts_with("3 new questions"), "{later}");
+        assert!(later.starts_with("3 new decisions"), "{later}");
         assert!(t.pending.is_empty());
     }
 

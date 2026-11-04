@@ -769,7 +769,7 @@ fn change_words(status: &str, path: &str, dir: Option<&Path>) -> String {
         r if r.starts_with("decisions/") && added && answered(dir, path) => {
             format!("Decision {} made", stem(r))
         }
-        r if r.starts_with("decisions/") && added => format!("Question {} asked", stem(r)),
+        r if r.starts_with("decisions/") && added => format!("Decision {} to make", stem(r)),
         r if r.starts_with("decisions/") => format!("Decision {} {verb}", stem(r)),
         r if r.starts_with("resources/") => {
             format!("Resource {} {verb}", r.trim_start_matches("resources/"))
@@ -1311,7 +1311,7 @@ mod tests {
         assert_eq!(title, "Product Groups: Milestones updated and 3 more");
         assert_eq!(
             body,
-            "Sent from hydraui by aza.\n\n- Milestones updated\n- Ticket PG-3 added\n- Question D-2 asked\n- Decision D-1 updated\n"
+            "Sent from hydraui by aza.\n\n- Milestones updated\n- Ticket PG-3 added\n- Decision D-2 to make\n- Decision D-1 updated\n"
         );
         let (title, _) = describe(
             "Product Groups",
@@ -1339,7 +1339,7 @@ mod tests {
             Some(tmp.path()),
         );
         assert!(
-            body.contains("- Decision D-1 made\n- Question D-2 asked"),
+            body.contains("- Decision D-1 made\n- Decision D-2 to make"),
             "{body}"
         );
         assert_eq!(

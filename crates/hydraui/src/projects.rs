@@ -274,7 +274,7 @@ pub fn ask(
 ) -> Result<String, String> {
     let question = question.trim();
     if question.is_empty() {
-        return Err("Write the question first.".into());
+        return Err("Say what needs deciding first.".into());
     }
     let id = next_id("D", p.decisions.iter().map(|d| d.id.as_str()));
     let d = Decision {

@@ -518,7 +518,9 @@ impl Workspace {
                     };
                     fresh.push(format!(
                         "{who} ({}, {}): {}",
-                        p.file.name, d.id, d.meta.question
+                        p.file.name,
+                        pj::decision_name(&d.id),
+                        d.meta.question
                     ));
                 }
                 now.insert(key);
@@ -1448,12 +1450,12 @@ impl Workspace {
         };
         match pane.and_then(|id| self.panes.get(&id).cloned()) {
             Some(view) if view.update(cx, |v, cx| v.type_prompt(&text, cx)) => {
-                window.push_notification(Notification::success(format!("Recorded, and sent to the session that asked {}.", q.id)), cx);
+                window.push_notification(Notification::success(format!("Recorded, and sent to the session that asked for {}.", pj::decision_name(&q.id))), cx);
             }
             _ => window.push_notification(
                 Notification::info(format!(
-                    "Recorded. The session that asked {} isn't running; it sees the answer when it next reads the project.",
-                    q.id
+                    "Recorded. The session that asked for {} isn't running; it sees the answer when it next reads the project.",
+                    pj::decision_name(&q.id)
                 )),
                 cx,
             ),
@@ -4020,9 +4022,8 @@ impl Workspace {
                             .child(
                                 div()
                                     .text_xs()
-                                    .font_family("monospace")
                                     .text_color(color(theme::TEXT_MUTED))
-                                    .child(d.id.clone()),
+                                    .child(pj::decision_name(&d.id)),
                             )
                             .child(div().flex_1())
                             .child(
@@ -4113,12 +4114,11 @@ impl Workspace {
                         div()
                             .flex_none()
                             .text_xs()
-                            .font_family("monospace")
                             .text_color(color(theme::TEXT_MUTED))
                             .child(if d.meta.ticket.is_empty() {
-                                d.id.clone()
+                                pj::decision_name(&d.id)
                             } else {
-                                format!("{} · {}", d.id, d.meta.ticket)
+                                format!("{} · {}", pj::decision_name(&d.id), d.meta.ticket)
                             }),
                     )
                     .child(div().flex_1())
@@ -4206,7 +4206,7 @@ impl Workspace {
                 .on_click(cx.listener(move |ws, _, window, cx| {
                     let (env, slug, q) = (env.clone(), slug.clone(), q.clone());
                     ws.text_dialog(
-                        format!("Decide {}: {}", q.id, q.meta.question),
+                        format!("Decide {}: {}", pj::decision_name(&q.id), q.meta.question),
                         String::new(),
                         "your answer; it's recorded with your name and the time",
                         move |ws, text, window, cx| {
@@ -5420,11 +5420,11 @@ mod tests {
         let mut t = QuestionToasts::default();
         assert_eq!(t.take(start), None, "nothing new");
         t.pending
-            .push("Claude needs a decision (PG, D-1): Postgres?".into());
+            .push("Claude needs a decision (PG, Decision 1): Postgres?".into());
         assert!(
             t.take(start)
                 .unwrap()
-                .starts_with("Claude needs a decision (PG, D-1)")
+                .starts_with("Claude needs a decision (PG, Decision 1)")
         );
         t.pending
             .extend(["a".to_string(), "b".to_string(), "c".to_string()]);

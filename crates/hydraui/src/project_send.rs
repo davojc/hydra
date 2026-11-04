@@ -767,10 +767,14 @@ fn change_words(status: &str, path: &str, dir: Option<&Path>) -> String {
         "resources/links.toml" => "Links updated".to_string(),
         r if r.starts_with("tickets/") => format!("Ticket {} {verb}", stem(r)),
         r if r.starts_with("decisions/") && added && answered(dir, path) => {
-            format!("Decision {} made", stem(r))
+            format!("{} made", crate::projects::decision_name(&stem(r)))
         }
-        r if r.starts_with("decisions/") && added => format!("Decision {} to make", stem(r)),
-        r if r.starts_with("decisions/") => format!("Decision {} {verb}", stem(r)),
+        r if r.starts_with("decisions/") && added => {
+            format!("{} to make", crate::projects::decision_name(&stem(r)))
+        }
+        r if r.starts_with("decisions/") => {
+            format!("{} {verb}", crate::projects::decision_name(&stem(r)))
+        }
         r if r.starts_with("resources/") => {
             format!("Resource {} {verb}", r.trim_start_matches("resources/"))
         }
@@ -1311,7 +1315,7 @@ mod tests {
         assert_eq!(title, "Product Groups: Milestones updated and 3 more");
         assert_eq!(
             body,
-            "Sent from hydraui by aza.\n\n- Milestones updated\n- Ticket PG-3 added\n- Decision D-2 to make\n- Decision D-1 updated\n"
+            "Sent from hydraui by aza.\n\n- Milestones updated\n- Ticket PG-3 added\n- Decision 2 to make\n- Decision 1 updated\n"
         );
         let (title, _) = describe(
             "Product Groups",
@@ -1339,12 +1343,12 @@ mod tests {
             Some(tmp.path()),
         );
         assert!(
-            body.contains("- Decision D-1 made\n- Decision D-2 to make"),
+            body.contains("- Decision 1 made\n- Decision 2 to make"),
             "{body}"
         );
         assert_eq!(
             pending_changes("?? pg/decisions/D-1.md\0", "pg", Some(tmp.path()))[0].0,
-            "Decision D-1 made"
+            "Decision 1 made"
         );
     }
 }

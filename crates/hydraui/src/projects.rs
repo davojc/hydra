@@ -405,6 +405,16 @@ pub fn new_project(checkout: &Path, name: &str, login: &str) -> Result<String, S
     Ok(slug)
 }
 
+/// How a decision is shown to people: `D-7` is "Decision 7". Files and Claude keep `D-7`.
+pub fn decision_name(id: &str) -> String {
+    match id.strip_prefix("D-") {
+        Some(n) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => {
+            format!("Decision {n}")
+        }
+        _ => id.to_string(),
+    }
+}
+
 /// A code repo a project changes, with the live tickets in it and, for one the planning session
 /// suggested, why.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1124,6 +1134,12 @@ pub fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_decision_is_shown_by_its_number() {
+        assert_eq!(decision_name("D-7"), "Decision 7");
+        assert_eq!(decision_name("odd"), "odd");
+    }
 
     #[test]
     fn os_litter_stays_out_of_the_checkouts_changes() {

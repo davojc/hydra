@@ -12,6 +12,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use hydraui_projects::front_matter;
 use serde::Deserialize;
 
 /// How long a call to GitHub may take.
@@ -335,7 +336,7 @@ pub fn send(r: &dyn Runner, s: &Send) -> Result<Sent, SendError> {
         &["diff-tree", "-r", "--name-status", &up_tree, &tree],
         None,
     )?;
-    let (title, body) = describe(s.name, s.login, &changes);
+    let (title, body) = describe(s.name, s.login, &changes, Some(dir));
     let commit = line(r.git(
         dir,
         &[
@@ -659,8 +660,9 @@ pub fn is_sent(r: &dyn Runner, dir: &Path, slug: &str) -> bool {
 // ---- The pull request's words ----
 
 /// One changed file of a project in words: `status` is git's letter (`A`, `M` or `D`), and
-/// `path` starts with the project's folder.
-fn change_words(status: &str, path: &str) -> String {
+/// `path` starts with the project's folder. With the checkout `dir`, a new decision that's
+/// already answered says so.
+fn change_words(status: &str, path: &str, dir: Option<&Path>) -> String {
     let rest = path.split_once('/').map(|(_, r)| r).unwrap_or(path);
     let (added, removed) = (status.starts_with('A'), status.starts_with('D'));
     let stem = |p: &str| {
@@ -685,6 +687,9 @@ fn change_words(status: &str, path: &str) -> String {
         "milestones.toml" => "Milestones updated".to_string(),
         "resources/links.toml" => "Links updated".to_string(),
         r if r.starts_with("tickets/") => format!("Ticket {} {verb}", stem(r)),
+        r if r.starts_with("decisions/") && added && answered(dir, path) => {
+            format!("Decision {} made", stem(r))
+        }
         r if r.starts_with("decisions/") && added => format!("Question {} asked", stem(r)),
         r if r.starts_with("decisions/") => format!("Decision {} {verb}", stem(r)),
         r if r.starts_with("resources/") => {
@@ -696,9 +701,20 @@ fn change_words(status: &str, path: &str) -> String {
     }
 }
 
+/// Whether the decision at `path` in checkout `dir` has an answer.
+fn answered(dir: Option<&Path>, path: &str) -> bool {
+    dir.and_then(|d| std::fs::read_to_string(d.join(path)).ok())
+        .and_then(|text| {
+            front_matter::parse::<hydraui_projects::DecisionMeta>(&text)
+                .ok()
+                .map(|(meta, _)| !meta.answer.is_empty())
+        })
+        .unwrap_or(false)
+}
+
 /// Project `slug`'s changes not sent yet, from `git status --porcelain -z` output: each in
-/// words, with its file.
-pub fn pending_changes(status: &str, slug: &str) -> Vec<(String, String)> {
+/// words, with its file. `dir` is the checkout, for reading what a new file says.
+pub fn pending_changes(status: &str, slug: &str, dir: Option<&Path>) -> Vec<(String, String)> {
     let prefix = format!("{slug}/");
     let mut out = Vec::new();
     let mut entries = status.split('\0');
@@ -721,7 +737,7 @@ pub fn pending_changes(status: &str, slug: &str) -> Vec<(String, String)> {
         } else {
             "M"
         };
-        out.push((change_words(letter, path), path.to_string()));
+        out.push((change_words(letter, path, dir), path.to_string()));
     }
     out
 }
@@ -733,7 +749,12 @@ pub fn status_text(r: &dyn Runner, dir: &Path) -> Result<String, String> {
 
 /// A pull request's title and body from `git diff-tree --name-status` output: what the change
 /// does, in words, not a diff (spec §5.2).
-pub fn describe(name: &str, login: &str, name_status: &str) -> (String, String) {
+pub fn describe(
+    name: &str,
+    login: &str,
+    name_status: &str,
+    dir: Option<&Path>,
+) -> (String, String) {
     let mut items: Vec<String> = Vec::new();
     let mut created = false;
     for l in name_status.lines() {
@@ -743,7 +764,7 @@ pub fn describe(name: &str, login: &str, name_status: &str) -> (String, String) 
         };
         let rest = path.split_once('/').map(|(_, r)| r).unwrap_or(path);
         created |= rest == "project.toml" && status.starts_with('A');
-        let item = change_words(status, path);
+        let item = change_words(status, path, dir);
         if !items.contains(&item) {
             items.push(item);
         }
@@ -1112,7 +1133,7 @@ mod tests {
     fn pending_changes_read_in_words_with_their_files() {
         let status = "?? pg/tickets/PG-3.md\0 M pg/milestones.toml\0 D pg/resources/old.pdf\0R  pg/a.md\0pg/b.md\0?? mx/spec.md\0";
         assert_eq!(
-            pending_changes(status, "pg"),
+            pending_changes(status, "pg", None),
             vec![
                 (
                     "Ticket PG-3 added".to_string(),
@@ -1134,6 +1155,7 @@ mod tests {
             "Product Groups",
             "aza",
             "M\tpg/milestones.toml\nA\tpg/tickets/PG-3.md\nA\tpg/decisions/D-2.md\nM\tpg/decisions/D-1.md\n",
+            None,
         );
         assert_eq!(title, "Product Groups: Milestones updated and 3 more");
         assert_eq!(
@@ -1144,7 +1166,34 @@ mod tests {
             "Product Groups",
             "aza",
             "A\tpg/project.toml\nA\tpg/spec.md\n",
+            None,
         );
         assert_eq!(title, "Product Groups: new project");
+        // A question answered before it was ever sent goes as a decision made.
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            tmp.path(),
+            "pg/decisions/D-1.md",
+            "+++\nquestion = \"q\"\nanswer = \"Yes\"\n+++\n",
+        );
+        write(
+            tmp.path(),
+            "pg/decisions/D-2.md",
+            "+++\nquestion = \"q\"\n+++\n",
+        );
+        let (_, body) = describe(
+            "Product Groups",
+            "aza",
+            "A\tpg/decisions/D-1.md\nA\tpg/decisions/D-2.md\n",
+            Some(tmp.path()),
+        );
+        assert!(
+            body.contains("- Decision D-1 made\n- Question D-2 asked"),
+            "{body}"
+        );
+        assert_eq!(
+            pending_changes("?? pg/decisions/D-1.md\0", "pg", Some(tmp.path()))[0].0,
+            "Decision D-1 made"
+        );
     }
 }

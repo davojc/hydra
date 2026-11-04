@@ -472,7 +472,7 @@ impl Workspace {
                     .iter()
                     .map(|(id, ..)| format!("{}/tickets/{id}.md", p.slug))
                     .collect();
-                let other: Vec<String> = ps::pending_changes(&e.status, &p.slug)
+                let other: Vec<String> = ps::pending_changes(&e.status, &p.slug, Some(&e.checkout))
                     .into_iter()
                     .filter(|(_, path)| !moved_paths.contains(path) && !path.contains("/progress/"))
                     .map(|(words, _)| words)
@@ -1043,7 +1043,7 @@ impl Workspace {
         };
         let mut changes = v_flex().gap_1();
         if show_changes {
-            for (i, (words, path)) in ps::pending_changes(&e.status, &p.slug)
+            for (i, (words, path)) in ps::pending_changes(&e.status, &p.slug, Some(&e.checkout))
                 .into_iter()
                 .enumerate()
             {

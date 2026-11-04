@@ -129,8 +129,10 @@ pub fn sync_checkout(hydra: &Path, env: &str, repo: &str, dir: &Path) -> Result<
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         env_git(hydra, env, &["clone", &clone_source(repo), &path])?;
+        ignore_os_files(dir);
         return Ok(());
     }
+    ignore_os_files(dir);
     let r = crate::project_send::EnvRunner {
         hydra,
         env,
@@ -144,6 +146,32 @@ pub fn sync_checkout(hydra: &Path, env: &str, repo: &str, dir: &Path) -> Result<
     // Not a plain pull: a file sent and merged is pending here too, and would clash with
     // the same file coming from the repo.
     crate::project_send::settle(&r, dir, &default)
+}
+
+/// Keeps files the OS drops in folders (Finder's `.DS_Store`, Windows' `Thumbs.db`) out of
+/// the checkout's changes, in its local exclude list: never in the repo's own `.gitignore`.
+fn ignore_os_files(dir: &Path) {
+    let exclude = dir.join(".git").join("info").join("exclude");
+    let text = std::fs::read_to_string(&exclude).unwrap_or_default();
+    let missing: Vec<&str> = [".DS_Store", "Thumbs.db", "desktop.ini"]
+        .into_iter()
+        .filter(|name| !text.lines().any(|l| l.trim() == *name))
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    let mut text = text;
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    for name in missing {
+        text.push_str(name);
+        text.push('\n');
+    }
+    if let Some(parent) = exclude.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(exclude, text);
 }
 
 /// Project `slug`'s folder on GitHub, for a GitHub repo (`HEAD` is its default branch).
@@ -1096,6 +1124,20 @@ pub fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn os_litter_stays_out_of_the_checkouts_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let info = tmp.path().join(".git/info");
+        std::fs::create_dir_all(&info).unwrap();
+        std::fs::write(info.join("exclude"), "# git's own\n.DS_Store").unwrap();
+        ignore_os_files(tmp.path());
+        ignore_os_files(tmp.path());
+        assert_eq!(
+            std::fs::read_to_string(info.join("exclude")).unwrap(),
+            "# git's own\n.DS_Store\nThumbs.db\ndesktop.ini\n"
+        );
+    }
 
     #[test]
     fn a_projects_repos_are_confirmed_or_suggested_by_its_tickets_and_claude() {

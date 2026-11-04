@@ -646,3 +646,41 @@ hydraui decided who merges, and it read the lead from the sender's own copy of
 - The gate's unit tests live in hydra (`projects_repo/.github/scripts/test_projects_gate.py`),
   not in the projects repo.
 
+### 14.5 Milestone runs (added 2026-11-04)
+
+This replaces Start work on each ticket (Jordan's call: picking a repo and a skill per ticket
+was wrong). Work starts on a milestone and runs its tickets one after another.
+
+- **Work settings, per engineer and per project** (Settings → On this Mac, kept in
+  `hydraui/projects.toml`, never in the repo):
+  - a **skill for each code repo**, e.g. the frontend developer skill for
+    `iov42/version2-frontend`;
+  - a **testing skill**;
+  - the **model** and **effort** for work sessions.
+
+  Every skill is chosen with a folder picker: the folder that holds its `SKILL.md`. The
+  planning skill is chosen the same way.
+- **Start milestone** on an approved milestone runs its approved tickets in id order, one at a
+  time. Nothing asks for a repo: a ticket names its own. The only question is where a repo
+  is cloned on this Mac, the first time.
+- **Each ticket** gets a fresh session in its own worktree of its repo, following its repo's
+  skill. It commits, pushes, opens a pull request and reports it (`ticket_report`). The
+  ticket goes to In review and the session closes.
+  - **The next ticket starts once the pull request is open**, without waiting for it to merge.
+  - A ticket in the same repo as an earlier one still in review branches off that ticket's
+    branch, so it builds on the earlier work.
+- **The testing skill checks each pull request** before the run moves on. A testing session
+  runs in the ticket's worktree and reports with `ticket_checked`: passed, or failed with
+  what's wrong. A failed check pauses the run.
+- **The run pauses when it needs you:**
+  - a ticket has no repo, or its repo has no skill;
+  - a repo isn't cloned here yet;
+  - a check failed;
+  - **the milestone is finished.**
+
+  A session's own decisions (`ticket_ask`) don't pause anything: the session waits, and your
+  answer goes straight to it. **Carry on** resumes a paused run; **Start** on the next
+  milestone begins it.
+- **The run lives in this hydraui**, not in the repo. After a restart, Start milestone picks up
+  where it was: a ticket that was in progress starts again in its existing worktree.
+

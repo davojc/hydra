@@ -500,7 +500,8 @@ mod tests {
                 "plan_done",
                 "ticket_show",
                 "ticket_ask",
-                "ticket_report"
+                "ticket_report",
+                "ticket_checked"
             ]
         );
         assert_eq!(names, hydra_providers::claude_files::HYDRAUI_TOOLS);

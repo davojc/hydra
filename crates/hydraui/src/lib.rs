@@ -43,6 +43,7 @@ pub mod pipeline;
 pub mod pipeline_card;
 pub mod pipeline_view;
 pub mod project_check;
+pub mod project_run;
 pub mod project_send;
 pub mod projects;
 pub mod quick_open;

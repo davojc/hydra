@@ -144,6 +144,12 @@ pub struct TicketMeta {
     /// The pull requests the work session reported.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prs: Vec<String>,
+    /// What the testing skill found on those pull requests: `passed` or `failed` (spec §14.5).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub check: String,
+    /// The testing session's summary.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub check_note: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub started_by: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

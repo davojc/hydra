@@ -331,7 +331,7 @@ pub fn render_claude_md(env: &str, base: Option<&str>, over: Option<&str>) -> Op
 pub const HYDRAUI_SERVER: &str = "hydraui";
 
 /// The tools that server offers; Claude Code may call them without asking.
-pub const HYDRAUI_TOOLS: [&str; 27] = [
+pub const HYDRAUI_TOOLS: [&str; 28] = [
     "tasks_read",
     "tasks_add",
     "tasks_take",
@@ -359,6 +359,7 @@ pub const HYDRAUI_TOOLS: [&str; 27] = [
     "ticket_show",
     "ticket_ask",
     "ticket_report",
+    "ticket_checked",
 ];
 
 /// Appends each missing `mcp__hydraui__<tool>` to `permissions.allow` in the settings JSON
@@ -495,7 +496,8 @@ mod tests {
                 "mcp__hydraui__plan_done",
                 "mcp__hydraui__ticket_show",
                 "mcp__hydraui__ticket_ask",
-                "mcp__hydraui__ticket_report"
+                "mcp__hydraui__ticket_report",
+                "mcp__hydraui__ticket_checked"
             ])
         );
         assert!(

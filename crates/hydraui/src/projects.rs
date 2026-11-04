@@ -763,14 +763,16 @@ pub fn branch_for(ticket: &Ticket) -> String {
     format!("{}-{words}", ticket.id.to_ascii_lowercase())
 }
 
-/// Makes a worktree of `clone` for work on `ticket`: branch [`branch_for`] from the remote's
-/// default branch (fetched first, as `env`), in `<clone>-worktrees/<branch>`. An existing
-/// worktree on that branch is reused. Returns its folder and branch. Blocks.
+/// Makes a worktree of `clone` for work on `ticket`: branch [`branch_for`] from `base` (an
+/// earlier ticket's branch it builds on, spec §14.5) or else the remote's default branch, both
+/// fetched first as `env`, in `<clone>-worktrees/<branch>`. An existing worktree on that branch
+/// is reused. Returns its folder and branch. Blocks.
 pub fn ticket_worktree(
     hydra: &Path,
     env: &str,
     clone: &Path,
     ticket: &Ticket,
+    base: Option<&str>,
 ) -> Result<(PathBuf, String), String> {
     let branch = branch_for(ticket);
     let name = clone
@@ -800,8 +802,12 @@ pub fn ticket_worktree(
             Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
         }
     };
-    let base =
-        local(&["rev-parse", "--abbrev-ref", "origin/HEAD"]).unwrap_or_else(|_| "HEAD".into());
+    let base = base
+        .map(|b| format!("origin/{b}"))
+        .filter(|b| local(&["rev-parse", "--verify", "--quiet", b]).is_ok())
+        .unwrap_or_else(|| {
+            local(&["rev-parse", "--abbrev-ref", "origin/HEAD"]).unwrap_or_else(|_| "HEAD".into())
+        });
     let target = path.display().to_string();
     let head = format!("refs/heads/{branch}");
     if local(&["rev-parse", "--verify", "--quiet", &head]).is_ok() {
@@ -859,7 +865,8 @@ pub const BUILT_IN_GUIDE: [(&str, &str); 4] = [
 pub enum PlanningGuide {
     /// A skill the engineer installed and picked for the project, by name.
     Skill(String),
-    /// hydraui's built-in guide, written out at this SKILL.md.
+    /// A guide read from this SKILL.md: a skill folder picked in Settings, or hydraui's
+    /// built-in guide written out.
     BuiltIn(PathBuf),
 }
 
@@ -931,6 +938,135 @@ pub fn set_planning_skill(
     hydraui_sets::layout::write_atomic(&file, &doc.to_string()).map_err(|e| e.to_string())
 }
 
+/// How this engineer's hydraui works a project's tickets (spec §14.5): the skill for each code
+/// repo, the testing skill, and the model and effort of work sessions. Local, in
+/// `[work."<repo>/<slug>"]` of projects.toml.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkSetup {
+    /// Skill folders by code repo (`owner/name`).
+    pub skills: BTreeMap<String, PathBuf>,
+    pub testing: Option<PathBuf>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+/// One of a project's work settings.
+#[derive(Debug, Clone, Copy)]
+pub enum WorkSetting<'a> {
+    /// The skill for this code repo.
+    Skill(&'a str),
+    Testing,
+    Model,
+    Effort,
+}
+
+/// Project `slug` of `repo`'s work settings on this machine.
+pub fn work_setup(hydra_root: &Path, repo: &str, slug: &str) -> WorkSetup {
+    let Some(table) = std::fs::read_to_string(config_file(hydra_root))
+        .ok()
+        .and_then(|text| toml::from_str::<toml::Table>(&text).ok())
+    else {
+        return WorkSetup::default();
+    };
+    let Some(work) = table
+        .get("work")
+        .and_then(|w| w.get(format!("{repo}/{slug}")))
+    else {
+        return WorkSetup::default();
+    };
+    let text = |k: &str| {
+        work.get(k)
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    };
+    WorkSetup {
+        skills: work
+            .get("skills")
+            .and_then(|s| s.as_table())
+            .map(|t| {
+                t.iter()
+                    .filter_map(|(k, v)| Some((k.clone(), PathBuf::from(v.as_str()?))))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        testing: text("testing").map(PathBuf::from),
+        model: text("model"),
+        effort: text("effort"),
+    }
+}
+
+/// Sets one of project `slug` of `repo`'s work settings, or with `None` clears it.
+pub fn set_work(
+    hydra_root: &Path,
+    repo: &str,
+    slug: &str,
+    setting: WorkSetting,
+    value: Option<&str>,
+) -> Result<(), String> {
+    let file = config_file(hydra_root);
+    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|e| format!("{}: {e}", file.display()))?;
+    let table_in = |parent: &mut toml_edit::Item, key: &str| -> Result<(), String> {
+        let t = parent
+            .as_table_like_mut()
+            .ok_or("projects.toml isn't laid out as hydraui wrote it")?;
+        if t.get(key).is_none() {
+            let mut new = toml_edit::Table::new();
+            new.set_implicit(true);
+            t.insert(key, toml_edit::Item::Table(new));
+        }
+        Ok(())
+    };
+    let project = format!("{repo}/{slug}");
+    table_in(doc.as_item_mut(), "work")?;
+    table_in(&mut doc["work"], &project)?;
+    let at = &mut doc["work"][project.as_str()];
+    let (holder, key) = match setting {
+        WorkSetting::Skill(code_repo) => {
+            table_in(at, "skills")?;
+            (&mut at["skills"], code_repo)
+        }
+        WorkSetting::Testing => (at, "testing"),
+        WorkSetting::Model => (at, "model"),
+        WorkSetting::Effort => (at, "effort"),
+    };
+    let t = holder
+        .as_table_like_mut()
+        .ok_or("projects.toml isn't laid out as hydraui wrote it")?;
+    match value.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(v) => {
+            t.insert(key, toml_edit::value(v));
+        }
+        None => {
+            t.remove(key);
+        }
+    }
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    hydraui_sets::layout::write_atomic(&file, &doc.to_string()).map_err(|e| e.to_string())
+}
+
+/// The skill folder for `picked`: a folder holding a `SKILL.md`, or a `SKILL.md` itself.
+pub fn skill_folder(picked: &Path) -> Result<PathBuf, String> {
+    let dir = if picked.file_name().is_some_and(|n| n == "SKILL.md") {
+        picked.parent().unwrap_or(picked)
+    } else {
+        picked
+    };
+    if dir.join("SKILL.md").is_file() {
+        Ok(dir.to_path_buf())
+    } else {
+        Err(format!(
+            "{} isn't a skill: pick the folder that holds its SKILL.md.",
+            dir.display()
+        ))
+    }
+}
+
 /// The last sync slot run for project `slug` of `repo` on this machine (`[synced]` in
 /// projects.toml, local `YYYY-MM-DD HH:MM`), spec §7.
 pub fn synced_at(hydra_root: &Path, repo: &str, slug: &str) -> Option<String> {
@@ -972,7 +1108,12 @@ pub fn planning_guide(
     slug: &str,
 ) -> Result<PlanningGuide, String> {
     if let Some(skill) = planning_skill_of(hydra_root, repo, slug) {
-        return Ok(PlanningGuide::Skill(skill));
+        // A folder picked in Settings, or a skill name from before the folder picker.
+        return Ok(if skill.contains('/') || skill.contains('\\') {
+            PlanningGuide::BuiltIn(PathBuf::from(skill).join("SKILL.md"))
+        } else {
+            PlanningGuide::Skill(skill)
+        });
     }
     let dir = state.join("planning-guide");
     for (name, text) in BUILT_IN_GUIDE {
@@ -1154,6 +1295,72 @@ mod tests {
     use super::*;
 
     #[test]
+    fn work_settings_are_kept_per_project_on_this_machine() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        assert_eq!(work_setup(root, "o/r", "pg"), WorkSetup::default());
+        set_work(
+            root,
+            "o/r",
+            "pg",
+            WorkSetting::Skill("iov42/version2-frontend"),
+            Some("/s/fe"),
+        )
+        .unwrap();
+        set_work(
+            root,
+            "o/r",
+            "pg",
+            WorkSetting::Skill("iov42/version-2-backend"),
+            Some("/s/be"),
+        )
+        .unwrap();
+        set_work(root, "o/r", "pg", WorkSetting::Testing, Some("/s/qa")).unwrap();
+        set_work(root, "o/r", "pg", WorkSetting::Model, Some("opus")).unwrap();
+        set_work(root, "o/r", "pg", WorkSetting::Effort, Some("high")).unwrap();
+        set_planning_skill(root, "o/r", "pg", Some("/s/plan")).unwrap();
+        let w = work_setup(root, "o/r", "pg");
+        assert_eq!(w.skills["iov42/version2-frontend"], PathBuf::from("/s/fe"));
+        assert_eq!(w.skills["iov42/version-2-backend"], PathBuf::from("/s/be"));
+        assert_eq!(w.testing, Some(PathBuf::from("/s/qa")));
+        assert_eq!(
+            (w.model.as_deref(), w.effort.as_deref()),
+            (Some("opus"), Some("high"))
+        );
+        // Another project has its own; clearing one leaves the rest.
+        assert_eq!(work_setup(root, "o/r", "mx"), WorkSetup::default());
+        set_work(
+            root,
+            "o/r",
+            "pg",
+            WorkSetting::Skill("iov42/version2-frontend"),
+            None,
+        )
+        .unwrap();
+        set_work(root, "o/r", "pg", WorkSetting::Model, None).unwrap();
+        let w = work_setup(root, "o/r", "pg");
+        assert!(!w.skills.contains_key("iov42/version2-frontend"));
+        assert_eq!((w.model, w.testing), (None, Some(PathBuf::from("/s/qa"))));
+        assert_eq!(
+            planning_skill_of(root, "o/r", "pg").as_deref(),
+            Some("/s/plan")
+        );
+    }
+
+    #[test]
+    fn a_skill_folder_must_hold_a_skill() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(skill_folder(tmp.path()).is_err());
+        std::fs::write(tmp.path().join("SKILL.md"), "---\nname: x\n---\n").unwrap();
+        assert_eq!(skill_folder(tmp.path()).unwrap(), tmp.path());
+        // Picking the SKILL.md itself means its folder.
+        assert_eq!(
+            skill_folder(&tmp.path().join("SKILL.md")).unwrap(),
+            tmp.path()
+        );
+    }
+
+    #[test]
     fn a_milestone_is_shown_by_its_number() {
         assert_eq!(milestone_name("M3"), "Milestone 3");
         assert_eq!(Item::Milestone("M12".into()).name(), "Milestone 12");
@@ -1312,6 +1519,11 @@ mod tests {
             planning_guide(root, &state, "o/r", "mx").unwrap(),
             PlanningGuide::BuiltIn(_)
         ));
+        set_planning_skill(root, "o/r", "pg", Some("/skills/ours")).unwrap();
+        assert_eq!(
+            planning_guide(root, &state, "o/r", "pg").unwrap(),
+            PlanningGuide::BuiltIn(PathBuf::from("/skills/ours/SKILL.md"))
+        );
         set_planning_skill(root, "o/r", "pg", None).unwrap();
         assert_eq!(planning_skill_of(root, "o/r", "pg"), None);
     }

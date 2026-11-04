@@ -21,6 +21,8 @@ pub enum Session {
     Plan { dir: PathBuf, login: String },
     /// Works on ticket `ticket` of project folder `dir`.
     Work { dir: PathBuf, ticket: String },
+    /// Checks ticket `ticket`'s pull requests with the testing skill (spec §14.5).
+    Check { dir: PathBuf, ticket: String },
 }
 
 /// The planning tools, in the order `tools/list` shows them.
@@ -39,7 +41,12 @@ pub const PLAN: [&str; 11] = [
 ];
 
 /// The work tools.
-pub const WORK: [&str; 3] = ["ticket_show", "ticket_ask", "ticket_report"];
+pub const WORK: [&str; 4] = [
+    "ticket_show",
+    "ticket_ask",
+    "ticket_report",
+    "ticket_checked",
+];
 
 /// Who asked a question a Claude session raised: its answer goes back to the session.
 pub const ASKED_BY_CLAUDE: &str = "claude";
@@ -230,6 +237,16 @@ pub fn schemas() -> Vec<Value> {
             }),
             vec!["prs", "summary"],
         ),
+        tool(
+            "ticket_checked",
+            "Testing: report your check of the ticket's pull requests, done with the testing \
+             skill. A pass lets the milestone run move on; a fail pauses it for the lead.",
+            json!({
+                "passed": {"type": "boolean", "description": "Whether the work passes."},
+                "summary": s("What you checked and, if it failed, what's wrong."),
+            }),
+            vec!["passed", "summary"],
+        ),
     ]
 }
 
@@ -243,7 +260,19 @@ pub fn call(reg: &Registry, token: &str, name: &str, args: &Value) -> Option<Out
     let out = match (session, PLAN.contains(&name)) {
         (Some(Session::Plan { .. }), true) if name == "plan_done" => done(reg, token, args),
         (Some(Session::Plan { dir, login }), true) => plan(dir, login, name, args),
-        (Some(Session::Work { dir, ticket }), false) => work(dir, ticket, name, args),
+        (Some(Session::Work { .. }), false) if name == "ticket_checked" => Err(
+            "Only a testing session reports a check: this session does the work and reports it \
+             with ticket_report."
+                .into(),
+        ),
+        (Some(Session::Check { .. }), false) if name == "ticket_report" => Err(
+            "A testing session reports with ticket_checked; ticket_report is the work \
+             session's."
+                .into(),
+        ),
+        (Some(Session::Work { dir, ticket } | Session::Check { dir, ticket }), false) => {
+            work(dir, ticket, name, args)
+        }
         _ if PLAN.contains(&name) => Err("Only a project's planning session can use the plan \
              tools: start one from the project in hydraui's Projects tab."
             .into()),
@@ -697,6 +726,27 @@ fn work(dir: &Path, ticket: &str, name: &str, args: &Value) -> Result<String, St
             Ok(format!(
                 "Reported: {} is in review with its pull requests.",
                 t.id
+            ))
+        }
+        "ticket_checked" => {
+            let passed = args
+                .get("passed")
+                .and_then(Value::as_bool)
+                .ok_or("Say whether the check passed (passed: true or false).")?;
+            let summary = need(args, "summary")?;
+            let mut t = t.clone();
+            t.meta.check = if passed { "passed" } else { "failed" }.into();
+            t.meta.check_note = summary.clone();
+            t.body = format!(
+                "{}\n\n## Check\n\n{}: {summary}\n",
+                t.body.trim_end(),
+                if passed { "Passed" } else { "Failed" }
+            );
+            repo::write_ticket(dir, &t).map_err(|e| e.to_string())?;
+            Ok(format!(
+                "Recorded: {}'s check {}.",
+                t.id,
+                if passed { "passed" } else { "failed" }
             ))
         }
         _ => Err(format!("unknown tool {name}")),
@@ -1295,5 +1345,63 @@ mod tests {
         assert!(run(&reg, "plan", "ticket_show", json!({})).is_error);
         assert!(run(&reg, "stranger", "plan_show", json!({})).is_error);
         assert!(call(&reg, "plan", "tasks_read", &json!({})).is_none());
+    }
+
+    #[test]
+    fn a_testing_session_checks_a_ticket_and_only_that() {
+        let (_tmp, mut reg, dir) = setup();
+        run(
+            &reg,
+            "plan",
+            "plan_propose_milestone",
+            json!({"title": "Model", "points": [{"point": "x", "detail": "y"}]}),
+        );
+        approve(&dir, "M1");
+        run(
+            &reg,
+            "plan",
+            "plan_propose_ticket",
+            json!({"milestone": "M1", "title": "Schema", "description": "x", "repo": "iov42/a"}),
+        );
+        approve(&dir, "PG-1");
+        reg.project_sessions.insert(
+            "check".into(),
+            Session::Check {
+                dir: dir.clone(),
+                ticket: "PG-1".into(),
+            },
+        );
+        reg.project_sessions.insert(
+            "work".into(),
+            Session::Work {
+                dir: dir.clone(),
+                ticket: "PG-1".into(),
+            },
+        );
+        assert!(!run(&reg, "check", "ticket_show", json!({})).is_error);
+        let report = json!({"prs": ["https://github.com/iov42/a/pull/1"], "summary": "x"});
+        assert!(run(&reg, "check", "ticket_report", report).is_error);
+        let checked = json!({"passed": false, "summary": "Two tests fail in the stepper."});
+        assert!(run(&reg, "work", "ticket_checked", checked.clone()).is_error);
+        let out = run(&reg, "check", "ticket_checked", checked);
+        assert!(!out.is_error, "{}", out.text);
+        let t = repo::load(&dir).unwrap().tickets.remove(0);
+        assert_eq!(
+            (t.meta.check.as_str(), t.meta.check_note.as_str()),
+            ("failed", "Two tests fail in the stepper.")
+        );
+        assert!(
+            t.body
+                .contains("## Check\n\nFailed: Two tests fail in the stepper.")
+        );
+        assert!(
+            run(
+                &reg,
+                "check",
+                "ticket_checked",
+                json!({"summary": "no verdict"})
+            )
+            .is_error
+        );
     }
 }

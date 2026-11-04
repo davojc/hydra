@@ -2273,7 +2273,9 @@ impl Workspace {
         let env_bg = env.clone();
         cx.spawn_in(window, async move |this, cx| {
             let made = cx
-                .background_spawn(async move { pj::ticket_worktree(&exe, &env_bg, &clone, &t) })
+                .background_spawn(
+                    async move { pj::ticket_worktree(&exe, &env_bg, &clone, &t, None) },
+                )
                 .await;
             let _ = this.update_in(cx, |ws, window, cx| match made {
                 Ok((path, branch)) => {

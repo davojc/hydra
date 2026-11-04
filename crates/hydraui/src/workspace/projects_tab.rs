@@ -3623,7 +3623,10 @@ impl Workspace {
                                 "Pick up planning this project. {} Then call plan_show, sum up \
                                  what's approved, what's waiting for review and what had \
                                  changes asked, and act on any notes. Rewrite with plan_revise \
-                                 any milestone still to review that doesn't meet its rules.",
+                                 any milestone still to review that doesn't meet its rules, give \
+                                 every ticket without a repo its repo (plan_revise), and suggest \
+                                 with plan_suggest_repo any repo the project will change that \
+                                 plan_show's Repos doesn't list.",
                                 guide.instruction()
                             );
                             ws.tell_planner(&env_b, &slug_b, prompt, window, cx)

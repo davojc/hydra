@@ -2686,11 +2686,12 @@ impl Workspace {
             if e.fetched && shown.is_empty() {
                 section = section.child(muted("No active projects. New project starts one."));
             }
-            let mut grid = h_flex().flex_wrap().gap_4().items_start();
+            // One full-width row per project, stacked.
+            let mut rows = v_flex().w_full().max_w(px(1400.)).gap_3();
             for p in shown {
-                grid = grid.child(self.project_card(env, e, p, &today, cx));
+                rows = rows.child(self.project_card(env, e, p, &today, cx));
             }
-            section = section.child(grid);
+            section = section.child(rows);
             for (slug, why) in &e.broken {
                 section = section.child(notice(
                     &format!("{slug} doesn't read: {why}"),
@@ -2747,11 +2748,115 @@ impl Workspace {
             env: env.to_string(),
             slug: p.slug.clone(),
         };
-        let mut card = v_flex()
-            .id(SharedString::from(format!("project-{env}-{}", p.slug)))
-            .w(px(340.))
+        // What needs attention, on the right of the header: short labels, so a row is fine.
+        let mut flags = h_flex().flex_none().gap_3().items_center().text_xs();
+        if mine > 0 {
+            flags = flags.child(
+                div()
+                    .text_color(color(theme::AMBER))
+                    .child(format!("{mine} waiting on you")),
+            );
+        }
+        if rm + rt > 0 {
+            flags = flags.child(
+                div()
+                    .text_color(color(theme::AMBER))
+                    .child(format!("{} to review", rm + rt)),
+            );
+        }
+        if unsent > 0 {
+            flags = flags.child(
+                div()
+                    .text_color(color(theme::TEAL))
+                    .child(format!("{unsent} not sent yet")),
+            );
+        }
+        flags = flags.child(
+            div()
+                .text_color(color(theme::TEXT_SECONDARY))
+                .child(format!(
+                    "{open} open question{}",
+                    if open == 1 { "" } else { "s" }
+                )),
+        );
+        let header = h_flex()
             .gap_3()
-            .p_4()
+            .items_center()
+            .child(div().flex_none().text_lg().child(p.file.name.clone()))
+            .child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .font_family("monospace")
+                    .text_color(color(theme::TEXT_MUTED))
+                    .child(p.file.key.clone()),
+            )
+            .when(p.file.status != ProjectStatus::Active, |d| {
+                d.child(pill(
+                    status_word(p.file.status),
+                    theme::TEXT_SECONDARY,
+                    theme::SURFACE,
+                ))
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .text_color(color(theme::TEXT_SECONDARY))
+                    .child(role),
+            )
+            .child(flags);
+
+        // Each milestone as a small tile: title, bar and count, side by side, wrapping.
+        let live: Vec<&Milestone> = p
+            .milestones
+            .iter()
+            .filter(|m| m.review != Review::Rejected)
+            .collect();
+        let mut strip = h_flex().flex_wrap().gap_3();
+        for m in &live {
+            let c = counts.get(&m.id).copied().unwrap_or_default();
+            let late = is_late(m, &c, today);
+            strip = strip.child(
+                v_flex()
+                    .w(px(210.))
+                    .flex_none()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .truncate()
+                            .child(format!("{} {}", m.id, m.title)),
+                    )
+                    .child(status_bar(&c, 6.))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .text_xs()
+                            .child(div().text_color(color(theme::TEXT_MUTED)).child(format!(
+                                "{}/{} done",
+                                c.done,
+                                c.total()
+                            )))
+                            .when(m.review.waiting(), |d| {
+                                d.child(
+                                    div().text_color(color(theme::AMBER)).child("review needed"),
+                                )
+                            })
+                            .when(late, |d| {
+                                d.child(div().text_color(color(theme::RED)).child("late"))
+                            }),
+                    ),
+            );
+        }
+        v_flex()
+            .id(SharedString::from(format!("project-{env}-{}", p.slug)))
+            .w_full()
+            .gap_3()
+            .px_5()
+            .py_4()
             .rounded_lg()
             .bg(color(theme::RAISED))
             .border_1()
@@ -2759,109 +2864,18 @@ impl Workspace {
             .cursor_pointer()
             .hover(|s| s.border_color(color(theme::TEAL_BORDER)))
             .on_click(cx.listener(move |ws, _, _, cx| ws.go(page.clone(), cx)))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_baseline()
-                    .child(div().text_lg().child(p.file.name.clone()))
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_family("monospace")
-                            .text_color(color(theme::TEXT_MUTED))
-                            .child(p.file.key.clone()),
-                    )
-                    .when(p.file.status != ProjectStatus::Active, |d| {
-                        d.child(pill(
-                            status_word(p.file.status),
-                            theme::TEXT_SECONDARY,
-                            theme::SURFACE,
-                        ))
-                    }),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(color(theme::TEXT_SECONDARY))
-                    .child(role),
-            );
-        let live: Vec<&Milestone> = p
-            .milestones
-            .iter()
-            .filter(|m| m.review != Review::Rejected)
-            .collect();
-        if live.is_empty() {
-            card = card.child(muted(if p.spec.trim().is_empty() {
-                "Not started: attach resources, then Start project."
+            .child(header)
+            .child(if live.is_empty() {
+                muted(if p.spec.trim().is_empty() {
+                    "Not started: attach resources, then Start project."
+                } else {
+                    "No milestones yet."
+                })
+                .into_any_element()
             } else {
-                "No milestones yet."
-            }));
-        }
-        for m in live {
-            let c = counts.get(&m.id).copied().unwrap_or_default();
-            card = card.child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        h_flex()
-                            .text_xs()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .truncate()
-                                    .child(format!("{} {}", m.id, m.title)),
-                            )
-                            .when(m.review != Review::Approved, |d| {
-                                d.child(
-                                    div()
-                                        .text_color(color(theme::AMBER))
-                                        .child(m.review.label()),
-                                )
-                            })
-                            .when(is_late(m, &c, today), |d| {
-                                d.child(div().text_color(color(theme::RED)).child("late"))
-                            })
-                            .child(div().text_color(color(theme::TEXT_MUTED)).child(format!(
-                                "{}/{}",
-                                c.done,
-                                c.total()
-                            ))),
-                    )
-                    .child(status_bar(&c, 6.)),
-            );
-        }
-        let mut foot = h_flex()
-            .gap_3()
-            .flex_wrap()
-            .text_xs()
-            .text_color(color(theme::TEXT_SECONDARY));
-        foot = foot.child(format!(
-            "{open} open question{}",
-            if open == 1 { "" } else { "s" }
-        ));
-        if rm + rt > 0 {
-            foot = foot.child(
-                div()
-                    .text_color(color(theme::AMBER))
-                    .child(format!("{} to review", rm + rt)),
-            );
-        }
-        if mine > 0 {
-            foot = foot.child(
-                div()
-                    .text_color(color(theme::AMBER))
-                    .child(format!("{mine} waiting on you")),
-            );
-        }
-        if unsent > 0 {
-            foot = foot.child(
-                div()
-                    .text_color(color(theme::TEAL))
-                    .child(format!("{unsent} not sent yet")),
-            );
-        }
-        card.child(foot).into_any_element()
+                strip.into_any_element()
+            })
+            .into_any_element()
     }
 
     fn project_page(&self, env: &str, slug: &str, cx: &mut Context<Self>) -> AnyElement {

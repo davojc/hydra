@@ -91,6 +91,9 @@ pub(super) struct ProjectsTab {
     open_points: BTreeSet<(String, String, usize)>,
     /// The send bar lists the changes not sent yet.
     show_changes: bool,
+    /// A milestone page shows the milestone's points (folded away by default, so the board
+    /// is in view).
+    show_about: bool,
 }
 
 /// One environment's projects, as last read.
@@ -307,6 +310,7 @@ impl Workspace {
                 show_claude: true,
                 open_points: BTreeSet::new(),
                 show_changes: false,
+                show_about: false,
             });
         }
         self.projects_data.next_fetch = None;
@@ -3927,12 +3931,29 @@ impl Workspace {
                 .child(new_button("New bug", TicketKind::Bug, cx)),
         );
         if !m.description.is_empty() {
+            let about = self.projects.as_ref().is_some_and(|t| t.show_about);
             head = head.child(
-                div()
+                h_flex()
+                    .id("toggle-about")
+                    .gap_2()
+                    .items_center()
+                    .cursor_pointer()
                     .text_sm()
                     .text_color(color(theme::TEXT_SECONDARY))
-                    .child(m.description.clone()),
+                    .hover(|s| s.text_color(color(theme::TEXT)))
+                    .child(div().text_xs().child(if about { "▾" } else { "▸" }))
+                    .child("About this milestone")
+                    .on_click(cx.listener(|ws, _, _, cx| {
+                        ws.tab_flag(cx, |t| t.show_about = !t.show_about)
+                    })),
             );
+            if about {
+                head = head.child(
+                    div()
+                        .max_w(px(900.))
+                        .child(self.milestone_points(env, slug, m, lead, cx)),
+                );
+            }
         }
         head = head
             .child(div().w(px(480.)).child(status_bar(&c, 10.)))
@@ -4027,6 +4048,9 @@ impl Workspace {
         let (env_s, slug_s) = (env.to_string(), p.slug.clone());
         let mut card = v_flex()
             .id(SharedString::from(format!("ticket-{}", t.id)))
+            .w_full()
+            .min_w_0()
+            .overflow_hidden()
             .gap_1()
             .p_2()
             .rounded_md()
@@ -4043,6 +4067,9 @@ impl Workspace {
             .child(
                 h_flex()
                     .gap_2()
+                    .gap_y_1()
+                    .flex_wrap()
+                    .items_center()
                     .child(
                         div()
                             .text_xs()

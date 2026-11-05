@@ -2647,8 +2647,10 @@ impl Workspace {
             Slot::Repo(r) => format!("repo-{r}"),
             Slot::Testing => "testing".to_string(),
         };
+        let testing = matches!(slot, Slot::Testing);
         let (e1, s1, slot1) = (env.to_string(), slug.to_string(), slot.clone());
         let (e2, s2, slot2) = (env.to_string(), slug.to_string(), slot);
+        let (e3, s3) = (env.to_string(), slug.to_string());
         h_flex()
             .gap_4()
             .py_2()
@@ -2663,6 +2665,28 @@ impl Workspace {
                     .child(label.to_string()),
             )
             .child(div().flex_1().min_w_0().truncate().text_sm().child(value))
+            .when(testing, |row| {
+                // Checks pull requests with no skill named (spec §14.5).
+                row.child(
+                    Button::new("team-testing")
+                        .label("Team skills")
+                        .ghost()
+                        .small()
+                        .tooltip(
+                            "Check with the repo's own skills and what the skill router asks for",
+                        )
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.set_work_setting(
+                                &e3,
+                                &s3,
+                                pj::WorkSetting::Testing,
+                                Some(pj::TEAM_TESTING),
+                                window,
+                                cx,
+                            )
+                        })),
+                )
+            })
             .child(
                 Button::new(SharedString::from(format!("choose-{id}")))
                     .label("Choose folder…")
@@ -3096,12 +3120,11 @@ impl Workspace {
                 .iter()
                 .find(|(r, _)| r.eq_ignore_ascii_case(&t.meta.repo))
                 .map(|(_, s)| s.clone()),
-            Phase::Check => Some(
-                setup
-                    .testing
-                    .clone()
-                    .ok_or("its testing skill isn't set any more")?,
-            ),
+            Phase::Check => match setup.testing.clone() {
+                Some(pj::Testing::Skill(s)) => Some(s),
+                Some(pj::Testing::Team) => None,
+                None => return Err("its testing skill isn't set any more".into()),
+            },
         };
         let clone = pj::clone_of(self.hydra.paths.root(), &t.meta.repo);
         let skill = pj::SkillSource::of(chosen.as_deref(), clone.as_deref()).folder_in(&path);
@@ -5806,9 +5829,10 @@ impl Workspace {
                     slug,
                     Slot::Testing,
                     "Testing skill",
-                    match setup.testing.as_deref() {
+                    match setup.testing.as_ref() {
+                        Some(pj::Testing::Team) => TEAM_TESTING_LABEL.to_string(),
                         // In whichever of the project's repos holds it, if any.
-                        Some(t) => clones
+                        Some(pj::Testing::Skill(t)) => clones
                             .iter()
                             .map(|c| pj::SkillSource::of(Some(t), Some(c)))
                             .find(|s| matches!(s, pj::SkillSource::InRepo(_)))
@@ -5865,6 +5889,9 @@ enum Slot {
 
 /// How the settings name hydraui's built-in planning guide, the choice when no skill is picked.
 const BUILT_IN_GUIDE_LABEL: &str = "hydraui's built-in guide";
+
+/// How the settings name checking pull requests with the team's skills, no skill named.
+const TEAM_TESTING_LABEL: &str = "Team skills: the repo's own and what the skill router asks for";
 
 /// A project setting the lead changes (spec §9.1, step 5).
 #[derive(Debug, Clone, Copy)]
@@ -6159,7 +6186,8 @@ fn check_prompt(p: &Project, t: &Ticket, skill: Option<&Path>) -> String {
         "You're checking ticket {id} \"{title}\" of the project \"{name}\": its pull \
          request(s) {prs}, checked out in this worktree. {follow} Call ticket_show for what \
          the ticket asks and how to tell it's done.\n\
-         Check that the work does what the ticket says and passes the skill's checks. You may \
+         Check that the work does what the ticket says and passes the checks its skills call \
+         for. You may \
          fix small problems within the ticket's scope: commit and push them to this branch. \
          Finish with ticket_checked: passed, or not with what's wrong. A failed check pauses \
          the milestone for the lead. If you need a decision, ask it with ticket_ask.",
@@ -6598,6 +6626,14 @@ mod tests {
                 && w.contains("iov42/fe")
         );
         let c = check_prompt(&p, &t, Some(Path::new("/skills/qa")));
+        // Checked with the team's skills alone: no skill named, the router's still apply.
+        let team = check_prompt(&p, &t, None);
+        assert!(
+            team.contains("ticket_checked")
+                && team.contains("skill router")
+                && !team.contains("SKILL.md"),
+            "{team}"
+        );
         assert!(
             c.contains("/skills/qa")
                 && c.contains("ticket_checked")
@@ -6616,7 +6652,7 @@ mod tests {
         assert!(w.contains("the angular skill with the Skill tool"), "{w}");
         // Every session loads the team's skills up front, since the skill router blocks
         // changes until they're loaded, and passes them on to subagents.
-        for prompt in [&w, &own, &c] {
+        for prompt in [&w, &own, &c, &team] {
             assert!(
                 prompt.contains("skill router") && prompt.contains("subagent"),
                 "{prompt}"

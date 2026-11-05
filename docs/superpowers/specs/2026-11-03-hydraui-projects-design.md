@@ -682,6 +682,13 @@ was wrong). Work starts on a milestone and runs its tickets one after another.
     its folder's, and `plugin:skill` when the folder sits in a plugin's `skills/` (its
     `.claude-plugin/plugin.json` names the plugin). If Claude doesn't know the skill, it reads
     the folder's `SKILL.md`.
+  - **Testing with the team's skills.** Settings' testing row has **Team skills** besides
+    Choose folder and Clear. It is written as `testing = "team"` (a chosen folder is always a
+    full path). Each pull request is still checked, by a session that names no skill: it
+    follows the repo's own and loads what the router asks for (`qa-engineer:qa-engineer` for
+    version2-frontend's `e2e/`). Clear still means pull requests aren't checked. Leaving a
+    repo's skill unset already works this way for work sessions, and planning has its built-in
+    guide, since the router doesn't cover the projects repo.
 - **Start milestone** on an approved milestone runs its approved tickets in id order, one at a
   time. Nothing asks for a repo: a ticket names its own. The only question is where a repo
   is cloned on this Mac, the first time.

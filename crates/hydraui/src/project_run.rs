@@ -155,7 +155,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
-            testing: testing.then(|| PathBuf::from("/qa")),
+            testing: testing.then(|| crate::projects::Testing::Skill(PathBuf::from("/qa"))),
             ..Default::default()
         }
     }

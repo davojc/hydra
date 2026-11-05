@@ -1238,10 +1238,23 @@ pub fn set_planning_skill(
 pub struct WorkSetup {
     /// Skill folders by code repo (`owner/name`).
     pub skills: BTreeMap<String, PathBuf>,
-    pub testing: Option<PathBuf>,
+    /// How each pull request is checked before the run moves on; `None`: it isn't.
+    pub testing: Option<Testing>,
     pub model: Option<String>,
     pub effort: Option<String>,
 }
+
+/// How a milestone run checks each pull request (spec §14.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Testing {
+    /// With this skill folder.
+    Skill(PathBuf),
+    /// With no skill named: the repo's own and those the team's skill router asks for.
+    Team,
+}
+
+/// How projects.toml writes `Testing::Team`; a chosen folder is always a full path.
+pub const TEAM_TESTING: &str = "team";
 
 /// One of a project's work settings.
 #[derive(Debug, Clone, Copy)]
@@ -1283,7 +1296,10 @@ pub fn work_setup(hydra_root: &Path, repo: &str, slug: &str) -> WorkSetup {
                     .collect()
             })
             .unwrap_or_default(),
-        testing: text("testing").map(PathBuf::from),
+        testing: text("testing").map(|t| match t.as_str() {
+            TEAM_TESTING => Testing::Team,
+            _ => Testing::Skill(PathBuf::from(t)),
+        }),
         model: text("model"),
         effort: text("effort"),
     }
@@ -1704,7 +1720,7 @@ mod tests {
         let w = work_setup(root, "o/r", "pg");
         assert_eq!(w.skills["iov42/version2-frontend"], PathBuf::from("/s/fe"));
         assert_eq!(w.skills["iov42/version-2-backend"], PathBuf::from("/s/be"));
-        assert_eq!(w.testing, Some(PathBuf::from("/s/qa")));
+        assert_eq!(w.testing, Some(Testing::Skill("/s/qa".into())));
         assert_eq!(
             (w.model.as_deref(), w.effort.as_deref()),
             (Some("opus"), Some("high"))
@@ -1722,11 +1738,24 @@ mod tests {
         set_work(root, "o/r", "pg", WorkSetting::Model, None).unwrap();
         let w = work_setup(root, "o/r", "pg");
         assert!(!w.skills.contains_key("iov42/version2-frontend"));
-        assert_eq!((w.model, w.testing), (None, Some(PathBuf::from("/s/qa"))));
+        assert_eq!(
+            (w.model, w.testing),
+            (None, Some(Testing::Skill("/s/qa".into())))
+        );
         assert_eq!(
             planning_skill_of(root, "o/r", "pg").as_deref(),
             Some("/s/plan")
         );
+    }
+
+    #[test]
+    fn pull_requests_can_be_checked_with_the_team_skills_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        set_work(root, "o/r", "pg", WorkSetting::Testing, Some(TEAM_TESTING)).unwrap();
+        assert_eq!(work_setup(root, "o/r", "pg").testing, Some(Testing::Team));
+        set_work(root, "o/r", "pg", WorkSetting::Testing, None).unwrap();
+        assert_eq!(work_setup(root, "o/r", "pg").testing, None);
     }
 
     #[test]

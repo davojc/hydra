@@ -2932,7 +2932,8 @@ impl Workspace {
         self.advance_run(env, slug, window, cx);
     }
 
-    /// Carry on: asks where a repo is cloned when that's what the run waits for, then goes on.
+    /// Carry on: asks where a repo is cloned, or which repo a ticket is in, when that's what
+    /// the run waits for, then goes on.
     fn carry_on_run(&mut self, env: &str, slug: &str, window: &mut Window, cx: &mut Context<Self>) {
         let key = (env.to_string(), slug.to_string());
         let Some(run) = self.projects_data.runs.get_mut(&key) else {
@@ -2941,6 +2942,10 @@ impl Workspace {
         run.paused = None;
         let milestone = run.milestone.clone();
         let step = self.run_step(env, slug, &milestone);
+        if let Some(Step::NeedRepo(ticket)) = step {
+            self.ask_ticket_repo(env, slug, &ticket, window, cx);
+            return;
+        }
         if let Some(Step::NeedClone(repo)) = step {
             window.push_notification(
                 Notification::info(format!(
@@ -2962,6 +2967,89 @@ impl Workspace {
             return;
         }
         self.advance_run(env, slug, window, cx);
+    }
+
+    /// Asks which of the project's code repos `ticket` is in, writes it into the ticket and
+    /// carries the run on (spec §14.5): tickets written before they named a repo don't.
+    fn ask_ticket_repo(
+        &mut self,
+        env: &str,
+        slug: &str,
+        ticket: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(p) = self.find_project(env, slug) else {
+            return;
+        };
+        let Some(t) = p.tickets.iter().find(|t| t.id == ticket) else {
+            return;
+        };
+        let (title, repos) = (t.meta.title.clone(), p.file.repos.clone());
+        if repos.is_empty() {
+            window.push_notification(
+                Notification::error(format!(
+                    "{ticket} doesn't say which repo it's in, and the project has no code \
+                     repos. Add them in its Settings."
+                )),
+                cx,
+            );
+            return;
+        }
+        let workspace = cx.entity();
+        let (env, slug, ticket) = (env.to_string(), slug.to_string(), ticket.to_string());
+        window.open_dialog(cx, move |dialog, _, _| {
+            let mut choices = v_flex().gap_2();
+            for r in &repos {
+                let (ws, env, slug, ticket, repo) = (
+                    workspace.clone(),
+                    env.clone(),
+                    slug.clone(),
+                    ticket.clone(),
+                    r.clone(),
+                );
+                choices = choices.child(
+                    Button::new(SharedString::from(format!("ticket-repo-{r}")))
+                        .label(r.clone())
+                        .w_full()
+                        .on_click(move |_, window, cx| {
+                            window.close_dialog(cx);
+                            ws.update(cx, |ws, cx| {
+                                let set = ws.edit_project(
+                                    &env,
+                                    &slug,
+                                    |dir, p, _| {
+                                        let t = p
+                                            .tickets
+                                            .iter()
+                                            .find(|t| t.id == ticket)
+                                            .ok_or("the ticket is gone")?;
+                                        pj::edit_ticket(dir, t, &t.meta.title, &t.body, &repo)
+                                    },
+                                    window,
+                                    cx,
+                                );
+                                match set {
+                                    Ok(()) => ws.carry_on_run(&env, &slug, window, cx),
+                                    Err(e) => window.push_notification(Notification::error(e), cx),
+                                }
+                            });
+                        }),
+                );
+            }
+            dialog
+                .title(format!("Which repo is {ticket} in?"))
+                .w(px(520.))
+                .child(
+                    v_flex()
+                        .gap_3()
+                        .child(div().text_sm().whitespace_normal().child(title.clone()))
+                        .child(muted(
+                            "It doesn't say yet. Its work session runs in a worktree of this repo.",
+                        ))
+                        .child(choices),
+                )
+        });
     }
 
     fn stop_run(&mut self, env: &str, slug: &str, cx: &mut Context<Self>) {
@@ -3002,6 +3090,14 @@ impl Workspace {
                 if let Some(run) = self.projects_data.runs.get_mut(&key) {
                     run.paused = Some(why);
                 }
+            }
+            Step::NeedRepo(ticket) => {
+                if let Some(run) = self.projects_data.runs.get_mut(&key) {
+                    run.paused = Some(format!(
+                        "{ticket} doesn't say which repo it's in. Carry on asks."
+                    ));
+                }
+                self.ask_ticket_repo(env, slug, &ticket, window, cx);
             }
             Step::NeedClone(repo) => {
                 if let Some(run) = self.projects_data.runs.get_mut(&key) {

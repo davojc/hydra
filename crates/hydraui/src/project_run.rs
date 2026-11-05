@@ -17,6 +17,8 @@ pub enum Step {
     Pause(String),
     /// Wait for the lead to say where this code repo is cloned on this machine.
     NeedClone(String),
+    /// Ask which of the project's code repos this ticket is in: it doesn't say.
+    NeedRepo(String),
     /// Every ticket is done, in review and checked, or dropped.
     Finished,
 }
@@ -79,7 +81,7 @@ pub fn next_step(
             ));
         }
         if t.meta.repo.is_empty() {
-            return Step::Pause(format!("{} doesn't name its repo: set it with Edit…", t.id));
+            return Step::NeedRepo(t.id.clone());
         }
         if !cloned(&t.meta.repo) {
             return Step::NeedClone(t.meta.repo.clone());
@@ -204,7 +206,11 @@ mod tests {
     fn it_pauses_for_what_only_the_lead_can_give() {
         let mut p = project(vec![ticket("PG-1", "", TicketStatus::Todo)]);
         let s = setup(false);
-        assert!(matches!(next_step(&p, "M1", &s, |_| true), Step::Pause(w) if w.contains("repo")));
+        // A ticket that doesn't say which repo it's in: the run asks, rather than stopping.
+        assert_eq!(
+            next_step(&p, "M1", &s, |_| true),
+            Step::NeedRepo("PG-1".into())
+        );
         // A repo with no skill chosen goes ahead with the repo's own CLAUDE.md and skills.
         p.tickets[0].meta.repo = "iov42/svc-usage".into();
         assert_eq!(next_step(&p, "M1", &s, |_| true), Step::Work("PG-1".into()));

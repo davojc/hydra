@@ -1834,18 +1834,19 @@ impl Workspace {
     fn linear_row(&self, env: &str, p: &Project, cx: &mut Context<Self>) -> gpui::Div {
         let key = (env.to_string(), p.slug.clone());
         let checking = self.projects_data.linear_checking.contains(&key);
-        let (e1, s1, url1) = (env.to_string(), p.slug.clone(), p.file.linear.clone());
+        let (e1, s1, url1) = (env.to_string(), p.slug.clone(), p.file.linear.join(" "));
         let link = Button::new("link-linear")
             .label(if p.file.linear.is_empty() {
-                "Link Linear project…"
+                "Link Linear…"
             } else {
-                "Change link…"
+                "Change links…"
             })
             .ghost()
             .xsmall()
             .tooltip(
-                "Where this project's requirements also live in Linear: hydraui reads it, and \
-                 Claude proposes what its changes mean for the plan",
+                "Where this project's requirements also live in Linear (projects, or tickets \
+                 with their sub-issues and comments): hydraui reads them, and Claude proposes \
+                 what their changes mean for the plan",
             )
             .on_click(cx.listener(move |ws, _, window, cx| {
                 ws.link_linear_dialog(e1.clone(), s1.clone(), url1.clone(), window, cx)
@@ -1867,7 +1868,10 @@ impl Workspace {
                 div()
                     .text_xs()
                     .text_color(color(theme::TEXT_SECONDARY))
-                    .child(format!("Linear{when}")),
+                    .child(match p.file.linear.len() {
+                        1 => format!("Linear{when}"),
+                        n => format!("Linear, {n} links{when}"),
+                    }),
             )
             .child(
                 Button::new("check-linear")
@@ -1880,7 +1884,7 @@ impl Workspace {
                     .xsmall()
                     .disabled(checking)
                     .tooltip(
-                        "Reads the Linear project now; what changed since the last read goes \
+                        "Reads the linked Linear now; what changed since the last read goes \
                          to Claude, whose proposed changes show here. It's also read at each \
                          sync.",
                     )
@@ -1900,18 +1904,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.text_dialog(
-            "Link a Linear project".into(),
+            "Link Linear".into(),
             current,
-            "its link, e.g. https://linear.app/iov42/project/mapping-ux-…; empty unlinks it",
-            move |ws, url, window, cx| {
-                let url = url.trim().to_string();
-                if !url.is_empty() && crate::linear_project::slug_of(&url).is_none() {
-                    return Err(
-                        "That isn't a Linear project link: open the project in Linear \
-                                and copy its address."
-                            .into(),
-                    );
-                }
+            "project or ticket links, separated by spaces; empty unlinks",
+            move |ws, text, window, cx| {
+                let url = crate::linear_project::links_in(&text)?;
                 ws.edit_project(
                     &env,
                     &slug,

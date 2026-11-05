@@ -725,16 +725,17 @@ People keep editing the Linear issues the project came from (Joshua added requir
 existing mapping issues). A planning session can't read Linear, and Linear's history doesn't
 keep a description's old text, so hydraui reads it and works out the difference itself.
 
-- **Link Linear project…** on the Overview (lead): the project's Linear link, kept as
-  `linear` in `project.toml`. hydraui reads it with the environment's Linear API key (the one
-  pipelines use).
-- **A read** takes the project's overview, its documents and every issue (title, state,
-  description) and keeps them as `linear.json` in the project folder, shared like everything
-  else.
+- **Link Linear…** on the Overview (lead): one or more links, each a Linear project or a
+  ticket, kept as `linear` in `project.toml`. hydraui reads them with the environment's
+  Linear API key (the one pipelines use).
+- **A read** takes, for a project, its overview, documents and every issue (title, state,
+  description); for a ticket, the ticket and its sub-issues with their comments (Mapping's
+  requirements live in a ticket). All of it is kept as one `linear.json` in the project
+  folder, shared like everything else.
   - **The first read** is saved whole as a resource ("Linear 2026-11-05.md"), for Claude to
     compare with the plan.
   - **Later reads** save only what changed since the last: new issues, edited ones (title and
-    state old → new, description as a `-`/`+` diff), issues gone from the project, changed
+    state old → new, description as a `-`/`+` diff, new comments), issues gone, changed
     documents and overview. Nothing changed: no resource, no session.
 - **What a read saves goes to the planning session** exactly as **Add requirements…** does
   (§14.6): Claude proposes changes, started tickets get follow-ups, the lead accepts.

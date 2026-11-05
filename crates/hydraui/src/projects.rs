@@ -400,7 +400,7 @@ pub fn new_project(checkout: &Path, name: &str, login: &str) -> Result<String, S
         dismissed_repos: Vec::new(),
         spec_change: None,
         spec_note: String::new(),
-        linear: String::new(),
+        linear: Vec::new(),
         sync: Default::default(),
         extra: Default::default(),
     };
@@ -1980,7 +1980,7 @@ mod tests {
                 dismissed_repos: vec![],
                 spec_change: None,
                 spec_note: String::new(),
-                linear: String::new(),
+                linear: Vec::new(),
                 sync: Default::default(),
                 extra: Default::default(),
             },
@@ -2171,6 +2171,7 @@ mod tests {
             url: "u".into(),
             state: "Todo".into(),
             description: desc.into(),
+            comments: vec![],
         };
         let read = |at: &str, desc: &str| Snapshot {
             name: "Mapping".into(),

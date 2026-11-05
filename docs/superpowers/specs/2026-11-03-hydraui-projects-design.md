@@ -668,6 +668,20 @@ was wrong). Work starts on a milestone and runs its tickets one after another.
     matches the code being changed rather than whatever the clone has checked out.
   - **A skill of the engineer's own** is read where it is, on top of the repo's. The prompt
     says the repo's own win where they disagree on how the repo is built or tested.
+- **The team's skill router** (added 2026-11-05). The `skill-router@iov42` plugin, which
+  hydraui's set-up checklist installs (orchestrator-core spec §48), blocks a change to a
+  covered file until every matching skill is loaded. Its `start-ticket` skill reads tickets
+  from Linear. So every work and testing session's prompt says:
+  - load every skill the ticket's areas need, as the router's session-start reminder lists
+    them, all at once and before changing anything. A personal copy of a skill under another
+    name doesn't count.
+  - tell any subagent which skills to load, since it starts with none.
+  - the ticket is in the projects repo, not in Linear, so don't use `start-ticket`.
+  - **A chosen skill is loaded by name** with the Skill tool, since only that, or reading a
+    repo skill's `SKILL.md`, counts for the router. The name is the `SKILL.md`'s `name`, else
+    its folder's, and `plugin:skill` when the folder sits in a plugin's `skills/` (its
+    `.claude-plugin/plugin.json` names the plugin). If Claude doesn't know the skill, it reads
+    the folder's `SKILL.md`.
 - **Start milestone** on an approved milestone runs its approved tickets in id order, one at a
   time. Nothing asks for a repo: a ticket names its own. The only question is where a repo
   is cloned on this Mac, the first time.

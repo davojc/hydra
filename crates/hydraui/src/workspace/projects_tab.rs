@@ -5764,9 +5764,10 @@ impl Workspace {
             .child(div().pt_3().child(section_title("On this Mac")))
             .child(muted(
                 "Yours, for this project: the skills Claude follows and how it works. Choose a \
-                 skill by its folder, the one holding its SKILL.md. A repo's own CLAUDE.md and \
-                 .claude/skills always apply; a skill chosen from inside a repo is read from the \
-                 ticket's worktree, so it matches the code.",
+                 skill by its folder, the one holding its SKILL.md; Claude loads it by name \
+                 (plugin:skill for a plugin's). A repo's own CLAUDE.md and .claude/skills, and \
+                 the team skills the skill router asks for, always apply; a skill chosen from \
+                 inside a repo is read from the ticket's worktree, so it matches the code.",
             ))
             .child(self.skill_row(
                 env,
@@ -6170,21 +6171,34 @@ fn check_prompt(p: &Project, t: &Ticket, skill: Option<&Path>) -> String {
     )
 }
 
-/// The prompt's line on which skill to follow: the repo's own CLAUDE.md and skills always
-/// apply, and win over a skill of the engineer's on how the repo works (spec §14.5).
+/// The prompt's lines on which skills to follow (spec §14.5): the team's skills for every
+/// area the ticket touches, loaded before any change, since the skill router blocks changes
+/// until they are; the repo's own CLAUDE.md and skills, which win over a chosen skill on how
+/// the repo works; and the chosen skill, loaded by name so the router counts it.
 fn follow(skill: Option<&Path>, what: &str) -> String {
     const REPO_OWN: &str = "the repo's own CLAUDE.md and its skills in .claude/skills";
-    match skill {
+    const TEAM: &str = "Before changing any file, load every skill the work needs, all at \
+         once: those for each area the ticket touches, as the skill router's reminder at the \
+         start of this session lists them (when it's installed, it blocks changes until \
+         they're loaded; a personal copy of a skill under another name doesn't count). If you \
+         hand work to a subagent, tell it which skills to load. This ticket is in the projects \
+         repo, not in Linear: don't use start-ticket.";
+    let chosen = match skill {
         None => format!(
             "Follow {REPO_OWN}: read the CLAUDE.md files and use the skills that fit the work."
         ),
-        Some(s) => format!(
-            "First read the {what}, {} (its SKILL.md and the files it points to), and follow \
-             it, along with {REPO_OWN}. Where they disagree on how this repo is built or \
-             tested, the repo's own win.",
-            s.display()
-        ),
-    }
+        Some(s) => {
+            let name = pj::skill_name(s).unwrap_or_else(|| "chosen".to_string());
+            format!(
+                "First load the {what}: the {name} skill with the Skill tool, or if you don't \
+                 have it, read {}/SKILL.md and the files it points to. Follow it along with \
+                 {REPO_OWN}; where they disagree on how this repo is built or tested, the \
+                 repo's own win.",
+                s.display()
+            )
+        }
+    };
+    format!("{chosen} {TEAM}")
 }
 
 // ---- Small pieces ----
@@ -6597,6 +6611,19 @@ mod tests {
                 && own.contains(".claude/skills")
                 && !own.contains("SKILL.md")
         );
+        // A chosen skill is loaded with the Skill tool when Claude knows it, which is what the
+        // skill router counts, and read from its folder when it doesn't.
+        assert!(w.contains("the angular skill with the Skill tool"), "{w}");
+        // Every session loads the team's skills up front, since the skill router blocks
+        // changes until they're loaded, and passes them on to subagents.
+        for prompt in [&w, &own, &c] {
+            assert!(
+                prompt.contains("skill router") && prompt.contains("subagent"),
+                "{prompt}"
+            );
+            // The ticket is in the projects repo: start-ticket would look for it in Linear.
+            assert!(prompt.contains("not in Linear"), "{prompt}");
+        }
         let req = requirements_prompt("Requirements from Joshua 2026-11-05.md", "Joshua", "G.");
         assert!(
             req.contains("from Joshua")

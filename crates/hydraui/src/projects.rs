@@ -1360,6 +1360,40 @@ pub fn skill_folder(picked: &Path) -> Result<PathBuf, String> {
     }
 }
 
+/// The name Claude's Skill tool knows the skill in `folder` by (spec §14.5): its SKILL.md's
+/// `name`, else the folder's; `plugin:skill` for a plugin's skill, the form the team's skill
+/// router counts as loaded.
+pub fn skill_name(folder: &Path) -> Option<String> {
+    let own = std::fs::read_to_string(folder.join("SKILL.md"))
+        .ok()
+        .and_then(|text| frontmatter_name(&text))
+        .or_else(|| folder.file_name().map(|n| n.to_string_lossy().into_owned()))?;
+    let plugin = folder
+        .parent()
+        .filter(|p| p.file_name().is_some_and(|n| n == "skills"))
+        .and_then(Path::parent)
+        .and_then(|root| std::fs::read_to_string(root.join(".claude-plugin/plugin.json")).ok())
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|v| v.get("name")?.as_str().map(str::to_string));
+    Some(match plugin {
+        Some(plugin) => format!("{plugin}:{own}"),
+        None => own,
+    })
+}
+
+/// The `name:` in a SKILL.md's front matter.
+fn frontmatter_name(text: &str) -> Option<String> {
+    let mut lines = text.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+    lines
+        .take_while(|l| l.trim() != "---")
+        .find_map(|l| l.strip_prefix("name:"))
+        .map(|n| n.trim().trim_matches(['"', '\'']).to_string())
+        .filter(|n| !n.is_empty())
+}
+
 /// Where a work or testing session's skill comes from (spec §14.5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkillSource {
@@ -1706,6 +1740,34 @@ mod tests {
             skill_folder(&tmp.path().join("SKILL.md")).unwrap(),
             tmp.path()
         );
+    }
+
+    #[test]
+    fn a_chosen_skill_is_loaded_by_the_name_claude_knows_it_by() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A skill of your own: its SKILL.md's name, else its folder's.
+        let own = tmp.path().join("mine");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(
+            own.join("SKILL.md"),
+            "---\nname: rust\ndescription: x\n---\n",
+        )
+        .unwrap();
+        assert_eq!(skill_name(&own).as_deref(), Some("rust"));
+        let bare = tmp.path().join("angular");
+        assert_eq!(skill_name(&bare).as_deref(), Some("angular"));
+        // A plugin's skill goes by plugin:skill, which is what the skill router counts.
+        let root = tmp.path().join("cache/iov42/qa-engineer/1.2.0");
+        let qa = root.join("skills/qa-engineer");
+        std::fs::create_dir_all(&qa).unwrap();
+        std::fs::create_dir_all(root.join(".claude-plugin")).unwrap();
+        std::fs::write(
+            root.join(".claude-plugin/plugin.json"),
+            r#"{"name":"qa-engineer","version":"1.2.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(qa.join("SKILL.md"), "---\nname: qa-engineer\n---\n").unwrap();
+        assert_eq!(skill_name(&qa).as_deref(), Some("qa-engineer:qa-engineer"));
     }
 
     #[test]

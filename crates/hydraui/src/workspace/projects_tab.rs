@@ -2641,7 +2641,7 @@ impl Workspace {
         slot: Slot,
         label: &str,
         hint: &str,
-        value: (String, String),
+        (state, value): (Setting, (String, String)),
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let id = match &slot {
@@ -2699,7 +2699,13 @@ impl Workspace {
                         ws.set_skill_slot(&e2, &s2, &slot2, None, window, cx)
                     })),
             );
-        setting_row(label, hint, two_line(value.0, value.1), Some(actions))
+        setting_row(
+            label,
+            hint,
+            state,
+            two_line(value.0, value.1),
+            Some(actions),
+        )
     }
 
     fn set_skill_slot(
@@ -2775,7 +2781,12 @@ impl Workspace {
                     })),
             );
         }
-        setting_row(label, hint, row, None)
+        let state = if current.is_some() {
+            Setting::Set
+        } else {
+            Setting::Default
+        };
+        setting_row(label, hint, state, row, None)
     }
 
     // ---- Milestone runs (spec §14.5) ----
@@ -5682,59 +5693,49 @@ impl Workspace {
             .is_some_and(|l| p.file.lead.eq_ignore_ascii_case(l));
         let f = &p.file;
         let root = self.hydra.paths.root().to_path_buf();
-        // A shared setting: its value, and Change… for the lead.
-        let field = |label: &'static str,
-                     hint: &str,
-                     value: AnyElement,
-                     initial: String,
-                     field: Field,
-                     cx: &mut Context<Self>| {
-            let (env, slug) = (env.to_string(), slug.to_string());
-            let change = lead.then(|| {
-                h_flex().child(
-                    Button::new(SharedString::from(format!("set-{label}")))
-                        .label("Change…")
-                        .ghost()
-                        .small()
-                        .on_click(cx.listener(move |ws, _, window, cx| {
-                            let (env, slug) = (env.clone(), slug.clone());
-                            ws.text_dialog(
-                                format!("{label} for {slug}"),
-                                initial.clone(),
-                                field.hint(),
-                                move |ws, text, window, cx| {
-                                    ws.edit_project(
-                                        &env,
-                                        &slug,
-                                        |dir, p, _| set_field(dir, p, field, &text),
-                                        window,
-                                        cx,
-                                    )
-                                },
-                                window,
-                                cx,
-                            )
-                        })),
-                )
-            });
-            setting_row(label, hint, value, change)
-        };
-        let text = |v: &str| -> AnyElement {
-            if v.trim().is_empty() {
-                div()
-                    .text_sm()
-                    .text_color(color(theme::TEXT_MUTED))
-                    .child("None")
-                    .into_any_element()
-            } else {
-                div()
-                    .text_sm()
-                    .min_w_0()
-                    .truncate()
-                    .child(v.to_string())
-                    .into_any_element()
-            }
-        };
+        // A shared setting: where it stands, its value, and Change… for the lead.
+        let field =
+            |label: &'static str, hint: &str, value: &str, field: Field, cx: &mut Context<Self>| {
+                let (env, slug) = (env.to_string(), slug.to_string());
+                let initial = value.to_string();
+                let change = lead.then(|| {
+                    h_flex().child(
+                        Button::new(SharedString::from(format!("set-{label}")))
+                            .label(if initial.trim().is_empty() {
+                                "Set…"
+                            } else {
+                                "Change…"
+                            })
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                let (env, slug) = (env.clone(), slug.clone());
+                                ws.text_dialog(
+                                    format!("{label} for {slug}"),
+                                    initial.clone(),
+                                    field.hint(),
+                                    move |ws, text, window, cx| {
+                                        ws.edit_project(
+                                            &env,
+                                            &slug,
+                                            |dir, p, _| set_field(dir, p, field, &text),
+                                            window,
+                                            cx,
+                                        )
+                                    },
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    )
+                });
+                let (state, shown) = if value.trim().is_empty() {
+                    (Setting::NotSet, "Not set yet".to_string())
+                } else {
+                    (Setting::Set, value.to_string())
+                };
+                setting_row(label, hint, state, value_text(&shown, state), change)
+            };
         let status_buttons = {
             let mut row = h_flex().gap_1();
             for s in [
@@ -5767,87 +5768,118 @@ impl Workspace {
             }
             row
         };
-        // Each code repo, with where it's cloned on this Mac.
-        let repos: AnyElement = if f.repos.is_empty() {
-            text("")
-        } else {
-            let mut list = v_flex().gap_1p5().min_w_0();
-            for r in &f.repos {
-                let place = match pj::clone_of(&root, r) {
-                    Some(path) => path.display().to_string(),
-                    None => "Not cloned yet: asked the first time a run needs it".to_string(),
-                };
-                list = list.child(two_line(r.clone(), place));
-            }
-            list.into_any_element()
-        };
+        let members = f.members.join(", ");
+        let project_rows = vec![
+            field("Name", "", &f.name, Field::Name, cx),
+            field("Key", "Starts each ticket's id", &f.key, Field::Key, cx),
+            field(
+                "Lead",
+                "Approves everyone else's changes",
+                &f.lead,
+                Field::Lead,
+                cx,
+            ),
+            field("Members", "GitHub logins", &members, Field::Members, cx),
+            setting_row("Status", "", Setting::Set, status_buttons, None),
+        ];
+        let project_missing = [&f.name, &f.key, &f.lead, &members]
+            .iter()
+            .filter(|v| v.trim().is_empty())
+            .count();
         let project = settings_card(
             "Project",
             "Shared with everyone on the project, through the projects repo.",
+            project_missing,
         )
-        .child(field(
-            "Name",
-            "",
-            text(&f.name),
-            f.name.clone(),
-            Field::Name,
-            cx,
-        ))
-        .child(field(
-            "Key",
-            "Starts each ticket's id",
-            text(&f.key),
-            f.key.clone(),
-            Field::Key,
-            cx,
-        ))
-        .child(field(
-            "Lead",
-            "Approves everyone else's changes",
-            text(&f.lead),
-            f.lead.clone(),
-            Field::Lead,
-            cx,
-        ))
-        .child(field(
-            "Members",
-            "GitHub logins",
-            text(&f.members.join(", ")),
-            f.members.join(", "),
-            Field::Members,
-            cx,
-        ))
-        .child(setting_row("Status", "", status_buttons, None));
+        .children(project_rows);
+
+        // Code repos, sync times, and where each repo is cloned on this Mac.
+        let repos = f.repos.join(", ");
+        let sync = f.sync.times.join(", ");
+        let mut work_missing = [&repos, &sync]
+            .iter()
+            .filter(|v| v.trim().is_empty())
+            .count();
+        let mut clone_rows = Vec::new();
+        for r in &f.repos {
+            let clone = pj::clone_of(&root, r);
+            let (state, title, detail) = match &clone {
+                Some(path) => (Setting::Set, r.clone(), path.display().to_string()),
+                None => {
+                    work_missing += 1;
+                    (
+                        Setting::NotSet,
+                        r.clone(),
+                        "Not located yet: a run asks for it the first time it needs it".to_string(),
+                    )
+                }
+            };
+            let (repo, root) = (r.clone(), root.clone());
+            let locate = h_flex().child(
+                Button::new(SharedString::from(format!("locate-{r}")))
+                    .label(if clone.is_some() {
+                        "Change…"
+                    } else {
+                        "Locate…"
+                    })
+                    .ghost()
+                    .small()
+                    .tooltip("Pick the folder where this repo is cloned")
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        let (repo, root) = (repo.clone(), root.clone());
+                        ws.open_dialog_path(true, window, cx, move |_, path, window, cx| {
+                            if let Err(e) = pj::set_clone(&root, &repo, &path) {
+                                window.push_notification(Notification::error(e), cx);
+                            }
+                            cx.notify();
+                        });
+                    })),
+            );
+            clone_rows.push(setting_row(
+                "Clone on this Mac",
+                "Worktrees are made from it",
+                state,
+                two_line(title, detail),
+                Some(locate),
+            ));
+        }
         let work = settings_card(
             "Code and progress",
             "Where the work happens, and when progress is sent.",
+            work_missing,
         )
         .child(field(
             "Code repos",
-            "Each ticket gets a worktree of its repo",
-            repos,
-            f.repos.join(", "),
+            "Each ticket names one of them",
+            &repos,
             Field::Repos,
             cx,
         ))
+        .children(clone_rows)
         .child(field(
             "Sync times",
             "When each member's hydraui sends the day's progress",
-            text(&f.sync.times.join(", ")),
-            f.sync.times.join(", "),
+            &sync,
             Field::Sync,
             cx,
         ));
+
         // This engineer's own choices, kept on this Mac.
         let planning = match pj::planning_skill_of(&root, &e.repo, slug) {
             None => (
-                BUILT_IN_GUIDE_LABEL.to_string(),
-                "Milestones, tickets and questions, the way hydraui expects them".to_string(),
+                Setting::Default,
+                (
+                    BUILT_IN_GUIDE_LABEL.to_string(),
+                    "Milestones, tickets and questions, the way hydraui expects them".to_string(),
+                ),
             ),
             Some(s) if s.contains('/') || s.contains('\\') => {
-                skill_value(&pj::SkillSource::Yours(s.into()))
+                (Setting::Set, skill_value(&pj::SkillSource::Yours(s.into())))
             }
-            Some(name) => (format!("/{name}"), "A skill you installed".to_string()),
+            Some(name) => (
+                Setting::Set,
+                (format!("/{name}"), "A skill you installed".to_string()),
+            ),
         };
         let setup = pj::work_setup(&root, &e.repo, slug);
         let clones: Vec<PathBuf> = f
@@ -5855,10 +5887,39 @@ impl Workspace {
             .iter()
             .filter_map(|r| pj::clone_of(&root, r))
             .collect();
+        let testing = match setup.testing.as_ref() {
+            Some(pj::Testing::Team) => (
+                Setting::Set,
+                (
+                    "Team skills".to_string(),
+                    "The repo's own and what the skill router asks for".to_string(),
+                ),
+            ),
+            // In whichever of the project's repos holds it, if any.
+            Some(pj::Testing::Skill(t)) => (
+                Setting::Set,
+                skill_value(
+                    &clones
+                        .iter()
+                        .map(|c| pj::SkillSource::of(Some(t), Some(c)))
+                        .find(|s| matches!(s, pj::SkillSource::InRepo(_)))
+                        .unwrap_or_else(|| pj::SkillSource::Yours(t.to_path_buf())),
+                ),
+            ),
+            None => (
+                Setting::NotSet,
+                (
+                    "Pull requests aren't checked".to_string(),
+                    "Choose a skill, or Team skills, to check each one".to_string(),
+                ),
+            ),
+        };
+        let mine_missing = usize::from(testing.0 == Setting::NotSet);
         let mut mine = settings_card(
             "How Claude works, on this Mac",
             "Yours alone. The repo's CLAUDE.md and skills, and the team skills the skill router \
              asks for, always apply; a skill you choose adds to them.",
+            mine_missing,
         )
         .child(self.skill_row(
             env,
@@ -5876,7 +5937,12 @@ impl Workspace {
                 .find(|(r, _)| r.eq_ignore_ascii_case(&code_repo))
                 .map(|(_, s)| s.clone());
             let clone = pj::clone_of(&root, &code_repo);
-            let value = skill_value(&pj::SkillSource::of(chosen.as_deref(), clone.as_deref()));
+            let source = pj::SkillSource::of(chosen.as_deref(), clone.as_deref());
+            let state = if source == pj::SkillSource::RepoOwn {
+                Setting::Default
+            } else {
+                Setting::Set
+            };
             let name = code_repo
                 .split_once('/')
                 .map(|(_, n)| n.to_string())
@@ -5885,30 +5951,12 @@ impl Workspace {
                 env,
                 slug,
                 Slot::Repo(code_repo),
-                &name,
-                "Skill for tickets in this repo",
-                value,
+                &format!("Skill for {name}"),
+                "Followed by work sessions in this repo",
+                (state, skill_value(&source)),
                 cx,
             ));
         }
-        let testing = match setup.testing.as_ref() {
-            Some(pj::Testing::Team) => (
-                "Team skills".to_string(),
-                "The repo's own and what the skill router asks for".to_string(),
-            ),
-            // In whichever of the project's repos holds it, if any.
-            Some(pj::Testing::Skill(t)) => skill_value(
-                &clones
-                    .iter()
-                    .map(|c| pj::SkillSource::of(Some(t), Some(c)))
-                    .find(|s| matches!(s, pj::SkillSource::InRepo(_)))
-                    .unwrap_or_else(|| pj::SkillSource::Yours(t.to_path_buf())),
-            ),
-            None => (
-                "Not checked".to_string(),
-                "Each pull request goes on without a check".to_string(),
-            ),
-        };
         mine = mine
             .child(self.skill_row(
                 env,
@@ -5937,6 +5985,17 @@ impl Workspace {
                 setup.effort.as_deref(),
                 cx,
             ));
+        let legend = h_flex()
+            .gap_3()
+            .items_center()
+            .text_xs()
+            .text_color(color(theme::TEXT_MUTED))
+            .child(state_pill(Setting::Set))
+            .child("chosen")
+            .child(state_pill(Setting::Default))
+            .child("hydraui's default")
+            .child(state_pill(Setting::NotSet))
+            .child("still to do");
         v_flex()
             .gap_4()
             .max_w(px(860.))
@@ -5944,7 +6003,8 @@ impl Workspace {
                 v_flex()
                     .gap_1()
                     .child(div().text_2xl().child(f.name.clone()))
-                    .child(muted(&format!("Settings · {} · led by {}", f.key, f.lead))),
+                    .child(muted(&format!("Settings · {} · led by {}", f.key, f.lead)))
+                    .child(div().pt_1().child(legend)),
             )
             .when(!lead, |d| {
                 d.child(notice(
@@ -5975,24 +6035,76 @@ enum Slot {
 /// How the settings name hydraui's built-in planning guide, the choice when no skill is picked.
 const BUILT_IN_GUIDE_LABEL: &str = "hydraui's built-in guide";
 
-/// A group of settings: a title and one line on what it holds, then its rows.
-fn settings_card(title: &str, blurb: &str) -> gpui::Div {
+/// Where one setting stands, shown beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Setting {
+    /// Chosen.
+    Set,
+    /// Not chosen, and hydraui's default applies.
+    Default,
+    /// Still to do: nothing applies until it's set.
+    NotSet,
+}
+
+fn state_pill(state: Setting) -> gpui::Div {
+    match state {
+        Setting::Set => pill("Set", theme::GREEN, theme::GREEN_TINT),
+        Setting::Default => pill("Default", theme::TEXT_SECONDARY, theme::RAISED),
+        Setting::NotSet => pill("Not set", theme::AMBER, theme::AMBER_TINT),
+    }
+}
+
+/// A one-line value; muted when it says nothing is set.
+fn value_text(text: &str, state: Setting) -> gpui::Div {
+    div()
+        .text_sm()
+        .min_w_0()
+        .truncate()
+        .when(state == Setting::NotSet, |d| {
+            d.text_color(color(theme::TEXT_MUTED))
+        })
+        .child(text.to_string())
+}
+
+/// A group of settings: a title, how many are still to do, one line on what it holds, then
+/// its rows.
+fn settings_card(title: &str, blurb: &str, not_set: usize) -> gpui::Div {
+    let count = if not_set == 0 {
+        pill("All set", theme::GREEN, theme::GREEN_TINT)
+    } else {
+        pill(
+            &format!("{not_set} not set"),
+            theme::AMBER,
+            theme::AMBER_TINT,
+        )
+    };
     v_flex()
         .px_5()
         .pt_4()
         .pb_1()
         .rounded_lg()
         .border_1()
-        .border_color(color(theme::BORDER_SUBTLE))
+        .border_color(color(if not_set == 0 {
+            theme::BORDER_SUBTLE
+        } else {
+            theme::AMBER_TINT
+        }))
         .bg(color(theme::SURFACE))
         .child(
-            div()
-                .text_base()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .child(title.to_string()),
+            h_flex()
+                .gap_3()
+                .items_center()
+                .child(
+                    div()
+                        .text_base()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child(title.to_string()),
+                )
+                .child(count),
         )
         .child(
             div()
+                .pt_0p5()
                 .pb_2()
                 .text_xs()
                 .text_color(color(theme::TEXT_MUTED))
@@ -6001,10 +6113,12 @@ fn settings_card(title: &str, blurb: &str) -> gpui::Div {
         )
 }
 
-/// One setting: its name and a hint on the left, its value, and its buttons on the right.
+/// One setting: its name and a hint on the left, where it stands, its value, and its buttons
+/// on the right.
 fn setting_row(
     label: &str,
     hint: &str,
+    state: Setting,
     value: impl IntoElement,
     actions: Option<gpui::Div>,
 ) -> gpui::Div {
@@ -6023,12 +6137,13 @@ fn setting_row(
         );
     }
     h_flex()
-        .gap_6()
+        .gap_4()
         .py_3()
         .items_center()
         .border_t_1()
         .border_color(color(theme::BORDER_SUBTLE))
         .child(name)
+        .child(div().w(px(64.)).flex_none().child(state_pill(state)))
         .child(div().flex_1().min_w_0().child(value))
         .children(actions.map(|a| a.flex_none()))
 }

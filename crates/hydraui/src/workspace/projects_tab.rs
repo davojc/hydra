@@ -4386,20 +4386,16 @@ impl Workspace {
                         .on_click(cx.listener(move |ws, _, _, cx| ws.go(page_to.clone(), cx)))
                         .child(
                             div()
-                                .w(px(36.))
+                                .w(px(84.))
                                 .flex_none()
+                                .whitespace_nowrap()
                                 .text_xs()
                                 .text_color(color(theme::TEXT_MUTED))
                                 .child(pj::milestone_name(&m.id)),
                         )
-                        .child(
-                            div()
-                                .w(px(280.))
-                                .flex_none()
-                                .truncate()
-                                .child(m.title.clone()),
-                        )
-                        .child(div().flex_1().child(status_bar(&c, 6.)))
+                        // The title takes the room; a one-line truncate is safe in flex_1.
+                        .child(div().flex_1().min_w_0().truncate().child(m.title.clone()))
+                        .child(div().w(px(140.)).flex_none().child(status_bar(&c, 6.)))
                         .child(
                             div()
                                 .w(px(60.))

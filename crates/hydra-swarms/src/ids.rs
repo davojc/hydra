@@ -126,6 +126,7 @@ pub(crate) fn from_hex(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+#[cfg(not(target_os = "macos"))]
 fn failed(e: impl fmt::Display) -> String {
     e.to_string()
 }
@@ -148,31 +149,76 @@ impl Keyring {
     /// isn't 32 bytes of hex is an error, never silently replaced: that would change who the
     /// person is.
     pub fn get_or_create(&self, user: &str) -> Result<[u8; 32], String> {
-        let entry = keyring::Entry::new(&self.service, user).map_err(failed)?;
-        match entry.get_password() {
-            Ok(hex) => from_hex(hex.trim())
+        match store::get(&self.service, user)? {
+            Some(hex) => from_hex(hex.trim())
                 .and_then(|v| <[u8; 32]>::try_from(v).ok())
                 .ok_or_else(|| format!("the stored key for {user} is damaged")),
-            Err(keyring::Error::NoEntry) => {
+            None => {
                 let mut key = [0u8; 32];
                 getrandom::fill(&mut key).map_err(|e| format!("random key: {e}"))?;
-                entry.set_password(&to_hex(&key)).map_err(failed)?;
+                store::set(&self.service, user, &to_hex(&key))?;
                 Ok(key)
             }
-            Err(e) => Err(failed(e)),
         }
     }
 
     /// Stores `key` for `user`, in place of whatever was there.
     pub fn set(&self, user: &str, key: [u8; 32]) -> Result<(), String> {
-        let entry = keyring::Entry::new(&self.service, user).map_err(failed)?;
-        entry.set_password(&to_hex(&key)).map_err(failed)
+        store::set(&self.service, user, &to_hex(&key))
     }
 
     /// Forgets the secret stored for `user`; there being none is fine.
     pub fn delete(&self, user: &str) -> Result<(), String> {
-        let entry = keyring::Entry::new(&self.service, user).map_err(failed)?;
-        match entry.delete_credential() {
+        store::delete(&self.service, user)
+    }
+}
+
+/// The credential store itself: on macOS `/usr/bin/security`, whose one "Always Allow" per
+/// item lasts across rebuilds; elsewhere the `keyring` crate.
+#[cfg(target_os = "macos")]
+mod store {
+    use hydra_platform::macos_keychain::Keychain;
+
+    pub fn get(service: &str, user: &str) -> Result<Option<String>, String> {
+        Keychain::user().get(service, user)
+    }
+
+    pub fn set(service: &str, user: &str, value: &str) -> Result<(), String> {
+        Keychain::user().set(service, user, value)
+    }
+
+    pub fn delete(service: &str, user: &str) -> Result<(), String> {
+        Keychain::user().delete(service, user).map(|_| ())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod store {
+    use super::failed;
+
+    pub fn get(service: &str, user: &str) -> Result<Option<String>, String> {
+        match keyring::Entry::new(service, user)
+            .map_err(failed)?
+            .get_password()
+        {
+            Ok(v) => Ok(Some(v)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(failed(e)),
+        }
+    }
+
+    pub fn set(service: &str, user: &str, value: &str) -> Result<(), String> {
+        keyring::Entry::new(service, user)
+            .map_err(failed)?
+            .set_password(value)
+            .map_err(failed)
+    }
+
+    pub fn delete(service: &str, user: &str) -> Result<(), String> {
+        match keyring::Entry::new(service, user)
+            .map_err(failed)?
+            .delete_credential()
+        {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(failed(e)),
         }
@@ -279,10 +325,12 @@ mod tests {
             }
         };
         assert_eq!(ring.get_or_create("alice").unwrap(), first);
-        let entry = keyring::Entry::new(&service, "alice").unwrap();
-        entry.set_password("not hex").unwrap();
+        store::set(&service, "alice", "not hex").unwrap();
         assert!(ring.get_or_create("alice").is_err());
-        assert_eq!(entry.get_password().unwrap(), "not hex");
+        assert_eq!(
+            store::get(&service, "alice").unwrap().as_deref(),
+            Some("not hex")
+        );
         ring.delete("alice").unwrap();
         ring.delete("alice").unwrap();
     }

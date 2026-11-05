@@ -176,6 +176,10 @@ pub(super) struct ProjectsData {
     reviewing: BTreeSet<String>,
     /// Milestone runs, by (environment, project): one at a time per project (spec §14.5).
     runs: BTreeMap<(String, String), Run>,
+    /// Projects whose Linear project is being read now (spec §14.7).
+    linear_checking: BTreeSet<(String, String)>,
+    /// When each project's Linear project was last read here, `YYYY-MM-DD HH:MM`.
+    linear_checked: BTreeMap<(String, String), String>,
 }
 
 impl ProjectsData {
@@ -489,6 +493,7 @@ impl Workspace {
             return;
         };
         let mut sends = Vec::new();
+        let mut linear = Vec::new();
         for (env, e) in &self.projects_data.envs {
             let Some(login) = e.login.as_deref() else {
                 continue;
@@ -509,6 +514,9 @@ impl Workspace {
                     continue;
                 };
                 let _ = pj::set_synced(&root, &e.repo, &p.slug, &slot);
+                if !p.file.linear.is_empty() && p.file.lead.eq_ignore_ascii_case(login) {
+                    linear.push((env.clone(), p.slug.clone()));
+                }
                 if pj::project_unsent(&e.pending, &p.slug) == 0 {
                     continue;
                 }
@@ -537,6 +545,10 @@ impl Workspace {
         for (env, slug) in sends {
             self.reload_env(&env, cx);
             self.send_project(&env, &slug, true, window, cx);
+        }
+        // At each sync the lead's Linear projects are read too; changes go to Claude.
+        for (env, slug) in linear {
+            self.check_linear(&env, &slug, false, window, cx);
         }
     }
 
@@ -1813,6 +1825,189 @@ impl Workspace {
             );
         }
         card
+    }
+
+    // ---- Linear (spec §14.7) ----
+
+    /// The project's Linear link on the Overview: Link…, or Check Linear and when it last
+    /// looked.
+    fn linear_row(&self, env: &str, p: &Project, cx: &mut Context<Self>) -> gpui::Div {
+        let key = (env.to_string(), p.slug.clone());
+        let checking = self.projects_data.linear_checking.contains(&key);
+        let (e1, s1, url1) = (env.to_string(), p.slug.clone(), p.file.linear.clone());
+        let link = Button::new("link-linear")
+            .label(if p.file.linear.is_empty() {
+                "Link Linear project…"
+            } else {
+                "Change link…"
+            })
+            .ghost()
+            .xsmall()
+            .tooltip(
+                "Where this project's requirements also live in Linear: hydraui reads it, and \
+                 Claude proposes what its changes mean for the plan",
+            )
+            .on_click(cx.listener(move |ws, _, window, cx| {
+                ws.link_linear_dialog(e1.clone(), s1.clone(), url1.clone(), window, cx)
+            }));
+        if p.file.linear.is_empty() {
+            return h_flex().gap_2().items_center().child(link);
+        }
+        let (e2, s2) = (env.to_string(), p.slug.clone());
+        let when = self
+            .projects_data
+            .linear_checked
+            .get(&key)
+            .map(|t| format!(" · last read {t}"))
+            .unwrap_or_default();
+        h_flex()
+            .gap_2()
+            .items_center()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(color(theme::TEXT_SECONDARY))
+                    .child(format!("Linear{when}")),
+            )
+            .child(
+                Button::new("check-linear")
+                    .label(if checking {
+                        "Reading Linear…"
+                    } else {
+                        "Check Linear"
+                    })
+                    .ghost()
+                    .xsmall()
+                    .disabled(checking)
+                    .tooltip(
+                        "Reads the Linear project now; what changed since the last read goes \
+                         to Claude, whose proposed changes show here. It's also read at each \
+                         sync.",
+                    )
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.check_linear(&e2, &s2, true, window, cx)
+                    })),
+            )
+            .child(link)
+    }
+
+    fn link_linear_dialog(
+        &mut self,
+        env: String,
+        slug: String,
+        current: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.text_dialog(
+            "Link a Linear project".into(),
+            current,
+            "its link, e.g. https://linear.app/iov42/project/mapping-ux-…; empty unlinks it",
+            move |ws, url, window, cx| {
+                let url = url.trim().to_string();
+                if !url.is_empty() && crate::linear_project::slug_of(&url).is_none() {
+                    return Err(
+                        "That isn't a Linear project link: open the project in Linear \
+                                and copy its address."
+                            .into(),
+                    );
+                }
+                ws.edit_project(
+                    &env,
+                    &slug,
+                    |dir, p, _| {
+                        let mut f = p.file.clone();
+                        f.linear = url.clone();
+                        repo::write_project_file(dir, &f).map_err(|e| e.to_string())
+                    },
+                    window,
+                    cx,
+                )?;
+                if !url.is_empty() {
+                    ws.check_linear(&env, &slug, true, window, cx);
+                }
+                Ok(())
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Reads the project's Linear project off the UI thread and hands what changed to the
+    /// planning session (spec §14.7). `by_hand` says whether to report "nothing changed" and
+    /// failures as toasts; a sync's read only logs them.
+    fn check_linear(
+        &mut self,
+        env: &str,
+        slug: &str,
+        by_hand: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (env.to_string(), slug.to_string());
+        if self.projects_data.linear_checking.contains(&key) {
+            return;
+        }
+        let Some(url) = self
+            .find_project(env, slug)
+            .map(|p| p.file.linear.clone())
+            .filter(|u| !u.is_empty())
+        else {
+            return;
+        };
+        let Some(dir) = self.project_dir(env, slug) else {
+            return;
+        };
+        self.projects_data.linear_checking.insert(key.clone());
+        cx.notify();
+        let hydra = self.hydra.clone();
+        let now = crate::action_log::now();
+        let now = now.get(..16).unwrap_or(&now).to_string();
+        let env_bg = env.to_string();
+        cx.spawn_in(window, async move |this, cx| {
+            let read = cx
+                .background_spawn(async move {
+                    let api = crate::linear::Http {
+                        key: hydra.linear_key(&env_bg)?,
+                    };
+                    crate::linear_project::fetch(&api, &url, &now)
+                })
+                .await;
+            let _ = this.update_in(cx, |ws, window, cx| {
+                ws.projects_data.linear_checking.remove(&key);
+                let (env, slug) = (key.0.as_str(), key.1.as_str());
+                let taken = read.map_err(|e| e.to_string()).and_then(|snap| {
+                    ws.projects_data
+                        .linear_checked
+                        .insert(key.clone(), snap.fetched_at.clone());
+                    pj::take_linear(&dir, &snap)
+                });
+                match taken {
+                    Ok(Some(file)) => {
+                        ws.review_requirements(env, slug, &file, "Linear", window, cx)
+                    }
+                    Ok(None) => {
+                        ws.reload_env(env, cx);
+                        if by_hand {
+                            window.push_notification(
+                                Notification::info(
+                                    "Nothing has changed in Linear since the last read.",
+                                ),
+                                cx,
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("projects: reading Linear for {env}/{slug} failed: {e}");
+                        if by_hand {
+                            window.push_notification(Notification::error(e), cx);
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     // ---- Review (spec §14) ----
@@ -4262,6 +4457,7 @@ impl Workspace {
         }
         if started && lead {
             let (env_r, slug_r) = (env_s.clone(), slug_s.clone());
+            page = page.child(self.linear_row(env, p, cx));
             page = page.child(
                 h_flex().child(
                     Button::new("add-requirements")

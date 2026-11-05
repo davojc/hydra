@@ -29,6 +29,9 @@ pub struct ProjectFile {
     /// A new spec Claude proposes from new requirements, in `description` (spec §14.6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec_change: Option<Change>,
+    /// The Linear project the requirements also live in, its link (spec §14.7).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub linear: String,
     /// Why the lead turned down the last spec change, so it isn't proposed again.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub spec_note: String,

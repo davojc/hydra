@@ -146,7 +146,7 @@ pub fn reply_error(reply: &Value) -> Option<LinearError> {
 }
 
 /// `reply`'s data, or the error it carries instead.
-fn data(reply: &Value) -> Result<&Value, LinearError> {
+pub(crate) fn data(reply: &Value) -> Result<&Value, LinearError> {
     if let Some(e) = reply_error(reply) {
         return Err(e);
     }
@@ -247,7 +247,7 @@ pub struct Http {
 impl Http {
     /// Sends `body`; the reply as JSON, or why there is none. Linear answers errors with a
     /// JSON body too, so a 4xx is read for them.
-    fn post(&self, body: &Value) -> Result<Value, LinearError> {
+    pub(crate) fn post(&self, body: &Value) -> Result<Value, LinearError> {
         if self.key.trim().is_empty() {
             return Err(LinearError::Rejected("no Linear API key".into()));
         }

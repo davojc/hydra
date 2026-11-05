@@ -400,6 +400,7 @@ pub fn new_project(checkout: &Path, name: &str, login: &str) -> Result<String, S
         dismissed_repos: Vec::new(),
         spec_change: None,
         spec_note: String::new(),
+        linear: String::new(),
         sync: Default::default(),
         extra: Default::default(),
     };
@@ -875,6 +876,27 @@ pub fn line_diff<'a>(old: &'a str, new: &'a str) -> Vec<Diff<'a>> {
     out
 }
 
+/// Takes `snap`, a fresh read of the project's Linear project, into project folder `dir`
+/// (spec §14.7): the first read as the whole project, later ones as what changed since the
+/// last, saved as a requirements resource. Returns its file name, or None when Linear hasn't
+/// changed. The snapshot is kept either way.
+pub fn take_linear(
+    dir: &Path,
+    snap: &crate::linear_project::Snapshot,
+) -> Result<Option<String>, String> {
+    use crate::linear_project as lp;
+    let text = match lp::load(dir) {
+        None => Some(lp::render_all(snap)),
+        Some(old) => lp::changes(&old, snap),
+    };
+    lp::save(dir, snap)?;
+    let Some(text) = text else {
+        return Ok(None);
+    };
+    let date = snap.fetched_at.get(..10).unwrap_or(&snap.fetched_at);
+    save_text_resource(dir, &format!("Linear {date}"), &text).map(Some)
+}
+
 /// Whether work on a ticket has begun: started tickets are never rewritten (spec §14.6).
 pub fn started(s: TicketStatus) -> bool {
     matches!(
@@ -898,6 +920,12 @@ pub fn add_requirements(dir: &Path, from: &str, text: &str) -> Result<String, St
     } else {
         format!("# Requirements from {who}, {date}\n\n")
     };
+    save_text_resource(dir, &name, &format!("{heading}{text}\n"))
+}
+
+/// Saves `text` as a Markdown resource named `name` (never over another), returning the
+/// file name it got.
+fn save_text_resource(dir: &Path, name: &str, text: &str) -> Result<String, String> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -906,8 +934,8 @@ pub fn add_requirements(dir: &Path, from: &str, text: &str) -> Result<String, St
         "hydraui-requirements-{}-{nanos}.md",
         std::process::id()
     ));
-    std::fs::write(&staged, format!("{heading}{text}\n")).map_err(|e| e.to_string())?;
-    let saved = repo::add_resource_as(dir, &staged, &name).map_err(|e| e.to_string());
+    std::fs::write(&staged, text).map_err(|e| e.to_string())?;
+    let saved = repo::add_resource_as(dir, &staged, name).map_err(|e| e.to_string());
     let _ = std::fs::remove_file(&staged);
     saved
 }
@@ -1952,6 +1980,7 @@ mod tests {
                 dismissed_repos: vec![],
                 spec_change: None,
                 spec_note: String::new(),
+                linear: String::new(),
                 sync: Default::default(),
                 extra: Default::default(),
             },
@@ -2128,6 +2157,49 @@ mod tests {
         );
         assert_eq!(line_diff("", "x"), [Added("x")]);
         assert_eq!(line_diff("x", ""), [Gone("x")]);
+    }
+
+    #[test]
+    fn linear_is_taken_whole_then_as_changes() {
+        use crate::linear_project::{Issue, Snapshot};
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        project(dir);
+        let issue = |desc: &str| Issue {
+            identifier: "MAP-1".into(),
+            title: "Upload".into(),
+            url: "u".into(),
+            state: "Todo".into(),
+            description: desc.into(),
+        };
+        let read = |at: &str, desc: &str| Snapshot {
+            name: "Mapping".into(),
+            url: "u".into(),
+            fetched_at: at.into(),
+            issues: vec![issue(desc)],
+            ..Default::default()
+        };
+        let first = take_linear(dir, &read("2026-11-05 09:00", "CSV"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(first, "Linear 2026-11-05.md");
+        let text = std::fs::read_to_string(dir.join("resources").join(&first)).unwrap();
+        assert!(text.contains("MAP-1 · Upload") && text.contains("Compare it with the plan"));
+        // Nothing changed: no requirements, but the read is kept.
+        assert_eq!(
+            take_linear(dir, &read("2026-11-05 12:30", "CSV")).unwrap(),
+            None
+        );
+        assert_eq!(
+            crate::linear_project::load(dir).unwrap().fetched_at,
+            "2026-11-05 12:30"
+        );
+        let next = take_linear(dir, &read("2026-11-05 17:30", "CSV or XLSX"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(next, "Linear 2026-11-05 (2).md");
+        let text = std::fs::read_to_string(dir.join("resources").join(&next)).unwrap();
+        assert!(text.contains("-CSV\n+CSV or XLSX"), "{text}");
     }
 
     #[test]

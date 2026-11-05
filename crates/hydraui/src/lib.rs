@@ -26,6 +26,7 @@ pub mod jev;
 pub mod keys;
 pub mod launcher;
 pub mod linear;
+pub mod linear_project;
 pub mod linear_watch;
 pub mod link;
 pub mod mcp;

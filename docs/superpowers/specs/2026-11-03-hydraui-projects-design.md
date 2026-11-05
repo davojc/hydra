@@ -718,3 +718,25 @@ plan only through the lead, and never rewrite started work.
   milestone drops its tickets still to do and is refused if any started.
 - **A running milestone pauses at a ticket with a change waiting** until the lead settles it;
   tickets before it carry on.
+
+### 14.7 Requirements that live in Linear (added 2026-11-05)
+
+People keep editing the Linear issues the project came from (Joshua added requirements to
+existing mapping issues). A planning session can't read Linear, and Linear's history doesn't
+keep a description's old text, so hydraui reads it and works out the difference itself.
+
+- **Link Linear project…** on the Overview (lead): the project's Linear link, kept as
+  `linear` in `project.toml`. hydraui reads it with the environment's Linear API key (the one
+  pipelines use).
+- **A read** takes the project's overview, its documents and every issue (title, state,
+  description) and keeps them as `linear.json` in the project folder, shared like everything
+  else.
+  - **The first read** is saved whole as a resource ("Linear 2026-11-05.md"), for Claude to
+    compare with the plan.
+  - **Later reads** save only what changed since the last: new issues, edited ones (title and
+    state old → new, description as a `-`/`+` diff), issues gone from the project, changed
+    documents and overview. Nothing changed: no resource, no session.
+- **What a read saves goes to the planning session** exactly as **Add requirements…** does
+  (§14.6): Claude proposes changes, started tickets get follow-ups, the lead accepts.
+- **When:** **Check Linear** by hand, at linking, and at each of the project's sync times
+  for the lead.

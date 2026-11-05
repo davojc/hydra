@@ -2653,9 +2653,9 @@ impl Workspace {
             Slot::Testing => "testing".to_string(),
         };
         let default_label = match slot {
-            Slot::Planning => "Built-in guide",
-            Slot::Repo(_) => "Repo's own",
-            Slot::Testing => "Don't check",
+            Slot::Planning => "Default",
+            Slot::Repo(_) => "Skill router",
+            Slot::Testing => "Off",
         };
         let (e1, s1, slot1) = (env.to_string(), slug.to_string(), slot.clone());
         let (e2, s2, slot2) = (env.to_string(), slug.to_string(), slot.clone());
@@ -2672,7 +2672,7 @@ impl Workspace {
         if matches!(slot, Slot::Testing) {
             seg = seg.child(
                 Button::new("team-testing")
-                    .label("Team skills")
+                    .label("Skill router")
                     .small()
                     .selected(matches!(current, SkillChoice::Team))
                     .on_click(cx.listener(move |ws, _, window, cx| {
@@ -2691,9 +2691,9 @@ impl Workspace {
         seg = seg.child(
             Button::new(SharedString::from(format!("choose-{id}")))
                 .label(if yours {
-                    "Your skill · change…"
+                    "Change skill…"
                 } else {
-                    "Your skill…"
+                    "Choose skill…"
                 })
                 .small()
                 .selected(yours)
@@ -2705,17 +2705,16 @@ impl Workspace {
                     });
                 })),
         );
+        // Only what the buttons don't already say: where a chosen skill is, or what Off means.
         let detail = match current {
-            SkillChoice::Default(d) => muted_line(&d),
-            SkillChoice::Team => {
-                muted_line("The repo's own skills and what the skill router asks for")
-            }
-            SkillChoice::Yours(name, place) => two_line(name, place),
+            SkillChoice::Default(d) if !d.is_empty() => Some(muted_line(&d)),
+            SkillChoice::Default(_) | SkillChoice::Team => None,
+            SkillChoice::Yours(name, place) => Some(two_line(name, place)),
         };
         setting_row(
             label,
             hint,
-            v_flex().gap_1p5().min_w_0().child(seg).child(detail),
+            v_flex().gap_1p5().min_w_0().child(seg).children(detail),
             None,
         )
     }
@@ -5896,8 +5895,7 @@ impl Workspace {
         // This engineer's own choices, kept on this Mac.
         let planning = match pj::planning_skill_of(&root, &e.repo, slug) {
             None => SkillChoice::Default(
-                "hydraui's guide: milestones, tickets and questions the way it expects them"
-                    .to_string(),
+                "hydraui's planning guide: the skill router doesn't cover planning".to_string(),
             ),
             Some(s) if s.contains('/') || s.contains('\\') => {
                 SkillChoice::yours(&pj::SkillSource::Yours(s.into()))
@@ -5920,9 +5918,7 @@ impl Workspace {
                     .find(|s| matches!(s, pj::SkillSource::InRepo(_)))
                     .unwrap_or_else(|| pj::SkillSource::Yours(t.to_path_buf())),
             ),
-            None => SkillChoice::Default(
-                "Each pull request goes on to the next ticket without a check".to_string(),
-            ),
+            None => SkillChoice::Default("Pull requests aren't checked".to_string()),
         };
         let mut mine = settings_card(
             "How Claude works, on this Mac",
@@ -5947,9 +5943,7 @@ impl Workspace {
             let clone = pj::clone_of(&root, &code_repo);
             let source = pj::SkillSource::of(chosen.as_deref(), clone.as_deref());
             let current = if source == pj::SkillSource::RepoOwn {
-                SkillChoice::Default(
-                    "CLAUDE.md, .claude/skills and what the skill router asks for".to_string(),
-                )
+                SkillChoice::Default(String::new())
             } else {
                 SkillChoice::yours(&source)
             };

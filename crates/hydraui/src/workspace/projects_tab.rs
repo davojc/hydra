@@ -3029,9 +3029,9 @@ impl Workspace {
                                     window,
                                     cx,
                                 );
-                                match set {
-                                    Ok(()) => ws.carry_on_run(&env, &slug, window, cx),
-                                    Err(e) => window.push_notification(Notification::error(e), cx),
+                                // A failed edit has said why already.
+                                if set.is_ok() {
+                                    ws.carry_on_run(&env, &slug, window, cx);
                                 }
                             });
                         }),

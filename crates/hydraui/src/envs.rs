@@ -1,6 +1,7 @@
 //! The window model (spec: docs/superpowers/specs/2026-10-19-hydraui-environment-tabs-design.md
 //! §2): one tab per environment, each with its terminals in creation order, the one shown, and
-//! the environment's single file pane.
+//! each terminal's file pane, shown beside it.
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Identifies a terminal or file pane for the life of the window.
@@ -19,12 +20,33 @@ pub struct EnvTab {
     /// In creation order.
     pub terminals: Vec<PaneId>,
     pub shown: Option<PaneId>,
-    /// The environment's file pane, beside whichever terminal is shown.
-    pub files: Option<PaneId>,
-    /// Whether keys go to the file pane rather than the shown terminal.
+    /// Each terminal's file pane, shown beside it: terminal → file pane.
+    pub files: HashMap<PaneId, PaneId>,
+    /// Whether keys go to the shown terminal's file pane rather than the terminal.
     pub files_focused: bool,
-    /// The terminal's share when the file pane shows.
-    pub files_ratio: f32,
+    /// Each terminal's share of the middle while its file pane shows; unset is the default.
+    ratios: HashMap<PaneId, f32>,
+}
+
+impl EnvTab {
+    /// The shown terminal's file pane.
+    pub fn shown_files(&self) -> Option<PaneId> {
+        self.files.get(&self.shown?).copied()
+    }
+
+    /// The shown terminal's share of the middle while its file pane shows.
+    pub fn files_ratio(&self) -> f32 {
+        self.shown
+            .and_then(|s| self.ratios.get(&s).copied())
+            .unwrap_or(DEFAULT_FILES_RATIO)
+    }
+
+    /// Sets the shown terminal's share, kept within [`MIN_RATIO`] and [`MAX_RATIO`].
+    pub fn set_files_ratio(&mut self, ratio: f32) {
+        if let Some(s) = self.shown {
+            self.ratios.insert(s, ratio.clamp(MIN_RATIO, MAX_RATIO));
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -67,9 +89,9 @@ impl EnvTabs {
             env: env.to_string(),
             terminals: Vec::new(),
             shown: None,
-            files: None,
+            files: HashMap::new(),
             files_focused: false,
-            files_ratio: DEFAULT_FILES_RATIO,
+            ratios: HashMap::new(),
         });
         self.active = self.tabs.len() - 1;
         true
@@ -163,7 +185,7 @@ impl EnvTabs {
     pub fn env_of(&self, id: PaneId) -> Option<&str> {
         self.tabs
             .iter()
-            .find(|t| t.terminals.contains(&id) || t.files == Some(id))
+            .find(|t| t.terminals.contains(&id) || t.files.values().any(|&f| f == id))
             .map(|t| t.env.as_str())
     }
 
@@ -174,6 +196,8 @@ impl EnvTabs {
         };
         let at = tab.terminals.iter().position(|&t| t == id).unwrap_or(0);
         tab.terminals.remove(at);
+        tab.files.remove(&id);
+        tab.ratios.remove(&id);
         if tab.shown == Some(id) {
             tab.shown = tab
                 .terminals
@@ -184,8 +208,8 @@ impl EnvTabs {
         true
     }
 
-    /// Removes the tab; returns its terminals then its file pane. The tab to the right becomes
-    /// active, else the left.
+    /// Removes the tab; returns its terminals then their file panes, in the terminals' order.
+    /// The tab to the right becomes active, else the left.
     pub fn close_env(&mut self, env: &str) -> Vec<PaneId> {
         let Some(i) = self.tabs.iter().position(|t| t.env == env) else {
             return Vec::new();
@@ -194,16 +218,51 @@ impl EnvTabs {
         if i < self.active || self.active >= self.tabs.len() {
             self.active = self.active.saturating_sub(1);
         }
-        tab.terminals.into_iter().chain(tab.files).collect()
+        let files = tab
+            .terminals
+            .iter()
+            .filter_map(|t| tab.files.get(t).copied());
+        let files: Vec<PaneId> = files.collect();
+        tab.terminals.into_iter().chain(files).collect()
     }
 
-    /// Sets `env`'s file pane; without one, the file pane cannot hold focus.
-    pub fn set_files(&mut self, env: &str, files: Option<PaneId>) {
-        if let Some(tab) = self.get_mut(env) {
-            tab.files = files;
-            if files.is_none() {
-                tab.files_focused = false;
+    /// Sets `terminal`'s file pane; a shown terminal without one can't give its file pane focus.
+    pub fn set_files(&mut self, terminal: PaneId, files: Option<PaneId>) {
+        let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|t| t.terminals.contains(&terminal))
+        else {
+            return;
+        };
+        match files {
+            Some(f) => {
+                tab.files.insert(terminal, f);
             }
+            None => {
+                tab.files.remove(&terminal);
+                if tab.shown == Some(terminal) {
+                    tab.files_focused = false;
+                }
+            }
+        }
+    }
+
+    /// `terminal`'s file pane.
+    pub fn files_of(&self, terminal: PaneId) -> Option<PaneId> {
+        self.tabs
+            .iter()
+            .find_map(|t| t.files.get(&terminal).copied())
+    }
+
+    /// Forgets the file pane `files`, whichever terminal it was beside.
+    pub fn drop_files(&mut self, files: PaneId) {
+        let terminal = self
+            .tabs
+            .iter()
+            .find_map(|t| t.files.iter().find(|&(_, &f)| f == files).map(|(&t, _)| t));
+        if let Some(terminal) = terminal {
+            self.set_files(terminal, None);
         }
     }
 }
@@ -242,7 +301,7 @@ mod tests {
         assert_eq!(t.active().unwrap().env, "a");
         assert!(t.add_env("c"));
         assert_eq!(t.active().unwrap().env, "c");
-        assert_eq!(t.active().unwrap().files_ratio, DEFAULT_FILES_RATIO);
+        assert_eq!(t.active().unwrap().files_ratio(), DEFAULT_FILES_RATIO);
     }
 
     #[test]
@@ -321,7 +380,7 @@ mod tests {
         let mut t = tabs_with(&["a"]);
         t.add_terminal("a", 1);
         t.add_terminal("a", 2);
-        t.set_files("a", Some(10));
+        t.set_files(1, Some(10));
         t.get_mut("a").unwrap().files_focused = true;
         t.show(1);
         assert!(!t.get("a").unwrap().files_focused);
@@ -331,8 +390,71 @@ mod tests {
         t.get_mut("a").unwrap().files_focused = true;
         t.add_terminal("a", 3);
         assert!(!t.get("a").unwrap().files_focused);
+        t.show(1);
         t.get_mut("a").unwrap().files_focused = true;
-        t.set_files("a", None);
+        t.set_files(1, None);
+        assert!(!t.get("a").unwrap().files_focused);
+    }
+
+    #[test]
+    fn each_terminal_shows_its_own_files() {
+        let mut t = tabs_with(&["a"]);
+        t.add_terminal("a", 1);
+        t.add_terminal("a", 2);
+        t.set_files(1, Some(10));
+        t.show(1);
+        assert_eq!(t.active().unwrap().shown_files(), Some(10));
+        t.show(2);
+        assert_eq!(t.active().unwrap().shown_files(), None);
+        t.set_files(2, Some(20));
+        assert_eq!(t.active().unwrap().shown_files(), Some(20));
+        t.show(1);
+        assert_eq!(t.active().unwrap().shown_files(), Some(10));
+        assert_eq!(t.files_of(2), Some(20));
+        // Unknown terminals get none.
+        t.set_files(99, Some(30));
+        assert_eq!(t.files_of(99), None);
+    }
+
+    #[test]
+    fn each_terminal_keeps_its_own_files_ratio() {
+        let mut t = tabs_with(&["a"]);
+        t.add_terminal("a", 1);
+        t.add_terminal("a", 2);
+        t.show(1);
+        t.active_mut().unwrap().set_files_ratio(0.3);
+        t.show(2);
+        assert_eq!(t.active().unwrap().files_ratio(), DEFAULT_FILES_RATIO);
+        t.active_mut().unwrap().set_files_ratio(0.95);
+        assert_eq!(t.active().unwrap().files_ratio(), MAX_RATIO);
+        t.show(1);
+        assert_eq!(t.active().unwrap().files_ratio(), 0.3);
+    }
+
+    #[test]
+    fn closing_a_terminal_forgets_its_files() {
+        let mut t = tabs_with(&["a"]);
+        t.add_terminal("a", 1);
+        t.add_terminal("a", 2);
+        t.set_files(1, Some(10));
+        t.set_files(2, Some(20));
+        assert!(t.close_terminal(1));
+        assert_eq!(t.files_of(1), None);
+        assert_eq!(t.env_of(10), None);
+        assert_eq!(t.files_of(2), Some(20));
+    }
+
+    #[test]
+    fn dropping_a_file_pane_finds_its_terminal() {
+        let mut t = tabs_with(&["a"]);
+        t.add_terminal("a", 1);
+        t.add_terminal("a", 2);
+        t.set_files(1, Some(10));
+        t.set_files(2, Some(20));
+        t.get_mut("a").unwrap().files_focused = true;
+        t.drop_files(20);
+        assert_eq!(t.files_of(2), None);
+        assert_eq!(t.files_of(1), Some(10));
         assert!(!t.get("a").unwrap().files_focused);
     }
 
@@ -341,9 +463,10 @@ mod tests {
         let mut t = tabs_with(&["a", "b", "c"]);
         t.add_terminal("b", 1);
         t.add_terminal("b", 2);
-        t.set_files("b", Some(9));
+        t.set_files(1, Some(9));
+        t.set_files(2, Some(8));
         t.activate("b");
-        assert_eq!(t.close_env("b"), vec![1, 2, 9]);
+        assert_eq!(t.close_env("b"), vec![1, 2, 9, 8]);
         assert_eq!(t.active().unwrap().env, "c");
         assert_eq!(t.close_env("b"), Vec::<PaneId>::new());
         assert_eq!(t.close_env("c"), Vec::<PaneId>::new());
@@ -380,7 +503,7 @@ mod tests {
         let mut t = tabs_with(&["a", "b"]);
         t.add_terminal("a", 1);
         t.add_terminal("b", 2);
-        t.set_files("b", Some(5));
+        t.set_files(2, Some(5));
         assert_eq!(t.env_of(1), Some("a"));
         assert_eq!(t.env_of(2), Some("b"));
         assert_eq!(t.env_of(5), Some("b"));

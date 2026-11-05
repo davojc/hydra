@@ -70,7 +70,7 @@ pub struct ListFile {
     pub hidden: bool,
 }
 
-/// One environment tab: its terminals, the shown one, and its file pane if open.
+/// One environment tab: its terminals and the shown one.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnvFile {
@@ -78,13 +78,15 @@ pub struct EnvFile {
     /// Index into `terminals`: the one shown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<usize>,
+    /// An older layout's one file pane for the whole environment: it opens beside the shown
+    /// terminal. Never written; each terminal saves its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files: Option<FilesFile>,
     #[serde(default, rename = "terminal", skip_serializing_if = "Vec::is_empty")]
     pub terminals: Vec<TerminalFile>,
 }
 
-/// An environment's file pane: the open files and the shown one.
+/// A terminal's file pane: the open files and the shown one.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FilesFile {
@@ -121,6 +123,9 @@ pub struct TerminalFile {
     /// opens, unless `command` is written.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub claude: bool,
+    /// The file pane beside it, when it had one open. Last: a table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<FilesFile>,
 }
 
 /// What a terminal saved with Claude running runs when its layout opens: Claude, resuming
@@ -226,6 +231,8 @@ pub struct PlannedTerminal {
     pub tasks: Option<TasksTab>,
     /// Run [`RESUME_CLAUDE`] after the shell starts (`spec.command` is then `None`).
     pub claude: bool,
+    /// Its file pane.
+    pub files: Option<FilesSpec>,
 }
 
 /// An environment tab that will open.
@@ -235,7 +242,6 @@ pub struct PlannedEnv {
     pub terminals: Vec<PlannedTerminal>,
     /// Index into `terminals`: the one shown; `None` when none opened.
     pub shown: Option<usize>,
-    pub files: Option<FilesSpec>,
 }
 
 /// A layout resolved against the disk: what opens, what didn't and why.
@@ -332,11 +338,16 @@ fn plan_env(ctx: &Context, env: &EnvFile, plan: &mut LayoutPlan) -> PlannedEnv {
     if shown.is_none() && !terminals.is_empty() {
         shown = Some(0);
     }
+    // An older layout's shared file pane goes to the shown terminal, unless it has its own.
+    if let Some(t) = shown.and_then(|i| terminals.get_mut(i))
+        && t.files.is_none()
+    {
+        t.files = env.files.as_ref().and_then(|f| plan_files(ctx, f));
+    }
     PlannedEnv {
         name: env.name.clone(),
         terminals,
         shown,
-        files: env.files.as_ref().and_then(|f| plan_files(ctx, f)),
     }
 }
 
@@ -369,6 +380,7 @@ fn plan_terminal(
         title: t.title.clone(),
         tasks: t.tasks,
         claude: t.claude && t.command.is_none(),
+        files: t.files.as_ref().and_then(|f| plan_files(ctx, f)),
     })
 }
 
@@ -525,6 +537,7 @@ cwd = "~/blog"
                             command: Some("claude".into()),
                             tasks: None,
                             claude: false,
+                            files: None,
                         },
                         TerminalFile {
                             cwd: "C:/c".into(),
@@ -533,6 +546,10 @@ cwd = "~/blog"
                         },
                         TerminalFile {
                             cwd: "C:/b".into(),
+                            files: Some(FilesFile {
+                                files: vec!["C:/b/y.md".into(), "C:/b/z.md".into()],
+                                active: Some(1),
+                            }),
                             ..Default::default()
                         },
                     ],
@@ -681,6 +698,7 @@ cwd = "~/blog"
                     command: Some("claude".into()),
                     tasks: Some(TasksTab::Open),
                     claude: false,
+                    files: None,
                 },
                 term(&fx.dir("web")),
             ],
@@ -834,7 +852,7 @@ cwd = \"~\"
         let cwds: Vec<_> = plan.envs[0].terminals.iter().map(|t| &t.spec.cwd).collect();
         assert_eq!(cwds, [&fx.home.join("api"), &fx.home.join("web")]);
         assert_eq!(plan.envs[0].shown, Some(0));
-        assert_eq!(plan.envs[0].files, None);
+        assert_eq!(plan.envs[0].terminals[0].files, None);
     }
 
     #[test]
@@ -888,12 +906,12 @@ cwd = \"~\"
         std::fs::write(&a, "a").unwrap();
         std::fs::write(&b, "b").unwrap();
         let files = |list: Vec<String>, active| {
-            let mut e = env("work", vec![]);
-            e.files = Some(FilesFile {
+            let mut t = term(&fx.dir("api"));
+            t.files = Some(FilesFile {
                 files: list,
                 active,
             });
-            plan_layout(&fx.ctx(), &layout(vec![e])).envs[0]
+            plan_layout(&fx.ctx(), &layout(vec![env("work", vec![t])])).envs[0].terminals[0]
                 .files
                 .clone()
         };
@@ -914,12 +932,12 @@ cwd = \"~\"
         std::fs::write(&b, "b").unwrap();
         let s = |p: &Path| p.to_string_lossy().into_owned();
         let active = |active| {
-            let mut e = env("work", vec![]);
-            e.files = Some(FilesFile {
+            let mut t = term(&fx.dir("api"));
+            t.files = Some(FilesFile {
                 files: vec![fx.dir("gone.md"), s(&a), s(&b)],
                 active: Some(active),
             });
-            plan_layout(&fx.ctx(), &layout(vec![e])).envs[0]
+            plan_layout(&fx.ctx(), &layout(vec![env("work", vec![t])])).envs[0].terminals[0]
                 .files
                 .clone()
                 .unwrap()
@@ -929,6 +947,61 @@ cwd = \"~\"
         assert_eq!(active(2), 1);
         assert_eq!(active(1), 0);
         assert_eq!(active(0), 0);
+    }
+
+    #[test]
+    fn each_terminal_opens_with_its_own_files() {
+        let fx = Fx::new();
+        let a = fx.home.join("a.md");
+        std::fs::write(&a, "a").unwrap();
+        let mut with = term(&fx.dir("api"));
+        with.files = Some(FilesFile {
+            files: vec![a.to_string_lossy().into_owned()],
+            active: None,
+        });
+        let plan = plan_layout(
+            &fx.ctx(),
+            &layout(vec![env("work", vec![term(&fx.dir("web")), with])]),
+        );
+        let files: Vec<_> = plan.envs[0]
+            .terminals
+            .iter()
+            .map(|t| t.files.clone())
+            .collect();
+        let a_open = FilesSpec {
+            files: vec![a],
+            active: 0,
+        };
+        assert_eq!(files, [None, Some(a_open)]);
+    }
+
+    #[test]
+    fn an_older_layouts_shared_files_go_to_the_shown_terminal() {
+        let fx = Fx::new();
+        let a = fx.home.join("a.md");
+        let b = fx.home.join("b.md");
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&b, "b").unwrap();
+        let shared = |p: &Path| FilesFile {
+            files: vec![p.to_string_lossy().into_owned()],
+            active: None,
+        };
+        let mut e = env("work", vec![term(&fx.dir("api")), term(&fx.dir("web"))]);
+        e.active = Some(1);
+        e.files = Some(shared(&a));
+        let plan = plan_layout(&fx.ctx(), &layout(vec![e.clone()]));
+        let files = |plan: &LayoutPlan| -> Vec<Option<Vec<PathBuf>>> {
+            plan.envs[0]
+                .terminals
+                .iter()
+                .map(|t| t.files.as_ref().map(|f| f.files.clone()))
+                .collect()
+        };
+        assert_eq!(files(&plan), [None, Some(vec![a.clone()])]);
+        // A shown terminal with files of its own keeps them.
+        e.terminals[1].files = Some(shared(&b));
+        let plan = plan_layout(&fx.ctx(), &layout(vec![e]));
+        assert_eq!(files(&plan), [None, Some(vec![b])]);
     }
 
     #[test]

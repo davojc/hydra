@@ -26,13 +26,15 @@ pub enum Session {
 }
 
 /// The planning tools, in the order `tools/list` shows them.
-pub const PLAN: [&str; 11] = [
+pub const PLAN: [&str; 13] = [
     "plan_show",
     "plan_set_spec",
     "plan_propose_milestone",
     "plan_propose_ticket",
     "plan_suggest_repo",
     "plan_revise",
+    "plan_propose_change",
+    "plan_propose_spec",
     "plan_withdraw",
     "plan_add_question",
     "plan_add_link",
@@ -158,6 +160,43 @@ pub fn schemas() -> Vec<Value> {
                 "kind": s("A ticket's kind: feature, bug or chore."),
             }),
             vec!["id"],
+        ),
+        tool(
+            "plan_propose_change",
+            "Planning: propose a change to an approved milestone (M..) or ticket (KEY-..) after \
+             new requirements. The approved version stays in force until the lead accepts the \
+             change in hydraui. Only the fields given change; say why, from the requirements. \
+             Only tickets still to do can change: started or done work is never rewritten, so \
+             propose a follow-up ticket for it instead (plan_propose_ticket, saying which ticket \
+             it follows). A milestone keeps to plain words (title at most 60 characters, 1 to 4 \
+             points of at most 80). drop proposes dropping it. A new change replaces one \
+             already waiting.",
+            json!({
+                "id": s("The approved milestone or ticket."),
+                "why": s("Why, in a line or two: what in the new requirements asks for it."),
+                "from": s("The requirements' file name, as plan_show lists it under Resources."),
+                "title": s("New title."),
+                "target": s("A milestone's new target date, YYYY-MM-DD."),
+                "points": points("A milestone's new points, 1 to 4, each with its full explanation."),
+                "description": s("A ticket's new description."),
+                "repo": s("A ticket's code repo, owner/name."),
+                "milestone": s("A ticket's new milestone id (approved)."),
+                "drop": {"type": "boolean", "description": "Propose dropping it: the requirements no longer need it. Not for a milestone with started work."},
+            }),
+            vec!["id", "why"],
+        ),
+        tool(
+            "plan_propose_spec",
+            "Planning: propose a new version of the agreed spec after new requirements, for the \
+             lead to accept in hydraui; the current spec stays until then. The whole spec, \
+             Markdown, with why. (Before any milestone is approved, plan_set_spec writes it \
+             directly.)",
+            json!({
+                "text": s("The whole new spec, Markdown."),
+                "why": s("What changed and why, in a line or two."),
+                "from": s("The requirements' file name, as plan_show lists it under Resources."),
+            }),
+            vec!["text", "why"],
         ),
         tool(
             "plan_withdraw",
@@ -325,10 +364,33 @@ fn plan(dir: &Path, login: &str, name: &str, args: &Value) -> Result<String, Str
     match name {
         "plan_show" => Ok(show(dir, &p)),
         "plan_set_spec" => {
+            if agreed(&p) {
+                return Err(
+                    "The plan is agreed (a milestone is approved), so the spec changes \
+                            only by proposal: use plan_propose_spec, with why."
+                        .into(),
+                );
+            }
             let text = args.get("text").and_then(Value::as_str).unwrap_or("");
             repo::write_spec(dir, text).map_err(e)?;
             Ok("Spec saved.".into())
         }
+        "plan_propose_spec" => {
+            if !agreed(&p) {
+                return Err("Nothing is approved yet: write the spec with plan_set_spec.".into());
+            }
+            let text = need(args, "text")?;
+            let mut file = p.file.clone();
+            file.spec_change = Some(hydraui_projects::Change {
+                why: need(args, "why")?,
+                from: get(args, "from").unwrap_or_default().to_string(),
+                description: Some(text),
+                ..Default::default()
+            });
+            repo::write_project_file(dir, &file).map_err(e)?;
+            Ok("Proposed the new spec; the lead accepts or turns it down in hydraui.".into())
+        }
+        "plan_propose_change" => propose_change(dir, &p, &need(args, "id")?, args),
         "plan_propose_milestone" => {
             let id = format!(
                 "M{}",
@@ -588,7 +650,8 @@ fn revise(dir: &Path, p: &Project, id: &str, args: &Value) -> Result<String, Str
         let m = &mut ms[i];
         if !open(m.review) {
             return Err(format!(
-                "{id} is {}; only proposals are revised.",
+                "{id} is {}; only proposals are revised. To change an approved one, use \
+                 plan_propose_change.",
                 m.review.label()
             ));
         }
@@ -621,7 +684,8 @@ fn revise(dir: &Path, p: &Project, id: &str, args: &Value) -> Result<String, Str
         }
         if !open(t.meta.review) {
             return Err(format!(
-                "{id} is {}; only proposals are revised.",
+                "{id} is {}; only proposals are revised. To change an approved one, use \
+                 plan_propose_change.",
                 t.meta.review.label()
             ));
         }
@@ -653,6 +717,111 @@ fn revise(dir: &Path, p: &Project, id: &str, args: &Value) -> Result<String, Str
         return Err(format!("There's no {id}."));
     }
     Ok(format!("Revised {id}; it's back with the lead to review."))
+}
+
+/// Whether the plan is agreed: a milestone is approved, so changes go through the lead
+/// (spec §14.6).
+fn agreed(p: &Project) -> bool {
+    p.milestones.iter().any(|m| m.review == Review::Approved)
+}
+
+/// Proposes a change to an approved milestone or ticket (spec §14.6).
+fn propose_change(dir: &Path, p: &Project, id: &str, args: &Value) -> Result<String, String> {
+    let e = |e: hydraui_projects::Error| e.to_string();
+    let drop = args.get("drop").and_then(Value::as_bool).unwrap_or(false);
+    let mut c = hydraui_projects::Change {
+        why: need(args, "why")?,
+        from: get(args, "from").unwrap_or_default().to_string(),
+        title: get(args, "title").map(str::to_string),
+        drop,
+        ..Default::default()
+    };
+    let not_approved = |r: Review| match r {
+        Review::Approved => Ok(()),
+        Review::Rejected => Err(format!("{id} was rejected; it stays that way.")),
+        _ => Err(format!(
+            "{id} isn't approved yet: revise it with plan_revise instead."
+        )),
+    };
+    if let Some(i) = p.milestones.iter().position(|m| m.id == id) {
+        let m = &p.milestones[i];
+        not_approved(m.review)?;
+        if let Some(v) = get(args, "target") {
+            c.target = Some(crate::projects::date(v)?);
+        }
+        c.description = milestone_points(args)?;
+        if drop {
+            if let Some(t) = p
+                .tickets
+                .iter()
+                .find(|t| t.meta.milestone == id && crate::projects::started(t.meta.status))
+            {
+                return Err(format!(
+                    "{id} has started work ({}), so it can't be dropped; propose changes to its \
+                     tickets still to do instead.",
+                    t.id
+                ));
+            }
+        } else {
+            milestone_fits(
+                c.title.as_deref().unwrap_or(&m.title),
+                c.description.as_deref().unwrap_or(&m.description),
+            )?;
+        }
+        if !drop && c.title.is_none() && c.target.is_none() && c.description.is_none() {
+            return Err("Give what changes: title, target or points (or drop).".into());
+        }
+        let mut ms = p.milestones.clone();
+        ms[i].change = Some(c);
+        repo::write_milestones(dir, &ms).map_err(e)?;
+    } else if let Some(t) = p.tickets.iter().find(|t| t.id == id) {
+        not_approved(t.meta.review)?;
+        match t.meta.status {
+            TicketStatus::Todo => {}
+            TicketStatus::Dropped => return Err(format!("{id} is dropped.")),
+            s => {
+                return Err(format!(
+                    "{id} is {}: started work is never rewritten. Propose a follow-up ticket \
+                     for what the new requirements add (plan_propose_ticket in {}, its \
+                     description starting \"Follows {id}:\" and saying why).",
+                    s.label().to_lowercase(),
+                    t.meta.milestone
+                ));
+            }
+        }
+        c.description = get(args, "description").map(str::to_string);
+        c.repo = get(args, "repo")
+            .map(crate::projects::repo_name)
+            .transpose()?;
+        if let Some(v) = get(args, "milestone") {
+            if !p
+                .milestones
+                .iter()
+                .any(|m| m.id == v && m.review == Review::Approved)
+            {
+                return Err(format!("{v} isn't an approved milestone."));
+            }
+            c.milestone = Some(v.to_string());
+        }
+        if !drop
+            && c.title.is_none()
+            && c.description.is_none()
+            && c.repo.is_none()
+            && c.milestone.is_none()
+        {
+            return Err(
+                "Give what changes: title, description, repo or milestone (or drop).".into(),
+            );
+        }
+        let mut t = t.clone();
+        t.meta.change = Some(c);
+        repo::write_ticket(dir, &t).map_err(e)?;
+    } else {
+        return Err(format!("There's no {id}."));
+    }
+    Ok(format!(
+        "Proposed a change to {id}; the approved version stands until the lead accepts it."
+    ))
 }
 
 fn work(dir: &Path, ticket: &str, name: &str, args: &Value) -> Result<String, String> {
@@ -782,10 +951,35 @@ fn show(dir: &Path, p: &Project) -> String {
             p.spec.trim()
         },
     );
-    let note = |r: Review, n: &str| match r {
-        Review::Changes => format!(" [changes asked: {n}]"),
-        Review::Rejected => format!(" [rejected: {n}]"),
-        other => format!(" [{}]", other.label()),
+    if let Some(c) = &p.file.spec_change {
+        out = out.replace(
+            "\n\n## Milestones\n",
+            &format!(
+                "\n\n(A new spec is waiting for the lead: {})\n\n## Milestones\n",
+                c.why
+            ),
+        );
+    } else if !p.file.spec_note.is_empty() {
+        out = out.replace(
+            "\n\n## Milestones\n",
+            &format!("\n\n(Spec: {})\n\n## Milestones\n", p.file.spec_note),
+        );
+    }
+    let note = |r: Review, n: &str, c: &Option<hydraui_projects::Change>| {
+        let mut s = match r {
+            Review::Changes => format!(" [changes asked: {n}]"),
+            Review::Rejected => format!(" [rejected: {n}]"),
+            Review::Approved if !n.is_empty() => format!(" [approved; {n}]"),
+            other => format!(" [{}]", other.label()),
+        };
+        if let Some(c) = c {
+            let what = if c.drop { "drop it" } else { "change" };
+            s.push_str(&format!(
+                " [proposed {what}, waiting for the lead: {}]",
+                c.why
+            ));
+        }
+        s
     };
     for m in &p.milestones {
         let target = m
@@ -796,7 +990,7 @@ fn show(dir: &Path, p: &Project) -> String {
             "- {}: {}{target}{}\n  {}\n",
             m.id,
             m.title,
-            note(m.review, &m.review_note),
+            note(m.review, &m.review_note, &m.change),
             m.description
         ));
         for t in p.tickets.iter().filter(|t| t.meta.milestone == m.id) {
@@ -814,7 +1008,7 @@ fn show(dir: &Path, p: &Project) -> String {
                 "  - {}: {}{kind}{} · {}{repo}\n",
                 t.id,
                 t.meta.title,
-                note(t.meta.review, &t.meta.review_note),
+                note(t.meta.review, &t.meta.review_note, &t.meta.change),
                 t.meta.status.label()
             ));
         }
@@ -907,6 +1101,106 @@ mod tests {
             Item::Ticket(id.into())
         };
         review(dir, &item, Review::Approved, "", "lead").unwrap();
+    }
+
+    /// An agreed plan: spec, M1 approved, PG-1 to do and PG-2 in progress, both approved.
+    fn agreed_plan(reg: &Registry, dir: &Path) {
+        run(reg, "plan", "plan_set_spec", json!({"text": "# PG"}));
+        run(
+            reg,
+            "plan",
+            "plan_propose_milestone",
+            json!({"title": "Model", "points": [{"point": "tables", "detail": "All of them."}]}),
+        );
+        approve(dir, "M1");
+        for title in ["Schema", "Share"] {
+            run(
+                reg,
+                "plan",
+                "plan_propose_ticket",
+                json!({"milestone": "M1", "title": title, "description": "x", "repo": "iov42/be"}),
+            );
+        }
+        approve(dir, "PG-1");
+        approve(dir, "PG-2");
+        let mut t = repo::load(dir).unwrap().tickets.remove(1);
+        t.meta.status = TicketStatus::InProgress;
+        repo::write_ticket(dir, &t).unwrap();
+    }
+
+    #[test]
+    fn new_requirements_change_an_agreed_plan_only_by_proposal() {
+        let (_tmp, reg, dir) = setup();
+        agreed_plan(&reg, &dir);
+        let from = "Requirements from Joshua 2026-11-05.md";
+        // The agreed spec isn't overwritten; a new one is proposed.
+        assert!(run(&reg, "plan", "plan_set_spec", json!({"text": "# New"})).is_error);
+        let out = run(
+            &reg,
+            "plan",
+            "plan_propose_spec",
+            json!({"text": "# New", "why": "CSV export", "from": from}),
+        );
+        assert!(!out.is_error, "{}", out.text);
+        // A ticket still to do gets a change; the approved version stands meanwhile.
+        let out = run(
+            &reg,
+            "plan",
+            "plan_propose_change",
+            json!({"id": "PG-1", "why": "CSV too", "from": from, "title": "Schema with CSV"}),
+        );
+        assert!(!out.is_error, "{}", out.text);
+        // Started work is never rewritten: Claude is pointed at a follow-up ticket.
+        let out = run(
+            &reg,
+            "plan",
+            "plan_propose_change",
+            json!({"id": "PG-2", "why": "CSV too", "title": "Share as CSV"}),
+        );
+        assert!(
+            out.is_error && out.text.contains("follow-up"),
+            "{}",
+            out.text
+        );
+        // A milestone with started work can't be dropped; its points keep the rules.
+        let drop = json!({"id": "M1", "why": "cut", "drop": true});
+        assert!(run(&reg, "plan", "plan_propose_change", drop).is_error);
+        let long = json!({"id": "M1", "why": "x", "title": "x".repeat(61)});
+        assert!(run(&reg, "plan", "plan_propose_change", long).is_error);
+        let empty = json!({"id": "M1", "why": "x"});
+        assert!(run(&reg, "plan", "plan_propose_change", empty).is_error);
+        // Approved items aren't revised in place.
+        let out = run(
+            &reg,
+            "plan",
+            "plan_revise",
+            json!({"id": "PG-1", "title": "y"}),
+        );
+        assert!(out.is_error && out.text.contains("plan_propose_change"));
+
+        let p = repo::load(&dir).unwrap();
+        assert_eq!(p.spec.trim(), "# PG");
+        assert_eq!(p.tickets[0].meta.title, "Schema");
+        assert_eq!(
+            p.tickets[0].meta.change.as_ref().unwrap().title.as_deref(),
+            Some("Schema with CSV")
+        );
+        let shown = run(&reg, "plan", "plan_show", json!({})).text;
+        assert!(shown.contains("A new spec is waiting") && shown.contains("proposed change"));
+        // A proposal still to review is revised, not changed.
+        run(
+            &reg,
+            "plan",
+            "plan_propose_ticket",
+            json!({"milestone": "M1", "title": "Export", "description": "x", "repo": "iov42/be"}),
+        );
+        let out = run(
+            &reg,
+            "plan",
+            "plan_propose_change",
+            json!({"id": "PG-3", "why": "x", "title": "y"}),
+        );
+        assert!(out.is_error && out.text.contains("plan_revise"));
     }
 
     #[test]

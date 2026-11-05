@@ -1522,6 +1522,299 @@ impl Workspace {
         Ok(())
     }
 
+    // ---- New requirements (spec §14.6) ----
+
+    /// Asks for new requirements: pasted, or (left empty) a file to attach.
+    fn requirements_dialog(
+        &mut self,
+        env: String,
+        slug: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.fields_dialog(
+            "Add requirements".into(),
+            vec![
+                ("From", "who gave them, e.g. Joshua", String::new()),
+                (
+                    "Requirements",
+                    "paste them here, or leave this empty to choose a file",
+                    String::new(),
+                ),
+            ],
+            move |ws, v, window, cx| {
+                let (from, text) = (v[0].clone(), v[1].clone());
+                let dir = ws.project_dir(&env, &slug).ok_or("The project is gone.")?;
+                if text.is_empty() {
+                    let (env, slug) = (env.clone(), slug.clone());
+                    ws.open_dialog_path(false, window, cx, move |ws, path, window, cx| {
+                        let name = pj::requirements_name(&from);
+                        match repo::add_resource_as(&dir, &path, &name) {
+                            Ok(file) => {
+                                ws.review_requirements(&env, &slug, &file, &from, window, cx)
+                            }
+                            Err(e) => {
+                                window.push_notification(Notification::error(e.to_string()), cx)
+                            }
+                        }
+                    });
+                    return Ok(());
+                }
+                let file = pj::add_requirements(&dir, &from, &text)?;
+                ws.review_requirements(&env, &slug, &file, &from, window, cx);
+                Ok(())
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Hands requirements saved as `file` to the planning session to propose their changes.
+    fn review_requirements(
+        &mut self,
+        env: &str,
+        slug: &str,
+        file: &str,
+        from: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reload_env(env, cx);
+        let guide = match self.planning_guide(env, slug) {
+            Ok(g) => g.instruction(),
+            Err(why) => {
+                window.push_notification(Notification::error(why), cx);
+                return;
+            }
+        };
+        window.push_notification(
+            Notification::info(format!(
+                "Saved as {file}. Claude is working out what it changes; each change shows \
+                 on the Overview for you to accept."
+            )),
+            cx,
+        );
+        self.tell_planner(
+            env,
+            slug,
+            requirements_prompt(file, from, &guide),
+            window,
+            cx,
+        );
+    }
+
+    /// The changes from new requirements waiting for the lead, each against what's agreed,
+    /// with Accept and Turn down (spec §14.6). None when nothing waits.
+    fn changes_block(
+        &self,
+        env: &str,
+        p: &Project,
+        lead: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Div> {
+        let changes = pj::pending_changes_of(p);
+        let new: Vec<String> = p
+            .milestones
+            .iter()
+            .filter(|m| m.review.waiting())
+            .map(|m| pj::milestone_name(&m.id))
+            .chain(
+                p.tickets
+                    .iter()
+                    .filter(|t| t.meta.review.waiting())
+                    .map(|t| t.id.clone()),
+            )
+            .collect();
+        if changes.is_empty() {
+            return None;
+        }
+        let mut block = v_flex().gap_2().child(
+            h_flex()
+                .gap_3()
+                .items_center()
+                .child(section_title(&format!(
+                    "Changes to review ({})",
+                    changes.len()
+                )))
+                .child(div().flex_1())
+                .when(lead && changes.len() > 1, |d| {
+                    let (env_a, slug_a) = (env.to_string(), p.slug.clone());
+                    let ids: Vec<String> = changes.iter().map(|(id, _)| id.clone()).collect();
+                    d.child(
+                        Button::new("accept-all-changes")
+                            .label("Accept all")
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                for id in &ids {
+                                    let _ = ws.edit_project(
+                                        &env_a,
+                                        &slug_a,
+                                        |dir, _, login| pj::accept_change(dir, id, login),
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            })),
+                    )
+                }),
+        );
+        if !lead {
+            block = block.child(muted(&format!(
+                "Waiting for {}, the lead, to accept or turn them down.",
+                p.file.lead
+            )));
+        }
+        for (id, c) in changes {
+            block = block.child(self.change_card(env, p, &id, &c, lead, cx));
+        }
+        if !new.is_empty() {
+            block = block.child(muted(&format!(
+                "Also new, to review on their milestones: {}",
+                new.join(", ")
+            )));
+        }
+        Some(block)
+    }
+
+    fn change_card(
+        &self,
+        env: &str,
+        p: &Project,
+        id: &str,
+        c: &hydraui_projects::Change,
+        lead: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let ticket = p.tickets.iter().find(|t| t.id == id);
+        let milestone = p.milestones.iter().find(|m| m.id == id);
+        let heading = match (ticket, milestone) {
+            (Some(t), _) => format!("{} · {}", t.id, t.meta.title),
+            (_, Some(m)) => format!("{} · {}", pj::milestone_name(&m.id), m.title),
+            _ => "Spec".to_string(),
+        };
+        // (what, agreed, proposed) for each field the change touches.
+        let mut fields: Vec<(&str, String, String)> = Vec::new();
+        let mut field = |what: &'static str, old: &str, new: &Option<String>| {
+            if let Some(new) = new
+                && new.trim() != old.trim()
+            {
+                fields.push((what, old.to_string(), new.clone()));
+            }
+        };
+        field("Title", &heading_title(ticket, milestone), &c.title);
+        match (ticket, milestone) {
+            (Some(t), _) => {
+                field("Description", &t.body, &c.description);
+                field("Repo", &t.meta.repo, &c.repo);
+                field("Milestone", &t.meta.milestone, &c.milestone);
+            }
+            (_, Some(m)) => {
+                field("Points", &m.description, &c.description);
+                field(
+                    "Target",
+                    &m.target.map(|d| d.to_string()).unwrap_or_default(),
+                    &c.target.map(|d| d.to_string()),
+                );
+            }
+            _ => field("Spec", &p.spec, &c.description),
+        }
+        let started = ticket.is_some_and(|t| pj::started(t.meta.status));
+        let mut card = v_flex()
+            .gap_2()
+            .px_4()
+            .py_3()
+            .rounded_lg()
+            .bg(color(theme::SURFACE))
+            .border_1()
+            .border_color(color(theme::AMBER))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child(heading),
+                    )
+                    .child(if c.drop {
+                        pill("Drop", theme::RED, theme::RED_TINT)
+                    } else {
+                        pill("Change", theme::AMBER, theme::AMBER_TINT)
+                    }),
+            )
+            .child(div().text_sm().child(c.why.clone()))
+            .when(!c.from.is_empty(), |d| {
+                d.child(muted(&format!("From {}", c.from)))
+            });
+        if started {
+            card = card.child(notice(
+                "This ticket has started since Claude proposed this, so it won't be changed: \
+                 turn this down and ask Claude for a follow-up ticket.",
+                theme::AMBER,
+                theme::AMBER_TINT,
+            ));
+        }
+        for (what, old, new) in fields {
+            card = card.child(diff_view(what, &old, &new));
+        }
+        if lead {
+            let (e1, s1, i1) = (env.to_string(), p.slug.clone(), id.to_string());
+            let (e2, s2, i2) = (env.to_string(), p.slug.clone(), id.to_string());
+            card = card.child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new(SharedString::from(format!("accept-change-{id}")))
+                            .label(if c.drop { "Accept: drop it" } else { "Accept" })
+                            .primary()
+                            .small()
+                            .disabled(started)
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                let _ = ws.edit_project(
+                                    &e1,
+                                    &s1,
+                                    |dir, _, login| pj::accept_change(dir, &i1, login),
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("turn-down-{id}")))
+                            .label("Turn down…")
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                let (env, slug, id) = (e2.clone(), s2.clone(), i2.clone());
+                                ws.text_dialog(
+                                    "Turn down this change".into(),
+                                    String::new(),
+                                    "why; Claude won't propose it again",
+                                    move |ws, why, window, cx| {
+                                        ws.edit_project(
+                                            &env,
+                                            &slug,
+                                            |dir, _, login| {
+                                                pj::reject_change(dir, &id, &why, login)
+                                            },
+                                            window,
+                                            cx,
+                                        )
+                                    },
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    ),
+            );
+        }
+        card
+    }
+
     // ---- Review (spec §14) ----
 
     #[allow(clippy::too_many_arguments)] // What the review is of, and what it says.
@@ -2856,7 +3149,7 @@ impl Workspace {
         let inputs: Vec<(&'static str, FieldBox)> = fields
             .into_iter()
             .map(|(label, placeholder, initial)| {
-                let input = if matches!(label, "Points" | "Description") {
+                let input = if matches!(label, "Points" | "Description" | "Requirements") {
                     FieldBox::Lines(cx.new(|cx| {
                         TextareaState::new(window, cx)
                             .auto_grow(3, 14)
@@ -3784,6 +4077,9 @@ impl Workspace {
                         .child(note),
                 )
         };
+        if let Some(changes) = self.changes_block(env, p, lead, cx) {
+            page = page.child(changes);
+        }
         if started {
             page = page.child(
                 h_flex()
@@ -3866,6 +4162,8 @@ impl Workspace {
                         .child(div().w(px(110.)).flex_none().child(
                             if m.review != Review::Approved {
                                 review_pill(m.review).into_any_element()
+                            } else if m.change.is_some() {
+                                change_pill().into_any_element()
                             } else if is_late(m, &c, &today) {
                                 pill("late", theme::RED, theme::RED_TINT).into_any_element()
                             } else {
@@ -3961,6 +4259,25 @@ impl Workspace {
         page = page.child(self.repos_block(env, p, lead, cx));
         if started {
             page = page.child(self.resources_block(&target, p, cx));
+        }
+        if started && lead {
+            let (env_r, slug_r) = (env_s.clone(), slug_s.clone());
+            page = page.child(
+                h_flex().child(
+                    Button::new("add-requirements")
+                        .label("Add requirements…")
+                        .ghost()
+                        .xsmall()
+                        .tooltip(
+                            "New requirements, pasted or as a file: Claude works out how they \
+                             change the spec, milestones and tickets, and proposes each change \
+                             here for you to accept",
+                        )
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.requirements_dialog(env_r.clone(), slug_r.clone(), window, cx)
+                        })),
+                ),
+            );
         }
         if started && lead && !planning {
             let (env_b, slug_b) = (env_s.clone(), slug_s.clone());
@@ -4891,6 +5208,7 @@ impl Workspace {
                     .when(t.meta.review != Review::Approved, |d| {
                         d.child(review_pill(t.meta.review))
                     })
+                    .when(t.meta.change.is_some(), |d| d.child(change_pill()))
                     .when(unsent && t.meta.review == Review::Approved, |d| {
                         d.child(
                             div()
@@ -5642,6 +5960,56 @@ fn follow(skill: Option<&Path>, what: &str) -> String {
 
 // ---- Small pieces ----
 
+/// The agreed title of the item a change is to: a ticket's or a milestone's; the spec has none.
+fn heading_title(ticket: Option<&Ticket>, milestone: Option<&Milestone>) -> String {
+    match (ticket, milestone) {
+        (Some(t), _) => t.meta.title.clone(),
+        (_, Some(m)) => m.title.clone(),
+        _ => String::new(),
+    }
+}
+
+/// One field of a proposed change: one-line fields as "old → new", longer ones as a line
+/// diff, removed lines red and struck through, added ones green.
+fn diff_view(what: &str, old: &str, new: &str) -> gpui::Div {
+    let label = div()
+        .text_xs()
+        .text_color(color(theme::TEXT_SECONDARY))
+        .child(what.to_uppercase());
+    if !old.contains('\n') && !new.contains('\n') {
+        let old = if old.trim().is_empty() { "(none)" } else { old };
+        return v_flex().gap_1().child(label).child(
+            v_flex()
+                .gap_1()
+                .text_sm()
+                .child(
+                    div()
+                        .text_color(color(theme::RED))
+                        .line_through()
+                        .child(old.to_string()),
+                )
+                .child(div().text_color(color(theme::GREEN)).child(new.to_string())),
+        );
+    }
+    let mut lines = v_flex().gap(px(1.)).text_sm().font_family("Menlo");
+    for d in pj::line_diff(old, new) {
+        let (mark, text, fg, bg) = match d {
+            pj::Diff::Same(l) => ("  ", l, theme::TEXT_SECONDARY, theme::SURFACE),
+            pj::Diff::Gone(l) => ("− ", l, theme::RED, theme::RED_TINT),
+            pj::Diff::Added(l) => ("+ ", l, theme::GREEN, theme::GREEN_TINT),
+        };
+        lines = lines.child(
+            div()
+                .px_2()
+                .rounded_sm()
+                .bg(color(bg))
+                .text_color(color(fg))
+                .child(format!("{mark}{text}")),
+        );
+    }
+    v_flex().gap_1().child(label).child(lines)
+}
+
 fn muted(text: &str) -> gpui::Div {
     div()
         .text_sm()
@@ -5735,6 +6103,40 @@ fn count_badge(n: usize, yours: bool) -> gpui::Div {
         .bg(color(bg))
         .text_color(color(fg))
         .child(n.to_string())
+}
+
+/// An approved item with a change from new requirements waiting for the lead (spec §14.6).
+fn change_pill() -> gpui::Div {
+    pill("Change waiting", theme::AMBER, theme::AMBER_TINT)
+}
+
+/// The planning session's job when new requirements arrive (spec §14.6): propose every
+/// change for the lead to accept, never rewrite agreed or started work.
+fn requirements_prompt(file: &str, from: &str, guide: &str) -> String {
+    let who = if from.trim().is_empty() {
+        String::new()
+    } else {
+        format!(" from {}", from.trim())
+    };
+    format!(
+        "New requirements{who} are in the project's resources as \"{file}\". {guide}\n\
+         Read them (plan_read_resource), then plan_show, and work out how they change the \
+         project. The plan is agreed and work may have started, so propose every change for \
+         the lead to accept in hydraui; never rewrite agreed work:\n\
+         - the spec, if it changes: plan_propose_spec with the whole new spec;\n\
+         - approved milestones: plan_propose_change (title, points, target, or drop);\n\
+         - approved tickets still to do: plan_propose_change (title, description, repo, \
+         milestone, or drop);\n\
+         - tickets in progress, in review or done are never changed: for what they now miss, \
+         propose a follow-up ticket (plan_propose_ticket) whose description starts \
+         \"Follows KEY-n:\";\n\
+         - new work: plan_propose_milestone, and plan_propose_ticket in approved milestones;\n\
+         - anything unclear: plan_add_question.\n\
+         Give each change from = \"{file}\" and a why the lead can check against the \
+         requirements. Leave alone what they don't touch. Then review what you proposed \
+         against the planning guide, and call plan_done with a short summary: what changes, \
+         what's new, which started tickets get follow-ups, and what you're unsure of."
+    )
 }
 
 fn review_pill(r: Review) -> gpui::Div {
@@ -5919,6 +6321,15 @@ mod tests {
             own.contains("CLAUDE.md")
                 && own.contains(".claude/skills")
                 && !own.contains("SKILL.md")
+        );
+        let req = requirements_prompt("Requirements from Joshua 2026-11-05.md", "Joshua", "G.");
+        assert!(
+            req.contains("from Joshua")
+                && req.contains("plan_propose_change")
+                && req.contains("plan_propose_spec")
+                && req.contains("follow-up")
+                && req.contains("from = \"Requirements from Joshua 2026-11-05.md\"")
+                && req.contains("plan_done")
         );
         let started = start_prompt(&p, "Use the /our-planning skill throughout.");
         assert!(started.contains("plan_propose_milestone") && started.contains("/our-planning"));

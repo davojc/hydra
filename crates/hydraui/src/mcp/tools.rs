@@ -493,6 +493,8 @@ mod tests {
                 "plan_propose_ticket",
                 "plan_suggest_repo",
                 "plan_revise",
+                "plan_propose_change",
+                "plan_propose_spec",
                 "plan_withdraw",
                 "plan_add_question",
                 "plan_add_link",

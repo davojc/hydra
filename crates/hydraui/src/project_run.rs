@@ -61,6 +61,12 @@ pub fn next_step(
             },
             TicketStatus::Todo | TicketStatus::InProgress => {}
         }
+        if t.meta.change.is_some() {
+            return Step::Pause(format!(
+                "{} has a change waiting for you: accept it or turn it down",
+                t.id
+            ));
+        }
         if let Some(d) = p
             .decisions
             .iter()
@@ -225,6 +231,24 @@ mod tests {
         q.tickets[0].meta.review = Review::Proposed;
         assert_eq!(next_step(&q, "M1", &s, |_| true), Step::Finished);
         assert_eq!(next_step(&p, "M2", &s, |_| true), Step::Finished);
+    }
+
+    #[test]
+    fn a_run_pauses_at_a_ticket_with_a_change_waiting() {
+        let mut p = project(vec![
+            ticket("PG-1", BE, TicketStatus::InReview),
+            ticket("PG-2", FE, TicketStatus::Todo),
+        ]);
+        p.tickets[1].meta.change = Some(hydraui_projects::Change {
+            why: "Joshua".into(),
+            ..Default::default()
+        });
+        let s = setup(false);
+        assert!(
+            matches!(next_step(&p, "M1", &s, |_| true), Step::Pause(w) if w.starts_with("PG-2 has a change"))
+        );
+        p.tickets[1].meta.change = None;
+        assert_eq!(next_step(&p, "M1", &s, |_| true), Step::Work("PG-2".into()));
     }
 
     #[test]

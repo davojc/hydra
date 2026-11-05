@@ -506,6 +506,39 @@ title = "Sharing"
     }
 
     #[test]
+    fn proposed_changes_round_trip_on_tickets_milestones_and_the_spec() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("pg");
+        sample(&dir);
+        let mut p = load(&dir).unwrap();
+        let change = Change {
+            why: "Joshua wants CSV too".into(),
+            from: "requirements-2026-11-05.md".into(),
+            title: Some("Export to CSV and PDF".into()),
+            description: Some("- a point\n  its detail".into()),
+            ..Default::default()
+        };
+        let mut t = p.tickets.remove(0);
+        t.meta.change = Some(change.clone());
+        write_ticket(&dir, &t).unwrap();
+        let mut ms = p.milestones.clone();
+        ms[0].change = Some(Change {
+            drop: true,
+            ..change.clone()
+        });
+        write_milestones(&dir, &ms).unwrap();
+        p.file.spec_change = Some(change.clone());
+        write_project_file(&dir, &p.file).unwrap();
+        let back = load(&dir).unwrap();
+        assert_eq!(back.tickets[0].meta.change.as_ref(), Some(&change));
+        assert!(back.milestones[0].change.as_ref().is_some_and(|c| c.drop));
+        assert_eq!(back.milestones[1].change, None);
+        assert_eq!(back.file.spec_change, Some(change));
+        // Unknown keys are still kept alongside.
+        assert!(back.file.extra.contains_key("owner_team"));
+    }
+
+    #[test]
     fn one_bad_project_does_not_hide_the_others() {
         let tmp = tempfile::tempdir().unwrap();
         sample(&tmp.path().join("good"));

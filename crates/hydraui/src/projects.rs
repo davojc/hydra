@@ -398,6 +398,8 @@ pub fn new_project(checkout: &Path, name: &str, login: &str) -> Result<String, S
         repos: Vec::new(),
         suggested_repos: Vec::new(),
         dismissed_repos: Vec::new(),
+        spec_change: None,
+        spec_note: String::new(),
         sync: Default::default(),
         extra: Default::default(),
     };
@@ -645,6 +647,269 @@ pub fn review(dir: &Path, item: &Item, to: Review, note: &str, login: &str) -> R
             repo::write_ticket(dir, &t).map_err(|e| e.to_string())
         }
     }
+}
+
+/// What a proposed change is to: the spec, a milestone or a ticket (spec §14.6).
+pub fn change_target(id: &str) -> &'static str {
+    if id == SPEC {
+        "spec"
+    } else if id.starts_with('M') && id[1..].chars().all(|c| c.is_ascii_digit()) {
+        "milestone"
+    } else {
+        "ticket"
+    }
+}
+
+/// The id a spec change goes by.
+pub const SPEC: &str = "spec";
+
+/// Every change waiting for the lead, as (id, change), spec first, then milestones and
+/// tickets in order.
+pub fn pending_changes_of(p: &Project) -> Vec<(String, hydraui_projects::Change)> {
+    let mut out = Vec::new();
+    if let Some(c) = &p.file.spec_change {
+        out.push((SPEC.to_string(), c.clone()));
+    }
+    for m in &p.milestones {
+        if let Some(c) = &m.change {
+            out.push((m.id.clone(), c.clone()));
+        }
+    }
+    for t in &p.tickets {
+        if let Some(c) = &t.meta.change {
+            out.push((t.id.clone(), c.clone()));
+        }
+    }
+    out
+}
+
+/// Accepts the change proposed to `id` (the spec, a milestone or a ticket) in project folder
+/// `dir`: it replaces the approved version (spec §14.6). A ticket must still be to do: started
+/// work only ever gets a follow-up ticket.
+pub fn accept_change(dir: &Path, id: &str, login: &str) -> Result<(), String> {
+    let e = |e: hydraui_projects::Error| e.to_string();
+    let p = repo::load(dir).map_err(e)?;
+    let gone = || format!("There's no change waiting for {id}.");
+    if id == SPEC {
+        let mut file = p.file.clone();
+        let c = file.spec_change.take().ok_or_else(gone)?;
+        repo::write_spec(dir, c.description.as_deref().unwrap_or(&p.spec)).map_err(e)?;
+        file.spec_note.clear();
+        return repo::write_project_file(dir, &file).map_err(e);
+    }
+    if let Some(i) = p.milestones.iter().position(|m| m.id == id) {
+        let mut ms = p.milestones.clone();
+        let c = ms[i].change.take().ok_or_else(gone)?;
+        let m = &mut ms[i];
+        if c.drop {
+            if let Some(t) = p
+                .tickets
+                .iter()
+                .find(|t| t.meta.milestone == id && started(t.meta.status))
+            {
+                return Err(format!(
+                    "{} has started work ({}), so it can't be dropped. Reject this change.",
+                    milestone_name(id),
+                    t.id
+                ));
+            }
+            m.review = Review::Rejected;
+            m.review_note = format!("Dropped: {}", c.why);
+            for t in p.tickets.iter().filter(|t| t.meta.milestone == id) {
+                let mut t = t.clone();
+                if t.meta.status == TicketStatus::Todo {
+                    t.meta.status = TicketStatus::Dropped;
+                    t.meta.change = None;
+                    repo::write_ticket(dir, &t).map_err(e)?;
+                }
+            }
+        } else {
+            if let Some(v) = c.title {
+                m.title = v;
+            }
+            if let Some(v) = c.target {
+                m.target = Some(v);
+            }
+            if let Some(v) = c.description {
+                m.description = v;
+            }
+            m.review_note.clear();
+        }
+        m.reviewed_by = login.to_string();
+        m.reviewed_at = Some(progress::now());
+        return repo::write_milestones(dir, &ms).map_err(e);
+    }
+    let mut t = p
+        .tickets
+        .iter()
+        .find(|t| t.id == id)
+        .cloned()
+        .ok_or_else(|| format!("There's no {id}."))?;
+    let c = t.meta.change.take().ok_or_else(gone)?;
+    if t.meta.status != TicketStatus::Todo {
+        return Err(format!(
+            "{id} is {} now, so it isn't changed. Reject this and ask Claude for a follow-up \
+             ticket instead.",
+            t.meta.status.label().to_lowercase()
+        ));
+    }
+    if c.drop {
+        t.meta.status = TicketStatus::Dropped;
+    } else {
+        if let Some(v) = c.title {
+            t.meta.title = v;
+        }
+        if let Some(v) = c.description {
+            t.body = v;
+        }
+        if let Some(v) = c.repo {
+            t.meta.repo = v;
+        }
+        if let Some(v) = c.milestone {
+            if !p
+                .milestones
+                .iter()
+                .any(|m| m.id == v && m.review == Review::Approved)
+            {
+                return Err(format!(
+                    "{} isn't an approved milestone.",
+                    milestone_name(&v)
+                ));
+            }
+            t.meta.milestone = v;
+        }
+    }
+    t.meta.review_note.clear();
+    t.meta.reviewed_by = login.to_string();
+    t.meta.reviewed_at = Some(progress::now());
+    repo::write_ticket(dir, &t).map_err(e)
+}
+
+/// Turns down the change proposed to `id`, keeping `reason` so Claude doesn't propose it again.
+pub fn reject_change(dir: &Path, id: &str, reason: &str, login: &str) -> Result<(), String> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err("Say why, so Claude doesn't propose it again.".into());
+    }
+    let e = |e: hydraui_projects::Error| e.to_string();
+    let p = repo::load(dir).map_err(e)?;
+    let gone = || format!("There's no change waiting for {id}.");
+    let note = format!("Change turned down: {reason}");
+    if id == SPEC {
+        let mut file = p.file.clone();
+        file.spec_change.take().ok_or_else(gone)?;
+        file.spec_note = note;
+        return repo::write_project_file(dir, &file).map_err(e);
+    }
+    if let Some(i) = p.milestones.iter().position(|m| m.id == id) {
+        let mut ms = p.milestones.clone();
+        let m = &mut ms[i];
+        m.change.take().ok_or_else(gone)?;
+        m.review_note = note;
+        m.reviewed_by = login.to_string();
+        m.reviewed_at = Some(progress::now());
+        return repo::write_milestones(dir, &ms).map_err(e);
+    }
+    let mut t = p
+        .tickets
+        .iter()
+        .find(|t| t.id == id)
+        .cloned()
+        .ok_or_else(|| format!("There's no {id}."))?;
+    t.meta.change.take().ok_or_else(gone)?;
+    t.meta.review_note = note;
+    t.meta.reviewed_by = login.to_string();
+    t.meta.reviewed_at = Some(progress::now());
+    repo::write_ticket(dir, &t).map_err(e)
+}
+
+/// The resource name new requirements are saved under: dated, and who they came from.
+pub fn requirements_name(from: &str) -> String {
+    let date = progress::today();
+    match from.trim() {
+        "" => format!("Requirements {date}"),
+        who => format!("Requirements from {who} {date}"),
+    }
+}
+
+/// One line of [`line_diff`]: kept, removed or added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Diff<'a> {
+    Same(&'a str),
+    Gone(&'a str),
+    Added(&'a str),
+}
+
+/// The lines of `old` and `new`, marked kept, removed or added (a longest-common-subsequence
+/// diff), to show a proposed change against what's agreed.
+pub fn line_diff<'a>(old: &'a str, new: &'a str) -> Vec<Diff<'a>> {
+    let a: Vec<&str> = old.lines().collect();
+    let b: Vec<&str> = new.lines().collect();
+    // lcs[i][j]: the common lines of a[i..] and b[j..].
+    let mut lcs = vec![vec![0u32; b.len() + 1]; a.len() + 1];
+    for i in (0..a.len()).rev() {
+        for j in (0..b.len()).rev() {
+            lcs[i][j] = if a[i] == b[j] {
+                lcs[i + 1][j + 1] + 1
+            } else {
+                lcs[i + 1][j].max(lcs[i][j + 1])
+            };
+        }
+    }
+    let (mut i, mut j, mut out) = (0, 0, Vec::new());
+    while i < a.len() && j < b.len() {
+        if a[i] == b[j] {
+            out.push(Diff::Same(a[i]));
+            i += 1;
+            j += 1;
+        } else if lcs[i + 1][j] >= lcs[i][j + 1] {
+            out.push(Diff::Gone(a[i]));
+            i += 1;
+        } else {
+            out.push(Diff::Added(b[j]));
+            j += 1;
+        }
+    }
+    out.extend(a[i..].iter().map(|l| Diff::Gone(l)));
+    out.extend(b[j..].iter().map(|l| Diff::Added(l)));
+    out
+}
+
+/// Whether work on a ticket has begun: started tickets are never rewritten (spec §14.6).
+pub fn started(s: TicketStatus) -> bool {
+    matches!(
+        s,
+        TicketStatus::InProgress | TicketStatus::InReview | TicketStatus::Done
+    )
+}
+
+/// Saves new requirements as a dated resource in project folder `dir`, named after who gave
+/// them, and returns its file name (spec §14.6).
+pub fn add_requirements(dir: &Path, from: &str, text: &str) -> Result<String, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("Paste the requirements, or attach them as files.".into());
+    }
+    let who = from.trim();
+    let date = progress::today();
+    let name = requirements_name(who);
+    let heading = if who.is_empty() {
+        format!("# Requirements, {date}\n\n")
+    } else {
+        format!("# Requirements from {who}, {date}\n\n")
+    };
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let staged = std::env::temp_dir().join(format!(
+        "hydraui-requirements-{}-{nanos}.md",
+        std::process::id()
+    ));
+    std::fs::write(&staged, format!("{heading}{text}\n")).map_err(|e| e.to_string())?;
+    let saved = repo::add_resource_as(dir, &staged, &name).map_err(|e| e.to_string());
+    let _ = std::fs::remove_file(&staged);
+    saved
 }
 
 /// Edits milestone `id` in place: its title, target date (`YYYY-MM-DD`, empty for none) and
@@ -1685,12 +1950,197 @@ mod tests {
                 repos: vec![],
                 suggested_repos: vec![],
                 dismissed_repos: vec![],
+                spec_change: None,
+                spec_note: String::new(),
                 sync: Default::default(),
                 extra: Default::default(),
             },
         )
         .unwrap();
         repo::load(dir).unwrap()
+    }
+
+    fn change(why: &str) -> hydraui_projects::Change {
+        hydraui_projects::Change {
+            why: why.into(),
+            from: "Requirements from Joshua 2026-11-05.md".into(),
+            ..Default::default()
+        }
+    }
+
+    fn ticket_in(dir: &Path, id: &str, status: TicketStatus) -> Ticket {
+        let t = Ticket {
+            id: id.into(),
+            meta: TicketMeta {
+                title: format!("{id} title"),
+                milestone: "M1".into(),
+                status,
+                ..Default::default()
+            },
+            body: "old body".into(),
+        };
+        repo::write_ticket(dir, &t).unwrap();
+        t
+    }
+
+    fn milestone_m1(dir: &Path) {
+        repo::write_milestones(
+            dir,
+            &[hydraui_projects::Milestone {
+                id: "M1".into(),
+                title: "Old".into(),
+                description: "- old point".into(),
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn an_accepted_change_replaces_the_approved_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        project(dir);
+        milestone_m1(dir);
+        let mut t = ticket_in(dir, "PG-1", TicketStatus::Todo);
+        t.meta.change = Some(hydraui_projects::Change {
+            title: Some("New title".into()),
+            description: Some("new body".into()),
+            repo: Some("iov42/fe".into()),
+            ..change("Joshua asked for it")
+        });
+        repo::write_ticket(dir, &t).unwrap();
+        let mut ms = repo::load(dir).unwrap().milestones;
+        ms[0].change = Some(hydraui_projects::Change {
+            title: Some("New".into()),
+            ..change("clearer")
+        });
+        repo::write_milestones(dir, &ms).unwrap();
+        let mut f = repo::load(dir).unwrap().file;
+        f.spec_change = Some(hydraui_projects::Change {
+            description: Some("# New spec".into()),
+            ..change("more scope")
+        });
+        repo::write_project_file(dir, &f).unwrap();
+        let p = repo::load(dir).unwrap();
+        assert_eq!(
+            pending_changes_of(&p)
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            ["spec", "M1", "PG-1"]
+        );
+
+        for id in ["spec", "M1", "PG-1"] {
+            accept_change(dir, id, "lead").unwrap();
+        }
+        let p = repo::load(dir).unwrap();
+        assert!(pending_changes_of(&p).is_empty());
+        assert_eq!(p.spec.trim(), "# New spec");
+        assert_eq!(p.milestones[0].title, "New");
+        assert_eq!(p.milestones[0].description, "- old point");
+        let t = &p.tickets[0];
+        assert_eq!(
+            (t.meta.title.as_str(), t.body.trim(), t.meta.repo.as_str()),
+            ("New title", "new body", "iov42/fe")
+        );
+        assert_eq!(t.meta.reviewed_by, "lead");
+        assert!(
+            accept_change(dir, "PG-1", "lead").is_err(),
+            "nothing left to accept"
+        );
+    }
+
+    #[test]
+    fn started_work_is_never_rewritten() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        project(dir);
+        milestone_m1(dir);
+        // The ticket started after Claude proposed the change.
+        let mut t = ticket_in(dir, "PG-1", TicketStatus::InProgress);
+        t.meta.change = Some(hydraui_projects::Change {
+            title: Some("New".into()),
+            ..change("x")
+        });
+        repo::write_ticket(dir, &t).unwrap();
+        let err = accept_change(dir, "PG-1", "lead").unwrap_err();
+        assert!(err.contains("follow-up"), "{err}");
+        assert_eq!(repo::load(dir).unwrap().tickets[0].meta.title, "PG-1 title");
+        // A milestone with started work can't be dropped either.
+        let mut ms = repo::load(dir).unwrap().milestones;
+        ms[0].change = Some(hydraui_projects::Change {
+            drop: true,
+            ..change("not needed")
+        });
+        repo::write_milestones(dir, &ms).unwrap();
+        assert!(accept_change(dir, "M1", "lead").is_err());
+    }
+
+    #[test]
+    fn dropping_a_milestone_drops_its_tickets_still_to_do() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        project(dir);
+        milestone_m1(dir);
+        ticket_in(dir, "PG-1", TicketStatus::Todo);
+        ticket_in(dir, "PG-2", TicketStatus::Dropped);
+        let mut ms = repo::load(dir).unwrap().milestones;
+        ms[0].change = Some(hydraui_projects::Change {
+            drop: true,
+            ..change("Joshua cut it")
+        });
+        repo::write_milestones(dir, &ms).unwrap();
+        accept_change(dir, "M1", "lead").unwrap();
+        let p = repo::load(dir).unwrap();
+        assert_eq!(p.milestones[0].review, Review::Rejected);
+        assert!(p.milestones[0].review_note.contains("Joshua cut it"));
+        assert_eq!(p.tickets[0].meta.status, TicketStatus::Dropped);
+    }
+
+    #[test]
+    fn a_turned_down_change_keeps_its_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        project(dir);
+        let mut t = ticket_in(dir, "PG-1", TicketStatus::Todo);
+        t.meta.change = Some(change("x"));
+        repo::write_ticket(dir, &t).unwrap();
+        let mut f = repo::load(dir).unwrap().file;
+        f.spec_change = Some(change("y"));
+        repo::write_project_file(dir, &f).unwrap();
+        assert!(reject_change(dir, "PG-1", " ", "lead").is_err());
+        reject_change(dir, "PG-1", "out of scope", "lead").unwrap();
+        reject_change(dir, "spec", "keep it short", "lead").unwrap();
+        let p = repo::load(dir).unwrap();
+        assert!(pending_changes_of(&p).is_empty());
+        assert!(p.tickets[0].meta.review_note.contains("out of scope"));
+        assert!(p.file.spec_note.contains("keep it short"));
+        assert_eq!(p.tickets[0].meta.title, "PG-1 title");
+    }
+
+    #[test]
+    fn a_diff_marks_kept_removed_and_added_lines() {
+        use Diff::*;
+        assert_eq!(
+            line_diff("a\nb\nc", "a\nB\nc\nd"),
+            [Same("a"), Gone("b"), Added("B"), Same("c"), Added("d")]
+        );
+        assert_eq!(line_diff("", "x"), [Added("x")]);
+        assert_eq!(line_diff("x", ""), [Gone("x")]);
+    }
+
+    #[test]
+    fn requirements_are_saved_as_a_dated_resource() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        project(dir);
+        assert!(add_requirements(dir, "Joshua", "  ").is_err());
+        let name = add_requirements(dir, "Joshua", "Export to CSV too.").unwrap();
+        assert!(name.starts_with("Requirements from Joshua ") && name.ends_with(".md"));
+        let text = std::fs::read_to_string(dir.join("resources").join(&name)).unwrap();
+        assert!(text.starts_with("# Requirements from Joshua, ") && text.contains("CSV"));
+        assert_eq!(repo::load(dir).unwrap().files, [name]);
     }
 
     #[test]

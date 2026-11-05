@@ -692,3 +692,29 @@ was wrong). Work starts on a milestone and runs its tickets one after another.
 - **The run lives in this hydraui**, not in the repo. After a restart, Start milestone picks up
   where it was: a ticket that was in progress starts again in its existing worktree.
 
+
+
+### 14.6 New requirements (added 2026-11-05)
+
+Requirements keep arriving after the plan is agreed (Joshua's, for mapping). They change the
+plan only through the lead, and never rewrite started work.
+
+- **Add requirements…** on the Overview: paste them, or leave the box empty to choose a file,
+  with who they came from. They're saved as a dated resource ("Requirements from Joshua
+  2026-11-05.md") and the planning session is asked what they change.
+- **Claude proposes; the agreed version stands until the lead accepts:**
+  - the spec: `plan_propose_spec`, the whole new spec, with why (`plan_set_spec` is refused
+    once a milestone is approved);
+  - approved milestones and approved tickets still to do: `plan_propose_change`, only the
+    fields that change or `drop`, with why and the requirements it comes from;
+  - **started or done tickets are never changed** (Jordan's call): what they now miss is a
+    follow-up ticket, "Follows MUE-3: …";
+  - new milestones and tickets are proposed as before.
+- **Changes to review** on the Overview: each change against what's agreed (one-line fields
+  as old → new, longer ones as a line diff), its why and source, with **Accept** and **Turn
+  down…** (with a reason, kept so it isn't proposed again), and **Accept all**. Items with a
+  change show **Change waiting**.
+- **Accepting** applies the change. A ticket that started since is refused; dropping a
+  milestone drops its tickets still to do and is refused if any started.
+- **A running milestone pauses at a ticket with a change waiting** until the lead settles it;
+  tickets before it carry on.

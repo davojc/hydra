@@ -153,4 +153,21 @@ changed and what you're still unsure of; turn anything they must decide into a q
 
 - `plan_revise` a proposal the lead hasn't approved; read their note first (`plan_show`).
 - Never propose again what was rejected; the reason is in `plan_show`.
-- Approved items are the lead's: suggest a change as a question.
+- Approved items are the lead's: change them only by proposal (below).
+
+## New requirements
+
+When the lead adds requirements after the plan is agreed, propose what they change; the
+agreed version stays in force until the lead accepts each change in hydraui.
+
+- **The spec:** `plan_propose_spec` with the whole new spec and why.
+- **Approved milestones and tickets still to do:** `plan_propose_change` with only what
+  changes (or `drop`), why, and `from` = the requirements' file name.
+- **Started or done tickets are never changed.** What they now miss is a follow-up ticket
+  (`plan_propose_ticket`) whose description starts "Follows PG-3:".
+- **New work** is proposed as usual; ask about anything unclear.
+- **Touch only what the requirements touch.** A change turned down keeps its reason in
+  `plan_show`: don't propose it again.
+- Run the devil's advocate on the changes too: is every change traceable to the
+  requirements, and is every requirement covered by a change, a new item or "already
+  covered by …"?

@@ -26,6 +26,12 @@ pub struct ProjectFile {
     pub dismissed_repos: Vec<String>,
     #[serde(default)]
     pub sync: Sync,
+    /// A new spec Claude proposes from new requirements, in `description` (spec §14.6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec_change: Option<Change>,
+    /// Why the lead turned down the last spec change, so it isn't proposed again.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub spec_note: String,
     /// Keys hydra doesn't know, kept on a rewrite.
     #[serde(flatten)]
     pub extra: toml::Table,
@@ -99,6 +105,36 @@ pub struct Milestone {
     pub reviewed_by: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewed_at: Option<Datetime>,
+    /// A change Claude proposes to it, waiting for the lead (spec §14.6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<Change>,
+}
+
+/// A change Claude proposes to an approved milestone or ticket, or to the spec, after new
+/// requirements (spec §14.6). The approved version stays in force until the lead accepts it.
+/// Only the fields given change.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Change {
+    /// Why, in a line or two: what in the new requirements asks for it.
+    pub why: String,
+    /// The requirements it comes from: a resource's file name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub from: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// A milestone's points, a ticket's description, or the new spec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<Datetime>,
+    /// A ticket's new milestone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub milestone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    /// Drop it: the requirements no longer need it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub drop: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +196,9 @@ pub struct TicketMeta {
     pub model: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub effort: String,
+    /// A change Claude proposes to it, waiting for the lead (spec §14.6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<Change>,
     #[serde(flatten)]
     pub extra: toml::Table,
 }

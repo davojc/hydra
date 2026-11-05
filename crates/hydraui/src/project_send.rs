@@ -704,14 +704,41 @@ fn sent_file(dir: &Path, slug: &str) -> PathBuf {
 /// The project's pending files with their contents' hashes, one per line.
 fn fingerprint(r: &dyn Runner, dir: &Path, slug: &str) -> Option<String> {
     let prefix = format!("{slug}/");
+    let paths: Vec<String> = pending_in(r, dir)
+        .ok()?
+        .into_iter()
+        .filter(|p| p.starts_with(&prefix))
+        .collect();
+    // One hash-object for every file still there, rather than one each: the page asks often.
+    let present: Vec<&str> = paths
+        .iter()
+        .map(String::as_str)
+        .filter(|p| dir.join(p).is_file())
+        .collect();
+    let mut blobs = Vec::new();
+    if !present.is_empty() {
+        let mut args = vec!["hash-object", "--"];
+        args.extend(&present);
+        blobs = r.git(dir, &args, None).ok()?.lines().map(line_of).collect();
+    }
+    if blobs.len() != present.len() {
+        return None;
+    }
+    let mut blobs = blobs.into_iter();
     let mut out = String::new();
-    for path in pending_in(r, dir).ok()? {
-        if path.starts_with(&prefix) {
-            let blob = work_blob(r, dir, &path, false).ok()?;
-            out.push_str(&format!("{path} {}\n", blob.as_deref().unwrap_or("-")));
-        }
+    for path in &paths {
+        let blob = if present.contains(&path.as_str()) {
+            blobs.next()?
+        } else {
+            "-".to_string()
+        };
+        out.push_str(&format!("{path} {blob}\n"));
     }
     Some(out)
+}
+
+fn line_of(s: &str) -> String {
+    s.trim().to_string()
 }
 
 fn remember_sent(r: &dyn Runner, dir: &Path, slug: &str) {
@@ -1082,6 +1109,52 @@ mod tests {
             ["pr list", "pr create", "pr merge"]
         );
         assert!(fake.prs.borrow().is_empty());
+    }
+
+    /// Counts the local git calls a [`Fake`] makes.
+    struct Counting<'a>(&'a Fake, RefCell<usize>);
+
+    impl Runner for Counting<'_> {
+        fn git(&self, dir: &Path, args: &[&str], index: Option<&Path>) -> Result<String, String> {
+            *self.1.borrow_mut() += 1;
+            self.0.git(dir, args, index)
+        }
+        fn remote_git(&self, dir: &Path, args: &[&str]) -> Result<String, String> {
+            self.0.remote_git(dir, args)
+        }
+        fn gh(&self, args: &[&str]) -> Result<String, String> {
+            self.0.gh(args)
+        }
+    }
+
+    #[test]
+    fn whether_a_change_was_sent_takes_two_git_calls_however_many_files_it_has() {
+        // The page asks every couple of seconds; a git call per file made it lag.
+        let (tmp, mut fake, dir) = setup("lead");
+        lead_creates(&fake, &dir);
+        fake.login = "aza".into();
+        let member = tmp.path().join("member");
+        git_cmd(
+            tmp.path(),
+            &["clone", "-q", &fake.bare.display().to_string(), "member"],
+            None,
+        )
+        .unwrap();
+        for n in 1..=6 {
+            write(
+                &member,
+                &format!("pg/tickets/PG-{n}.md"),
+                &format!("t{n}\n"),
+            );
+        }
+        std::fs::remove_file(member.join("pg/spec.md")).unwrap();
+        let none = BTreeSet::new();
+        send(&fake, &sending(&member, "aza", &none)).unwrap();
+        let counting = Counting(&fake, RefCell::new(0));
+        assert!(is_sent(&counting, &member, "pg"));
+        assert_eq!(*counting.1.borrow(), 2);
+        write(&member, "pg/tickets/PG-3.md", "changed\n");
+        assert!(!is_sent(&fake, &member, "pg"));
     }
 
     #[test]

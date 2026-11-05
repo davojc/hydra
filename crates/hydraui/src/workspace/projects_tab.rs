@@ -157,6 +157,12 @@ pub(super) struct ProjectsData {
     next_fetch: Option<Instant>,
     fetching: bool,
     next_read: Option<Instant>,
+    /// A background read of the checkouts is under way (it runs git, so never on the UI
+    /// thread).
+    reading: bool,
+    /// Bumped by every edit and fetch, so a background read begun before one is dropped
+    /// rather than undoing what the page already shows.
+    edits: u64,
     /// Planning sessions, by (environment, project).
     planners: BTreeMap<(String, String), PaneId>,
     /// Work sessions, by (environment, project, ticket).
@@ -420,12 +426,7 @@ impl Workspace {
                 .next_read
                 .is_none_or(|t| Instant::now() >= t)
         {
-            self.projects_data.next_read = Some(Instant::now() + READ_EVERY);
-            for e in self.projects_data.envs.values_mut().filter(|e| e.fetched) {
-                read_checkout(e);
-            }
-            self.announce_questions(window, cx);
-            cx.notify();
+            self.read_checkouts(window, cx);
         }
         let data = &self.projects_data;
         if data.fetching || data.next_fetch.is_some_and(|t| Instant::now() < t) {
@@ -473,6 +474,7 @@ impl Workspace {
                 for (env, read) in fetched {
                     ws.projects_data.envs.insert(env, read);
                 }
+                ws.projects_data.edits += 1;
                 ws.projects_data.fetching = false;
                 ws.projects_data.next_fetch = Some(Instant::now() + FETCH_EVERY);
                 ws.announce_questions(window, cx);
@@ -591,11 +593,66 @@ impl Workspace {
     }
 
     /// Reads `env`'s checkout again after an edit here (local, so at once).
+    /// Reads `env`'s project files again after an edit, at once; what git says about them
+    /// follows within a second, from [`Self::read_checkouts`].
     fn reload_env(&mut self, env: &str, cx: &mut Context<Self>) {
         if let Some(e) = self.projects_data.envs.get_mut(env) {
-            read_checkout(e);
+            read_projects(e);
         }
+        self.projects_data.edits += 1;
+        self.projects_data.next_read = None;
         cx.notify();
+    }
+
+    /// Reads every fetched checkout again in the background: its projects, and what git says
+    /// about them. Running git on the UI thread every couple of seconds made the page lag.
+    fn read_checkouts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.projects_data.reading {
+            return;
+        }
+        self.projects_data.next_read = Some(Instant::now() + READ_EVERY);
+        let dirs: Vec<(String, PathBuf)> = self
+            .projects_data
+            .envs
+            .iter()
+            .filter(|(_, e)| e.fetched)
+            .map(|(env, e)| (env.clone(), e.checkout.clone()))
+            .collect();
+        if dirs.is_empty() {
+            return;
+        }
+        self.projects_data.reading = true;
+        let edits = self.projects_data.edits;
+        cx.spawn_in(window, async move |this, cx| {
+            let reads = cx
+                .background_spawn(async move {
+                    dirs.into_iter()
+                        .map(|(env, dir)| {
+                            let read = CheckoutRead::of(&dir);
+                            (env, dir, read)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            let _ = this.update_in(cx, |ws, window, cx| {
+                ws.projects_data.reading = false;
+                if ws.projects_data.edits != edits {
+                    // Edited or fetched meanwhile: this read may be older than the page.
+                    ws.projects_data.next_read = None;
+                    return;
+                }
+                for (env, dir, read) in reads {
+                    if let Some(e) = ws.projects_data.envs.get_mut(&env)
+                        && e.checkout == dir
+                    {
+                        read.apply(e);
+                    }
+                }
+                ws.announce_questions(window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn find_project(&self, env: &str, slug: &str) -> Option<&Project> {
@@ -6043,27 +6100,70 @@ fn check_env(exe: &Path, root: &Path, env: &str, state: &Path, e: &mut EnvProjec
         .then(|| format!("The progress check couldn't read {}", problems.join("; ")));
 }
 
-fn read_checkout(e: &mut EnvProjects) {
-    e.projects.clear();
-    e.broken.clear();
-    for (slug, p) in repo::load_all(&e.checkout) {
-        match p {
-            Ok(p) => e.projects.push(p),
-            Err(why) => e.broken.push((slug, why.to_string())),
+/// A checkout as read from disk and git. Reading it blocks (it runs git), so it happens off
+/// the UI thread, except in [`read_projects`]'s file-only part.
+struct CheckoutRead {
+    projects: Vec<Project>,
+    broken: Vec<(String, String)>,
+    status: String,
+    pending: BTreeSet<String>,
+    sent: BTreeSet<String>,
+    sent_for_lead: BTreeSet<String>,
+}
+
+impl CheckoutRead {
+    fn of(dir: &Path) -> Self {
+        let (projects, broken) = load_projects(dir);
+        let status = ps::status_text(&ps::Local, dir).unwrap_or_default();
+        let pending = pj::parse_status(&status);
+        let sent_for_lead = projects
+            .iter()
+            .map(|p| p.slug.clone())
+            .filter(|slug| {
+                pj::project_unsent(&pending, slug) > 0 && ps::is_sent(&ps::Local, dir, slug)
+            })
+            .collect();
+        Self {
+            projects,
+            broken,
+            status,
+            pending,
+            sent: pj::sent_projects(dir),
+            sent_for_lead,
         }
     }
-    e.status = ps::status_text(&ps::Local, &e.checkout).unwrap_or_default();
-    e.pending = pj::parse_status(&e.status);
-    e.sent = pj::sent_projects(&e.checkout);
-    e.sent_for_lead = e
-        .projects
-        .iter()
-        .map(|p| p.slug.clone())
-        .filter(|slug| {
-            pj::project_unsent(&e.pending, slug) > 0 && ps::is_sent(&ps::Local, &e.checkout, slug)
-        })
-        .collect();
-    e.fetched = true;
+
+    fn apply(self, e: &mut EnvProjects) {
+        e.projects = self.projects;
+        e.broken = self.broken;
+        e.status = self.status;
+        e.pending = self.pending;
+        e.sent = self.sent;
+        e.sent_for_lead = self.sent_for_lead;
+        e.fetched = true;
+    }
+}
+
+/// The checkout's projects, and the folders that don't read with why. Files only, no git.
+fn load_projects(dir: &Path) -> (Vec<Project>, Vec<(String, String)>) {
+    let (mut projects, mut broken) = (Vec::new(), Vec::new());
+    for (slug, p) in repo::load_all(dir) {
+        match p {
+            Ok(p) => projects.push(p),
+            Err(why) => broken.push((slug, why.to_string())),
+        }
+    }
+    (projects, broken)
+}
+
+/// Reads `e`'s project files again, without git: quick enough for the UI thread.
+fn read_projects(e: &mut EnvProjects) {
+    (e.projects, e.broken) = load_projects(&e.checkout);
+}
+
+/// Reads `e`'s checkout in full. Blocks: only off the UI thread.
+fn read_checkout(e: &mut EnvProjects) {
+    CheckoutRead::of(&e.checkout).apply(e);
 }
 
 /// The planning session's first prompt (spec §14).

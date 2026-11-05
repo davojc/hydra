@@ -5704,7 +5704,9 @@ impl Workspace {
         let f = &p.file;
         let root = self.hydra.paths.root().to_path_buf();
         // The lead's Change… (or Set… when empty) for a shared setting.
-        let change_button = |label: &'static str,
+        // `place` keeps the ids apart: the to-do list repeats some of these buttons.
+        let change_button = |place: &'static str,
+                             label: &'static str,
                              value: &str,
                              field: Field,
                              cx: &mut Context<Self>|
@@ -5713,7 +5715,7 @@ impl Workspace {
             let initial = value.to_string();
             lead.then(|| {
                 h_flex().child(
-                    Button::new(SharedString::from(format!("set-{label}")))
+                    Button::new(SharedString::from(format!("{place}-set-{label}")))
                         .label(if initial.trim().is_empty() {
                             "Set…"
                         } else {
@@ -5749,13 +5751,13 @@ impl Workspace {
                     label,
                     hint,
                     value_text(value),
-                    change_button(label, value, field, cx),
+                    change_button("card", label, value, field, cx),
                 )
             };
-        let locate = |r: &str, located: bool, cx: &mut Context<Self>| {
+        let locate = |place: &str, r: &str, located: bool, cx: &mut Context<Self>| {
             let (repo, root) = (r.to_string(), root.clone());
             h_flex().child(
-                Button::new(SharedString::from(format!("locate-{r}")))
+                Button::new(SharedString::from(format!("{place}-locate-{r}")))
                     .label(if located { "Change…" } else { "Locate…" })
                     .ghost()
                     .small()
@@ -5792,14 +5794,14 @@ impl Workspace {
             ),
         ] {
             if value.trim().is_empty() {
-                todo.push(todo_row(what, change_button(label, value, fld, cx)));
+                todo.push(todo_row(what, change_button("todo", label, value, fld, cx)));
             }
         }
         for r in &f.repos {
             if pj::clone_of(&root, r).is_none() {
                 todo.push(todo_row(
                     &format!("Locate your clone of {r}"),
-                    Some(locate(r, false, cx)),
+                    Some(locate("todo", r, false, cx)),
                 ));
             }
         }
@@ -5885,7 +5887,7 @@ impl Workspace {
                 "Clone on this Mac",
                 "Worktrees are made from it",
                 value,
-                Some(locate(r, clone.is_some(), cx)),
+                Some(locate("card", r, clone.is_some(), cx)),
             ));
         }
         work = work.child(field(

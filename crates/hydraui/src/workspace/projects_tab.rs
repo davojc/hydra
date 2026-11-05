@@ -4703,6 +4703,7 @@ impl Workspace {
                 );
             }
         }
+        let run = self.run_controls(env, p, m, cx);
         let header = h_flex()
             .gap_2()
             .items_center()
@@ -4797,17 +4798,22 @@ impl Workspace {
                         .child(div().flex_none().child(counts_line(c))),
                 )
             })
-            .when(has_actions, |d| {
+            .when(has_actions || run.is_some(), |d| {
+                // One footer row: running the milestone on the left, its tickets on the right.
                 d.child(
-                    div()
+                    h_flex()
                         .mt_1()
                         .pt_3()
+                        .gap_3()
+                        .items_center()
+                        .flex_wrap()
                         .border_t_1()
                         .border_color(color(theme::BORDER_SUBTLE))
+                        .children(run)
+                        .child(div().flex_1())
                         .child(actions),
                 )
             })
-            .children(self.run_controls(env, p, m, cx))
             .into_any_element()
     }
 

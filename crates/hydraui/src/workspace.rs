@@ -1847,7 +1847,7 @@ impl Workspace {
     ) -> impl IntoElement + use<> {
         let active = self.envs.active().map(|t| t.env.clone());
         let mut strip = h_flex()
-            .h(px(34.))
+            .h(px(crate::ENV_STRIP_HEIGHT))
             .px_1()
             .gap_1()
             .bg(bg)

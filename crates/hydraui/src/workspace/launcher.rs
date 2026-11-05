@@ -1189,6 +1189,7 @@ impl Workspace {
             ThemeChoice::Light => ThemeMode::Light,
         };
         Theme::change(mode, None, cx);
+        crate::place_toasts(cx);
         self.style = Arc::new(TermStyle {
             font: crate::config::terminal_font(&ui.font, &cx.text_system().all_font_names()).into(),
             font_size: px(ui.font_size),

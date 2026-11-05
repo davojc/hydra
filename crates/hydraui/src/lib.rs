@@ -73,3 +73,29 @@ pub mod version;
 pub mod window_layout;
 pub mod workspace;
 pub mod worktrees;
+
+/// The environment strip's height, under hydraui's own title bar.
+pub const ENV_STRIP_HEIGHT: f32 = 34.;
+
+/// Where toasts start: below the title bar and the environment strip, so they never cover
+/// the strip's Projects and Settings buttons.
+pub fn toast_top() -> gpui::Pixels {
+    gpui_component::TITLE_BAR_HEIGHT + gpui::px(ENV_STRIP_HEIGHT + 12.)
+}
+
+/// Puts toasts below the strip; again after each theme change, which may reset them.
+pub fn place_toasts(cx: &mut gpui::App) {
+    gpui_component::Theme::global_mut(cx)
+        .notification
+        .margins
+        .top = toast_top();
+}
+
+#[cfg(test)]
+mod toast_tests {
+    #[test]
+    fn toasts_start_below_the_title_bar_and_the_environment_strip() {
+        let covered = gpui_component::TITLE_BAR_HEIGHT + gpui::px(super::ENV_STRIP_HEIGHT);
+        assert!(super::toast_top() > covered);
+    }
+}

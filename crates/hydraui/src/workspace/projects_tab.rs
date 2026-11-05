@@ -3969,46 +3969,16 @@ impl Workspace {
             )
             .child(flags);
 
-        // Each milestone as a small tile: title, bar and count, side by side, wrapping.
+        // One line per milestone, as on the Overview, so whole titles fit.
         let live: Vec<&Milestone> = p
             .milestones
             .iter()
             .filter(|m| m.review != Review::Rejected)
             .collect();
-        let mut strip = h_flex().flex_wrap().gap_3();
+        let mut strip = v_flex().gap_1p5();
         for m in &live {
             let c = counts.get(&m.id).copied().unwrap_or_default();
-            let late = is_late(m, &c, today);
-            strip = strip.child(
-                v_flex()
-                    .w(px(210.))
-                    .flex_none()
-                    .gap_1()
-                    .child(div().text_xs().truncate().child(format!(
-                        "{} · {}",
-                        pj::milestone_name(&m.id),
-                        m.title
-                    )))
-                    .child(status_bar(&c, 6.))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .text_xs()
-                            .child(div().text_color(color(theme::TEXT_MUTED)).child(format!(
-                                "{}/{} done",
-                                c.done,
-                                c.total()
-                            )))
-                            .when(m.review.waiting(), |d| {
-                                d.child(
-                                    div().text_color(color(theme::AMBER)).child("review needed"),
-                                )
-                            })
-                            .when(late, |d| {
-                                d.child(div().text_color(color(theme::RED)).child("late"))
-                            }),
-                    ),
-            );
+            strip = strip.child(milestone_line(m, &c, today).text_sm());
         }
         v_flex()
             .id(SharedString::from(format!("project-{env}-{}", p.slug)))
@@ -4378,47 +4348,11 @@ impl Workspace {
                     id: m.id.clone(),
                 };
                 lines = lines.child(
-                    h_flex()
+                    milestone_line(m, &c, &today)
                         .id(SharedString::from(format!("overview-m-{}", m.id)))
-                        .gap_3()
                         .cursor_pointer()
                         .hover(|d| d.text_color(color(theme::TEAL)))
-                        .on_click(cx.listener(move |ws, _, _, cx| ws.go(page_to.clone(), cx)))
-                        .child(
-                            div()
-                                .w(px(84.))
-                                .flex_none()
-                                .whitespace_nowrap()
-                                .text_xs()
-                                .text_color(color(theme::TEXT_MUTED))
-                                .child(pj::milestone_name(&m.id)),
-                        )
-                        // The title takes the room; a one-line truncate is safe in flex_1.
-                        .child(div().flex_1().min_w_0().truncate().child(m.title.clone()))
-                        .child(div().w(px(140.)).flex_none().child(status_bar(&c, 6.)))
-                        .child(
-                            div()
-                                .w(px(60.))
-                                .flex_none()
-                                .text_xs()
-                                .text_color(color(theme::TEXT_SECONDARY))
-                                .child(format!("{}/{}", c.done, c.total())),
-                        )
-                        .child(div().w(px(110.)).flex_none().child(
-                            if m.review != Review::Approved {
-                                review_pill(m.review).into_any_element()
-                            } else if m.change.is_some() {
-                                change_pill().into_any_element()
-                            } else if is_late(m, &c, &today) {
-                                pill("late", theme::RED, theme::RED_TINT).into_any_element()
-                            } else {
-                                div()
-                                    .text_xs()
-                                    .text_color(color(theme::TEXT_MUTED))
-                                    .child(m.target.map(|t| t.to_string()).unwrap_or_default())
-                                    .into_any_element()
-                            },
-                        )),
+                        .on_click(cx.listener(move |ws, _, _, cx| ws.go(page_to.clone(), cx))),
                 );
             }
             if live.is_empty() {
@@ -6468,6 +6402,52 @@ fn status_colour(s: TicketStatus) -> u32 {
 }
 
 /// A bar split by ticket status: done, in review, in progress, then todo (spec §8.2).
+/// A milestone on one line: its name, its whole title (cut short only when the window is
+/// narrow), a short bar, how many tickets are done, and what it waits on or its target.
+fn milestone_line(m: &Milestone, c: &Counts, today: &str) -> gpui::Div {
+    h_flex()
+        .gap_3()
+        .items_center()
+        .child(
+            div()
+                .w(px(84.))
+                .flex_none()
+                .whitespace_nowrap()
+                .text_xs()
+                .text_color(color(theme::TEXT_MUTED))
+                .child(pj::milestone_name(&m.id)),
+        )
+        // The title takes the room; a one-line truncate is safe in flex_1.
+        .child(div().flex_1().min_w_0().truncate().child(m.title.clone()))
+        .child(div().w(px(140.)).flex_none().child(status_bar(c, 6.)))
+        .child(
+            div()
+                .w(px(44.))
+                .flex_none()
+                .text_xs()
+                .text_color(color(theme::TEXT_SECONDARY))
+                .child(format!("{}/{}", c.done, c.total())),
+        )
+        .child(
+            div()
+                .w(px(110.))
+                .flex_none()
+                .child(if m.review != Review::Approved {
+                    review_pill(m.review).into_any_element()
+                } else if m.change.is_some() {
+                    change_pill().into_any_element()
+                } else if is_late(m, c, today) {
+                    pill("late", theme::RED, theme::RED_TINT).into_any_element()
+                } else {
+                    div()
+                        .text_xs()
+                        .text_color(color(theme::TEXT_MUTED))
+                        .child(m.target.map(|t| t.to_string()).unwrap_or_default())
+                        .into_any_element()
+                }),
+        )
+}
+
 fn status_bar(c: &Counts, height: f32) -> AnyElement {
     let total = c.total();
     let mut bar = h_flex()

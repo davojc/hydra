@@ -2632,10 +2632,9 @@ impl Workspace {
         cx.notify();
     }
 
-    /// A skill setting's row: what's chosen, Choose folder…, and Clear.
-    /// A skill setting as a segmented choice: hydraui's default (`default`, described by
-    /// `default_detail`), Team skills for testing, or a skill of yours (`chosen`: its name and
-    /// where it is). The selected one is highlighted; what it means is under it.
+    /// A skill setting: what's selected on the left (its name, and where a chosen skill is or
+    /// what Off and Default mean), and the other choices on the right: hydraui's default, the
+    /// skill router for testing, or a skill of yours.
     #[allow(clippy::too_many_arguments)] // Its call sites differ in every one.
     fn skill_row(
         &self,
@@ -2652,29 +2651,33 @@ impl Workspace {
             Slot::Repo(r) => format!("repo-{r}"),
             Slot::Testing => "testing".to_string(),
         };
-        let default_label = match slot {
-            Slot::Planning => "Default",
-            Slot::Repo(_) => "Skill router",
-            Slot::Testing => "Off",
+        // The default's name, and the button that goes back to it.
+        let (default_name, use_default) = match slot {
+            Slot::Planning => ("Default", "Use default"),
+            Slot::Repo(_) => ("Skill router", "Use skill router"),
+            Slot::Testing => ("Off", "Turn off"),
         };
         let (e1, s1, slot1) = (env.to_string(), slug.to_string(), slot.clone());
         let (e2, s2, slot2) = (env.to_string(), slug.to_string(), slot.clone());
         let (e3, s3) = (env.to_string(), slug.to_string());
-        let mut seg = h_flex().gap_1().flex_wrap().child(
-            Button::new(SharedString::from(format!("default-{id}")))
-                .label(default_label)
-                .small()
-                .selected(matches!(current, SkillChoice::Default(_)))
-                .on_click(cx.listener(move |ws, _, window, cx| {
-                    ws.set_skill_slot(&e2, &s2, &slot2, None, window, cx)
-                })),
-        );
-        if matches!(slot, Slot::Testing) {
-            seg = seg.child(
-                Button::new("team-testing")
-                    .label("Skill router")
+        let mut others = h_flex().gap_1();
+        if !matches!(current, SkillChoice::Default(_)) {
+            others = others.child(
+                Button::new(SharedString::from(format!("default-{id}")))
+                    .label(use_default)
+                    .ghost()
                     .small()
-                    .selected(matches!(current, SkillChoice::Team))
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.set_skill_slot(&e2, &s2, &slot2, None, window, cx)
+                    })),
+            );
+        }
+        if matches!(slot, Slot::Testing) && !matches!(current, SkillChoice::Team) {
+            others = others.child(
+                Button::new("team-testing")
+                    .label("Use skill router")
+                    .ghost()
+                    .small()
                     .on_click(cx.listener(move |ws, _, window, cx| {
                         ws.set_work_setting(
                             &e3,
@@ -2688,15 +2691,15 @@ impl Workspace {
             );
         }
         let yours = matches!(current, SkillChoice::Yours(..));
-        seg = seg.child(
+        others = others.child(
             Button::new(SharedString::from(format!("choose-{id}")))
                 .label(if yours {
                     "Change skill…"
                 } else {
                     "Choose skill…"
                 })
+                .ghost()
                 .small()
-                .selected(yours)
                 .tooltip("Pick the folder that holds the skill's SKILL.md")
                 .on_click(cx.listener(move |ws, _, window, cx| {
                     let (e, s, slot) = (e1.clone(), s1.clone(), slot1.clone());
@@ -2705,18 +2708,13 @@ impl Workspace {
                     });
                 })),
         );
-        // Only what the buttons don't already say: where a chosen skill is, or what Off means.
-        let detail = match current {
-            SkillChoice::Default(d) if !d.is_empty() => Some(muted_line(&d)),
-            SkillChoice::Default(_) | SkillChoice::Team => None,
-            SkillChoice::Yours(name, place) => Some(two_line(name, place)),
+        let selected = match current {
+            SkillChoice::Default(d) if !d.is_empty() => two_line(default_name.to_string(), d),
+            SkillChoice::Default(_) => value_text(default_name),
+            SkillChoice::Team => value_text("Skill router"),
+            SkillChoice::Yours(name, place) => two_line(name, place),
         };
-        setting_row(
-            label,
-            hint,
-            v_flex().gap_1p5().min_w_0().child(seg).children(detail),
-            None,
-        )
+        setting_row(label, hint, selected, Some(others))
     }
 
     fn set_skill_slot(
@@ -2772,15 +2770,16 @@ impl Workspace {
         current: Option<&str>,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let mut row = h_flex().gap_1().flex_wrap();
-        for opt in options {
-            let chosen = current.unwrap_or("default") == *opt;
+        // The selected one on the left, the others on the right.
+        let selected = current.unwrap_or("default");
+        let mut others = h_flex().gap_1();
+        for opt in options.iter().filter(|o| **o != selected) {
             let (e, s, value) = (env.to_string(), slug.to_string(), opt.to_string());
-            row = row.child(
+            others = others.child(
                 Button::new(SharedString::from(format!("{label}-{opt}")))
-                    .label(opt.to_string())
+                    .label(capitalised(opt))
+                    .ghost()
                     .small()
-                    .selected(chosen)
                     .on_click(cx.listener(move |ws, _, window, cx| {
                         let setting = if label == "Model" {
                             pj::WorkSetting::Model
@@ -2792,7 +2791,12 @@ impl Workspace {
                     })),
             );
         }
-        setting_row(label, hint, row, None)
+        setting_row(
+            label,
+            hint,
+            value_text(&capitalised(selected)),
+            Some(others),
+        )
     }
 
     // ---- Milestone runs (spec §14.5) ----
@@ -6066,6 +6070,15 @@ fn value_text(text: &str) -> gpui::Div {
         return muted_line("None");
     }
     div().text_sm().min_w_0().truncate().child(text.to_string())
+}
+
+/// `text` with its first letter capitalised, for a setting's option name.
+fn capitalised(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 fn muted_line(text: &str) -> gpui::Div {

@@ -1691,6 +1691,7 @@ mod tests {
             last_change: None,
             removed: false,
             my_other_machines: 0,
+            claims: Vec::new(),
         }
     }
 

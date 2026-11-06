@@ -34,8 +34,8 @@ use crate::decide::Remote;
 use crate::ids::{PersonId, PersonKey};
 use crate::invites::{Hydra, Invites};
 use crate::paths::{
-    FILES_PREFIX, LOG_PREFIX, MAX_FILE_BYTES, PARENTS_PREFIX, RelPath, file_key, log_key,
-    parent_key, path_of_key, path_of_parent_key, safe_rel_path,
+    CLAIMS_PREFIX, FILES_PREFIX, LOG_PREFIX, MAX_FILE_BYTES, PARENTS_PREFIX, RelPath, file_key,
+    log_key, parent_key, path_of_key, path_of_parent_key, safe_rel_path,
 };
 use crate::roster::{
     Change, Kept, KeptAuthor, KeptEntry, MAX_CHANGE_BYTES, Machine, Member, Role, Roster,
@@ -83,8 +83,11 @@ pub struct NodeConfig {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NodeEvent {
-    /// Any insert into the document, local or remote.
+    /// Any insert into the document, local or remote, other than a claim's.
     Changed,
+    /// An insert under `claims/`. Renewals make these all the time and folder sync has no use for
+    /// them, so they are kept apart from `Changed`.
+    ClaimsChanged,
     ContentReady(Hash),
     PeerUp(String),
     PeerDown(String),
@@ -428,6 +431,9 @@ impl SwarmNode {
         tokio::spawn(async move {
             while let Some(ev) = stream.next().await {
                 let ev = match ev {
+                    Ok(
+                        LiveEvent::InsertLocal { entry } | LiveEvent::InsertRemote { entry, .. },
+                    ) if entry.key().starts_with(CLAIMS_PREFIX) => NodeEvent::ClaimsChanged,
                     Ok(LiveEvent::InsertLocal { .. } | LiveEvent::InsertRemote { .. }) => {
                         NodeEvent::Changed
                     }

@@ -143,7 +143,7 @@ impl People {
 
     /// Whether `by` may end the claim that `target` made: an owner may end anyone's, and a
     /// person may end the claims of their own machines.
-    fn may_release(&self, by: &str, target: &str) -> bool {
+    pub(crate) fn may_release(&self, by: &str, target: &str) -> bool {
         let Some((person, role)) = self.members.get(by).filter(|_| self.writes(by)) else {
             return false;
         };

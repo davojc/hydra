@@ -18,6 +18,7 @@ pub use folder::Attention;
 pub use invites::Invite;
 pub use roster::Role;
 pub use service::{
-    Command, DeviceView, DirectPeers, Identity, MachineView, MachinesView, MemberView, Resolution,
-    ServiceConfig, ServiceEvent, SwarmView, SwarmsService,
+    ClaimHandle, ClaimOutcome, ClaimView, Command, ContextView, DeviceView, DirectPeers, DoneView,
+    Identity, LostReason, MachineView, MachinesView, MemberView, Resolution, ServiceConfig,
+    ServiceEvent, SwarmView, SwarmsService,
 };

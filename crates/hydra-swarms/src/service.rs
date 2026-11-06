@@ -24,6 +24,7 @@ use tokio::sync::{Notify, broadcast, mpsc};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 
+use crate::claims::{ContextSettings, Holder};
 use crate::folder::{Attention, Folder, FolderEvent};
 use crate::ids::{PersonId, PersonKey, to_hex};
 use crate::ids::{RekeyCert, chain_ends};
@@ -32,7 +33,7 @@ use crate::mine::DEVICE_KEY_ID;
 use crate::node::{NodeConfig, NodeEvent, SwarmNode, now_micros};
 use crate::paths::{RelPath, safe_rel_path};
 use crate::roster::{Change, Kept, Machine, Member, Role, Roster, SignedChange};
-use crate::wire::{MineReply, Offer};
+use crate::wire::{ClaimAnswer, MineReply, Offer};
 
 /// How often every swarm reconciles its folder, and retries what it couldn't send.
 const PERIODIC: Duration = Duration::from_secs(60);
@@ -73,7 +74,11 @@ pub type SwarmKeyFn = Box<dyn Fn(&str) -> Result<[u8; 32], String> + Send>;
 /// Keeps a new personal key, in place of the one before.
 pub type PersonKeyFn = Box<dyn Fn([u8; 32]) -> Result<(), String> + Send>;
 
+mod claims;
 mod linking;
+
+use claims::{CLOCK_SLACK, ClaimBook, TakeReply, resolve_swarm};
+pub use claims::{ClaimHandle, ClaimOutcome, ClaimView, ContextView, DoneView, LostReason};
 
 pub struct ServiceConfig {
     /// `state_root/swarms`.
@@ -89,6 +94,7 @@ pub struct ServiceConfig {
     pub relays: bool,
     direct_peers: Option<DirectPeers>,
     lose_relays: Duration,
+    claim_slack: Duration,
 }
 
 impl ServiceConfig {
@@ -107,7 +113,14 @@ impl ServiceConfig {
             relays,
             direct_peers: None,
             lose_relays: Duration::ZERO,
+            claim_slack: CLOCK_SLACK,
         }
+    }
+
+    /// Allows `d` for clocks running late before a claim lapses, so tests can see a lapse soon.
+    pub fn claim_slack_for_tests(mut self, d: Duration) -> Self {
+        self.claim_slack = d;
+        self
     }
 
     /// Finds peers through `book` rather than address lookup, for tests with relays off: every
@@ -168,6 +181,8 @@ pub struct SwarmView {
     pub removed: bool,
     /// How many other machines of yours are in this swarm.
     pub my_other_machines: usize,
+    /// Every claim context in this swarm.
+    pub claims: Vec<ContextView>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -290,6 +305,46 @@ pub enum Command {
     DeclineOffer {
         swarm: String,
     },
+    /// Asks for a key. Without a swarm, the only one with that context; with one, its id or name.
+    ClaimTake {
+        swarm: Option<String>,
+        context: String,
+        key: String,
+        holder: Holder,
+        reply: TakeReply,
+    },
+    ClaimsList {
+        swarm: Option<String>,
+        context: String,
+        reply: oneshot::Sender<Result<ContextView, String>>,
+    },
+    /// Ends the claim the machine with author id `author` holds on `key`.
+    ClaimRelease {
+        swarm: String,
+        context: String,
+        key: String,
+        author: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Makes the context `name`, or changes its settings.
+    ClaimContextSet {
+        swarm: String,
+        name: String,
+        settings: ContextSettings,
+    },
+    /// Makes this machine's claim look `by_secs` older, as if the machine had been asleep.
+    #[doc(hidden)]
+    ClaimAgeForTests {
+        swarm: String,
+        context: String,
+        key: String,
+        by_secs: u64,
+    },
+    /// From now on this machine takes questions about claims and never answers them.
+    #[doc(hidden)]
+    ClaimsSilentForTests {
+        swarm: String,
+    },
     Stop,
 }
 
@@ -304,7 +359,14 @@ impl Command {
             | Command::SetTypes { swarm, .. }
             | Command::SetFolder { swarm, .. }
             | Command::Leave { swarm }
-            | Command::Resolve { swarm, .. } => Some(swarm),
+            | Command::Resolve { swarm, .. }
+            | Command::ClaimRelease { swarm, .. }
+            | Command::ClaimContextSet { swarm, .. }
+            | Command::ClaimAgeForTests { swarm, .. }
+            | Command::ClaimsSilentForTests { swarm } => Some(swarm),
+            Command::ClaimTake { swarm, .. } | Command::ClaimsList { swarm, .. } => {
+                swarm.as_deref()
+            }
             Command::Create { .. }
             | Command::Join { .. }
             | Command::SetIdentity { .. }
@@ -383,6 +445,7 @@ impl SwarmsService {
                     relays: cfg.relays,
                     direct: cfg.direct_peers,
                     lose_relays_until: Instant::now() + cfg.lose_relays,
+                    claim_slack: cfg.claim_slack,
                     events: ev_tx,
                     registry,
                     views: Mutex::default(),
@@ -528,6 +591,8 @@ struct Shared {
     direct: Option<DirectPeers>,
     /// Until when owners' answers to relays are treated as lost (tests only).
     lose_relays_until: Instant,
+    /// What claims allow for clocks running late.
+    claim_slack: Duration,
     events: fmpsc::UnboundedSender<ServiceEvent>,
     registry: Registry,
     views: Mutex<BTreeMap<String, SwarmView>>,
@@ -643,6 +708,16 @@ enum Msg {
     Joining(SignedChange, oneshot::Sender<MineReply>),
     /// This person's new key, after one of their machines was removed.
     Person([u8; 32]),
+    /// A claim's handle was dropped: its renewals stop, and it lapses by itself.
+    ClaimDrop {
+        id: u64,
+    },
+    /// A claim's handle gave it up, or finished it when `done`.
+    ClaimFinish {
+        id: u64,
+        done: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     Stop,
 }
 
@@ -788,6 +863,30 @@ async fn run(
                         m.decline(&swarm);
                     }
                 }
+                Some(Command::ClaimTake { swarm, context, key, holder, reply }) => {
+                    match resolve_swarm(&shared.views(), swarm.as_deref(), &context) {
+                        Ok(id) => {
+                            let swarm = Some(id);
+                            let cmd = Command::ClaimTake { swarm, context, key, holder, reply };
+                            to_swarm(&shared, &mut swarms, cmd);
+                        }
+                        Err(text) => {
+                            let _ = reply.send(Err(text));
+                        }
+                    }
+                }
+                Some(Command::ClaimsList { swarm, context, reply }) => {
+                    match resolve_swarm(&shared.views(), swarm.as_deref(), &context) {
+                        Ok(id) => {
+                            let swarm = Some(id);
+                            let cmd = Command::ClaimsList { swarm, context, reply };
+                            to_swarm(&shared, &mut swarms, cmd);
+                        }
+                        Err(text) => {
+                            let _ = reply.send(Err(text));
+                        }
+                    }
+                }
                 Some(cmd) => to_swarm(&shared, &mut swarms, cmd),
             },
             Some(ns) = left.recv() => {
@@ -812,7 +911,8 @@ async fn run(
                         m.note_endpoint(&node.endpoint_id());
                     }
                     let (tx, rx) = mpsc::unbounded_channel();
-                    let worker = Worker::new(Arc::clone(&shared), identity.clone(), opened);
+                    let own_tx = tx.downgrade();
+                    let worker = Worker::new(Arc::clone(&shared), identity.clone(), opened, own_tx);
                     let task = tokio::spawn(worker.run(rx));
                     swarms.insert(ns, Handle { tx, task });
                 }
@@ -899,8 +999,24 @@ fn to_swarm(shared: &Shared, swarms: &mut HashMap<String, Handle>, cmd: Command)
         None => cmd,
     };
     let text = "That swarm isn't on this machine.".to_string();
-    if let Command::Invite { reply, .. } = cmd {
-        let _ = reply.send(Err(text.clone()));
+    // Whoever asked about a claim gets the answer; it isn't anything to show the person.
+    match cmd {
+        Command::ClaimTake { reply, .. } => {
+            let _ = reply.send(Err(text));
+            return;
+        }
+        Command::ClaimsList { reply, .. } => {
+            let _ = reply.send(Err(text));
+            return;
+        }
+        Command::ClaimRelease { reply, .. } => {
+            let _ = reply.send(Err(text));
+            return;
+        }
+        Command::Invite { reply, .. } => {
+            let _ = reply.send(Err(text.clone()));
+        }
+        _ => {}
     }
     shared.failed(text);
 }
@@ -1240,6 +1356,11 @@ enum Sent {
     Removed,
     /// A machine of yours joining through this one has had its answer.
     Answered,
+    /// The members had their chance to say what they know about claim `id`.
+    ClaimAsked {
+        id: u64,
+        answers: Vec<ClaimAnswer>,
+    },
 }
 
 /// One swarm's task: its node, its folder and everything this machine knows of it.
@@ -1301,10 +1422,23 @@ struct Worker {
     /// Old keys this machine has asked to move this person from, and removed machines it has
     /// asked to take out, so each is asked once.
     rekeyed: HashSet<String>,
+    /// The claims this machine holds for something alive.
+    claim_book: ClaimBook,
+    /// When something in the book is next due.
+    claims_at: Option<Instant>,
+    /// What the view shows of claims, kept since reading them takes more than a view should.
+    claims_view: Vec<ContextView>,
+    /// For the handles it gives out. Weak, so this task doesn't keep its own channel open.
+    own_tx: mpsc::WeakUnboundedSender<Msg>,
 }
 
 impl Worker {
-    fn new(shared: Arc<Shared>, identity: Identity, opened: Opened) -> Worker {
+    fn new(
+        shared: Arc<Shared>,
+        identity: Identity,
+        opened: Opened,
+        own_tx: mpsc::WeakUnboundedSender<Msg>,
+    ) -> Worker {
         let Opened {
             entry,
             node,
@@ -1350,6 +1484,10 @@ impl Worker {
             names_checked: false,
             dropped: false,
             rekeyed: HashSet::new(),
+            claim_book: ClaimBook::new(),
+            claims_at: None,
+            claims_view: Vec::new(),
+            own_tx,
             shared,
         }
     }
@@ -1366,18 +1504,26 @@ impl Worker {
                     Some(Msg::Identity(id)) => self.set_identity(id).await,
                     Some(Msg::Joining(change, reply)) => self.joining(change, reply).await,
                     Some(Msg::Person(key)) => self.set_person(key),
+                    Some(Msg::ClaimDrop { id }) => self.claim_drop(id),
+                    Some(Msg::ClaimFinish { id, done, reply }) => {
+                        self.claim_finish(id, done, reply).await;
+                    }
                 },
                 ev = next_event(&mut self.events) => self.node_event(ev),
                 Some(()) = next_signal(&mut self.watch) => self.soon(Duration::ZERO),
                 _ = tick.tick() => self.periodic().await,
-                () = sleep_until(self.pass_at) => self.pass().await,
+                () = sleep_until(self.pass_at) => {
+                    self.pass().await;
+                    self.claims_refresh().await;
+                }
+                () = sleep_until(self.claims_at) => self.claims_due().await,
                 () = sleep_until(self.relay_retry_at) => {
                     self.relay_retry_at = None;
                     self.deliver(true);
                 }
                 Some(done) = self.sends.join_next(), if !self.sends.is_empty() => {
                     if let Ok(sent) = done {
-                        self.sent(sent);
+                        self.sent(sent).await;
                     }
                 }
             }
@@ -1385,6 +1531,7 @@ impl Worker {
             if self.finished {
                 return;
             }
+            self.claims_at = self.next_claims_at();
         }
         self.close().await;
     }
@@ -1408,6 +1555,8 @@ impl Worker {
         self.events = None;
         self.watch = None;
         self.folder = None;
+        self.claim_book.close(&self.name);
+        self.claims_view.clear();
         if let Some(node) = self.node.take() {
             match Arc::try_unwrap(node) {
                 Ok(node) => node.shutdown().await,
@@ -1457,8 +1606,8 @@ impl Worker {
                 self.dropped = true;
                 self.removed_now = true;
             }
-            // Nothing here tracks claims yet.
-            Ok(NodeEvent::ClaimHeard) => {}
+            // Neither is anything to the folder, so nothing here says it's syncing.
+            Ok(NodeEvent::ClaimsChanged | NodeEvent::ClaimHeard) => self.claims_changed(),
             Err(broadcast::error::RecvError::Closed) => self.events = None,
         }
     }
@@ -1481,6 +1630,7 @@ impl Worker {
                 let _ = node.sync_with(&others).await;
             }
         }
+        self.prune_claims(&node).await;
         self.deliver(true);
     }
 
@@ -1741,6 +1891,48 @@ impl Worker {
             Command::SetFolder { folder, .. } => self.set_folder(folder),
             Command::Leave { .. } => self.leave().await,
             Command::Resolve { action, .. } => self.resolve(action).await,
+            Command::ClaimTake {
+                context,
+                key,
+                holder,
+                reply,
+                ..
+            } => {
+                self.claim_take(context, key, holder, reply).await;
+                Ok(())
+            }
+            Command::ClaimsList { context, reply, .. } => {
+                let _ = reply.send(self.claims_list(&context).await);
+                Ok(())
+            }
+            Command::ClaimRelease {
+                context,
+                key,
+                author,
+                reply,
+                ..
+            } => {
+                let _ = reply.send(self.claim_release(&context, &key, &author).await);
+                Ok(())
+            }
+            Command::ClaimContextSet { name, settings, .. } => {
+                self.claim_context_set(name, settings).await
+            }
+            Command::ClaimAgeForTests {
+                context,
+                key,
+                by_secs,
+                ..
+            } => {
+                self.claim_age_for_tests(&context, &key, by_secs);
+                Ok(())
+            }
+            Command::ClaimsSilentForTests { .. } => {
+                if let Some(node) = &self.node {
+                    node.silent_claims_for_tests();
+                }
+                Ok(())
+            }
             Command::Create { .. }
             | Command::Join { .. }
             | Command::SetIdentity { .. }
@@ -2003,6 +2195,7 @@ impl Worker {
         self.leaving = true;
         self.watch = None;
         self.folder = None;
+        self.claim_book.close(&self.name);
         if let Err(e) = self.shared.registry.update(&self.ns, |e| e.leaving = true) {
             self.report(format!("{}: {e:#}", self.name));
         }
@@ -2357,7 +2550,7 @@ impl Worker {
         }
     }
 
-    fn sent(&mut self, sent: Sent) {
+    async fn sent(&mut self, sent: Sent) {
         match sent {
             Sent::Promoted { endpoint, ok } => {
                 self.in_flight.remove(&endpoint);
@@ -2383,6 +2576,7 @@ impl Worker {
                 }
             }
             Sent::Removed | Sent::Answered => {}
+            Sent::ClaimAsked { id, answers } => self.claim_asked(id, answers).await,
         }
     }
 
@@ -2474,6 +2668,7 @@ impl Worker {
                         .count()
                 })
                 .unwrap_or(0),
+            claims: self.claims_view.clone(),
         }
     }
 }
@@ -2505,6 +2700,81 @@ fn copy_machine(copy: &RelPath) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn view_with_contexts(id: &str, name: &str, contexts: &[&str]) -> SwarmView {
+        SwarmView {
+            id: id.to_string(),
+            name: name.to_string(),
+            folder: PathBuf::new(),
+            my_role: Role::Writer,
+            members: Vec::new(),
+            types: Vec::new(),
+            pending_invites: Vec::new(),
+            attention: Vec::new(),
+            online: 1,
+            machines: 1,
+            syncing: false,
+            last_change: None,
+            removed: false,
+            my_other_machines: 0,
+            claims: contexts
+                .iter()
+                .map(|c| ContextView {
+                    name: c.to_string(),
+                    settings: ContextSettings::default(),
+                    live: Vec::new(),
+                    done: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_claim_finds_its_swarm() {
+        let gone = SwarmView {
+            removed: true,
+            ..view_with_contexts("r", "Gone", &["both", "lonely"])
+        };
+        let views = vec![
+            view_with_contexts("a", "Notes", &["both", "only-a"]),
+            view_with_contexts("b", "Work", &["both"]),
+            view_with_contexts("c", "Twin", &[]),
+            view_with_contexts("d", "Twin", &[]),
+            gone,
+        ];
+        let no_context = |c: &str| Err(format!("No swarm here has a context called {c}."));
+        let not_here = Err("That swarm isn't on this machine.".to_string());
+        for (swarm, context, want) in [
+            (Some("a"), "both", Ok("a".to_string())),
+            // Named, the swarm itself says whether it has the context.
+            (Some("a"), "nope", Ok("a".to_string())),
+            (Some("Work"), "both", Ok("b".to_string())),
+            // An id comes before a name.
+            (Some("r"), "both", Ok("r".to_string())),
+            (Some("Gone"), "both", not_here.clone()),
+            (Some("nope"), "both", not_here),
+            (
+                Some("Twin"),
+                "both",
+                Err("More than one swarm here is called Twin: use its id.".to_string()),
+            ),
+            (None, "only-a", Ok("a".to_string())),
+            (None, "nope", no_context("nope")),
+            // A swarm this machine was removed from has no say.
+            (None, "lonely", no_context("lonely")),
+            (
+                None,
+                "both",
+                Err("both is in more than one swarm: name which one.".to_string()),
+            ),
+        ] {
+            assert_eq!(
+                resolve_swarm(&views, swarm, context),
+                want,
+                "{swarm:?} {context}"
+            );
+        }
+    }
 
     #[test]
     fn a_copy_names_its_machine() {

@@ -6512,7 +6512,9 @@ fn work_prompt(p: &Project, t: &Ticket, branch: &str, skill: Option<&Path>) -> S
         "You're doing ticket {id} \"{title}\" of the project \"{name}\", {place} {follow} \
          Then call ticket_show: the ticket, its milestone and where the project's spec is.\n\
          {ship} Finish by calling ticket_report with the pull request URL(s) and a short \
-         summary: hydraui then closes this session and moves on to the milestone's next \
+         summary. If the ticket needs no code change (an investigation, a check, a write-up), \
+         open no pull request: call ticket_report with none and your findings as the summary, \
+         which is what the lead reads. Either way hydraui then closes this session and moves on to the milestone's next \
          ticket. If you need a decision, ask it with ticket_ask, never in this terminal: it \
          shows in hydraui and the answer comes back to you here.",
         id = t.id,
@@ -7028,6 +7030,7 @@ mod tests {
                 && any.contains("doesn't say which repo")
                 && any.contains("In each repo you change")
                 && any.contains("PG-3 in its title")
+                && any.contains("needs no code change")
                 && !any.contains("{id}"),
             "{any}"
         );

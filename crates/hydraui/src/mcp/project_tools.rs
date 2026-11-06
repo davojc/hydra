@@ -268,10 +268,12 @@ pub fn schemas() -> Vec<Value> {
         tool(
             "ticket_report",
             "Work: finish the ticket: the pull requests you opened for it and what you did. The \
-             ticket moves to in review and the people on the project see the links.",
+             ticket moves to in review and the people on the project see the links. A ticket \
+             whose work changes no code (an investigation, a check, a write-up) finishes with \
+             no pull requests: the summary is its result, and it's done.",
             json!({
                 "prs": {"type": "array", "items": {"type": "string"},
-                    "description": "The pull request URLs."},
+                    "description": "The pull request URLs; none when the work changed no code."},
                 "summary": s("What you did, and anything a reviewer should know."),
             }),
             vec!["prs", "summary"],
@@ -880,22 +882,29 @@ fn work(dir: &Path, ticket: &str, name: &str, args: &Value) -> Result<String, St
                         .collect()
                 })
                 .unwrap_or_default();
-            if prs.is_empty() {
-                return Err("Give the pull request URLs you opened for the ticket.".into());
-            }
             if let Some(bad) = prs.iter().find(|u| !u.starts_with("https://")) {
                 return Err(format!("{bad} isn't a pull request URL."));
             }
             let summary = need(args, "summary")?;
             let mut t = t.clone();
+            // With no pull request there's nothing to review or merge: the summary is the result.
+            let done = prs.is_empty();
             t.meta.prs = prs;
-            t.meta.status = TicketStatus::InReview;
+            t.meta.status = if done {
+                TicketStatus::Done
+            } else {
+                TicketStatus::InReview
+            };
             t.body = format!("{}\n\n## Work\n\n{summary}\n", t.body.trim_end());
             repo::write_ticket(dir, &t).map_err(|e| e.to_string())?;
-            Ok(format!(
-                "Reported: {} is in review with its pull requests.",
-                t.id
-            ))
+            Ok(if done {
+                format!(
+                    "Reported: {} is done, with your summary as its result.",
+                    t.id
+                )
+            } else {
+                format!("Reported: {} is in review with its pull requests.", t.id)
+            })
         }
         "ticket_checked" => {
             let passed = args
@@ -1302,8 +1311,8 @@ mod tests {
                 .text
                 .contains("Make the tables.")
         );
-        let empty = json!({"prs": [], "summary": "x"});
-        assert!(run(&reg, "work", "ticket_report", empty).is_error);
+        let no_summary = json!({"prs": []});
+        assert!(run(&reg, "work", "ticket_report", no_summary).is_error);
         let junk = json!({"prs": ["not a url"], "summary": "x"});
         assert!(run(&reg, "work", "ticket_report", junk).is_error);
         let pr = "https://github.com/iov42/fe/pull/1";
@@ -1318,6 +1327,17 @@ mod tests {
         assert_eq!(t.meta.status, TicketStatus::InReview);
         assert_eq!(t.meta.prs, [pr]);
         assert!(t.body.contains("## Work\n\nAdded the tables."));
+        // Work that changes no code, such as an investigation, finishes with its findings.
+        let found = json!({"prs": [], "summary": "newRecords misses location types."});
+        let out = run(&reg, "work", "ticket_report", found);
+        assert!(!out.is_error && out.text.contains("done"), "{}", out.text);
+        let t = repo::load(&dir).unwrap().tickets.remove(0);
+        assert_eq!(t.meta.status, TicketStatus::Done);
+        assert!(t.meta.prs.is_empty());
+        assert!(
+            t.body
+                .contains("## Work\n\nnewRecords misses location types.")
+        );
     }
 
     #[test]

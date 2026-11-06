@@ -5,6 +5,7 @@ mod accounts;
 mod all_tasks;
 mod asking;
 mod busy;
+mod claims_page;
 mod finder;
 mod launcher;
 mod layout_file;

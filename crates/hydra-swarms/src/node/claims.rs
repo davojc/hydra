@@ -234,7 +234,7 @@ impl Core {
             if e.content_len() > MAX_RECORD_BYTES {
                 continue;
             }
-            // Not here yet: `ContentReady` brings a re-read.
+            // Not here yet: `ClaimsChanged` brings a re-read when it comes.
             let Some(bytes) = self.read_blob(e.content_hash()).await? else {
                 continue;
             };

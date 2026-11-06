@@ -1,7 +1,7 @@
 //! One swarm on the network: an iroh endpoint and router running iroh-docs, iroh-blobs and
 //! iroh-gossip, behind a gate that refuses machines outside the roster, and the swarm document's
 //! files and signed change log.
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,7 +24,7 @@ use iroh_docs::api::protocol::{AddrInfoOptions, ShareMode};
 use iroh_docs::engine::LiveEvent;
 use iroh_docs::protocol::Docs;
 use iroh_docs::store::Query;
-use iroh_docs::{Author, AuthorId, Capability, CapabilityKind, Entry, NamespaceId};
+use iroh_docs::{Author, AuthorId, Capability, CapabilityKind, ContentStatus, Entry, NamespaceId};
 use iroh_gossip::net::Gossip;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -85,8 +85,9 @@ pub struct NodeConfig {
 pub enum NodeEvent {
     /// Any insert into the document, local or remote, other than a claim's.
     Changed,
-    /// An insert under `claims/`. Renewals make these all the time and folder sync has no use for
-    /// them, so they are kept apart from `Changed`.
+    /// An insert under `claims/`, or the content of one arriving. Renewals make these all the time
+    /// and folder sync has no use for them, so they are kept apart from `Changed` and
+    /// `ContentReady`.
     ClaimsChanged,
     ContentReady(Hash),
     PeerUp(String),
@@ -98,6 +99,45 @@ pub enum NodeEvent {
     Dropped,
     /// Another member asked about a claim, so this machine has just heard of it.
     ClaimHeard,
+}
+
+/// The event for an insert under `key`.
+fn insert_event(key: &[u8]) -> NodeEvent {
+    if key.starts_with(CLAIMS_PREFIX) {
+        NodeEvent::ClaimsChanged
+    } else {
+        NodeEvent::Changed
+    }
+}
+
+/// How much content on its way is remembered. Renewals can overtake each other, leaving hashes
+/// whose content never comes, so this can't grow without end.
+const CONTENT_COMING: usize = 1024;
+
+/// The content remote inserts are waiting for, and whether only claims want it. Every renewal is
+/// new content, and its arrival must say the claim can be read now without waking the folder.
+/// Anything not known to be for claims alone still wakes it: a missed wake could leave a file
+/// unsynced until the next pass, where an extra one only costs that pass.
+#[derive(Default)]
+struct ContentComing(VecDeque<(Hash, bool)>);
+
+impl ContentComing {
+    fn inserted(&mut self, hash: Hash, is_claim: bool) {
+        if let Some((_, claims_alone)) = self.0.iter_mut().find(|(h, _)| *h == hash) {
+            *claims_alone &= is_claim;
+            return;
+        }
+        if self.0.len() == CONTENT_COMING {
+            self.0.pop_front();
+        }
+        self.0.push_back((hash, is_claim));
+    }
+
+    fn arrived_for_claims_alone(&mut self, hash: &Hash) -> bool {
+        let at = self.0.iter().position(|(h, _)| h == hash);
+        at.and_then(|i| self.0.remove(i))
+            .is_some_and(|(_, claims_alone)| claims_alone)
+    }
 }
 
 /// The ALPNs that carry the swarm document, its content and its gossip, and questions about claims.
@@ -429,15 +469,28 @@ impl SwarmNode {
         let (events, _) = broadcast::channel(256);
         let tx = events.clone();
         tokio::spawn(async move {
+            let mut coming = ContentComing::default();
             while let Some(ev) = stream.next().await {
                 let ev = match ev {
-                    Ok(
-                        LiveEvent::InsertLocal { entry } | LiveEvent::InsertRemote { entry, .. },
-                    ) if entry.key().starts_with(CLAIMS_PREFIX) => NodeEvent::ClaimsChanged,
-                    Ok(LiveEvent::InsertLocal { .. } | LiveEvent::InsertRemote { .. }) => {
-                        NodeEvent::Changed
+                    Ok(LiveEvent::InsertLocal { entry }) => insert_event(entry.key()),
+                    Ok(LiveEvent::InsertRemote {
+                        entry,
+                        content_status,
+                        ..
+                    }) => {
+                        if !matches!(content_status, ContentStatus::Complete) {
+                            let is_claim = entry.key().starts_with(CLAIMS_PREFIX);
+                            coming.inserted(entry.content_hash(), is_claim);
+                        }
+                        insert_event(entry.key())
                     }
-                    Ok(LiveEvent::ContentReady { hash }) => NodeEvent::ContentReady(hash),
+                    Ok(LiveEvent::ContentReady { hash }) => {
+                        if coming.arrived_for_claims_alone(&hash) {
+                            NodeEvent::ClaimsChanged
+                        } else {
+                            NodeEvent::ContentReady(hash)
+                        }
+                    }
                     Ok(LiveEvent::NeighborUp(p)) => NodeEvent::PeerUp(p.to_string()),
                     Ok(LiveEvent::NeighborDown(p)) => NodeEvent::PeerDown(p.to_string()),
                     Ok(LiveEvent::SyncFinished(_)) => NodeEvent::SyncFinished,
@@ -986,4 +1039,47 @@ fn saved_anchor(cfg: &NodeConfig) -> anyhow::Result<PersonId> {
 async fn stop(router: Router, blobs: FsStore) {
     let _ = router.shutdown().await;
     let _ = blobs.shutdown().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hash(n: usize) -> Hash {
+        Hash::new(n.to_string())
+    }
+
+    #[test]
+    fn content_only_claims_wanted_is_for_claims_alone() {
+        let mut coming = ContentComing::default();
+        coming.inserted(hash(1), true);
+        assert!(coming.arrived_for_claims_alone(&hash(1)));
+        // It's been dealt with, and anything unknown wakes the folder.
+        assert!(!coming.arrived_for_claims_alone(&hash(1)));
+    }
+
+    #[test]
+    fn content_a_file_wants_wakes_the_folder_whichever_came_first() {
+        let mut coming = ContentComing::default();
+        coming.inserted(hash(1), false);
+        assert!(!coming.arrived_for_claims_alone(&hash(1)));
+        coming.inserted(hash(2), true);
+        coming.inserted(hash(2), false);
+        assert!(!coming.arrived_for_claims_alone(&hash(2)));
+        coming.inserted(hash(3), false);
+        coming.inserted(hash(3), true);
+        assert!(!coming.arrived_for_claims_alone(&hash(3)));
+    }
+
+    #[test]
+    fn content_that_never_comes_is_forgotten_oldest_first() {
+        let mut coming = ContentComing::default();
+        for n in 0..=CONTENT_COMING {
+            coming.inserted(hash(n), true);
+        }
+        assert_eq!(coming.0.len(), CONTENT_COMING);
+        assert!(!coming.arrived_for_claims_alone(&hash(0)));
+        assert!(coming.arrived_for_claims_alone(&hash(1)));
+        assert!(coming.arrived_for_claims_alone(&hash(CONTENT_COMING)));
+    }
 }

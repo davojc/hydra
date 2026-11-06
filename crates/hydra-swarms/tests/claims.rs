@@ -456,39 +456,53 @@ async fn the_view_shows_claims_and_recent_done() {
     wren.stop().await;
 }
 
+/// Whether `svc` shows swarm `id` as syncing at any point in the next `d`. Views that arrived
+/// before now and haven't been taken in yet are looked at too.
+async fn shows_syncing_during(svc: &mut Svc, id: &str, d: Duration) -> bool {
+    let end = tokio::time::Instant::now() + d;
+    svc.until("the time to pass", |s| {
+        let view = s.views.iter().find(|v| v.id == id)?;
+        if view.syncing {
+            return Some(true);
+        }
+        (tokio::time::Instant::now() >= end).then_some(false)
+    })
+    .await
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn renewing_a_claim_does_not_show_as_syncing() {
     let _slot = slot();
     let (mut olive, mut wren, id) = claimers(Role::Writer, FAST).await;
     olive
-        .view("the swarm quiet", |v| v.id == id && !v.syncing)
+        .view("the swarm quiet on olive", |v| v.id == id && !v.syncing)
+        .await;
+    wren.view("the swarm quiet on wren", |v| v.id == id && !v.syncing)
         .await;
     let handle = yours(&olive, &id, "k").await;
     let renewed = |v: &SwarmView| v.claims[0].live.first().map(|c| c.renewed_at);
-    let first = olive
-        .until("the claim in the view", |s| {
+    let first = wren
+        .until("the claim in wren's view", |s| {
             s.views.iter().find(|v| v.id == id).and_then(renewed)
         })
         .await;
 
-    // Writing a claim gives the folder nothing to do, so nothing here should say it's syncing.
-    let end = tokio::time::Instant::now() + PAST_LAPSE;
-    let flipped = olive
-        .until("the renewals", |s| {
-            let view = s.views.iter().find(|v| v.id == id)?;
-            if view.syncing {
-                return Some(true);
-            }
-            (tokio::time::Instant::now() >= end).then_some(false)
-        })
-        .await;
-    assert!(!flipped, "a renewal showed as syncing");
-    let last = olive
-        .until("the view", |s| {
+    // Writing a claim gives the folder nothing to do, on the machine renewing it or on any other.
+    assert!(
+        !shows_syncing_during(&mut olive, &id, PAST_LAPSE).await,
+        "a renewal showed as syncing on the machine holding the claim"
+    );
+    assert!(
+        !shows_syncing_during(&mut wren, &id, PAST_LAPSE).await,
+        "a renewal showed as syncing on another machine"
+    );
+    // And the other machine did see the renewals, so that says something.
+    let last = wren
+        .until("the claim in wren's view", |s| {
             s.views.iter().find(|v| v.id == id).and_then(renewed)
         })
         .await;
-    assert!(last > first, "the claim was never renewed");
+    assert!(last > first, "the renewals never reached wren");
     drop(handle);
     olive.stop().await;
     wren.stop().await;

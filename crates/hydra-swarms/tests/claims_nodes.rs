@@ -13,6 +13,7 @@ use hydra_swarms::ids::{PersonId, PersonKey};
 use hydra_swarms::node::{NodeConfig, NodeEvent, SwarmNode};
 use hydra_swarms::roster::{Change, Machine, Member, Role, Roster, SignedChange};
 use hydra_swarms::wire::ClaimAnswer;
+use iroh_blobs::Hash;
 use iroh_docs::{Author, Capability};
 
 const WAIT: Duration = Duration::from_secs(20);
@@ -247,6 +248,41 @@ async fn a_question_that_arrives_first_stops_the_other_claiming() {
     })
     .await
     .expect("asking tells the node it heard a claim");
+    a.node.shutdown().await;
+    b.node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_claim_whose_content_comes_late_is_told_as_a_claim_change() {
+    let (a, b, _roster) = pair(Role::Writer).await;
+    let mut events = b.node.events();
+    let claim = claim_at("k", now());
+    let blob = Hash::new(serde_json::to_vec(&claim).unwrap());
+    a.node.write_claim(&claim).await.unwrap();
+
+    // The entry comes first, its content after. A read made on the first event can miss the
+    // content, so there has to be a second event, and nothing to wake the folder for it.
+    let told = async {
+        let mut changes = 0;
+        loop {
+            match events.recv().await.unwrap() {
+                NodeEvent::ClaimsChanged => changes += 1,
+                NodeEvent::ContentReady(hash) => {
+                    assert_ne!(hash, blob, "a claim's content looked like a file's")
+                }
+                _ => continue,
+            }
+            if changes >= 2 {
+                break;
+            }
+        }
+    };
+    tokio::time::timeout(WAIT, told)
+        .await
+        .expect("told of the entry and then of its content");
+    // Only what the events prompted has been read, and the claim is in it.
+    let seen = records(&b.node).await;
+    assert!(seen.claims.iter().any(|(_, c)| *c == claim), "{seen:?}");
     a.node.shutdown().await;
     b.node.shutdown().await;
 }

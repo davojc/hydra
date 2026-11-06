@@ -260,6 +260,49 @@ pub fn wake_to_type(
     }
 }
 
+/// How many times a wake-up that doesn't take is typed before the person is told.
+const WAKE_TRIES: u8 = 3;
+
+/// What to do with a wake-up typed a while ago that never started its session working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SentWakeCheck {
+    /// Tell the person it isn't getting through.
+    pub tell: bool,
+    /// Queue it to be typed again; otherwise it is let go.
+    pub again: bool,
+}
+
+/// A run's wake-up can be let go, since its orchestrator can catch up through `run_status`. A lost
+/// claim has no second way to reach its session, which would keep working a key it no longer
+/// holds, so it is never let go. `tries` is how many times it has been typed, `idle` whether the
+/// session is idle now, and `told` whether the person has been told about this text already.
+pub fn check_sent_wake(run: &str, idle: bool, tries: u8, told: bool) -> SentWakeCheck {
+    if run == CLAIMS_WAKE {
+        return SentWakeCheck {
+            tell: tries >= WAKE_TRIES && !told,
+            again: true,
+        };
+    }
+    SentWakeCheck {
+        tell: idle && tries >= WAKE_TRIES,
+        again: idle && tries < WAKE_TRIES,
+    }
+}
+
+/// How many times a wake-up has been typed, once it is typed again.
+pub fn tries_after_typing(before: Option<u8>) -> u8 {
+    (before.unwrap_or(0) + 1).min(WAKE_TRIES)
+}
+
+/// What the person is told when `name` won't take news of a lost claim: all of it, so they can
+/// tell the session themselves.
+pub fn lost_claim_toast(name: &str, message: &str) -> String {
+    format!(
+        "{name} isn't taking messages from hydraui, and this one matters: {message} Look at its \
+         terminal and tell it yourself. hydraui keeps trying too."
+    )
+}
+
 /// Keys a run's escalation toast, so a newer one for the same run replaces it.
 struct RunAlert;
 
@@ -1088,6 +1131,7 @@ impl Workspace {
             let Some(session) = sessions.iter().find(|s| s.pane == pane) else {
                 self.pending_wakes.remove(&pane);
                 self.wake_waiting.remove(&pane);
+                self.wake_told.remove(&pane);
                 continue;
             };
             // Still on its first turn: what's typed now never reaches it.
@@ -1156,7 +1200,7 @@ impl Workspace {
                 self.reserved.insert(pane, std::time::Instant::now());
                 self.pending_wakes.remove(&pane);
                 self.wake_waiting.remove(&pane);
-                let tries = self.wake_tries.remove(&pane).unwrap_or(0) + 1;
+                let tries = tries_after_typing(self.wake_tries.remove(&pane));
                 self.sent_wakes
                     .insert(pane, (run, message, std::time::Instant::now(), tries));
             }
@@ -1165,7 +1209,8 @@ impl Workspace {
 
     /// A wake-up typed 30 seconds ago whose session never started working didn't reach Claude
     /// (a Claude Code prompt was open over the input): it's sent again, up to 3 times, then
-    /// the user is told to look at that terminal.
+    /// the user is told to look at that terminal. A lost claim goes on being sent after that
+    /// (`check_sent_wake`).
     pub(super) fn recheck_wakes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         const TAKE: std::time::Duration = std::time::Duration::from_secs(30);
         let stale: Vec<PaneId> = self
@@ -1181,24 +1226,34 @@ impl Workspace {
             let Some(view) = self.panes.get(&pane) else {
                 continue;
             };
-            if view.read(cx).claude() != Some(crate::mcp::SessionState::Idle) {
-                continue;
-            }
-            if tries >= 3 {
+            let idle = view.read(cx).claude() == Some(crate::mcp::SessionState::Idle);
+            let told = self.wake_told.get(&pane) == Some(&message);
+            let check = check_sent_wake(&run, idle, tries, told);
+            if check.tell {
                 let name = self.pane_name(pane, cx);
-                let title = self.toast_title(pane, &run, cx);
                 crate::action_log::write(format!(
                     "run {run}: {name} didn't take a wake-up after 3 tries"
                 ));
-                window.push_notification(
+                let toast = if run == CLAIMS_WAKE {
+                    self.wake_told.insert(pane, message.clone());
+                    let ws = cx.entity();
+                    Notification::warning(lost_claim_toast(&name, &message))
+                        .title(self.toast_title(pane, "Lost claim", cx))
+                        .autohide(false)
+                        .on_click(move |_, window, cx| {
+                            ws.update(cx, |ws, cx| ws.show_terminal(pane, window, cx));
+                        })
+                } else {
                     Notification::warning(format!(
                         "{name} isn't taking messages from hydraui. Look at its terminal: \
                          Claude Code may be showing a question. Answer it, and hydraui carries \
                          on."
                     ))
-                    .title(title),
-                    cx,
-                );
+                    .title(self.toast_title(pane, &run, cx))
+                };
+                window.push_notification(toast, cx);
+            }
+            if !check.again {
                 continue;
             }
             crate::action_log::write(format!(
@@ -1921,6 +1976,74 @@ pub(super) fn pill_colors(state: CardState, accent: u32) -> (gpui::Hsla, gpui::H
 
 #[cfg(test)]
 mod tests {
+    use super::{SentWakeCheck, check_sent_wake};
+
+    const GO: SentWakeCheck = SentWakeCheck {
+        tell: false,
+        again: false,
+    };
+    const AGAIN: SentWakeCheck = SentWakeCheck {
+        tell: false,
+        again: true,
+    };
+
+    #[test]
+    fn a_runs_wake_up_is_sent_up_to_three_times_and_let_go_if_the_session_moves_on() {
+        for told in [false, true] {
+            assert_eq!(check_sent_wake("A-1", false, 1, told), GO);
+            assert_eq!(check_sent_wake("A-1", false, 3, told), GO);
+            assert_eq!(check_sent_wake("A-1", true, 1, told), AGAIN);
+            assert_eq!(check_sent_wake("A-1", true, 2, told), AGAIN);
+            assert_eq!(
+                check_sent_wake("A-1", true, 3, told),
+                SentWakeCheck {
+                    tell: true,
+                    again: false
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_lost_claim_is_never_let_go_whatever_the_session_is_doing() {
+        for idle in [false, true] {
+            for tries in 1..=3 {
+                for told in [false, true] {
+                    let check = check_sent_wake(super::CLAIMS_WAKE, idle, tries, told);
+                    assert!(check.again, "{idle} {tries} {told}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_person_hears_of_a_stuck_loss_once_after_three_tries() {
+        let check = |idle, tries, told| check_sent_wake(super::CLAIMS_WAKE, idle, tries, told).tell;
+        assert!(!check(true, 2, false));
+        assert!(check(true, 3, false));
+        assert!(!check(true, 3, true), "already told");
+        // Stuck behind a question it never gets out of counts just the same.
+        assert!(check(false, 3, false));
+        assert!(!check(false, 2, false));
+    }
+
+    #[test]
+    fn a_wake_ups_tries_stop_at_three() {
+        assert_eq!(super::tries_after_typing(None), 1);
+        assert_eq!(super::tries_after_typing(Some(2)), 3);
+        assert_eq!(super::tries_after_typing(Some(3)), 3);
+    }
+
+    #[test]
+    fn the_toast_for_a_stuck_loss_says_what_to_tell_the_session() {
+        let text = super::lost_claim_toast("Fixer", "Your claim on k in inbox has gone.");
+        assert!(text.contains("Fixer"), "{text}");
+        assert!(
+            text.contains("Your claim on k in inbox has gone."),
+            "{text}"
+        );
+    }
+
     #[test]
     fn wake_ups_for_different_tickets_add_up_and_one_ticket_keeps_its_newest() {
         let first = super::join_wake(None, "A-1".into(), "A passed.".into());

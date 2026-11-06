@@ -251,6 +251,8 @@ pub struct Workspace {
     sent_wakes: HashMap<PaneId, (String, String, Instant, u8)>,
     /// Times a wake-up waiting to be sent again was already sent.
     wake_tries: HashMap<PaneId, u8>,
+    /// The lost claims the user was last told a session isn't taking, so they're told once.
+    wake_told: HashMap<PaneId, String>,
     /// When each run waiting on product last had its stage look in the Slack thread.
     ask_checks: HashMap<String, std::time::SystemTime>,
     /// When open runs about pull requests were last checked on GitHub, and whether a check is
@@ -533,6 +535,7 @@ impl Workspace {
             wake_waiting: HashMap::new(),
             sent_wakes: HashMap::new(),
             wake_tries: HashMap::new(),
+            wake_told: HashMap::new(),
             ask_checks: HashMap::new(),
             pr_checked: None,
             pr_checking: false,

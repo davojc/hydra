@@ -74,12 +74,14 @@ pub struct Svc {
     pub named: Vec<String>,
     pub book: DirectPeers,
     pub claim_slack: Duration,
+    /// Where the service tells other windows how to reach it, kept across a restart.
+    pub bridge: Option<PathBuf>,
     /// Where this machine's folders go.
     pub home: PathBuf,
     pub _dirs: Vec<tempfile::TempDir>,
 }
 
-pub fn launch(
+pub fn config(
     root: &Path,
     identity: Identity,
     keys: &Keys,
@@ -87,10 +89,7 @@ pub fn launch(
     book: &DirectPeers,
     lost_relays: Duration,
     claim_slack: Duration,
-) -> (
-    mpsc::UnboundedSender<Command>,
-    mpsc::UnboundedReceiver<ServiceEvent>,
-) {
+) -> ServiceConfig {
     let held = Arc::clone(keys);
     let swarm_key = Box::new(move |id: &str| {
         let mut keys = held.lock().unwrap();
@@ -105,10 +104,24 @@ pub fn launch(
         person: *person.lock().unwrap(),
         ..identity
     };
-    let cfg = ServiceConfig::new(root.to_path_buf(), identity, swarm_key, set_person, false)
+    ServiceConfig::new(root.to_path_buf(), identity, swarm_key, set_person, false)
         .direct_peers_for_tests(book)
         .lose_relay_answers_for_tests(lost_relays)
-        .claim_slack_for_tests(claim_slack);
+        .claim_slack_for_tests(claim_slack)
+}
+
+/// `cfg` started, telling other windows how to reach it through `bridge` if there is one.
+fn launch(
+    cfg: ServiceConfig,
+    bridge: Option<&PathBuf>,
+) -> (
+    mpsc::UnboundedSender<Command>,
+    mpsc::UnboundedReceiver<ServiceEvent>,
+) {
+    let cfg = match bridge {
+        Some(file) => cfg.bridge_file(file.clone()),
+        None => cfg,
+    };
     SwarmsService::start(cfg).expect("start")
 }
 
@@ -119,15 +132,26 @@ impl Svc {
 
     /// A machine that loses the owners' answers to its relays for its first `lost`.
     pub fn losing_relays(name: &str, book: &DirectPeers, lost: Duration) -> Svc {
-        Svc::start(name, book, lost, DEFAULT_CLAIM_SLACK)
+        Svc::start(name, book, lost, DEFAULT_CLAIM_SLACK, None)
     }
 
     /// A machine that allows `slack` for clock differences before a claim lapses.
     pub fn with_claim_slack(name: &str, book: &DirectPeers, slack: Duration) -> Svc {
-        Svc::start(name, book, Duration::ZERO, slack)
+        Svc::start(name, book, Duration::ZERO, slack, None)
     }
 
-    fn start(name: &str, book: &DirectPeers, lost: Duration, claim_slack: Duration) -> Svc {
+    /// A machine like `with_claim_slack` that other windows reach through the file `bridge`.
+    pub fn with_bridge(name: &str, book: &DirectPeers, slack: Duration, bridge: PathBuf) -> Svc {
+        Svc::start(name, book, Duration::ZERO, slack, Some(bridge))
+    }
+
+    fn start(
+        name: &str,
+        book: &DirectPeers,
+        lost: Duration,
+        claim_slack: Duration,
+        bridge: Option<PathBuf>,
+    ) -> Svc {
         let state = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         let identity = Identity {
@@ -138,7 +162,7 @@ impl Svc {
         let keys = Keys::default();
         let person = Person::new(Mutex::new(identity.person));
         let root = state.path().join("swarms");
-        let (tx, rx) = launch(
+        let cfg = config(
             &root,
             identity.clone(),
             &keys,
@@ -147,6 +171,7 @@ impl Svc {
             lost,
             claim_slack,
         );
+        let (tx, rx) = launch(cfg, bridge.as_ref());
         Svc {
             tx,
             rx,
@@ -161,6 +186,7 @@ impl Svc {
             named: Vec::new(),
             book: book.clone(),
             claim_slack,
+            bridge,
             home: home.path().to_path_buf(),
             _dirs: vec![state, home],
         }
@@ -342,7 +368,7 @@ impl Svc {
 
     /// Starts the service again on the same root, keys and person.
     pub fn restart(&mut self) {
-        let (tx, rx) = launch(
+        let cfg = config(
             &self.root,
             self.identity.clone(),
             &self.keys,
@@ -351,6 +377,7 @@ impl Svc {
             Duration::ZERO,
             self.claim_slack,
         );
+        let (tx, rx) = launch(cfg, self.bridge.as_ref());
         self.tx = tx;
         self.rx = rx;
         self.views.clear();

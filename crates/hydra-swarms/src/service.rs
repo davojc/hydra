@@ -24,6 +24,7 @@ use tokio::sync::{Notify, broadcast, mpsc};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 
+use crate::bridge::Host;
 use crate::claims::{ContextSettings, Holder};
 use crate::folder::{Attention, Folder, FolderEvent};
 use crate::ids::{PersonId, PersonKey, to_hex};
@@ -77,6 +78,7 @@ pub type PersonKeyFn = Box<dyn Fn([u8; 32]) -> Result<(), String> + Send>;
 mod claims;
 mod linking;
 
+pub(crate) use claims::NO_LONGER_YOURS;
 use claims::{CLOCK_SLACK, ClaimBook, TakeReply, resolve_swarm};
 pub use claims::{ClaimHandle, ClaimOutcome, ClaimView, ContextView, DoneView, LostReason};
 
@@ -92,6 +94,7 @@ pub struct ServiceConfig {
     /// The keyring in hydraui, for a personal key this machine is given or makes.
     pub set_person: PersonKeyFn,
     pub relays: bool,
+    bridge: Option<PathBuf>,
     direct_peers: Option<DirectPeers>,
     lose_relays: Duration,
     claim_slack: Duration,
@@ -111,10 +114,18 @@ impl ServiceConfig {
             swarm_key,
             set_person,
             relays,
+            bridge: None,
             direct_peers: None,
             lose_relays: Duration::ZERO,
             claim_slack: CLOCK_SLACK,
         }
+    }
+
+    /// Lets other windows on this machine reach the claims through `file`, which says how for
+    /// as long as the service runs.
+    pub fn bridge_file(mut self, file: PathBuf) -> Self {
+        self.bridge = Some(file);
+        self
     }
 
     /// Allows `d` for clocks running late before a claim lapses, so tests can see a lapse soon.
@@ -457,17 +468,24 @@ impl SwarmsService {
                 if let Some(text) = damaged {
                     shared.failed(text);
                 }
-                rt.block_on(run(shared, cfg.identity, cfg.set_person, cmd_rx, left_rx));
+                rt.block_on(run(
+                    shared,
+                    cfg.identity,
+                    cfg.set_person,
+                    cmd_rx,
+                    left_rx,
+                    cfg.bridge,
+                ));
             })?;
         Ok((cmd_tx, ev_rx))
     }
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn random32() -> anyhow::Result<[u8; 32]> {
+pub(crate) fn random32() -> anyhow::Result<[u8; 32]> {
     let mut b = [0u8; 32];
     getrandom::fill(&mut b).map_err(|e| anyhow::anyhow!("random bytes: {e}"))?;
     Ok(b)
@@ -478,7 +496,7 @@ fn now_secs() -> u64 {
 }
 
 /// `bytes` written to `path` through a temp file and a rename.
-fn save_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
+pub(crate) fn save_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, serde_json::to_vec_pretty(value)?)
         .with_context(|| format!("writing {}", tmp.display()))?;
@@ -728,7 +746,21 @@ async fn run(
     set_person: PersonKeyFn,
     mut commands: fmpsc::UnboundedReceiver<Command>,
     mut left: mpsc::UnboundedReceiver<String>,
+    bridge: Option<PathBuf>,
 ) {
+    // Apart from `commands`, so clients still connected don't keep the service alive once
+    // hydraui has dropped its sender.
+    let (host_tx, mut host_commands) = mpsc::unbounded_channel();
+    let host = match bridge {
+        Some(file) => match Host::start(file, host_tx).await {
+            Ok(host) => Some(host),
+            Err(e) => {
+                shared.failed(format!("Other windows can't claim through this one: {e:#}"));
+                None
+            }
+        },
+        None => None,
+    };
     let (up_tx, mut up) = mpsc::unbounded_channel();
     let machines = match start_machines(&shared, &identity, set_person, up_tx).await {
         Ok(m) => Some(m),
@@ -863,32 +895,9 @@ async fn run(
                         m.decline(&swarm);
                     }
                 }
-                Some(Command::ClaimTake { swarm, context, key, holder, reply }) => {
-                    match resolve_swarm(&shared.views(), swarm.as_deref(), &context) {
-                        Ok(id) => {
-                            let swarm = Some(id);
-                            let cmd = Command::ClaimTake { swarm, context, key, holder, reply };
-                            to_swarm(&shared, &mut swarms, cmd);
-                        }
-                        Err(text) => {
-                            let _ = reply.send(Err(text));
-                        }
-                    }
-                }
-                Some(Command::ClaimsList { swarm, context, reply }) => {
-                    match resolve_swarm(&shared.views(), swarm.as_deref(), &context) {
-                        Ok(id) => {
-                            let swarm = Some(id);
-                            let cmd = Command::ClaimsList { swarm, context, reply };
-                            to_swarm(&shared, &mut swarms, cmd);
-                        }
-                        Err(text) => {
-                            let _ = reply.send(Err(text));
-                        }
-                    }
-                }
-                Some(cmd) => to_swarm(&shared, &mut swarms, cmd),
+                Some(cmd) => route(&shared, &mut swarms, cmd),
             },
+            Some(cmd) = host_commands.recv() => route(&shared, &mut swarms, cmd),
             Some(ns) = left.recv() => {
                 // Left here: not offered back by your other machines.
                 if let Some(m) = &machines {
@@ -940,6 +949,10 @@ async fn run(
             }
         }
     }
+    // First, so other windows hear at once, and no handle outlives its swarm.
+    if let Some(host) = host {
+        host.stop().await;
+    }
     // Swarms still being made or joined are let finish, then closed with the rest.
     while let Some(done) = opening.join_next().await {
         if let Ok((
@@ -982,6 +995,48 @@ async fn start_machines(
 ) -> anyhow::Result<Arc<linking::Machines>> {
     let device_key = shared.machine_key(DEVICE_KEY_ID).await?;
     linking::Machines::start(Arc::clone(shared), device_key, identity, set_person, up).await
+}
+
+/// Passes a command to its swarm's task, once it is clear which swarm a claim command means.
+fn route(shared: &Shared, swarms: &mut HashMap<String, Handle>, cmd: Command) {
+    let cmd = match cmd {
+        Command::ClaimTake {
+            swarm,
+            context,
+            key,
+            holder,
+            reply,
+        } => match resolve_swarm(&shared.views(), swarm.as_deref(), &context) {
+            Ok(id) => Command::ClaimTake {
+                swarm: Some(id),
+                context,
+                key,
+                holder,
+                reply,
+            },
+            Err(text) => {
+                let _ = reply.send(Err(text));
+                return;
+            }
+        },
+        Command::ClaimsList {
+            swarm,
+            context,
+            reply,
+        } => match resolve_swarm(&shared.views(), swarm.as_deref(), &context) {
+            Ok(id) => Command::ClaimsList {
+                swarm: Some(id),
+                context,
+                reply,
+            },
+            Err(text) => {
+                let _ = reply.send(Err(text));
+                return;
+            }
+        },
+        cmd => cmd,
+    };
+    to_swarm(shared, swarms, cmd);
 }
 
 /// Passes a command to its swarm's task.

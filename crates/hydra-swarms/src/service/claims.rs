@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::channel::oneshot;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
@@ -31,7 +32,7 @@ const MAX_KEY_BYTES: usize = 1024;
 const MAX_LABEL_CHARS: usize = 200;
 const RECENT_DONE: usize = 20;
 
-const NO_LONGER_YOURS: &str = "This claim is no longer yours.";
+pub(crate) const NO_LONGER_YOURS: &str = "This claim is no longer yours.";
 
 pub(super) type TakeReply = oneshot::Sender<Result<ClaimOutcome, String>>;
 
@@ -54,7 +55,7 @@ pub enum ClaimOutcome {
 }
 
 /// Why a claim stopped being this machine's.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub enum LostReason {
     Beaten { person: String, machine: String },
     Done { person: String },
@@ -126,7 +127,7 @@ impl Drop for ClaimHandle {
 }
 
 /// One context as it stands.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ContextView {
     pub name: String,
     pub settings: ContextSettings,
@@ -135,7 +136,7 @@ pub struct ContextView {
     pub done: Vec<DoneView>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ClaimView {
     pub key: String,
     /// The author id of the machine holding it, which is what a release names.
@@ -149,7 +150,7 @@ pub struct ClaimView {
     pub mine: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct DoneView {
     pub key: String,
     pub person: String,

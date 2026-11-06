@@ -14,7 +14,7 @@ jiff.workspace = true
 iroh-blobs.workspace = true
 iroh-docs.workspace = true
 iroh-gossip.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net"] }
 anyhow.workspace = true
 bytes.workspace = true
 futures.workspace = true

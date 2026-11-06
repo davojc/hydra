@@ -12,7 +12,7 @@ use hydra_swarms::claims::{
 use hydra_swarms::ids::{PersonId, PersonKey};
 use hydra_swarms::node::{NodeConfig, NodeEvent, SwarmNode};
 use hydra_swarms::roster::{Change, Machine, Member, Role, Roster, SignedChange};
-use hydra_swarms::wire::ClaimAnswer;
+use hydra_swarms::wire::{ClaimAnswer, OwnRecords};
 use iroh_blobs::Hash;
 use iroh_docs::{Author, Capability};
 
@@ -415,7 +415,7 @@ async fn an_answer_carries_a_done_the_asker_has_not_synced() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_answer_only_says_what_is_held_for_that_key() {
+async fn an_answer_says_what_is_held_for_that_key_and_all_the_answerers_own_claims() {
     let (a, b, _roster) = pair(Role::Writer).await;
     hold_back_sync(&a.node, &b.node).await;
     let mine = claim_at("k", now());
@@ -428,6 +428,10 @@ async fn an_answer_only_says_what_is_held_for_that_key() {
     let mut got = answers[0].claims.clone();
     got.sort_by_key(|(author, _)| *author != b.node.author());
     assert_eq!(got, vec![(b.node.author(), mine), (a.node.author(), asked)]);
+    let own = answers[0].own.as_ref().expect("its own records");
+    let mut keys: Vec<&str> = own.claims.iter().map(|c| c.key.as_str()).collect();
+    keys.sort();
+    assert_eq!(keys, ["k", "other"]);
     a.node.shutdown().await;
     b.node.shutdown().await;
 }
@@ -457,6 +461,7 @@ async fn answers_from_anyone_but_a_writer_are_not_kept() {
     let answer = ClaimAnswer {
         claims: vec![("stranger".into(), claim_at("k", now()))],
         dones: vec![("stranger".into(), done_at("j", now()))],
+        ..ClaimAnswer::default()
     };
     a.node.take_answers(vec![answer], &roster);
     let held = records(&a.node).await;
@@ -504,7 +509,7 @@ async fn a_record_over_the_limit_is_skipped() {
 
     let answer = ClaimAnswer {
         claims: vec![(b.node.author(), big)],
-        dones: vec![],
+        ..ClaimAnswer::default()
     };
     a.node.take_answers(vec![answer], &roster);
     assert!(records(&a.node).await.claims.is_empty());
@@ -610,6 +615,136 @@ async fn a_release_outlasts_a_short_keep_done_until_its_claim_must_have_lapsed()
     assert!(held.dones.is_empty());
     a.node.shutdown().await;
     b.node.shutdown().await;
+}
+
+/// `a` has held "k1" under a limit of 1, which `c` has synced, and then sync stops.
+async fn holding_k1_then_split() -> (Peer, Peer, Roster) {
+    let (a, c, roster) = pair(Role::Writer).await;
+    a.node.write_claim(&claim_at("k1", now())).await.unwrap();
+    eventually("a's first claim on c", || async {
+        (holder_of(&settled(&c.node, &roster).await, "k1") == Some(a.node.author())).then_some(())
+    })
+    .await;
+    hold_back_sync(&a.node, &c.node).await;
+    (a, c, roster)
+}
+
+/// `a` claims "k2", then `c` claims it too and asks `a`, the later of the two.
+async fn both_claim_k2(
+    a: &SwarmNode,
+    c: &SwarmNode,
+    roster: &Roster,
+) -> BTreeMap<String, KeyState> {
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    a.write_claim(&claim_at("k2", now())).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let mine = claim_at("k2", now());
+    c.write_claim(&mine).await.unwrap();
+    let answers = c.ask_claim(&[a.endpoint_id()], &mine, ASK).await;
+    assert_eq!(answers.len(), 1);
+    c.take_answers(answers, roster);
+    settled(c, roster).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_answer_shows_a_machine_finished_its_last_key_before_claiming_this_one() {
+    let (a, c, roster) = holding_k1_then_split().await;
+    let finished = now();
+    a.node.write_done(&done_at("k1", finished)).await.unwrap();
+    a.node.delete_claim(CONTEXT, "k1").await.unwrap();
+
+    let states = both_claim_k2(&a.node, &c.node, &roster).await;
+
+    // Counting a's old claim on k1 would put its claim on k2 over the limit, and give c the key.
+    assert_eq!(holder_of(&states, "k2"), Some(a.node.author()));
+    assert!(
+        matches!(states.get("k1"), Some(KeyState::Done { .. })),
+        "{states:?}"
+    );
+    a.node.shutdown().await;
+    c.node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_answer_shows_a_machine_released_its_last_key_before_claiming_this_one() {
+    let (a, c, roster) = holding_k1_then_split().await;
+    // Nothing but the claim's tombstone says k1 has ended.
+    a.node.delete_claim(CONTEXT, "k1").await.unwrap();
+
+    let states = both_claim_k2(&a.node, &c.node, &roster).await;
+
+    assert_eq!(holder_of(&states, "k2"), Some(a.node.author()));
+    assert_eq!(states.get("k1"), None);
+    a.node.shutdown().await;
+    c.node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_machine_holding_nothing_can_still_say_its_last_claim_ended() {
+    let (a, c, roster) = holding_k1_then_split().await;
+    a.node.delete_claim(CONTEXT, "k1").await.unwrap();
+
+    let asked = claim_at("other", now());
+    let answers = c.node.ask_claim(&[a.node.endpoint_id()], &asked, ASK).await;
+    c.node.take_answers(answers, &roster);
+
+    assert_eq!(holder_of(&settled(&c.node, &roster).await, "k1"), None);
+    a.node.shutdown().await;
+    c.node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_claim_made_after_an_answer_counts_when_sync_brings_it() {
+    let (a, c, roster) = holding_k1_then_split().await;
+    a.node.delete_claim(CONTEXT, "k1").await.unwrap();
+    let asked = claim_at("other", now());
+    let answers = c.node.ask_claim(&[a.node.endpoint_id()], &asked, ASK).await;
+    c.node.take_answers(answers, &roster);
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    a.node.write_claim(&claim_at("later", now())).await.unwrap();
+    sync_again(&a.node, &c.node).await;
+
+    eventually("the later claim on c", || async {
+        (holder_of(&settled(&c.node, &roster).await, "later") == Some(a.node.author()))
+            .then_some(())
+    })
+    .await;
+    a.node.shutdown().await;
+    c.node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn what_an_answer_says_of_its_own_records_is_only_about_the_machine_asked() {
+    let (a, c, roster) = holding_k1_then_split().await;
+    let saying_nothing_is_held = |from: String| ClaimAnswer {
+        own: Some(OwnRecords {
+            context: CONTEXT.into(),
+            claims: vec![],
+            dones: vec![],
+            through: now(),
+        }),
+        from,
+        ..ClaimAnswer::default()
+    };
+
+    // Nobody asked, and a machine that isn't the claim's: neither can end a's claim.
+    let answers = vec![
+        saying_nothing_is_held(String::new()),
+        saying_nothing_is_held(c.node.endpoint_id()),
+    ];
+    c.node.take_answers(answers, &roster);
+    assert_eq!(
+        holder_of(&settled(&c.node, &roster).await, "k1"),
+        Some(a.node.author())
+    );
+
+    // a can.
+    let answers = vec![saying_nothing_is_held(a.node.endpoint_id())];
+    c.node.take_answers(answers, &roster);
+    assert_eq!(holder_of(&settled(&c.node, &roster).await, "k1"), None);
+    a.node.shutdown().await;
+    c.node.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

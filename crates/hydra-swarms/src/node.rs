@@ -230,6 +230,8 @@ pub(crate) struct Core {
     pub(crate) heard: Mutex<HashMap<(String, String, String), ClaimRecord>>,
     /// The same for done marks, which a member can hold before this machine has synced them.
     heard_dones: Mutex<HashMap<(String, String, String), DoneRecord>>,
+    /// What each member last said of its own claims, by context and author.
+    told_own: Mutex<HashMap<(String, String), claims::ToldOwn>>,
     /// Set in tests: take questions about claims and never answer.
     silent_claims: AtomicBool,
     /// Set in tests: reading this context's claims fails.
@@ -518,6 +520,7 @@ impl SwarmNode {
             invites: Invites::new(&cfg.dir),
             heard: Mutex::default(),
             heard_dones: Mutex::default(),
+            told_own: Mutex::default(),
             silent_claims: AtomicBool::new(false),
             unreadable_claims: Mutex::default(),
         });

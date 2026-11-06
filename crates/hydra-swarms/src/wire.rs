@@ -114,10 +114,30 @@ pub struct ClaimAsk {
 
 /// Every claim and done mark the answering machine holds for the key asked about, its own
 /// included, each with the author id of the machine that made it.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Default)]
 pub struct ClaimAnswer {
     pub claims: Vec<(String, ClaimRecord)>,
     pub dones: Vec<(String, DoneRecord)>,
+    /// The answering machine on its own records. None if they are too many to send.
+    #[serde(default)]
+    pub own: Option<OwnRecords>,
+    /// The endpoint this answer came from. The asker sets it from who it asked, so `own` can't be
+    /// said on another machine's behalf.
+    #[serde(skip)]
+    pub from: String,
+}
+
+/// What a machine says of its own records across a context. Whether a claim of its counts depends
+/// on its other claims, by the limit, so the key asked about isn't enough.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct OwnRecords {
+    pub context: String,
+    /// Every claim it has now.
+    pub claims: Vec<ClaimRecord>,
+    /// Its done marks, newest first, as many as fit.
+    pub dones: Vec<DoneRecord>,
+    /// A claim of its made by this time, by its own clock, that isn't in `claims` has ended.
+    pub through: u64,
 }
 
 /// A swarm one of your machines is in, offered to another.
@@ -346,15 +366,32 @@ mod tests {
         .await;
         round_trip(vec![
             ClaimAnswer {
-                claims: vec![("au".into(), claim)],
-                dones: vec![("au".into(), done)],
+                claims: vec![("au".into(), claim.clone())],
+                dones: vec![("au".into(), done.clone())],
+                own: Some(OwnRecords {
+                    context: "inbox".into(),
+                    claims: vec![claim],
+                    dones: vec![done],
+                    through: 4,
+                }),
+                from: String::new(),
             },
-            ClaimAnswer {
-                claims: vec![],
-                dones: vec![],
-            },
+            ClaimAnswer::default(),
         ])
         .await;
+    }
+
+    #[test]
+    fn who_an_answer_came_from_is_never_taken_from_the_answer() {
+        let answer = ClaimAnswer {
+            from: "said".into(),
+            ..ClaimAnswer::default()
+        };
+        let sent = serde_json::to_value(&answer).unwrap();
+        assert_eq!(sent.get("from"), None);
+        let forged = json!({"claims": [], "dones": [], "from": "forged"});
+        let read: ClaimAnswer = serde_json::from_value(forged).unwrap();
+        assert_eq!(read.from, "");
     }
 
     #[test]

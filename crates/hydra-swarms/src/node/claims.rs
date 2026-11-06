@@ -18,17 +18,92 @@ use super::{Core, CoreSlot, MAX_RECORD_BYTES, NodeEvent, SwarmNode, lock, now_mi
 use crate::claims::{ClaimRecord, ContextSettings, DoneRecord, Records, ReleaseRecord};
 use crate::paths::{claim_key, claims_context_prefix, done_key, release_key};
 use crate::roster::{Role, Roster};
-use crate::wire::{CLAIMS_ALPN, ClaimAnswer, ClaimAsk, read_msg, write_msg};
+use crate::wire::{CLAIMS_ALPN, ClaimAnswer, ClaimAsk, OwnRecords, read_msg, write_msg};
 
 /// A heard claim that hasn't been renewed for this long is dropped, in microseconds, so it can
 /// never block a key for long even if its context's settings are unknown.
 const HEARD_FOR: u64 = 60 * 60 * 1_000_000;
+
+/// The most an answer gives to a machine's own records. Past it the oldest done marks stay behind,
+/// since an answer too long to send would count as no answer at all.
+const OWN_RECORDS_BYTES: usize = 1 << 20;
 
 /// How long the handler waits for a member to send its question.
 const READ_ASK_FOR: Duration = Duration::from_secs(10);
 
 /// When each tombstone was written, by its author and the document key it ended.
 type Tombstones = HashMap<(String, Vec<u8>), u64>;
+
+/// What a member said of its own claims in a context. It stands in for tombstones that haven't
+/// synced: whether a machine's claim counts depends on its other claims, so one that ended and
+/// still looks live here would push its newer claims over the limit.
+pub(super) struct ToldOwn {
+    through: u64,
+    /// Each claim it had then: the key, and when it was made.
+    claims: HashMap<String, u64>,
+    /// When this machine was told, by its own clock.
+    heard_at: u64,
+}
+
+impl ToldOwn {
+    /// Whether what was said ends `claim`. A claim made later says nothing either way, since it
+    /// hadn't been made.
+    fn ended(&self, claim: &ClaimRecord) -> bool {
+        claim.claimed_at <= self.through && self.claims.get(&claim.key) != Some(&claim.claimed_at)
+    }
+}
+
+/// What the machine `me` can say of its own records, given when it last ended a record there.
+///
+/// `through` is the newest of its claims and tombstones, not the time now: a claim is stamped
+/// before it is written, so at any time now one could be stamped and still on its way into the
+/// document, and it mustn't be taken for ended. The swarm's one task makes these one at a time, so
+/// everything stamped before the newest of them is already written.
+fn own_records(
+    context: &str,
+    me: &str,
+    records: &Records,
+    last_ended: u64,
+    budget: usize,
+) -> Option<OwnRecords> {
+    let claims: Vec<ClaimRecord> = records
+        .claims
+        .iter()
+        .filter(|(author, _)| author == me)
+        .map(|(_, c)| c.clone())
+        .collect();
+    // A list that left a claim out would say that claim had ended.
+    let mut room = budget.checked_sub(claims.iter().map(sent_size).sum())?;
+
+    let mut mine: Vec<&DoneRecord> = records
+        .dones
+        .iter()
+        .filter(|(author, _)| author == me)
+        .map(|(_, d)| d)
+        .collect();
+    mine.sort_by_key(|d| std::cmp::Reverse(d.at));
+    let mut dones = Vec::new();
+    for done in mine {
+        let Some(left) = room.checked_sub(sent_size(done)) else {
+            break;
+        };
+        room = left;
+        dones.push(done.clone());
+    }
+
+    let newest_claim = claims.iter().map(|c| c.claimed_at).max().unwrap_or(0);
+    Some(OwnRecords {
+        context: context.to_string(),
+        claims,
+        dones,
+        through: newest_claim.max(last_ended),
+    })
+}
+
+/// How much of an answer `record` takes up.
+fn sent_size<T: Serialize>(record: &T) -> usize {
+    serde_json::to_vec(record).map_or(0, |b| b.len())
+}
 
 /// One entry under a context.
 enum Record {
@@ -126,6 +201,15 @@ impl SwarmNode {
         let core = &self.core;
         let me = core.author.to_string();
         for answer in answers {
+            // Who it came from, by who was asked: a member can't speak for another machine here.
+            let answerer = roster
+                .member_by_endpoint(&answer.from)
+                .and_then(|m| m.machines.iter().find(|x| x.endpoint == answer.from))
+                .map(|x| x.author.clone())
+                .filter(|author| *author != me && roster.writes(author));
+            if let (Some(author), Some(own)) = (answerer, answer.own) {
+                core.hold_own(author, own);
+            }
             for (author, claim) in answer.claims {
                 if author != me && roster.writes(&author) {
                     core.hold_claim(author, claim);
@@ -225,6 +309,34 @@ impl Core {
         }
     }
 
+    /// Takes in what `author` says of its own records in a context.
+    fn hold_own(&self, author: String, own: OwnRecords) {
+        let OwnRecords {
+            context,
+            claims,
+            dones,
+            through,
+        } = own;
+        let mut current = HashMap::new();
+        for claim in claims.into_iter().filter(|c| c.context == context) {
+            current.insert(claim.key.clone(), claim.claimed_at);
+            self.hold_claim(author.clone(), claim);
+        }
+        for done in dones.into_iter().filter(|d| d.context == context) {
+            self.hold_done(author.clone(), done);
+        }
+        let mut told = lock(&self.told_own);
+        let at = (context, author);
+        if told.get(&at).is_none_or(|t| through >= t.through) {
+            let told_own = ToldOwn {
+                through,
+                claims: current,
+                heard_at: now_micros(),
+            };
+            told.insert(at, told_own);
+        }
+    }
+
     pub(crate) async fn claim_records(&self, context: &str) -> anyhow::Result<Records> {
         if lock(&self.unreadable_claims).as_deref() == Some(context) {
             anyhow::bail!("{context} can't be read");
@@ -287,6 +399,14 @@ impl Core {
             .extend(told.map(|((_, _, author), c)| (author.clone(), c.clone())));
         drop(heard);
 
+        let mut told = lock(&self.told_own);
+        told.retain(|_, t| now.saturating_sub(t.heard_at) <= HEARD_FOR);
+        records.claims.retain(|(author, c)| {
+            let at = (context.to_string(), author.clone());
+            told.get(&at).is_none_or(|t| !t.ended(c))
+        });
+        drop(told);
+
         let mut heard = lock(&self.heard_dones);
         heard.retain(|(ctx, key, author), d| {
             ctx != context || !ended(author, done_key(ctx, key), d.at)
@@ -314,9 +434,12 @@ impl Core {
         let (mut send, mut recv) = conn.open_bi().await?;
         write_msg(&mut send, ask).await?;
         send.finish()?;
-        let answer = read_msg(&mut recv).await?;
+        let answer: Option<ClaimAnswer> = read_msg(&mut recv).await?;
         conn.close(0u32.into(), b"done");
-        Ok(answer)
+        Ok(answer.map(|answer| ClaimAnswer {
+            from: endpoint.to_string(),
+            ..answer
+        }))
     }
 
     /// The author id of the machine at `from`, if its person may claim. It is what the roster
@@ -331,7 +454,18 @@ impl Core {
         Some(machine.author.clone())
     }
 
-    /// Everything this machine holds for `claim`'s key.
+    /// When this machine last ended one of its records in a context, by the tombstone it left.
+    async fn last_ended(&self, context: &str) -> anyhow::Result<u64> {
+        let query = Query::author(self.author)
+            .key_prefix(claims_context_prefix(context))
+            .include_empty()
+            .build();
+        let entries = self.entries(query).await?;
+        let ended = entries.iter().filter(|e| e.content_hash() == Hash::EMPTY);
+        Ok(ended.map(|e| e.timestamp()).max().unwrap_or(0))
+    }
+
+    /// Everything this machine holds for `claim`'s key, and its own records in the whole context.
     ///
     /// The claim is stored before anything is read, and that order is the point: of two claimers
     /// that can reach each other, whichever asks second is answered with the first one's claim,
@@ -341,7 +475,12 @@ impl Core {
         self.hold_claim(author, claim);
         // Nobody listening is fine.
         let _ = self.events.send(NodeEvent::ClaimHeard);
+        // Read before the records, so nothing the tombstones cover can be missing from them for
+        // any reason but having ended.
+        let last_ended = self.last_ended(&context).await?;
         let records = self.claim_records(&context).await?;
+        let me = self.author.to_string();
+        let own = own_records(&context, &me, &records, last_ended, OWN_RECORDS_BYTES);
         Ok(ClaimAnswer {
             claims: records
                 .claims
@@ -353,6 +492,8 @@ impl Core {
                 .into_iter()
                 .filter(|(_, d)| d.key == key)
                 .collect(),
+            own,
+            from: String::new(),
         })
     }
 }
@@ -400,5 +541,108 @@ impl ProtocolHandler for Claims {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::claims::{Holder, HolderKind};
+
+    fn claim(key: &str, claimed_at: u64) -> ClaimRecord {
+        ClaimRecord {
+            context: "inbox".into(),
+            key: key.into(),
+            claimed_at,
+            renewed_at: claimed_at,
+            limit: 1,
+            holder: Holder {
+                kind: HolderKind::Session,
+                label: "session".into(),
+            },
+        }
+    }
+
+    fn done(key: &str, at: u64) -> DoneRecord {
+        DoneRecord {
+            context: "inbox".into(),
+            key: key.into(),
+            at,
+        }
+    }
+
+    #[test]
+    fn a_machine_speaks_only_of_its_own_records() {
+        let records = Records {
+            claims: vec![("me".into(), claim("a", 5)), ("them".into(), claim("b", 9))],
+            dones: vec![("them".into(), done("c", 9)), ("me".into(), done("d", 2))],
+            releases: vec![],
+        };
+        let own = own_records("inbox", "me", &records, 3, 1 << 20).unwrap();
+        assert_eq!(own.context, "inbox");
+        assert_eq!(own.claims, vec![claim("a", 5)]);
+        assert_eq!(own.dones, vec![done("d", 2)]);
+    }
+
+    #[test]
+    fn what_a_machine_says_runs_up_to_its_newest_claim_or_tombstone_and_no_further() {
+        let records = |claims: Vec<(String, ClaimRecord)>| Records {
+            claims,
+            ..Records::default()
+        };
+        let mine = vec![("me".to_string(), claim("a", 5))];
+        let through = |r: &Records, ended| {
+            own_records("inbox", "me", r, ended, 1 << 20)
+                .unwrap()
+                .through
+        };
+        assert_eq!(through(&records(mine.clone()), 3), 5);
+        assert_eq!(through(&records(mine), 7), 7);
+        assert_eq!(through(&records(vec![]), 7), 7);
+        assert_eq!(through(&records(vec![]), 0), 0);
+    }
+
+    #[test]
+    fn only_the_newest_done_marks_go_when_they_dont_all_fit() {
+        let records = Records {
+            claims: vec![("me".into(), claim("a", 5))],
+            dones: vec![
+                ("me".into(), done("old", 1)),
+                ("me".into(), done("new", 3)),
+                ("me".into(), done("mid", 2)),
+            ],
+            releases: vec![],
+        };
+        let room = sent_size(&claim("a", 5)) + 2 * sent_size(&done("new", 3));
+        let own = own_records("inbox", "me", &records, 0, room).unwrap();
+        assert_eq!(own.claims.len(), 1, "claims come first");
+        assert_eq!(own.dones, vec![done("new", 3), done("mid", 2)]);
+    }
+
+    #[test]
+    fn nothing_is_said_when_the_claims_dont_all_fit() {
+        let records = Records {
+            claims: vec![("me".into(), claim("a", 5)), ("me".into(), claim("b", 6))],
+            ..Records::default()
+        };
+        let room = sent_size(&claim("a", 5)) + 1;
+        // A list that left a claim out would say that claim had ended.
+        assert_eq!(own_records("inbox", "me", &records, 0, room), None);
+    }
+
+    #[test]
+    fn only_a_claim_made_by_then_and_not_listed_has_ended() {
+        let told = ToldOwn {
+            through: 10,
+            claims: HashMap::from([("k2".to_string(), 8)]),
+            heard_at: 0,
+        };
+        assert!(told.ended(&claim("k1", 5)), "not listed");
+        assert!(!told.ended(&claim("k2", 8)), "listed");
+        assert!(
+            told.ended(&claim("k2", 6)),
+            "an older claim on a listed key"
+        );
+        assert!(!told.ended(&claim("k3", 11)), "made after");
     }
 }

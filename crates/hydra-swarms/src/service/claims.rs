@@ -32,7 +32,7 @@ const MAX_KEY_BYTES: usize = 1024;
 const MAX_LABEL_CHARS: usize = 200;
 const RECENT_DONE: usize = 20;
 
-pub(crate) const NO_LONGER_YOURS: &str = "This claim is no longer yours.";
+pub const NO_LONGER_YOURS: &str = "This claim is no longer yours.";
 
 pub(super) type TakeReply = oneshot::Sender<Result<ClaimOutcome, String>>;
 

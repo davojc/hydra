@@ -427,6 +427,8 @@ impl Workspace {
         if let Some(server) = crate::mcp::server::get() {
             // The weekly share a stage needs (orchestrator spec §5.1), from config.toml.
             crate::mcp::server::lock(server.registry()).min_week_left = ui.min_week_left;
+            // Before any terminal opens, so its session's first claim finds them.
+            crate::mcp::claims_tools::connect(server, &hydra.paths);
         }
         let mcp_pump = crate::mcp::server::get().map(|server| {
             let mut rx = server.subscribe();
@@ -447,6 +449,9 @@ impl Workspace {
                         McpEvent::StageStart(s) => ws.start_stage(s, window, cx),
                         McpEvent::RunChanged(changes) => ws.runs_changed(changes, window, cx),
                         McpEvent::Skill(..) => cx.notify(),
+                        McpEvent::ClaimLost { token, text } => {
+                            ws.claim_lost(&token, text, window, cx)
+                        }
                     });
                     if alive.is_err() {
                         break;

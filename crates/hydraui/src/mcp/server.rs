@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use serde_json::{Value, json};
 
+use super::claims_tools::ClaimsSessions;
 use super::registry::{Peer, Registry, Terminal};
 use super::tools::{INSTRUCTIONS, Outcome, call_with, list};
 use super::{SessionState, Usage};
@@ -44,6 +45,8 @@ pub enum McpEvent {
     /// A Claude session invoked a skill (`hydra hook skill`): the terminal's token and the
     /// skill's name.
     Skill(String, String),
+    /// A session's claim has gone: type `text` into the prompt of the terminal holding `token`.
+    ClaimLost { token: String, text: String },
 }
 
 /// What `handle` answers: an HTTP status and, for 200, the JSON body.
@@ -347,6 +350,7 @@ pub struct Server {
     url: String,
     registry: Arc<Mutex<Registry>>,
     events: Mutex<Vec<UnboundedSender<McpEvent>>>,
+    claims: Mutex<Option<Arc<ClaimsSessions>>>,
 }
 
 impl Server {
@@ -362,6 +366,7 @@ impl Server {
             url: format!("http://127.0.0.1:{port}/mcp"),
             registry: Arc::default(),
             events: Mutex::default(),
+            claims: Mutex::default(),
         });
         let worker = server.clone();
         std::thread::Builder::new()
@@ -390,6 +395,23 @@ impl Server {
     /// The `hydra` the branch rule asks GitHub through.
     pub fn set_hydra_exe(&self, exe: Option<PathBuf>) {
         lock(&self.registry).hydra_exe = exe;
+    }
+
+    /// How the `claims_*` tools reach the swarms.
+    pub fn set_claims(&self, claims: Arc<ClaimsSessions>) {
+        *lock(&self.claims) = Some(claims);
+    }
+
+    pub fn claims(&self) -> Option<Arc<ClaimsSessions>> {
+        lock(&self.claims).clone()
+    }
+
+    /// A holder's claim has gone: tells the app, which tells the session.
+    pub fn claim_lost(&self, holder_id: u64, reason: &hydra_swarms::LostReason) {
+        let told = self.claims().and_then(|c| c.lost(holder_id, reason));
+        if let Some((token, text)) = told {
+            self.broadcast(McpEvent::ClaimLost { token, text });
+        }
     }
 
     /// Sends `event` to every subscriber still listening.
@@ -430,6 +452,24 @@ impl Server {
         };
         let mut body = String::new();
         let read = request.as_reader().take(MAX_BODY).read_to_string(&mut body);
+        if read.is_ok()
+            && let Some(call) = claims_call(&body)
+        {
+            let claims = self.claims();
+            let token = bearer(auth.as_deref()).to_string();
+            // Asking the swarms can take many seconds, and every other session's calls and hooks
+            // come through this one serving thread.
+            let _ = std::thread::Builder::new()
+                .name("hydraui-mcp-claims".into())
+                .spawn(move || {
+                    let reply = catch_unwind(AssertUnwindSafe(|| {
+                        call.answer(claims.as_deref(), &token, &terminal)
+                    }))
+                    .unwrap_or_else(|_| status(500));
+                    respond(request, reply);
+                });
+            return;
+        }
         let handled = match read {
             Err(_) => Some((status(400), None)),
             Ok(_) => catch_unwind(AssertUnwindSafe(|| {
@@ -442,6 +482,47 @@ impl Server {
             self.broadcast(event);
         }
         respond(request, reply);
+    }
+}
+
+/// A `tools/call` of a `claims_*` tool.
+struct ClaimsCall {
+    id: Value,
+    name: String,
+    args: Value,
+}
+
+/// The call in `body`, if that is what it holds; a notification is never one.
+fn claims_call(body: &str) -> Option<ClaimsCall> {
+    let msg: Value = serde_json::from_str(body).ok()?;
+    if msg.get("method")?.as_str()? != "tools/call" {
+        return None;
+    }
+    let params = msg.get("params")?;
+    let name = params.get("name")?.as_str()?;
+    if !name.starts_with("claims_") {
+        return None;
+    }
+    Some(ClaimsCall {
+        id: msg.get("id")?.clone(),
+        name: name.to_string(),
+        args: params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+    })
+}
+
+impl ClaimsCall {
+    fn answer(&self, claims: Option<&ClaimsSessions>, token: &str, terminal: &Terminal) -> Reply {
+        let Some(claims) = claims else {
+            let out = Outcome::err("Swarms aren't set up on this machine.");
+            return ok(&self.id, tool_result(&out));
+        };
+        match claims.call(token, terminal, &self.name, &self.args) {
+            Some(out) => ok(&self.id, tool_result(&out)),
+            None => fail(&self.id, -32602, "unknown tool"),
+        }
     }
 }
 
@@ -1166,7 +1247,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 13);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 17);
         let bad: Value = serde_json::from_str(&rpc(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"tasks_delete","arguments":{}}}"#).body.unwrap()).unwrap();
         assert_eq!(bad["error"]["code"], -32602);
         let junk: Value = serde_json::from_str(&rpc("{not json").body.unwrap()).unwrap();
@@ -1273,6 +1354,149 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 200);
         drop(idle);
+    }
+
+    /// A server's tool call over HTTP: the result's text and whether it is an error.
+    fn post_tool(server: &Server, token: &str, name: &str, args: Value) -> (String, bool) {
+        let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                          "params": {"name": name, "arguments": args}});
+        let resp = ureq::post(server.url())
+            .set("Authorization", &format!("Bearer {token}"))
+            .send_string(&body.to_string())
+            .unwrap();
+        let msg: Value = serde_json::from_str(&resp.into_string().unwrap()).unwrap();
+        let r = &msg["result"];
+        (
+            r["content"][0]["text"].as_str().unwrap().to_string(),
+            r["isError"].as_bool().unwrap(),
+        )
+    }
+
+    #[test]
+    fn a_slow_claim_does_not_hold_up_other_tools() {
+        use crate::mcp::claims_tools::{ClaimsSessions, testing::Fake};
+        use std::time::{Duration, Instant};
+        let dir = repo();
+        let server = Server::start().unwrap();
+        let tok = server
+            .registry()
+            .lock()
+            .unwrap()
+            .register("c", dir.path().to_path_buf());
+        let fake = Fake {
+            slow: Some(Duration::from_secs(2)),
+            ..Fake::default()
+        };
+        server.set_claims(Arc::new(ClaimsSessions::new(Arc::new(fake))));
+        let taking = {
+            let (server, tok) = (server.clone(), tok.clone());
+            std::thread::spawn(move || {
+                let args = json!({"context": "mail", "key": "m-1"});
+                post_tool(&server, &tok, "claims_take", args)
+            })
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        let asked = Instant::now();
+        let resp = ureq::post(server.url())
+            .set("Authorization", &format!("Bearer {tok}"))
+            .send_string(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#)
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert!(
+            asked.elapsed() < Duration::from_secs(1),
+            "took {:?}",
+            asked.elapsed()
+        );
+        let (text, err) = taking.join().unwrap();
+        assert!(!err && text.starts_with("You hold m-1"), "{text}");
+    }
+
+    #[test]
+    fn without_claims_the_tools_say_so() {
+        let dir = repo();
+        let server = Server::start().unwrap();
+        let tok = server
+            .registry()
+            .lock()
+            .unwrap()
+            .register("c", dir.path().to_path_buf());
+        for tool in [
+            "claims_take",
+            "claims_release",
+            "claims_done",
+            "claims_list",
+        ] {
+            let (text, err) = post_tool(&server, &tok, tool, json!({}));
+            assert_eq!(text, "Swarms aren't set up on this machine.");
+            assert!(err);
+        }
+    }
+
+    #[test]
+    fn a_claim_tool_nobody_knows_is_an_unknown_tool() {
+        use crate::mcp::claims_tools::{ClaimsSessions, testing::Fake};
+        let dir = repo();
+        let server = Server::start().unwrap();
+        let tok = server
+            .registry()
+            .lock()
+            .unwrap()
+            .register("c", dir.path().to_path_buf());
+        server.set_claims(Arc::new(ClaimsSessions::new(Arc::new(Fake::default()))));
+        let resp = ureq::post(server.url())
+            .set("Authorization", &format!("Bearer {tok}"))
+            .send_string(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"claims_steal"}}"#,
+            )
+            .unwrap();
+        let msg: Value = serde_json::from_str(&resp.into_string().unwrap()).unwrap();
+        assert_eq!(msg["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn a_stranger_cant_reach_the_claims() {
+        use crate::mcp::claims_tools::{ClaimsSessions, testing::Fake};
+        let server = Server::start().unwrap();
+        let fake = Arc::new(Fake::default());
+        server.set_claims(Arc::new(ClaimsSessions::new(fake.clone())));
+        let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                          "params": {"name": "claims_take",
+                                     "arguments": {"context": "c", "key": "k"}}});
+        let refused = ureq::post(server.url())
+            .set("Authorization", "Bearer nope")
+            .send_string(&body.to_string());
+        assert!(matches!(refused, Err(ureq::Error::Status(401, _))));
+        assert!(fake.holders.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_loss_reaches_the_app_as_an_event() {
+        use crate::mcp::claims_tools::{ClaimsSessions, testing::Fake};
+        let dir = repo();
+        let server = Server::start().unwrap();
+        let tok = server
+            .registry()
+            .lock()
+            .unwrap()
+            .register("c", dir.path().to_path_buf());
+        server.set_claims(Arc::new(ClaimsSessions::new(Arc::new(Fake::default()))));
+        let mut events = server.subscribe();
+        let args = json!({"context": "mail", "key": "m-1"});
+        let (_, err) = post_tool(&server, &tok, "claims_take", args);
+        assert!(!err);
+        assert!(events.try_recv().is_err(), "a take broadcasts nothing");
+        server.claim_lost(1, &hydra_swarms::LostReason::Lapsed);
+        assert_eq!(
+            events.try_recv().ok(),
+            Some(McpEvent::ClaimLost {
+                token: tok,
+                text: "Your claim on m-1 in mail has gone: it lapsed while this machine \
+                       couldn't renew it. Stop working on it."
+                    .to_string(),
+            })
+        );
+        server.claim_lost(1, &hydra_swarms::LostReason::Lapsed);
+        assert!(events.try_recv().is_err(), "told once");
     }
 
     #[test]

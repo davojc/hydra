@@ -78,7 +78,7 @@ pub type PersonKeyFn = Box<dyn Fn([u8; 32]) -> Result<(), String> + Send>;
 mod claims;
 mod linking;
 
-pub(crate) use claims::NO_LONGER_YOURS;
+pub use claims::NO_LONGER_YOURS;
 use claims::{CLOCK_SLACK, ClaimBook, TakeReply, resolve_swarm};
 pub use claims::{ClaimHandle, ClaimOutcome, ClaimView, ContextView, DoneView, LostReason};
 

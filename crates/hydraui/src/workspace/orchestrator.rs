@@ -225,6 +225,20 @@ pub fn join_wake(waiting: Option<(String, String)>, run: String, new: String) ->
     }
 }
 
+/// The label of a wake-up about a claim, in place of a run's id.
+const CLAIMS_WAKE: &str = "claims";
+
+/// What a session is told after losing a claim, given the wake-up waiting for it. All of a
+/// session's losses share one label, and `join_wake` would have a newer one replace the last.
+/// Each is a different job to stop, so each is kept.
+pub fn join_claim_lost(waiting: Option<&(String, String)>, new: String) -> String {
+    match waiting {
+        Some((run, old)) if run == CLAIMS_WAKE && !old.contains(&new) => format!("{old} {new}"),
+        Some((run, old)) if run == CLAIMS_WAKE => old.clone(),
+        _ => new,
+    }
+}
+
 /// Keys a run's escalation toast, so a newer one for the same run replaces it.
 struct RunAlert;
 
@@ -1317,6 +1331,27 @@ impl Workspace {
             .insert(pane, join_wake(waiting, run, message));
     }
 
+    /// Tells the session in the terminal holding `token` that a claim of its has gone. A closed
+    /// terminal has nobody left to tell.
+    pub(super) fn claim_lost(
+        &mut self,
+        token: &str,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pane = self
+            .panes
+            .iter()
+            .find(|(_, v)| v.read(cx).mcp_token() == Some(token))
+            .map(|(id, _)| *id);
+        if let Some(pane) = pane {
+            let text = join_claim_lost(self.pending_wakes.get(&pane), text);
+            self.queue_wake(pane, CLAIMS_WAKE.into(), text);
+            self.send_wakes(window, cx);
+        }
+    }
+
     /// The name and colour of the pipeline terminal `pane` belongs to, when it belongs to one.
     pub(super) fn pipeline_of(&self, pane: PaneId, cx: &gpui::App) -> Option<(String, u32)> {
         self.pipeline_cards(cx)
@@ -1869,6 +1904,24 @@ mod tests {
         assert_eq!(newer.1, "A needs you.");
         let both = super::join_wake(Some(first), "B-1".into(), "B passed.".into());
         assert_eq!(both, ("B-1".into(), "A passed. B passed.".into()));
+    }
+
+    #[test]
+    fn every_claim_a_session_loses_is_told_and_a_runs_wake_up_stays() {
+        let label = || super::CLAIMS_WAKE.to_string();
+        let first = super::join_claim_lost(None, "Lost a.".into());
+        assert_eq!(first, "Lost a.");
+        let waiting = (label(), first);
+        let both = super::join_claim_lost(Some(&waiting), "Lost b.".into());
+        assert_eq!(both, "Lost a. Lost b.");
+        let waiting = (label(), both);
+        let again = super::join_claim_lost(Some(&waiting), "Lost a.".into());
+        assert_eq!(again, "Lost a. Lost b.");
+        // A run's wake-up is `join_wake`'s to add to, as it does for another ticket.
+        let run = ("A-1".to_string(), "A passed.".to_string());
+        let lost = super::join_claim_lost(Some(&run), "Lost a.".into());
+        let joined = super::join_wake(Some(run), label(), lost);
+        assert_eq!(joined, (label(), "A passed. Lost a.".to_string()));
     }
 
     use serde_json::json;

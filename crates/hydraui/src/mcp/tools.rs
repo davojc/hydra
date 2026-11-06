@@ -51,7 +51,11 @@ take nothing outside hydraui that can't be taken back, like approving or merging
 request, unless you will report at or above the bar. Below it, report first and leave that \
 action to the person, saying what's left. When the last proof needs a person's eyes, report \
 check with what to look at, and attach screenshots of it whenever you can capture them, so they \
-can decide in hydraui.";
+can decide in hydraui.
+
+Claims stop two teammates' sessions working one job. When the user asks you to work something \
+shared by claiming it, call claims_take first and only start if it says you hold it; finish with \
+claims_done, or claims_release if you stop. If hydraui tells you a claim has gone, stop that work.";
 
 /// The `tools` array of `tools/list`.
 pub fn list() -> Value {
@@ -127,6 +131,7 @@ pub fn list() -> Value {
     .iter()
     .cloned()
     .chain(super::run_tools::schemas())
+    .chain(super::claims_tools::schemas())
     .collect()
 }
 
@@ -485,7 +490,11 @@ mod tests {
                 "stage_brief",
                 "stage_report",
                 "stage_ask",
-                "stage_answer"
+                "stage_answer",
+                "claims_take",
+                "claims_release",
+                "claims_done",
+                "claims_list"
             ]
         );
         assert_eq!(names, hydra_providers::claude_files::HYDRAUI_TOOLS);

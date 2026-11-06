@@ -307,9 +307,8 @@ The builder's choices, as built:
   depends on that machine's other claims (§4.6), so the key asked about isn't enough. A claim of
   its made by then and not on the list has ended, so the asker stops counting it, as it would on
   syncing the tombstone. The asker takes this only from the machine it asked.
-- **Who is entitled** is judged by the roster now, not as it stood when a record was written, which
-  §6 asks for and the document can't show: its entries carry no proof of the writer's role at the
-  time. So a demoted writer's claims stop counting.
+- **Who is entitled** is judged by the roster now, not as it stood when a record was written, as
+  §6 has it. So a demoted writer's claims stop counting.
 - **A loss is typed when the session next goes idle**, so a session in the middle of a turn works
   on until then. One that doesn't take is typed again, and after 3 tries the person is told what it
   says, so they can tell the session by hand, while hydraui goes on trying.

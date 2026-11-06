@@ -2,7 +2,7 @@
 //! hydraui asks after each session ends; this says whether to work a ticket, check one, wait
 //! for the lead, or stop because the milestone is finished.
 
-use hydraui_projects::{Project, Review, Ticket, TicketStatus};
+use hydraui_projects::{Decision, Project, Review, Ticket, TicketStatus};
 
 use crate::projects::WorkSetup;
 
@@ -97,6 +97,28 @@ pub fn next_step(
         return Step::Work(t.id.clone());
     }
     Step::Finished
+}
+
+/// Whether ticket `t`'s work session has finished: it reported pull requests (in review), or
+/// work that changed no code (done, with its findings).
+pub fn work_finished(t: &Ticket) -> bool {
+    match t.meta.status {
+        TicketStatus::Done => true,
+        TicketStatus::InReview => !t.meta.prs.is_empty(),
+        _ => false,
+    }
+}
+
+/// The open questions ticket `ticket`'s work session asked and is waiting on, oldest first.
+pub fn session_questions<'a>(p: &'a Project, ticket: &str) -> Vec<&'a Decision> {
+    p.decisions
+        .iter()
+        .filter(|d| {
+            d.is_open()
+                && d.meta.ticket == ticket
+                && d.meta.asked_by == crate::mcp::project_tools::ASKED_BY_CLAUDE
+        })
+        .collect()
 }
 
 /// Whether starting `milestone`'s run picks up work already begun: one of its tickets is in
@@ -320,5 +342,50 @@ mod tests {
             next_step(&p, "M1", &setup(false), |_| true),
             Step::Work("PG-2".into())
         );
+    }
+
+    #[test]
+    fn a_session_finishes_with_pull_requests_or_with_findings_alone() {
+        let mut t = ticket("PG-1", BE, TicketStatus::InProgress);
+        assert!(!work_finished(&t));
+        t.meta.status = TicketStatus::InReview;
+        assert!(
+            !work_finished(&t),
+            "in review but no pull request reported yet"
+        );
+        t.meta.prs = vec!["u".into()];
+        assert!(work_finished(&t));
+        let mut found = ticket("PG-2", BE, TicketStatus::Done);
+        found.meta.prs.clear();
+        assert!(work_finished(&found));
+    }
+
+    #[test]
+    fn a_running_session_waits_on_the_questions_it_asked() {
+        let mut p = project(vec![ticket("PG-1", BE, TicketStatus::InProgress)]);
+        let d = |id: &str, ticket: &str, by: &str, answer: &str| Decision {
+            id: id.into(),
+            meta: DecisionMeta {
+                question: format!("{id}?"),
+                ticket: ticket.into(),
+                asked_by: by.into(),
+                answer: answer.into(),
+                ..Default::default()
+            },
+            body: String::new(),
+        };
+        let claude = crate::mcp::project_tools::ASKED_BY_CLAUDE;
+        p.decisions = vec![
+            d("D-1", "", "me", ""),          // the project's, not the session's
+            d("D-2", "PG-1", "me", ""),      // a person's question on the ticket
+            d("D-3", "PG-1", claude, "yes"), // answered
+            d("D-4", "PG-1", claude, ""),
+            d("D-5", "PG-2", claude, ""), // another ticket's session
+        ];
+        let ids: Vec<&str> = session_questions(&p, "PG-1")
+            .iter()
+            .map(|d| d.id.as_str())
+            .collect();
+        assert_eq!(ids, ["D-4"]);
     }
 }

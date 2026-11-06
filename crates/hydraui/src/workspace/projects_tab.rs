@@ -260,6 +260,8 @@ pub(super) struct Run {
     current: Option<Current>,
     /// Why it waits for the lead.
     paused: Option<String>,
+    /// The session's questions already told about with a toast.
+    told: BTreeSet<String>,
 }
 
 pub(super) struct Current {
@@ -2587,6 +2589,14 @@ impl Workspace {
 
     // ---- Work (spec §14) ----
 
+    /// Whether decision `d` is a question a work session that's still open asked.
+    fn session_waits(&self, env: &str, slug: &str, d: &Decision) -> bool {
+        d.is_open()
+            && d.meta.asked_by == ASKED_BY_CLAUDE
+            && !d.meta.ticket.is_empty()
+            && self.worker(env, slug, &d.meta.ticket).is_some()
+    }
+
     fn worker(&self, env: &str, slug: &str, ticket: &str) -> Option<PaneId> {
         self.projects_data
             .workers
@@ -2820,24 +2830,53 @@ impl Workspace {
         let mut row = h_flex().gap_2().items_center().flex_wrap();
         match run {
             Some(run) if run.milestone == m.id => {
+                let asked = run
+                    .current
+                    .as_ref()
+                    .filter(|c| c.pane.is_some())
+                    .map(|c| crate::project_run::session_questions(p, &c.ticket))
+                    .unwrap_or_default();
                 let status = match (&run.current, &run.paused) {
                     (_, Some(why)) => why.clone(),
                     (Some(c), None) if c.pane.is_none() => {
                         format!("Getting {} ready…", c.ticket)
                     }
+                    (Some(c), None) if !asked.is_empty() => format!(
+                        "{} is waiting for your answer: {}",
+                        c.ticket, asked[0].meta.question
+                    ),
                     (Some(c), None) => match c.phase {
                         Phase::Work => format!("Working on {}", c.ticket),
                         Phase::Check => format!("Checking {}'s pull request", c.ticket),
                     },
                     (None, None) => "Starting…".to_string(),
                 };
-                let paused = run.paused.is_some();
+                let paused = run.paused.is_some() || !asked.is_empty();
                 row = row.child(
                     div()
                         .text_sm()
                         .text_color(color(if paused { theme::AMBER } else { theme::TEAL }))
                         .child(status),
                 );
+                if run.paused.is_none() && !asked.is_empty() {
+                    let (e, s) = (e.clone(), s.clone());
+                    row = row.child(
+                        Button::new(SharedString::from(format!("answer-{mid}")))
+                            .label("Answer")
+                            .small()
+                            .primary()
+                            .on_click(cx.listener(move |ws, _, _, cx| {
+                                ws.go(
+                                    Page::Project {
+                                        env: e.clone(),
+                                        slug: s.clone(),
+                                    },
+                                    cx,
+                                );
+                                ws.tab_flag(cx, |t| t.section = Section::Decisions);
+                            })),
+                    );
+                }
                 if paused {
                     let (e, s) = (e.clone(), s.clone());
                     row = row.child(
@@ -2934,6 +2973,7 @@ impl Workspace {
                 milestone: milestone.to_string(),
                 current: None,
                 paused: None,
+                told: BTreeSet::new(),
             },
         );
         self.advance_run(env, slug, window, cx);
@@ -3269,14 +3309,35 @@ impl Workspace {
                 .find_project(env, slug)
                 .and_then(|p| p.tickets.iter().find(|t| t.id == cur.ticket))
                 .is_some_and(|t| match cur.phase {
-                    Phase::Work => {
-                        matches!(t.meta.status, TicketStatus::InReview | TicketStatus::Done)
-                            && !t.meta.prs.is_empty()
-                    }
+                    Phase::Work => crate::project_run::work_finished(t),
                     Phase::Check => !t.meta.check.is_empty(),
                 });
             let alive = self.panes.contains_key(&id);
             let ticket = cur.ticket.clone();
+            // A question the session just asked: say so at once, since it waits for the answer
+            // and the Decisions list may already hold others.
+            if alive && !finished {
+                let new: Vec<(String, String)> = self
+                    .find_project(env, slug)
+                    .map(|p| crate::project_run::session_questions(p, &ticket))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|d| !run.told.contains(&d.id))
+                    .map(|d| (d.id.clone(), d.meta.question.clone()))
+                    .collect();
+                for (id, question) in new {
+                    window.push_notification(
+                        Notification::warning(format!(
+                            "{ticket}'s session is waiting for your answer: {question} \
+                             Answer it in the project's Decisions."
+                        )),
+                        cx,
+                    );
+                    if let Some(run) = self.projects_data.runs.get_mut(&key) {
+                        run.told.insert(id);
+                    }
+                }
+            }
             if finished {
                 if alive {
                     self.close_terminal_now(id, window, cx);
@@ -4886,9 +4947,10 @@ impl Workspace {
     ) -> AnyElement {
         let now = pj::now_secs();
         let mut open: Vec<&Decision> = p.decisions.iter().filter(|d| d.is_open()).collect();
-        // Yours first, then the oldest.
+        // A running session's first, since it's waiting; then yours, then the oldest.
         open.sort_by_key(|d| {
             (
+                !self.session_waits(env, &p.slug, d),
                 !d.meta.assigned_to.eq_ignore_ascii_case(login),
                 d.meta.asked_at.map(|t| t.to_string()).unwrap_or_default(),
             )
@@ -4981,6 +5043,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let mine = d.meta.assigned_to.eq_ignore_ascii_case(login);
+        let blocking = self.session_waits(env, &p.slug, d);
         let waited = d
             .meta
             .asked_at
@@ -5052,6 +5115,17 @@ impl Workspace {
                             .child(meta),
                     ),
             )
+            .when(blocking, |r| {
+                r.child(
+                    div()
+                        .text_sm()
+                        .text_color(color(theme::AMBER))
+                        .child(format!(
+                            "{}'s session is waiting for this answer before it carries on.",
+                            d.meta.ticket
+                        )),
+                )
+            })
             .child(div().child(d.meta.question.clone()))
             .when(!d.body.trim().is_empty(), |r| {
                 r.child(

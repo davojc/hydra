@@ -196,11 +196,13 @@ own. There are no free-standing claims and no hand-offs.
 - **Inside hydraui**: pipelines and any later feature call the core directly. A new user is a
   new caller, with no change to the service.
 - **Claude sessions**, through hydraui's MCP server, beside `tasks_*` and `stage_*`:
-  `claims_take(context, key, swarm?)`, `claims_release(key)`, `claims_done(key)`,
-  `claims_list(context)`. `swarm` is optional, an id or a name; without it the call uses the one
-  swarm that has the context, and fails if there is none or more than one. A session's claims
-  are tied to its terminal (§5.2). When a session loses a claim, hydraui types it into the
-  session's prompt, as it already tells an orchestrator that a stage reported.
+  `claims_take(context, key, swarm?)`, `claims_release(key, context?)`,
+  `claims_done(key, context?)`, `claims_list(context, swarm?)`. `swarm` is optional, an id or a
+  name; without it the call uses the one swarm that has the context, and fails if there is none or
+  more than one. `context` on a release or done is needed only if the session holds the same key in
+  two contexts. A session's claims are tied to its terminal (§5.2). When a session loses a claim,
+  hydraui types it into the session's prompt, as it already tells an orchestrator that a stage
+  reported.
 - **Later, maybe**: a `hydra claim …` command for scripts. Not in this work.
 
 ### 5.4 In hydraui
@@ -289,13 +291,31 @@ swarm, the channel between windows, and the Claims section's layout.
 The builder's choices, as built:
 
 - **Settings** are a signed `SetClaimContext` change in `log/` (§7). Older hydras skip it.
-- **Records** are `claims/<context>/<blake3(key) hex>/claim`, `/done` and
-  `/release/<target author>`, one each per author; the plain key is inside the record, since
-  Message-IDs hold `/` and `<`. A machine releasing its own claim deletes its claim entry; only
-  someone else's release writes a release record. A release ends only the claim it names.
+- **Records** are `claims/<context>/claim/<base64url(key)>\0`,
+  `claims/<context>/done/<base64url(key)>\0` and
+  `claims/<context>/release/<base64url(key)>/<base64url(target author)>\0`, one each per author.
+  Keys are encoded since Message-IDs hold `/` and `<`, and the closing zero is there because a
+  delete clears every entry its key starts, and one job's key can start another's. The plain key
+  is inside the record too. A machine releasing its own claim deletes its claim entry; only
+  someone else's release writes a release record. A release ends only the claim it names, and is
+  kept for `keep_done` or the lapse time, whichever is longer.
 - **Limits**: a key is up to 1024 bytes; a context name is 1 to 64 of `a-z 0-9 - _`.
 - **Lapse time** is `renew_secs` x `lapse_after` + 30 s of clock slack, so 210 s by default.
 - **Asking** all members at once waits at most 3 s.
+- **An answer** also carries the answering machine's own records across the context: all its
+  claims, its newest done marks up to 1 MiB, and how far that list reaches. Whether a claim counts
+  depends on that machine's other claims (§4.6), so the key asked about isn't enough. A claim of
+  its made by then and not on the list has ended, so the asker stops counting it, as it would on
+  syncing the tombstone. The asker takes this only from the machine it asked.
+- **Who is entitled** is judged by the roster now, not as it stood when a record was written, which
+  §6 asks for and the document can't show: its entries carry no proof of the writer's role at the
+  time. So a demoted writer's claims stop counting.
+- **A loss is typed when the session next goes idle**, so a session in the middle of a turn works
+  on until then. One that doesn't take is typed again, and after 3 tries the person is told what it
+  says, so they can tell the session by hand, while hydraui goes on trying.
+- **Names in typed prompts** are cleaned of control characters and capped, but a member could still
+  put plain words there, and the session reads them as part of the prompt.
+- **A done key can't be undone**: it stays done until `keep_done` passes.
 - **Finding the swarm**: `claims_take` takes an optional `swarm` (§5.3).
 - **Two sessions on one machine** can't share a key: a key this machine holds through a live
   handle answers "held" (by this machine). Taking up (§4.7) applies only when no live handle

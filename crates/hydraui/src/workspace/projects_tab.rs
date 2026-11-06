@@ -192,6 +192,11 @@ pub(super) struct ProjectsData {
     linear_checking: BTreeSet<(String, String)>,
     /// When each project's Linear project was last read here, `YYYY-MM-DD HH:MM`.
     linear_checked: BTreeMap<(String, String), String>,
+    /// Ticket outcomes being summarised (None), or why it failed, by (environment, project,
+    /// ticket). A finished summary lives in its cache file.
+    summarising: BTreeMap<(String, String, String), Option<String>>,
+    /// Tickets whose page shows the full report rather than its summary.
+    full_report: BTreeSet<(String, String, String)>,
 }
 
 impl ProjectsData {
@@ -5608,6 +5613,57 @@ impl Workspace {
         panel.into_any_element()
     }
 
+    /// Asks Claude, in the background, for a short summary of ticket `id`'s outcome, kept in
+    /// this Mac's cache; the page shows it once written.
+    fn summarise_ticket(
+        &mut self,
+        env: &str,
+        slug: &str,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(t) = self
+            .find_project(env, slug)
+            .and_then(|p| p.tickets.iter().find(|t| t.id == id))
+            .cloned()
+        else {
+            return;
+        };
+        let outcome = pj::outcome_text(&t);
+        if outcome.is_empty() {
+            return;
+        }
+        let key = (env.to_string(), slug.to_string(), id.to_string());
+        self.projects_data.summarising.insert(key.clone(), None);
+        cx.notify();
+        let root = self.hydra.paths.root().to_path_buf();
+        let file = pj::summary_file(&root, env, slug, id);
+        let cwd = root.join("hydraui").join("summaries");
+        let (exe, env_s) = (hydra_exe(), env.to_string());
+        cx.spawn_in(window, async move |this, cx| {
+            let made = cx
+                .background_spawn(async move {
+                    let text = pj::summarise(&exe, &env_s, &cwd, &t, &outcome)?;
+                    pj::save_summary(&file, &outcome, &text)
+                })
+                .await;
+            let _ = this.update(cx, |ws, cx| {
+                match made {
+                    Ok(()) => {
+                        ws.projects_data.summarising.remove(&key);
+                        ws.projects_data.full_report.remove(&key);
+                    }
+                    Err(e) => {
+                        ws.projects_data.summarising.insert(key, Some(e));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// One ticket's page: what came of it (the work sessions' reports, its pull requests and
     /// checks), the decisions made on it, then what it asked for.
     fn ticket_page(&self, env: &str, slug: &str, id: &str, cx: &mut Context<Self>) -> AnyElement {
@@ -5688,8 +5744,69 @@ impl Workspace {
                     ),
                 );
         }
-        // What came of it.
-        let mut outcome = v_flex().gap_3().child(section_title("Outcome"));
+        // What came of it: the summary when there is one, else the reports in full.
+        let key = (env.to_string(), slug.to_string(), id.to_string());
+        let outcome_all = pj::outcome_text(t);
+        let summary = (!outcome_all.is_empty())
+            .then(|| {
+                pj::cached_summary(
+                    &pj::summary_file(self.hydra.paths.root(), env, slug, id),
+                    &outcome_all,
+                )
+            })
+            .flatten();
+        let full = summary.is_none() || self.projects_data.full_report.contains(&key);
+        let state = self.projects_data.summarising.get(&key);
+        let mut controls = h_flex().gap_2().items_center();
+        if matches!(state, Some(None)) {
+            controls = controls.child(muted("Summarising…"));
+        } else if summary.is_some() {
+            let k = key.clone();
+            controls = controls.child(
+                Button::new("ticket-summary-toggle")
+                    .label(if full {
+                        "Show summary"
+                    } else {
+                        "Show full report"
+                    })
+                    .small()
+                    .ghost()
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        let shown = &mut ws.projects_data.full_report;
+                        if !shown.remove(&k) {
+                            shown.insert(k.clone());
+                        }
+                        cx.notify();
+                    })),
+            );
+        } else if !outcome_all.is_empty() {
+            let (e2, s2, i2) = (env.to_string(), slug.to_string(), id.to_string());
+            controls = controls.child(
+                Button::new("ticket-summarise")
+                    .label("Summarise")
+                    .small()
+                    .primary()
+                    .tooltip("What it did, what worked, what it missed and the gaps, in bullets")
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.summarise_ticket(&e2, &s2, &i2, window, cx)
+                    })),
+            );
+        }
+        let mut outcome = v_flex().gap_3().child(
+            h_flex()
+                .gap_3()
+                .items_center()
+                .child(section_title("Outcome"))
+                .child(div().flex_1())
+                .child(controls),
+        );
+        if let Some(Some(err)) = state {
+            outcome = outcome.child(notice(
+                &format!("Couldn't summarise it: {err}"),
+                theme::RED,
+                theme::RED_TINT,
+            ));
+        }
         if report.work.is_empty() && t.meta.prs.is_empty() {
             outcome = outcome.child(muted(match t.meta.status {
                 TicketStatus::Todo => "Not started yet.",
@@ -5726,8 +5843,25 @@ impl Workspace {
                 },
             ));
         }
+        if let (Some(text), false) = (&summary, full) {
+            outcome = outcome.child(
+                div()
+                    .p_4()
+                    .rounded_lg()
+                    .bg(color(theme::RAISED))
+                    .border_1()
+                    .border_color(color(theme::BORDER_SUBTLE))
+                    .child(
+                        gpui_base::TextView::markdown(
+                            SharedString::from(format!("ticket-summary-{id}")),
+                            text.clone(),
+                        )
+                        .selectable(true),
+                    ),
+            );
+        }
         // The latest report first; earlier ones (from a restarted session) after it.
-        for (i, w) in report.work.iter().rev().enumerate() {
+        for (i, w) in report.work.iter().rev().enumerate().filter(|_| full) {
             outcome = outcome.child(
                 div()
                     .p_4()

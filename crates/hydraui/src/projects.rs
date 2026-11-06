@@ -1217,6 +1217,115 @@ pub fn headline(text: &str) -> String {
         .to_string()
 }
 
+/// The headings a ticket's outcome summary is written under, in order.
+pub const SUMMARY_HEADINGS: [&str; 4] = [
+    "What it did",
+    "What worked or passed",
+    "What it missed or failed",
+    "Gaps",
+];
+
+/// Everything a ticket's sessions reported, for summarising: their reports, its checks and
+/// its pull requests. Empty when nothing was reported.
+pub fn outcome_text(t: &Ticket) -> String {
+    let s = ticket_sections(&t.body);
+    let mut out: Vec<String> = s.work.iter().map(|w| format!("Report:\n{w}")).collect();
+    out.extend(s.check.iter().map(|c| format!("Check:\n{c}")));
+    if !t.meta.prs.is_empty() {
+        out.push(format!("Pull requests: {}", t.meta.prs.join(", ")));
+    }
+    out.join("\n\n")
+}
+
+/// The prompt that turns a ticket's outcome into a short summary under [`SUMMARY_HEADINGS`].
+pub fn summary_prompt(t: &Ticket, outcome: &str) -> String {
+    let headings = SUMMARY_HEADINGS
+        .iter()
+        .map(|h| format!("## {h}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "Summarise what came of ticket {id} \"{title}\" for its project lead, who wants to see \
+         at a glance what happened. Use only the report below; don't add anything it doesn't \
+         say. Write exactly these four headings, in this order, each followed by 1 to 5 short \
+         bullet points (one line each, plain words, no code blocks):\n{headings}\n\
+         Under a heading with nothing to say, write one bullet: \"- Nothing\". Reply with \
+         just the summary.\n\n---\n{outcome}",
+        id = t.id,
+        title = t.meta.title,
+    )
+}
+
+/// Where this Mac keeps ticket `ticket`'s outcome summary: a local cache, never sent.
+pub fn summary_file(hydra_root: &Path, env: &str, slug: &str, ticket: &str) -> PathBuf {
+    hydra_root
+        .join("hydraui")
+        .join("summaries")
+        .join(env)
+        .join(slug)
+        .join(format!("{ticket}.md"))
+}
+
+/// A stable fingerprint of an outcome, so a summary is only reused for the report it summed up.
+fn outcome_key(outcome: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in outcome.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+/// The saved summary of `outcome`; None when there's none, or it summed up an older report.
+pub fn cached_summary(file: &Path, outcome: &str) -> Option<String> {
+    let text = std::fs::read_to_string(file).ok()?;
+    let (first, rest) = text.split_once('\n')?;
+    (first == format!("<!-- outcome {} -->", outcome_key(outcome))).then(|| rest.to_string())
+}
+
+pub fn save_summary(file: &Path, outcome: &str, summary: &str) -> Result<(), String> {
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let text = format!(
+        "<!-- outcome {} -->\n{}",
+        outcome_key(outcome),
+        summary.trim()
+    );
+    std::fs::write(file, text).map_err(|e| e.to_string())
+}
+
+/// Asks Claude, as `env` and with no tools, to summarise ticket `t`'s outcome. Blocks for up
+/// to a few minutes.
+pub fn summarise(
+    hydra: &Path,
+    env: &str,
+    cwd: &Path,
+    t: &Ticket,
+    outcome: &str,
+) -> Result<String, String> {
+    std::fs::create_dir_all(cwd).map_err(|e| e.to_string())?;
+    let mut cmd = std::process::Command::new(hydra);
+    cmd.args(["run", env, "--", "claude", "-p"])
+        .arg(summary_prompt(t, outcome))
+        .args(["--tools", "", "--model", "sonnet"])
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null());
+    hydra_platform::process::hide_window(&mut cmd);
+    let out = crate::branch_rule::output_within(cmd, Duration::from_secs(240))?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if out.status.success() && !text.is_empty() {
+        Ok(text)
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        Err(if err.is_empty() {
+            "Claude gave no summary".to_string()
+        } else {
+            err
+        })
+    }
+}
+
 /// Marks `folder` as trusted in an environment's Claude state (`.claude.json` in its
 /// CLAUDE_CONFIG_DIR), as accepting Claude Code's "trust this folder?" prompt would. hydraui
 /// does this only for the folders it makes for a milestone run's sessions, from the user's own
@@ -2906,5 +3015,49 @@ mod tests {
                 ..Default::default()
             }
         );
+    }
+
+    #[test]
+    fn an_outcome_summary_asks_for_the_four_headings_and_is_kept_per_report() {
+        let t = Ticket {
+            id: "PG-1".into(),
+            meta: TicketMeta {
+                title: "Check the list".into(),
+                prs: vec!["https://github.com/o/r/pull/1".into()],
+                ..Default::default()
+            },
+            body: "Ask.\n\n## Work\n\nFound two gaps.\n\n## Check\n\nPassed: ok\n".into(),
+        };
+        let outcome = outcome_text(&t);
+        assert!(
+            outcome.contains("Found two gaps.")
+                && outcome.contains("Passed: ok")
+                && outcome.contains("pull/1")
+                && !outcome.contains("Ask."),
+            "{outcome}"
+        );
+        let prompt = summary_prompt(&t, &outcome);
+        for h in SUMMARY_HEADINGS {
+            assert!(prompt.contains(&format!("## {h}")), "{prompt}");
+        }
+        assert!(prompt.contains("Found two gaps.") && prompt.contains("PG-1"));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let file = summary_file(tmp.path(), "dev", "pg", "PG-1");
+        assert_eq!(cached_summary(&file, &outcome), None);
+        save_summary(&file, &outcome, "## What it did\n- Read code\n").unwrap();
+        assert_eq!(
+            cached_summary(&file, &outcome).as_deref(),
+            Some("## What it did\n- Read code")
+        );
+        // A new report (the session ran again) needs a new summary.
+        assert_eq!(cached_summary(&file, &format!("{outcome}\nMore.")), None);
+        // Nothing reported: nothing to summarise.
+        let fresh = Ticket {
+            body: "Ask.".into(),
+            meta: TicketMeta::default(),
+            ..t
+        };
+        assert_eq!(outcome_text(&fresh), "");
     }
 }

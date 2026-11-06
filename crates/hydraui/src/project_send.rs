@@ -540,12 +540,57 @@ pub fn settle(r: &dyn Runner, dir: &Path, default: &str) -> Result<(), String> {
             std::fs::remove_file(dir.join(&path)).map_err(|e| e.to_string())?;
         }
     }
+    // A file changed here and in the repo since this checkout last caught up (often by this
+    // engineer's own earlier send, merged since) would make the autostash conflict and leave
+    // conflict markers in it. Merge it ourselves first: both sides' changes, this Mac's
+    // winning where they touch the same lines, since edits here are the newer ones and a
+    // clash with someone else's is caught when this is sent.
+    let mut merged: Vec<(String, String)> = Vec::new();
+    if has_head {
+        for path in pending_in(r, dir)? {
+            let (Some(base), Some(theirs)) = (
+                rev(r, dir, &format!("HEAD:{path}")),
+                rev(r, dir, &format!("{upstream}:{path}")),
+            ) else {
+                continue;
+            };
+            if base == theirs || !dir.join(&path).is_file() {
+                continue;
+            }
+            let git_dir = dir.join(".git");
+            let (b, t) = (git_dir.join("hydraui-base"), git_dir.join("hydraui-theirs"));
+            let write = |file: &Path, spec: &str| -> Result<(), String> {
+                let text = r.git(dir, &["show", spec], None)?;
+                std::fs::write(file, text).map_err(|e| e.to_string())
+            };
+            write(&b, &format!("HEAD:{path}"))?;
+            write(&t, &format!("{upstream}:{path}"))?;
+            let both = r.git(
+                dir,
+                &[
+                    "merge-file",
+                    "--ours",
+                    "-p",
+                    &path,
+                    &b.display().to_string(),
+                    &t.display().to_string(),
+                ],
+                None,
+            );
+            let _ = (std::fs::remove_file(&b), std::fs::remove_file(&t));
+            merged.push((path.clone(), both?));
+            r.git(dir, &["checkout", "HEAD", "--", &path], None)?;
+        }
+    }
     if has_head {
         r.git(
             dir,
             &["merge", "--ff-only", "--autostash", "-q", &upstream],
             None,
         )?;
+        for (path, text) in merged {
+            std::fs::write(dir.join(&path), text).map_err(|e| e.to_string())?;
+        }
     } else {
         r.git(
             dir,
@@ -1193,6 +1238,38 @@ mod tests {
         settle(&fake, &member, "main").unwrap();
         assert!(pending_in(&fake, &member).unwrap().is_empty());
         assert!(dir.join("pg/tickets/PG-2.md").is_file());
+    }
+
+    #[test]
+    fn a_file_changed_here_and_in_the_repo_merges_with_this_macs_edits_winning() {
+        let (tmp, fake, dir) = setup("lead");
+        lead_creates(&fake, &dir);
+        // Someone else's change reaches the repo: a new first line, and line two.
+        let other = tmp.path().join("other");
+        git_cmd(
+            tmp.path(),
+            &["clone", "-q", &fake.bare.display().to_string(), "other"],
+            None,
+        )
+        .unwrap();
+        write(&other, "pg/spec.md", "zero\none\ntwo-theirs\nthree\n");
+        git_cmd(&other, &["commit", "-qam", "theirs"], None).unwrap();
+        git_cmd(&other, &["push", "-q", "origin", "main"], None).unwrap();
+        // Meanwhile this Mac changed line two and added a last line, not sent yet.
+        write(&dir, "pg/spec.md", "one\ntwo-mine\nthree\nfour\n");
+        git_cmd(&dir, &["fetch", "-q", "origin"], None).unwrap();
+        settle(&fake, &dir, "main").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("pg/spec.md")).unwrap(),
+            "zero\none\ntwo-mine\nthree\nfour\n"
+        );
+        // Caught up, with this Mac's edit still waiting to be sent, and nothing half-merged.
+        assert_eq!(
+            git_cmd(&dir, &["rev-parse", "HEAD"], None).unwrap(),
+            git_cmd(&dir, &["rev-parse", "origin/main"], None).unwrap()
+        );
+        assert!(pending_in(&fake, &dir).unwrap().contains("pg/spec.md"));
+        assert_eq!(git_cmd(&dir, &["stash", "list"], None).unwrap(), "");
     }
 
     #[test]

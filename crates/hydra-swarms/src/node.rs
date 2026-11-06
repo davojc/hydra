@@ -29,6 +29,7 @@ use iroh_gossip::net::Gossip;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
+use crate::claims::{ClaimRecord, DoneRecord};
 use crate::decide::Remote;
 use crate::ids::{PersonId, PersonKey};
 use crate::invites::{Hydra, Invites};
@@ -40,9 +41,11 @@ use crate::roster::{
     Change, Kept, KeptAuthor, KeptEntry, MAX_CHANGE_BYTES, Machine, Member, Role, Roster,
     SignedChange, Version,
 };
-use crate::wire::ALPN;
+use crate::wire::{ALPN, CLAIMS_ALPN};
 
-/// A parent record holds at most a few hundred hashes.
+mod claims;
+
+/// A parent record holds at most a few hundred hashes, and a claim far less.
 const MAX_RECORD_BYTES: u64 = 64 * 1024;
 
 /// What one author's file entry for a path was made from, so other machines can tell an edit
@@ -90,10 +93,17 @@ pub enum NodeEvent {
     Removed,
     /// Another machine of this person's told this one it was taken out of the swarm.
     Dropped,
+    /// Another member asked about a claim, so this machine has just heard of it.
+    ClaimHeard,
 }
 
-/// The ALPNs that carry the swarm document, its content and its gossip.
-const GATED_ALPNS: [&[u8]; 3] = [iroh_docs::ALPN, iroh_blobs::ALPN, iroh_gossip::ALPN];
+/// The ALPNs that carry the swarm document, its content and its gossip, and questions about claims.
+const GATED_ALPNS: [&[u8]; 4] = [
+    iroh_docs::ALPN,
+    iroh_blobs::ALPN,
+    iroh_gossip::ALPN,
+    CLAIMS_ALPN,
+];
 
 fn is_gated(alpn: &[u8]) -> bool {
     GATED_ALPNS.contains(&alpn)
@@ -109,11 +119,11 @@ struct GateState {
 
 type Gate = Arc<Mutex<GateState>>;
 
-fn lock(gate: &Gate) -> std::sync::MutexGuard<'_, GateState> {
-    gate.lock().unwrap_or_else(|e| e.into_inner())
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Endpoint hooks that keep machines outside the gate off docs, blobs and gossip in both
+/// Endpoint hooks that keep machines outside the gate off docs, blobs, gossip and claims in both
 /// directions: a dial to one is never started, and a connection with one, either way, is closed
 /// as soon as the handshake shows who it is. Other ALPNs (the hydra protocol) pass.
 #[derive(Debug)]
@@ -172,6 +182,13 @@ pub(crate) struct Core {
     pub(crate) addrs: MemoryLookup,
     pub(crate) events: broadcast::Sender<NodeEvent>,
     pub(crate) invites: Invites,
+    /// Claims other members told this machine about, by context, key and author, for the time
+    /// until the document brings them or says they ended.
+    pub(crate) heard: Mutex<HashMap<(String, String, String), ClaimRecord>>,
+    /// The same for done marks, which a member can hold before this machine has synced them.
+    heard_dones: Mutex<HashMap<(String, String, String), DoneRecord>>,
+    /// Set in tests: take questions about claims and never answer.
+    silent_claims: AtomicBool,
 }
 
 /// Where the hydra protocol handler finds the node, once there is one: the router starts before
@@ -240,6 +257,7 @@ async fn start(cfg: &NodeConfig) -> anyhow::Result<Parts> {
         .accept(iroh_gossip::ALPN, gossip)
         .accept(iroh_docs::ALPN, docs.clone())
         .accept(ALPN, Hydra(Arc::clone(&slot)))
+        .accept(CLAIMS_ALPN, claims::Claims(Arc::clone(&slot)))
         .spawn();
     Ok(Parts {
         endpoint,
@@ -437,6 +455,9 @@ impl SwarmNode {
             addrs: parts.addrs,
             events,
             invites: Invites::new(&cfg.dir),
+            heard: Mutex::default(),
+            heard_dones: Mutex::default(),
+            silent_claims: AtomicBool::new(false),
         });
         let _ = parts.slot.set(Arc::downgrade(&core));
         let node = SwarmNode {

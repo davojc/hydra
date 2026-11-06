@@ -1,5 +1,5 @@
 //! The hydra protocol between swarm machines: joining with an invite, readers' own changes passed
-//! to an owner, and an owner's notices. One bi-stream per request, each way one length-prefixed
+//! to an owner, an owner's notices, and asking about a claim. One bi-stream per request, each way one length-prefixed
 //! JSON frame: a big-endian u32 length, then that many bytes of JSON.
 //!
 //! The framing is a copy of the phone link's rather than a dependency on it, so the two protocols
@@ -9,6 +9,7 @@ use std::io;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use crate::claims::{ClaimRecord, DoneRecord};
 use crate::ids::RekeyCert;
 use crate::mine::Mine;
 use crate::roster::{MAX_CHANGE_BYTES, Member, Role, SignedChange};
@@ -17,6 +18,9 @@ pub const ALPN: &[u8] = b"hydra/swarm/1";
 
 /// Between your own machines, on each machine's device endpoint.
 pub const MINE_ALPN: &[u8] = b"hydra/mine/1";
+
+/// Between members, asking about a claim, behind the roster gate.
+pub const CLAIMS_ALPN: &[u8] = b"hydra/claims/1";
 
 /// The longest frame either side accepts: room for the longest change, which a leaving passed
 /// on or a removal notice carries.
@@ -101,6 +105,21 @@ pub enum MineReply {
     },
 }
 
+/// Here is my claim: what do you know about this key? The sender's machine is the claim's author,
+/// so the message doesn't name one.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct ClaimAsk {
+    pub claim: ClaimRecord,
+}
+
+/// Every claim and done mark the answering machine holds for the key asked about, its own
+/// included, each with the author id of the machine that made it.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct ClaimAnswer {
+    pub claims: Vec<(String, ClaimRecord)>,
+    pub dones: Vec<(String, DoneRecord)>,
+}
+
 /// A swarm one of your machines is in, offered to another.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Offer {
@@ -157,6 +176,7 @@ pub async fn read_msg<R: AsyncRead + Unpin, T: DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claims::{Holder, HolderKind};
     use crate::ids::{PersonKey, RekeyCert};
     use crate::mine::Mine;
     use crate::roster::{Change, Machine, Role};
@@ -300,6 +320,41 @@ mod tests {
     async fn round_trips_every_mine_message() {
         round_trip(mine_requests()).await;
         round_trip(mine_replies()).await;
+    }
+
+    #[tokio::test]
+    async fn round_trips_a_claim_ask_and_answer() {
+        let claim = ClaimRecord {
+            context: "inbox".into(),
+            key: "<a/b@x>".into(),
+            claimed_at: 1,
+            renewed_at: 2,
+            limit: -1,
+            holder: Holder {
+                kind: HolderKind::Session,
+                label: "session".into(),
+            },
+        };
+        let done = DoneRecord {
+            context: "inbox".into(),
+            key: "<a/b@x>".into(),
+            at: 3,
+        };
+        round_trip(vec![ClaimAsk {
+            claim: claim.clone(),
+        }])
+        .await;
+        round_trip(vec![
+            ClaimAnswer {
+                claims: vec![("au".into(), claim)],
+                dones: vec![("au".into(), done)],
+            },
+            ClaimAnswer {
+                claims: vec![],
+                dones: vec![],
+            },
+        ])
+        .await;
     }
 
     #[test]

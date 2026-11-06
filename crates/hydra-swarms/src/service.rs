@@ -1457,6 +1457,8 @@ impl Worker {
                 self.dropped = true;
                 self.removed_now = true;
             }
+            // Nothing here tracks claims yet.
+            Ok(NodeEvent::ClaimHeard) => {}
             Err(broadcast::error::RecvError::Closed) => self.events = None,
         }
     }

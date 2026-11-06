@@ -182,10 +182,15 @@ pub fn settle(
 ) -> BTreeMap<String, KeyState> {
     let keep = settings.keep_done_secs.saturating_mul(1_000_000);
     // A retired machine's finished keys still count; its claims never do.
-    let dones = records.dones.iter().filter(|(author, d)| {
-        (people.writes(author) || people.retired.contains(author))
-            && now.saturating_sub(d.at) <= keep
-    });
+    let dones: Vec<_> = records
+        .dones
+        .iter()
+        .filter(|(author, d)| {
+            (people.writes(author) || people.retired.contains(author))
+                && now.saturating_sub(d.at) <= keep
+        })
+        .collect();
+    let finished: BTreeSet<&str> = dones.iter().map(|(_, d)| d.key.as_str()).collect();
 
     let released = |author: &str, c: &ClaimRecord| {
         records.releases.iter().any(|(by, r)| {
@@ -198,7 +203,9 @@ pub fn settle(
     let lapse = settings.lapse_micros(slack);
     let mut by_author: BTreeMap<&str, Vec<&ClaimRecord>> = BTreeMap::new();
     for (author, c) in &records.claims {
+        // A finished key doesn't count against the limit, so marking one done frees its slot.
         if people.writes(author)
+            && !finished.contains(c.key.as_str())
             && !released(author, c)
             && now.saturating_sub(c.renewed_at) <= lapse
         {
@@ -602,6 +609,15 @@ mod tests {
             holder_of(&settle_at(&r, -1, 200), "k").as_deref(),
             Some("a")
         );
+    }
+
+    #[test]
+    fn a_done_key_frees_its_machines_slot() {
+        let mut r = records(&[("a", claim("k1", 100, 1)), ("a", claim("k2", 200, 1))]);
+        r.dones.push(("a".into(), done("k1", 150)));
+        let s = settle_at(&r, 1, 300);
+        assert!(matches!(s.get("k1"), Some(KeyState::Done { .. })));
+        assert_eq!(holder_of(&s, "k2").as_deref(), Some("a"));
     }
 
     #[test]

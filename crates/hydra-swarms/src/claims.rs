@@ -1,8 +1,11 @@
 //! Claims: one machine in a swarm takes a job so no other machine does it too. A context is a
 //! named kind of job, and an owner sets its rules in the roster.
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+
+use crate::roster::{Role, Roster};
 
 /// The longest a context's name may be.
 const MAX_CONTEXT_NAME: usize = 64;
@@ -61,6 +64,260 @@ impl ContextSettings {
     }
 }
 
+/// What is holding a claim.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum HolderKind {
+    Session,
+    /// Nothing uses this yet; it is here so records written later need no new format.
+    PipelineRun,
+}
+
+/// Who holds a claim, for people to read.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct Holder {
+    pub kind: HolderKind,
+    pub label: String,
+}
+
+/// A machine saying it has taken a key. Times are Unix microseconds.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct ClaimRecord {
+    pub context: String,
+    pub key: String,
+    pub claimed_at: u64,
+    pub renewed_at: u64,
+    /// The context's `max_per_machine` when the claim was made, so lowering the limit later
+    /// takes nothing away.
+    pub limit: i32,
+    pub holder: Holder,
+}
+
+/// A machine saying a key is finished.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct DoneRecord {
+    pub context: String,
+    pub key: String,
+    pub at: u64,
+}
+
+/// A machine ending one claim, its own or another's: the one `target` made at `claimed_at`.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct ReleaseRecord {
+    pub context: String,
+    pub key: String,
+    /// The author id of the machine whose claim this ends.
+    pub target: String,
+    pub claimed_at: u64,
+    pub at: u64,
+}
+
+/// Who may write what, by author id, as the roster stands.
+#[derive(Clone, Default, Debug)]
+pub struct People {
+    /// Each current member machine's person id and role.
+    pub members: BTreeMap<String, (String, Role)>,
+    /// Machines of people who were writers and no longer are: their finished keys still count.
+    pub retired: BTreeSet<String>,
+}
+
+impl People {
+    pub fn from_roster(roster: &Roster) -> People {
+        let mut members = BTreeMap::new();
+        for m in &roster.members {
+            for machine in &m.machines {
+                members.insert(machine.author.clone(), (m.person.to_string(), m.role));
+            }
+        }
+        People {
+            members,
+            retired: roster.retired.keys().cloned().collect(),
+        }
+    }
+
+    fn writes(&self, author: &str) -> bool {
+        self.members
+            .get(author)
+            .is_some_and(|(_, role)| *role >= Role::Writer)
+    }
+
+    /// Whether `by` may end the claim that `target` made: an owner may end anyone's, and a
+    /// person may end the claims of their own machines.
+    fn may_release(&self, by: &str, target: &str) -> bool {
+        let Some((person, role)) = self.members.get(by).filter(|_| self.writes(by)) else {
+            return false;
+        };
+        *role == Role::Owner
+            || self
+                .members
+                .get(target)
+                .is_some_and(|(theirs, _)| theirs == person)
+    }
+}
+
+/// One context's entries, each with the author id of the machine that wrote it.
+#[derive(Clone, Default, Debug)]
+pub struct Records {
+    pub claims: Vec<(String, ClaimRecord)>,
+    pub dones: Vec<(String, DoneRecord)>,
+    pub releases: Vec<(String, ReleaseRecord)>,
+}
+
+/// Where a key stands once the records are settled.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum KeyState {
+    Free,
+    Held { author: String, claim: ClaimRecord },
+    Done { author: String, at: u64 },
+}
+
+/// Settles one context's records into the state of each key that isn't free (a key missing from
+/// the result is free). Every machine with the same records and roster gets the same answer.
+pub fn settle(
+    records: &Records,
+    people: &People,
+    settings: &ContextSettings,
+    now: u64,
+    slack: Duration,
+) -> BTreeMap<String, KeyState> {
+    let keep = settings.keep_done_secs.saturating_mul(1_000_000);
+    // A retired machine's finished keys still count; its claims never do.
+    let dones = records.dones.iter().filter(|(author, d)| {
+        (people.writes(author) || people.retired.contains(author))
+            && now.saturating_sub(d.at) <= keep
+    });
+
+    let released = |author: &str, c: &ClaimRecord| {
+        records.releases.iter().any(|(by, r)| {
+            r.target == author
+                && r.claimed_at == c.claimed_at
+                && r.key == c.key
+                && people.may_release(by, author)
+        })
+    };
+    let lapse = settings.lapse_micros(slack);
+    let mut by_author: BTreeMap<&str, Vec<&ClaimRecord>> = BTreeMap::new();
+    for (author, c) in &records.claims {
+        if people.writes(author)
+            && !released(author, c)
+            && now.saturating_sub(c.renewed_at) <= lapse
+        {
+            by_author.entry(author).or_default().push(c);
+        }
+    }
+
+    // Each machine's oldest claims fit under the limit they were made with; later ones are
+    // ignored and don't count against it.
+    let mut live: Vec<(&str, &ClaimRecord)> = Vec::new();
+    for (author, mut claims) in by_author {
+        claims.sort_by(|a, b| (a.claimed_at, &a.key).cmp(&(b.claimed_at, &b.key)));
+        let mut count = 0;
+        for c in claims {
+            if c.limit >= 0 && count >= c.limit {
+                continue;
+            }
+            count += 1;
+            live.push((author, c));
+        }
+    }
+
+    let mut states: BTreeMap<String, KeyState> = BTreeMap::new();
+    for (author, c) in live {
+        let beats = match states.get(&c.key) {
+            Some(KeyState::Held { author: a, claim }) => {
+                (c.claimed_at, author) < (claim.claimed_at, a.as_str())
+            }
+            _ => true,
+        };
+        if beats {
+            states.insert(
+                c.key.clone(),
+                KeyState::Held {
+                    author: author.to_string(),
+                    claim: c.clone(),
+                },
+            );
+        }
+    }
+    // Done beats any live claim, and the newest done is the one shown.
+    let mut newest: BTreeMap<&str, (u64, &str)> = BTreeMap::new();
+    for (author, d) in dones {
+        let e = newest.entry(&d.key).or_insert((d.at, author));
+        if (d.at, author.as_str()) > *e {
+            *e = (d.at, author);
+        }
+    }
+    for (key, (at, author)) in newest {
+        states.insert(
+            key.to_string(),
+            KeyState::Done {
+                author: author.to_string(),
+                at,
+            },
+        );
+    }
+    states
+}
+
+/// What a machine should do about taking a key.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Take {
+    /// Free, and under the limit: make the claim.
+    Go,
+    /// Already this machine's: keep renewing the one it has.
+    TakeUp(ClaimRecord),
+    Held {
+        author: String,
+        claim: ClaimRecord,
+    },
+    Done {
+        author: String,
+        at: u64,
+    },
+    /// The context is paused.
+    Paused,
+    /// This machine already holds as many as it may.
+    AtLimit(i32),
+}
+
+pub fn decide_take(
+    states: &BTreeMap<String, KeyState>,
+    key: &str,
+    me: &str,
+    settings: &ContextSettings,
+) -> Take {
+    match states.get(key) {
+        Some(KeyState::Done { author, at }) => {
+            return Take::Done {
+                author: author.clone(),
+                at: *at,
+            };
+        }
+        Some(KeyState::Held { author, claim }) if author == me => {
+            return Take::TakeUp(claim.clone());
+        }
+        Some(KeyState::Held { author, claim }) => {
+            return Take::Held {
+                author: author.clone(),
+                claim: claim.clone(),
+            };
+        }
+        Some(KeyState::Free) | None => {}
+    }
+    let limit = settings.max_per_machine;
+    if limit == 0 {
+        return Take::Paused;
+    }
+    let mine = states
+        .values()
+        .filter(|s| matches!(s, KeyState::Held { author, .. } if author == me))
+        .count();
+    if limit > 0 && mine >= limit as usize {
+        return Take::AtLimit(limit);
+    }
+    Take::Go
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +372,295 @@ mod tests {
         assert!(!valid_context_name("Has Space"));
         assert!(!valid_context_name("Upper"));
         assert!(!valid_context_name("dot.ted"));
+    }
+
+    const SEC: u64 = 1_000_000;
+
+    fn holder() -> Holder {
+        Holder {
+            kind: HolderKind::Session,
+            label: "session".into(),
+        }
+    }
+
+    fn claim(key: &str, claimed_at: u64, limit: i32) -> ClaimRecord {
+        ClaimRecord {
+            context: "inbox".into(),
+            key: key.into(),
+            claimed_at,
+            renewed_at: claimed_at,
+            limit,
+            holder: holder(),
+        }
+    }
+
+    fn done(key: &str, at: u64) -> DoneRecord {
+        DoneRecord {
+            context: "inbox".into(),
+            key: key.into(),
+            at,
+        }
+    }
+
+    fn release(target: &str, key: &str, claimed_at: u64) -> ReleaseRecord {
+        ReleaseRecord {
+            context: "inbox".into(),
+            key: key.into(),
+            target: target.into(),
+            claimed_at,
+            at: claimed_at + 1,
+        }
+    }
+
+    /// Writers "a" and "a2" (one person), "aaa", "b", "bbb" and "c", an owner "boss" and a reader.
+    fn people() -> People {
+        let mut p = People::default();
+        for (author, person, role) in [
+            ("a", "pa", Role::Writer),
+            ("a2", "pa", Role::Writer),
+            ("aaa", "paaa", Role::Writer),
+            ("b", "pb", Role::Writer),
+            ("bbb", "pbbb", Role::Writer),
+            ("c", "pc", Role::Writer),
+            ("boss", "pboss", Role::Owner),
+            ("reader", "pr", Role::Reader),
+        ] {
+            p.members.insert(author.into(), (person.into(), role));
+        }
+        p
+    }
+
+    fn settings(max: i32) -> ContextSettings {
+        ContextSettings {
+            max_per_machine: max,
+            ..Default::default()
+        }
+    }
+
+    fn records(claims: &[(&str, ClaimRecord)]) -> Records {
+        Records {
+            claims: claims
+                .iter()
+                .map(|(a, c)| (a.to_string(), c.clone()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn settle_at(r: &Records, max: i32, now: u64) -> BTreeMap<String, KeyState> {
+        settle(r, &people(), &settings(max), now, Duration::from_secs(30))
+    }
+
+    fn holder_of(states: &BTreeMap<String, KeyState>, key: &str) -> Option<String> {
+        match states.get(key) {
+            Some(KeyState::Held { author, .. }) => Some(author.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn the_earliest_claim_wins() {
+        let r = records(&[("a", claim("k", 200, -1)), ("b", claim("k", 100, -1))]);
+        assert_eq!(
+            holder_of(&settle_at(&r, -1, 300), "k").as_deref(),
+            Some("b")
+        );
+        let r = records(&[("b", claim("k", 100, -1)), ("a", claim("k", 200, -1))]);
+        assert_eq!(
+            holder_of(&settle_at(&r, -1, 300), "k").as_deref(),
+            Some("b")
+        );
+    }
+
+    #[test]
+    fn equal_times_go_to_the_lowest_machine_id() {
+        let r = records(&[("bbb", claim("k", 100, -1)), ("aaa", claim("k", 100, -1))]);
+        assert_eq!(
+            holder_of(&settle_at(&r, -1, 300), "k").as_deref(),
+            Some("aaa")
+        );
+    }
+
+    #[test]
+    fn done_beats_any_live_claim() {
+        let mut r = records(&[("a", claim("k", 100, -1))]);
+        r.dones.push(("b".into(), done("k", 500)));
+        assert_eq!(
+            settle_at(&r, -1, 600).get("k"),
+            Some(&KeyState::Done {
+                author: "b".into(),
+                at: 500
+            })
+        );
+    }
+
+    #[test]
+    fn a_claim_lapses_after_its_time_with_slack() {
+        // Renewed every 60 s, 3 missed allowed, 30 s of slack: 210 s.
+        let r = records(&[("a", claim("k", 0, -1))]);
+        assert!(holder_of(&settle_at(&r, -1, 210 * SEC), "k").is_some());
+        assert!(!settle_at(&r, -1, 211 * SEC).contains_key("k"));
+    }
+
+    #[test]
+    fn done_is_forgotten_after_keep_done() {
+        let mut r = Records::default();
+        r.dones.push(("a".into(), done("k", 1000)));
+        let keep = settings(1).keep_done_secs * SEC;
+        assert!(settle_at(&r, 1, 1000 + keep).contains_key("k"));
+        assert!(!settle_at(&r, 1, 1000 + keep + 1).contains_key("k"));
+    }
+
+    #[test]
+    fn a_removed_members_done_still_counts_but_their_claim_does_not() {
+        let mut p = people();
+        p.members.remove("c");
+        p.retired.insert("c".into());
+        let mut r = records(&[("c", claim("live", 100, -1))]);
+        r.dones.push(("c".into(), done("finished", 100)));
+        let s = settle(&r, &p, &settings(-1), 200, Duration::from_secs(30));
+        assert!(!s.contains_key("live"));
+        assert!(matches!(s.get("finished"), Some(KeyState::Done { .. })));
+        // Someone who was never a member gets neither.
+        let r = Records {
+            dones: vec![("stranger".into(), done("x", 100))],
+            claims: vec![("stranger".into(), claim("y", 100, -1))],
+            ..Default::default()
+        };
+        assert!(settle(&r, &p, &settings(-1), 200, Duration::ZERO).is_empty());
+    }
+
+    #[test]
+    fn a_readers_entries_are_ignored() {
+        let mut r = records(&[("reader", claim("k", 100, -1))]);
+        r.dones.push(("reader".into(), done("j", 100)));
+        assert!(settle_at(&r, -1, 200).is_empty());
+    }
+
+    #[test]
+    fn newest_claims_over_the_limit_are_ignored() {
+        let r = records(&[
+            ("a", claim("k3", 300, 2)),
+            ("a", claim("k1", 100, 2)),
+            ("a", claim("k2", 200, 2)),
+        ]);
+        let s = settle_at(&r, 2, 400);
+        assert_eq!(holder_of(&s, "k1").as_deref(), Some("a"));
+        assert_eq!(holder_of(&s, "k2").as_deref(), Some("a"));
+        assert!(!s.contains_key("k3"));
+    }
+
+    #[test]
+    fn lowering_the_limit_takes_nothing_away() {
+        let r = records(&[("a", claim("k1", 100, 2)), ("a", claim("k2", 200, 2))]);
+        let s = settle_at(&r, 1, 400);
+        assert!(holder_of(&s, "k1").is_some() && holder_of(&s, "k2").is_some());
+    }
+
+    #[test]
+    fn a_claim_made_under_zero_is_ignored() {
+        let r = records(&[("a", claim("k", 100, 0))]);
+        assert!(settle_at(&r, 0, 200).is_empty());
+    }
+
+    #[test]
+    fn no_limit_means_no_limit() {
+        let claims: Vec<(&str, ClaimRecord)> = (0..50)
+            .map(|i| ("a", claim(&format!("k{i}"), 100 + i, -1)))
+            .collect();
+        let s = settle_at(&records(&claims), -1, 1000);
+        assert_eq!(s.len(), 50);
+        assert!(s.values().all(|v| matches!(v, KeyState::Held { .. })));
+    }
+
+    #[test]
+    fn a_release_only_ends_the_claim_it_names() {
+        let mut r = records(&[("a", claim("k", 500, -1))]);
+        r.releases.push(("a".into(), release("a", "k", 100)));
+        assert!(holder_of(&settle_at(&r, -1, 600), "k").is_some());
+    }
+
+    #[test]
+    fn a_person_can_release_their_other_machine() {
+        let mut r = records(&[("a", claim("k", 100, -1))]);
+        r.releases.push(("a2".into(), release("a", "k", 100)));
+        assert!(!settle_at(&r, -1, 200).contains_key("k"));
+    }
+
+    #[test]
+    fn an_owner_can_release_anyones() {
+        let mut r = records(&[("a", claim("k", 100, -1))]);
+        r.releases.push(("boss".into(), release("a", "k", 100)));
+        assert!(!settle_at(&r, -1, 200).contains_key("k"));
+    }
+
+    #[test]
+    fn a_writer_cannot_release_someone_elses() {
+        let mut r = records(&[("a", claim("k", 100, -1))]);
+        r.releases.push(("b".into(), release("a", "k", 100)));
+        assert_eq!(
+            holder_of(&settle_at(&r, -1, 200), "k").as_deref(),
+            Some("a")
+        );
+    }
+
+    #[test]
+    fn a_split_heals_to_one_holder() {
+        let one = records(&[("b", claim("k", 100, -1)), ("c", claim("k", 150, -1))]);
+        let other = records(&[("c", claim("k", 150, -1)), ("b", claim("k", 100, -1))]);
+        let (x, y) = (settle_at(&one, -1, 300), settle_at(&other, -1, 300));
+        assert_eq!(x, y);
+        assert_eq!(holder_of(&x, "k").as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn take_says_go_paused_at_limit_held_done_and_take_up() {
+        let mine = claim("mine", 100, 1);
+        let theirs = claim("theirs", 100, 1);
+        let mut states = BTreeMap::new();
+        states.insert(
+            "mine".to_string(),
+            KeyState::Held {
+                author: "me".into(),
+                claim: mine.clone(),
+            },
+        );
+        states.insert(
+            "theirs".to_string(),
+            KeyState::Held {
+                author: "you".into(),
+                claim: theirs.clone(),
+            },
+        );
+        states.insert(
+            "finished".to_string(),
+            KeyState::Done {
+                author: "you".into(),
+                at: 9,
+            },
+        );
+        let take = |key: &str, me: &str, max: i32| decide_take(&states, key, me, &settings(max));
+        assert_eq!(take("fresh", "nobody", 1), Take::Go);
+        assert_eq!(take("fresh", "me", 2), Take::Go);
+        assert_eq!(take("fresh", "me", -1), Take::Go);
+        assert_eq!(take("fresh", "me", 1), Take::AtLimit(1));
+        assert_eq!(take("fresh", "me", 0), Take::Paused);
+        assert_eq!(
+            take("theirs", "me", 1),
+            Take::Held {
+                author: "you".into(),
+                claim: theirs
+            }
+        );
+        assert_eq!(
+            take("finished", "me", 0),
+            Take::Done {
+                author: "you".into(),
+                at: 9
+            }
+        );
+        // Paused, but the claim is already mine: taking it up is allowed.
+        assert_eq!(take("mine", "me", 0), Take::TakeUp(mine.clone()));
+        assert_eq!(take("mine", "me", 1), Take::TakeUp(mine));
     }
 }

@@ -232,6 +232,8 @@ pub(crate) struct Core {
     heard_dones: Mutex<HashMap<(String, String, String), DoneRecord>>,
     /// Set in tests: take questions about claims and never answer.
     silent_claims: AtomicBool,
+    /// Set in tests: reading this context's claims fails.
+    unreadable_claims: Mutex<Option<String>>,
 }
 
 /// Where the hydra protocol handler finds the node, once there is one: the router starts before
@@ -517,6 +519,7 @@ impl SwarmNode {
             heard: Mutex::default(),
             heard_dones: Mutex::default(),
             silent_claims: AtomicBool::new(false),
+            unreadable_claims: Mutex::default(),
         });
         let _ = parts.slot.set(Arc::downgrade(&core));
         let node = SwarmNode {

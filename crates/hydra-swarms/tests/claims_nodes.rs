@@ -571,6 +571,48 @@ async fn pruning_takes_this_machines_old_entries_and_leaves_the_rest() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_release_outlasts_a_short_keep_done_until_its_claim_must_have_lapsed() {
+    let (a, b, _roster) = pair(Role::Writer).await;
+    // Done keys go after 60 s, while a claim can run on for 210 s out of sight.
+    let settings = ContextSettings {
+        keep_done_secs: 60,
+        ..ContextSettings::default()
+    };
+    let t = now();
+    let release = |key: &str, at: u64| ReleaseRecord {
+        context: CONTEXT.into(),
+        key: key.into(),
+        target: "someone".into(),
+        claimed_at: 1,
+        at,
+    };
+    a.node
+        .write_release(&release("may-still-run", t - 100 * SEC))
+        .await
+        .unwrap();
+    a.node
+        .write_release(&release("has-lapsed", t - 211 * SEC))
+        .await
+        .unwrap();
+    a.node
+        .write_done(&done_at("old-done", t - 100 * SEC))
+        .await
+        .unwrap();
+
+    a.node
+        .prune_claims(CONTEXT, &settings, t, SLACK)
+        .await
+        .unwrap();
+
+    let held = records(&a.node).await;
+    let releases: Vec<&str> = held.releases.iter().map(|(_, r)| r.key.as_str()).collect();
+    assert_eq!(releases, ["may-still-run"]);
+    assert!(held.dones.is_empty());
+    a.node.shutdown().await;
+    b.node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn claims_stay_out_of_the_folder_entries() {
     let (a, b, roster) = pair(Role::Writer).await;
     let before = a.node.file_entries_for_tests().await.unwrap();

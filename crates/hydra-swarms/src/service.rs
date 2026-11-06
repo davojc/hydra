@@ -359,6 +359,12 @@ pub enum Command {
     ClaimsSilentForTests {
         swarm: String,
     },
+    /// From now on reading `context`'s claims here fails.
+    #[doc(hidden)]
+    ClaimsUnreadableForTests {
+        swarm: String,
+        context: String,
+    },
     Stop,
 }
 
@@ -377,7 +383,8 @@ impl Command {
             | Command::ClaimRelease { swarm, .. }
             | Command::ClaimContextSet { swarm, .. }
             | Command::ClaimAgeForTests { swarm, .. }
-            | Command::ClaimsSilentForTests { swarm } => Some(swarm),
+            | Command::ClaimsSilentForTests { swarm }
+            | Command::ClaimsUnreadableForTests { swarm, .. } => Some(swarm),
             Command::ClaimTake { swarm, .. } | Command::ClaimsList { swarm, .. } => {
                 swarm.as_deref()
             }
@@ -1991,6 +1998,12 @@ impl Worker {
             Command::ClaimsSilentForTests { .. } => {
                 if let Some(node) = &self.node {
                     node.silent_claims_for_tests();
+                }
+                Ok(())
+            }
+            Command::ClaimsUnreadableForTests { context, .. } => {
+                if let Some(node) = &self.node {
+                    node.unreadable_claims_for_tests(&context);
                 }
                 Ok(())
             }

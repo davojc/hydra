@@ -487,6 +487,71 @@ async fn a_silent_member_does_not_stop_a_claim() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_context_can_be_claimed_in_without_naming_the_swarm_as_soon_as_it_is_made() {
+    let _slot = slot();
+    let book = DirectPeers::new();
+    let mut olive = Svc::with_claim_slack("olive", &book, SLACK);
+    let notes = olive.create("Notes", &[]).await;
+    // The swarm's task can also get round to reading the new context by itself, so one try could
+    // pass by luck.
+    for i in 0..8 {
+        let context = format!("made-{i}");
+        olive.send(Command::ClaimContextSet {
+            swarm: notes.id.clone(),
+            name: context.clone(),
+            settings: FAST,
+        });
+        // These go through the task in turn, so by the second answer it has dealt with the
+        // change and published what came of it. An empty key is refused without reading anything.
+        for _ in 0..2 {
+            release(&olive, &notes.id, "", "").await.unwrap_err();
+        }
+        let taken = ask_to_take(&olive, None, &context, "k", "a session").await;
+        assert!(matches!(taken, Ok(ClaimOutcome::Yours(_))), "{taken:?}");
+    }
+    olive.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_context_that_cannot_be_read_keeps_its_view_and_the_others_carry_on() {
+    let _slot = slot();
+    let book = DirectPeers::new();
+    let mut olive = Svc::with_claim_slack("olive", &book, SLACK);
+    let notes = olive.create("Notes", &[]).await;
+    let id = notes.id.as_str();
+    set_context(&olive, id, FAST);
+    context_is(&mut olive, id, FAST).await;
+    let _held = yours(&olive, id, "k").await;
+
+    olive.send(Command::ClaimsUnreadableForTests {
+        swarm: id.to_string(),
+        context: "inbox".to_string(),
+    });
+    olive.send(Command::ClaimContextSet {
+        swarm: id.to_string(),
+        name: "later".to_string(),
+        settings: FAST,
+    });
+
+    let (reply, answer) = oneshot::channel();
+    olive.send(Command::ClaimsList {
+        swarm: Some(id.to_string()),
+        context: "later".to_string(),
+        reply,
+    });
+    assert!(answer.await.unwrap().is_ok(), "the readable context shows");
+    let (reply, answer) = oneshot::channel();
+    olive.send(Command::ClaimsList {
+        swarm: Some(id.to_string()),
+        context: "inbox".to_string(),
+        reply,
+    });
+    let inbox = answer.await.unwrap().expect("the old view of the context");
+    assert!(inbox.live.iter().any(|c| c.key == "k"), "{inbox:?}");
+    olive.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_view_shows_claims_and_recent_done() {
     let _slot = slot();
     let settings = ContextSettings {

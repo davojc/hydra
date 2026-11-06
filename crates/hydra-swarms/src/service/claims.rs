@@ -23,7 +23,7 @@ use crate::wire::ClaimAnswer;
 /// What a lapse allows for clocks and sync running late: well above any likely skew.
 pub(super) const CLOCK_SLACK: Duration = Duration::from_secs(30);
 /// How long the members get to answer. A member that doesn't is taken to be out of reach.
-const ASK_FOR: Duration = Duration::from_secs(5);
+const ASK_FOR: Duration = Duration::from_secs(3);
 /// How often the view is worked out again with nothing to prompt it, so lapses show.
 const VIEW_EVERY: Duration = Duration::from_secs(15);
 const MAX_KEY_BYTES: usize = 1024;
@@ -679,8 +679,10 @@ impl Worker {
         let mut views = Vec::with_capacity(roster.claim_contexts.len());
         for (name, settings) in &roster.claim_contexts {
             let settings = settings.normalised();
+            // One context that can't be read leaves that context as it was, not all the others.
             let Ok((records, states)) = self.settled(&node, &roster, name, &settings).await else {
-                return;
+                views.extend(self.claims_view.iter().find(|c| c.name == *name).cloned());
+                continue;
             };
             self.notice_losses(&node, &roster, name, settings, &records, &states)
                 .await;
@@ -887,7 +889,10 @@ impl Worker {
         check_context(&name)?;
         let only = format!("Only owners can change {}'s claim contexts.", self.name);
         let change = crate::roster::Change::SetClaimContext { name, settings };
-        self.owner_change(change, only).await
+        self.owner_change(change, only).await?;
+        // A take that doesn't name its swarm finds the context through the view.
+        self.claims_refresh().await;
+        Ok(())
     }
 
     /// Makes a claim here look as a machine waking from sleep would find it.
@@ -916,5 +921,15 @@ impl Worker {
                 .prune_claims(name, &settings, now_micros(), self.shared.claim_slack)
                 .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn members_get_the_three_seconds_the_spec_gives_them() {
+        assert_eq!(ASK_FOR, Duration::from_secs(3));
     }
 }

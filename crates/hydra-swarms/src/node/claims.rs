@@ -142,8 +142,9 @@ impl SwarmNode {
     }
 
     /// Deletes this machine's claims that have lapsed, its done marks past `keep_done`, and its
-    /// releases that old too: a release has to outlast a split, since the holder it ends may
-    /// still be renewing out of sight, so it isn't enough for the claim to have lapsed here.
+    /// releases that old too, or past the lapse time if that is longer: a release has to outlast
+    /// a split, since the holder it ends may still be renewing out of sight, so it isn't enough
+    /// for the claim to have lapsed here.
     pub async fn prune_claims(
         &self,
         context: &str,
@@ -164,7 +165,7 @@ impl SwarmNode {
             let old = match parse_record(e.key(), &bytes) {
                 Some(Record::Claim(c)) => now.saturating_sub(c.renewed_at) > lapse,
                 Some(Record::Done(d)) => now.saturating_sub(d.at) > keep,
-                Some(Record::Release(r)) => now.saturating_sub(r.at) > keep,
+                Some(Record::Release(r)) => now.saturating_sub(r.at) > keep.max(lapse),
                 None => false,
             };
             if old {
@@ -177,6 +178,11 @@ impl SwarmNode {
     /// From now on this node takes questions about claims and never answers them.
     pub fn silent_claims_for_tests(&self) {
         self.core.silent_claims.store(true, Ordering::Release);
+    }
+
+    /// From now on reading `context`'s claims fails, as a damaged store would.
+    pub fn unreadable_claims_for_tests(&self, context: &str) {
+        *lock(&self.core.unreadable_claims) = Some(context.to_string());
     }
 
     /// Stops live sync of the document; `sync_with` starts it again.
@@ -220,6 +226,9 @@ impl Core {
     }
 
     pub(crate) async fn claim_records(&self, context: &str) -> anyhow::Result<Records> {
+        if lock(&self.unreadable_claims).as_deref() == Some(context) {
+            anyhow::bail!("{context} can't be read");
+        }
         let query = Query::key_prefix(claims_context_prefix(context))
             .include_empty()
             .build();

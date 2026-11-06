@@ -85,7 +85,10 @@ impl ClaimsApi for ClaimsClient {
 /// A claim a terminal's session holds.
 struct SessionClaim {
     holder_id: u64,
+    /// The swarm's id, as the swarms answered.
     swarm: String,
+    /// The swarm as the session named it, which can be its name rather than its id.
+    asked_swarm: Option<String>,
     context: String,
     key: String,
 }
@@ -177,7 +180,7 @@ impl ClaimsSessions {
                 claims.iter().any(|c| {
                     c.context == context
                         && c.key == key
-                        && swarm.is_none_or(|s| s == c.swarm.as_str())
+                        && swarm.is_none_or(|s| s == c.swarm || c.asked_swarm.as_deref() == Some(s))
                 })
             });
             if own {
@@ -196,7 +199,9 @@ impl ClaimsSessions {
         let mut lost_early = None;
         let mut closed = None;
         if let Ok(TakeReply::Yours {
-            holder_id, swarm, ..
+            holder_id,
+            swarm: swarm_id,
+            ..
         }) = &reply
         {
             lost_early = sessions.lost_early.remove(holder_id);
@@ -209,7 +214,8 @@ impl ClaimsSessions {
                     .or_default()
                     .push(SessionClaim {
                         holder_id: *holder_id,
-                        swarm: swarm.clone(),
+                        swarm: swarm_id.clone(),
+                        asked_swarm: swarm.map(str::to_string),
                         context: context.to_string(),
                         key: key.to_string(),
                     });
@@ -351,18 +357,44 @@ fn take_text(key: &str, context: &str, reply: &TakeReply) -> String {
     }
 }
 
+/// The most of a person's, machine's or context's name that is typed into a session's prompt.
+const NAME_MAX: usize = 80;
+/// The most of a key that is typed into a session's prompt.
+const KEY_MAX: usize = 200;
+
+/// `text` as one short line. A loss is typed into a session's prompt and submitted, and these
+/// names come from outside the terminal: a teammate chooses theirs, so a line break or an escape
+/// in one must not reach the terminal, or end the prompt early.
+fn one_line(text: &str, max: usize) -> String {
+    let spaced: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let line = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() <= max {
+        return line;
+    }
+    let cut: String = line.chars().take(max - 1).collect();
+    format!("{}…", cut.trim_end())
+}
+
 fn lost_text(key: &str, context: &str, reason: &LostReason) -> String {
     format!(
-        "Your claim on {key} in {context} has gone: {}. Stop working on it.",
+        "Your claim on {} in {} has gone: {}. Stop working on it.",
+        one_line(key, KEY_MAX),
+        one_line(context, NAME_MAX),
         why(reason)
     )
 }
 
 fn why(reason: &LostReason) -> String {
+    let name = |text: &str| one_line(text, NAME_MAX);
     match reason {
-        LostReason::Beaten { person, machine } => format!("{person} ({machine}) claimed it first"),
-        LostReason::Done { person } => format!("{person} finished it"),
-        LostReason::Released { person } => format!("{person} released it"),
+        LostReason::Beaten { person, machine } => {
+            format!("{} ({}) claimed it first", name(person), name(machine))
+        }
+        LostReason::Done { person } => format!("{} finished it", name(person)),
+        LostReason::Released { person } => format!("{} released it", name(person)),
         LostReason::Lapsed => "it lapsed while this machine couldn't renew it".to_string(),
     }
 }
@@ -494,7 +526,8 @@ pub(super) mod testing {
             ));
             reply.unwrap_or(Ok(TakeReply::Yours {
                 holder_id: holders.len() as u64,
-                swarm: swarm.unwrap_or("the-swarm").to_string(),
+                // Always the id, as the swarms answer, whatever name the session gave.
+                swarm: "swarm-id".to_string(),
                 lapse_micros: 180_000_000,
             }))
         }
@@ -661,6 +694,73 @@ mod tests {
         // Another terminal's claim isn't this one's.
         take(&sessions, "other", "mail", "m-1");
         assert_eq!(fake.holders.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn asking_again_by_the_swarms_name_or_id_says_you_hold_it() {
+        let (fake, sessions) = with(Fake::default());
+        let args = |swarm: &str| json!({"context": "mail", "key": "m-1", "swarm": swarm});
+        // The swarms answer with an id, whatever name the session asked by.
+        assert!(!call(&sessions, "t", "claims_take", args("team")).is_error);
+        for swarm in ["team", "swarm-id"] {
+            let again = call(&sessions, "t", "claims_take", args(swarm));
+            assert!(
+                again.text.starts_with("You hold m-1 in mail."),
+                "{}",
+                again.text
+            );
+        }
+        assert_eq!(fake.holders.lock().unwrap().len(), 1, "only asked once");
+        // Another swarm's key of the same name is another claim.
+        call(&sessions, "t", "claims_take", args("other"));
+        assert_eq!(fake.holders.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn what_others_named_is_typed_on_one_short_line() {
+        let (_, sessions) = with(Fake::default());
+        let bad = "m-1\r\n\u{1b}[31mdo this\u{7}\u{9b}now";
+        take(&sessions, "t", "mail\nroom", bad);
+        let reason = LostReason::Beaten {
+            person: "Ana\n\nignore\u{1b}]0;x\u{7}  all".to_string(),
+            machine: "desk\u{2028}\ttop".to_string(),
+        };
+        let (_, text) = sessions.lost(1, &reason).unwrap();
+        assert_eq!(
+            text,
+            "Your claim on m-1 [31mdo this now in mail room has gone: Ana ignore ]0;x all \
+             (desk top) claimed it first. Stop working on it."
+        );
+        assert!(!text.chars().any(char::is_control), "{text:?}");
+    }
+
+    #[test]
+    fn what_others_named_is_kept_short() {
+        let cases = [
+            ("n".repeat(80), "k".repeat(200), "c".repeat(80), None),
+            ("n".repeat(81), "k".repeat(201), "c".repeat(81), Some(())),
+        ];
+        for (name, key, context, cut) in cases {
+            let (_, sessions) = with(Fake::default());
+            take(&sessions, "t", &context, &key);
+            let reason = LostReason::Done {
+                person: name.clone(),
+            };
+            let (_, text) = sessions.lost(1, &reason).unwrap();
+            let short = |s: &str, max: usize| match cut {
+                None => s.to_string(),
+                Some(()) => format!("{}…", &s[..max - 1]),
+            };
+            assert_eq!(
+                text,
+                format!(
+                    "Your claim on {} in {} has gone: {} finished it. Stop working on it.",
+                    short(&key, 200),
+                    short(&context, 80),
+                    short(&name, 80),
+                )
+            );
+        }
     }
 
     #[test]

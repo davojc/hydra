@@ -213,11 +213,30 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
     })
 }
 
+/// The label of a wake-up that tells of a lost claim, in place of a run's id. Each loss is a
+/// different job to stop, so a wake-up with this label is only ever added to, and keeps the label
+/// once it holds a loss, since a run's label would let that run's next wake-up replace it.
+pub(super) const CLAIMS_WAKE: &str = "claims";
+
+/// Both texts, once each.
+fn join_text(old: String, new: String) -> String {
+    if old.contains(&new) {
+        old
+    } else if new.contains(&old) {
+        new
+    } else {
+        format!("{old} {new}")
+    }
+}
+
 /// The wake-up waiting for an orchestrator after `new` for run `run` joins `waiting`: a newer
 /// one for the same run replaces it; one for another of its tickets is added, so an
-/// orchestrator holding several tickets hears about each.
+/// orchestrator holding several tickets hears about each. Lost claims are always added.
 pub fn join_wake(waiting: Option<(String, String)>, run: String, new: String) -> (String, String) {
     match waiting {
+        Some((old_run, old)) if old_run == CLAIMS_WAKE || run == CLAIMS_WAKE => {
+            (CLAIMS_WAKE.to_string(), join_text(old, new))
+        }
         Some((old_run, old)) if old_run != run && !old.contains(&new) => {
             (run, format!("{old} {new}"))
         }
@@ -225,17 +244,19 @@ pub fn join_wake(waiting: Option<(String, String)>, run: String, new: String) ->
     }
 }
 
-/// The label of a wake-up about a claim, in place of a run's id.
-const CLAIMS_WAKE: &str = "claims";
-
-/// What a session is told after losing a claim, given the wake-up waiting for it. All of a
-/// session's losses share one label, and `join_wake` would have a newer one replace the last.
-/// Each is a different job to stop, so each is kept.
-pub fn join_claim_lost(waiting: Option<&(String, String)>, new: String) -> String {
-    match waiting {
-        Some((run, old)) if run == CLAIMS_WAKE && !old.contains(&new) => format!("{old} {new}"),
-        Some((run, old)) if run == CLAIMS_WAKE => old.clone(),
-        _ => new,
+/// What to type for a waiting wake-up, given the one last typed that hasn't been confirmed.
+/// Typing replaces that one, and only it would be sent again, so a lost claim on either side goes
+/// with the text: it may be sitting in a Claude Code prompt that never took it.
+pub fn wake_to_type(
+    unconfirmed: Option<(String, String)>,
+    run: String,
+    message: String,
+) -> (String, String) {
+    match unconfirmed {
+        Some((old_run, old)) if old_run == CLAIMS_WAKE || run == CLAIMS_WAKE => {
+            join_wake(Some((old_run, old)), run, message)
+        }
+        _ => (run, message),
     }
 }
 
@@ -1120,6 +1141,11 @@ impl Workspace {
                 }
                 continue;
             }
+            let unconfirmed = self
+                .sent_wakes
+                .get(&pane)
+                .map(|(run, message, ..)| (run.clone(), message.clone()));
+            let (run, message) = wake_to_type(unconfirmed, run, message);
             let typed = self
                 .panes
                 .get(&pane)
@@ -1346,7 +1372,6 @@ impl Workspace {
             .find(|(_, v)| v.read(cx).mcp_token() == Some(token))
             .map(|(id, _)| *id);
         if let Some(pane) = pane {
-            let text = join_claim_lost(self.pending_wakes.get(&pane), text);
             self.queue_wake(pane, CLAIMS_WAKE.into(), text);
             self.send_wakes(window, cx);
         }
@@ -1906,22 +1931,70 @@ mod tests {
         assert_eq!(both, ("B-1".into(), "A passed. B passed.".into()));
     }
 
+    /// A wake-up about claims, as `queue_wake` and `sent_wakes` hold it.
+    fn claims(text: &str) -> (String, String) {
+        (super::CLAIMS_WAKE.to_string(), text.to_string())
+    }
+
+    fn join(waiting: (String, String), new: (String, String)) -> (String, String) {
+        super::join_wake(Some(waiting), new.0, new.1)
+    }
+
     #[test]
-    fn every_claim_a_session_loses_is_told_and_a_runs_wake_up_stays() {
-        let label = || super::CLAIMS_WAKE.to_string();
-        let first = super::join_claim_lost(None, "Lost a.".into());
-        assert_eq!(first, "Lost a.");
-        let waiting = (label(), first);
-        let both = super::join_claim_lost(Some(&waiting), "Lost b.".into());
-        assert_eq!(both, "Lost a. Lost b.");
-        let waiting = (label(), both);
-        let again = super::join_claim_lost(Some(&waiting), "Lost a.".into());
-        assert_eq!(again, "Lost a. Lost b.");
-        // A run's wake-up is `join_wake`'s to add to, as it does for another ticket.
-        let run = ("A-1".to_string(), "A passed.".to_string());
-        let lost = super::join_claim_lost(Some(&run), "Lost a.".into());
-        let joined = super::join_wake(Some(run), label(), lost);
-        assert_eq!(joined, (label(), "A passed. Lost a.".to_string()));
+    fn every_loss_waiting_for_a_session_is_kept() {
+        let both = join(claims("Lost a."), claims("Lost b."));
+        assert_eq!(both, claims("Lost a. Lost b."));
+        assert_eq!(join(both.clone(), claims("Lost a.")), both, "told once");
+    }
+
+    #[test]
+    fn a_loss_sent_again_over_a_newer_one_keeps_both() {
+        // recheck_wakes queues what didn't take while a newer loss waits.
+        let again = join(claims("Lost b."), claims("Lost a."));
+        assert_eq!(again, claims("Lost b. Lost a."));
+        // What it sends again can already hold what waits.
+        let again = join(claims("Lost b."), claims("Lost a. Lost b."));
+        assert_eq!(again, claims("Lost a. Lost b."));
+    }
+
+    #[test]
+    fn a_run_cant_replace_a_loss_it_was_joined_to() {
+        let run = |text: &str| ("A-1".to_string(), text.to_string());
+        let joined = join(claims("Lost a."), run("A passed."));
+        assert_eq!(joined, claims("Lost a. A passed."));
+        // The same run's newer wake-up would replace a wake-up labelled with that run.
+        let newer = join(joined.clone(), run("A needs you."));
+        assert_eq!(newer, claims("Lost a. A passed. A needs you."));
+        assert_eq!(join(joined.clone(), run("A passed.")), joined);
+        assert_eq!(
+            join(run("A passed."), claims("Lost a.")),
+            claims("A passed. Lost a.")
+        );
+    }
+
+    #[test]
+    fn a_loss_typed_over_an_unconfirmed_one_carries_it() {
+        // The older went into an open Claude Code prompt, and nothing else would send it again.
+        let typed = |sent, new: (String, String)| super::wake_to_type(sent, new.0, new.1);
+        let run = |id: &str, text: &str| (id.to_string(), text.to_string());
+        assert_eq!(
+            typed(Some(claims("Lost a.")), claims("Lost b.")),
+            claims("Lost a. Lost b.")
+        );
+        assert_eq!(
+            typed(Some(run("A-1", "A passed.")), claims("Lost a.")),
+            claims("A passed. Lost a.")
+        );
+        assert_eq!(
+            typed(Some(claims("Lost a.")), run("A-1", "A passed.")),
+            claims("Lost a. A passed.")
+        );
+        assert_eq!(typed(None, claims("Lost a.")), claims("Lost a."));
+        // Between runs, what is typed stays as it was.
+        assert_eq!(
+            typed(Some(run("A-1", "A passed.")), run("B-1", "B passed.")),
+            run("B-1", "B passed.")
+        );
     }
 
     use serde_json::json;

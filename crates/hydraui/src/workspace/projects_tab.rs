@@ -2932,8 +2932,7 @@ impl Workspace {
         self.advance_run(env, slug, window, cx);
     }
 
-    /// Carry on: asks where a repo is cloned, or which repo a ticket is in, when that's what
-    /// the run waits for, then goes on.
+    /// Carry on: asks where a repo is cloned when that's what the run waits for, then goes on.
     fn carry_on_run(&mut self, env: &str, slug: &str, window: &mut Window, cx: &mut Context<Self>) {
         let key = (env.to_string(), slug.to_string());
         let Some(run) = self.projects_data.runs.get_mut(&key) else {
@@ -2942,10 +2941,6 @@ impl Workspace {
         run.paused = None;
         let milestone = run.milestone.clone();
         let step = self.run_step(env, slug, &milestone);
-        if let Some(Step::NeedRepo(ticket)) = step {
-            self.ask_ticket_repo(env, slug, &ticket, window, cx);
-            return;
-        }
         if let Some(Step::NeedClone(repo)) = step {
             window.push_notification(
                 Notification::info(format!(
@@ -2967,89 +2962,6 @@ impl Workspace {
             return;
         }
         self.advance_run(env, slug, window, cx);
-    }
-
-    /// Asks which of the project's code repos `ticket` is in, writes it into the ticket and
-    /// carries the run on (spec §14.5): tickets written before they named a repo don't.
-    fn ask_ticket_repo(
-        &mut self,
-        env: &str,
-        slug: &str,
-        ticket: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(p) = self.find_project(env, slug) else {
-            return;
-        };
-        let Some(t) = p.tickets.iter().find(|t| t.id == ticket) else {
-            return;
-        };
-        let (title, repos) = (t.meta.title.clone(), p.file.repos.clone());
-        if repos.is_empty() {
-            window.push_notification(
-                Notification::error(format!(
-                    "{ticket} doesn't say which repo it's in, and the project has no code \
-                     repos. Add them in its Settings."
-                )),
-                cx,
-            );
-            return;
-        }
-        let workspace = cx.entity();
-        let (env, slug, ticket) = (env.to_string(), slug.to_string(), ticket.to_string());
-        window.open_dialog(cx, move |dialog, _, _| {
-            let mut choices = v_flex().gap_2();
-            for r in &repos {
-                let (ws, env, slug, ticket, repo) = (
-                    workspace.clone(),
-                    env.clone(),
-                    slug.clone(),
-                    ticket.clone(),
-                    r.clone(),
-                );
-                choices = choices.child(
-                    Button::new(SharedString::from(format!("ticket-repo-{r}")))
-                        .label(r.clone())
-                        .w_full()
-                        .on_click(move |_, window, cx| {
-                            window.close_dialog(cx);
-                            ws.update(cx, |ws, cx| {
-                                let set = ws.edit_project(
-                                    &env,
-                                    &slug,
-                                    |dir, p, _| {
-                                        let t = p
-                                            .tickets
-                                            .iter()
-                                            .find(|t| t.id == ticket)
-                                            .ok_or("the ticket is gone")?;
-                                        pj::edit_ticket(dir, t, &t.meta.title, &t.body, &repo)
-                                    },
-                                    window,
-                                    cx,
-                                );
-                                // A failed edit has said why already.
-                                if set.is_ok() {
-                                    ws.carry_on_run(&env, &slug, window, cx);
-                                }
-                            });
-                        }),
-                );
-            }
-            dialog
-                .title(format!("Which repo is {ticket} in?"))
-                .w(px(520.))
-                .child(
-                    v_flex()
-                        .gap_3()
-                        .child(div().text_sm().whitespace_normal().child(title.clone()))
-                        .child(muted(
-                            "It doesn't say yet. Its work session runs in a worktree of this repo.",
-                        ))
-                        .child(choices),
-                )
-        });
     }
 
     fn stop_run(&mut self, env: &str, slug: &str, cx: &mut Context<Self>) {
@@ -3091,14 +3003,6 @@ impl Workspace {
                     run.paused = Some(why);
                 }
             }
-            Step::NeedRepo(ticket) => {
-                if let Some(run) = self.projects_data.runs.get_mut(&key) {
-                    run.paused = Some(format!(
-                        "{ticket} doesn't say which repo it's in. Carry on asks."
-                    ));
-                }
-                self.ask_ticket_repo(env, slug, &ticket, window, cx);
-            }
             Step::NeedClone(repo) => {
                 if let Some(run) = self.projects_data.runs.get_mut(&key) {
                     run.paused = Some(format!(
@@ -3139,13 +3043,24 @@ impl Workspace {
         let Some(t) = p.tickets.iter().find(|t| t.id == ticket).cloned() else {
             return;
         };
-        let Some(clone) = pj::clone_of(self.hydra.paths.root(), &t.meta.repo) else {
-            return;
-        };
         let Some(run) = self.projects_data.runs.get_mut(&key) else {
             return;
         };
-        let base = crate::project_run::stack_base(&p, &run.milestone, ticket);
+        // A ticket that names no repo gets a worktree of each of the project's repos.
+        let repos = if t.meta.repo.is_empty() {
+            p.file.repos.clone()
+        } else {
+            vec![t.meta.repo.clone()]
+        };
+        let mut clones = Vec::new();
+        for r in &repos {
+            let Some(clone) = pj::clone_of(self.hydra.paths.root(), r) else {
+                return;
+            };
+            let base = crate::project_run::stack_base(&p, &run.milestone, ticket, r);
+            clones.push(pj::RepoClone { clone, base });
+        }
+        let several = t.meta.repo.is_empty();
         run.current = Some(Current {
             ticket: ticket.to_string(),
             phase,
@@ -3154,11 +3069,16 @@ impl Workspace {
         cx.notify();
         let exe = hydra_exe();
         let (env_s, slug_s, ticket_s) = (env.to_string(), slug.to_string(), ticket.to_string());
-        let env_bg = env_s.clone();
+        let (env_bg, slug_bg) = (env_s.clone(), slug_s.clone());
         cx.spawn_in(window, async move |this, cx| {
             let made = cx
                 .background_spawn(async move {
-                    pj::ticket_worktree(&exe, &env_bg, &clone, &t, base.as_deref())
+                    match clones.as_slice() {
+                        [one] if !several => {
+                            pj::ticket_worktree(&exe, &env_bg, &one.clone, &t, one.base.as_deref())
+                        }
+                        _ => pj::ticket_workspace(&exe, &env_bg, &slug_bg, &clones, &t),
+                    }
                 })
                 .await;
             let _ = this.update_in(cx, |ws, window, cx| {
@@ -6564,20 +6484,41 @@ fn start_prompt(p: &Project, guide: &str) -> String {
 }
 
 /// A work session's prompt (spec §14.5): one ticket, in its worktree, following `skill`.
+/// A ticket that names no repo is worked in a folder holding a worktree of each of the
+/// project's repos: Claude finds out which the work needs and changes those.
 fn work_prompt(p: &Project, t: &Ticket, branch: &str, skill: Option<&Path>) -> String {
+    let (place, ship) = if t.meta.repo.is_empty() {
+        (
+            format!(
+                "in a folder holding a worktree of each of the project's code repos ({}), one \
+                 subfolder per repo, all on branch {branch}. The ticket doesn't say which repo \
+                 it's in: work that out from the ticket and the code, and change whichever \
+                 repos it needs, more than one if it spans them. Each repo's own CLAUDE.md and \
+                 skills apply inside it.",
+                p.file.repos.join(", ")
+            ),
+            "In each repo you change, commit the work on this branch, push it and open a pull \
+             request (gh pr create) with {id} in its title; leave the repos you don't need \
+             untouched.",
+        )
+    } else {
+        (
+            format!("in a worktree of {} on branch {branch}.", t.meta.repo),
+            "Do the work here, commit it on this branch, push it and open a pull request (gh pr \
+             create) with {id} in its title.",
+        )
+    };
     format!(
-        "You're doing ticket {id} \"{title}\" of the project \"{name}\", in a worktree of \
-         {repo} on branch {branch}. {follow} Then call ticket_show: the ticket, its \
-         milestone and where the project's spec is.\n\
-         Do the work here, commit it on this branch, push it and open a pull request (gh pr \
-         create) with {id} in its title. Finish by calling ticket_report with the pull request \
-         URL(s) and a short summary: hydraui then closes this session and moves on to the \
-         milestone's next ticket. If you need a decision, ask it with ticket_ask, never in \
-         this terminal: it shows in hydraui and the answer comes back to you here.",
+        "You're doing ticket {id} \"{title}\" of the project \"{name}\", {place} {follow} \
+         Then call ticket_show: the ticket, its milestone and where the project's spec is.\n\
+         {ship} Finish by calling ticket_report with the pull request URL(s) and a short \
+         summary: hydraui then closes this session and moves on to the milestone's next \
+         ticket. If you need a decision, ask it with ticket_ask, never in this terminal: it \
+         shows in hydraui and the answer comes back to you here.",
         id = t.id,
         title = t.meta.title,
         name = p.file.name,
-        repo = t.meta.repo,
+        ship = ship.replace("{id}", &t.id),
         follow = follow(skill, "skill for this work"),
     )
 }
@@ -6586,7 +6527,7 @@ fn work_prompt(p: &Project, t: &Ticket, branch: &str, skill: Option<&Path>) -> S
 fn check_prompt(p: &Project, t: &Ticket, skill: Option<&Path>) -> String {
     format!(
         "You're checking ticket {id} \"{title}\" of the project \"{name}\": its pull \
-         request(s) {prs}, checked out in this worktree. {follow} Call ticket_show for what \
+         request(s) {prs}, checked out {place}. {follow} Call ticket_show for what \
          the ticket asks and how to tell it's done.\n\
          Check that the work does what the ticket says and passes the checks its skills call \
          for. You may \
@@ -6597,6 +6538,11 @@ fn check_prompt(p: &Project, t: &Ticket, skill: Option<&Path>) -> String {
         title = t.meta.title,
         name = p.file.name,
         prs = t.meta.prs.join(", "),
+        place = if t.meta.repo.is_empty() {
+            "in this folder's worktrees, one subfolder per code repo"
+        } else {
+            "in this worktree"
+        },
         follow = follow(skill, "testing skill"),
     )
 }
@@ -7071,6 +7017,21 @@ mod tests {
                 && req.contains("from = \"Requirements from Joshua 2026-11-05.md\"")
                 && req.contains("plan_done")
         );
+        // A ticket that names no repo is worked across the project's repos, wherever it needs.
+        let mut p = p;
+        p.file.repos = vec!["iov42/be".into(), "iov42/fe".into()];
+        let mut anywhere = t.clone();
+        anywhere.meta.repo = String::new();
+        let any = work_prompt(&p, &anywhere, "pg-3-share-dialog", None);
+        assert!(
+            any.contains("iov42/be, iov42/fe")
+                && any.contains("doesn't say which repo")
+                && any.contains("In each repo you change")
+                && any.contains("PG-3 in its title")
+                && !any.contains("{id}"),
+            "{any}"
+        );
+        assert!(check_prompt(&p, &anywhere, None).contains("one subfolder per code repo"));
         let started = start_prompt(&p, "Use the /our-planning skill throughout.");
         assert!(started.contains("plan_propose_milestone") && started.contains("/our-planning"));
     }

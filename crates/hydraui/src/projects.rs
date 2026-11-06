@@ -1068,14 +1068,63 @@ pub fn ticket_worktree(
     base: Option<&str>,
 ) -> Result<(PathBuf, String), String> {
     let branch = branch_for(ticket);
-    let name = clone
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .ok_or("the clone has no folder name")?;
+    let name = folder_name(clone)?;
     let parent = clone.parent().ok_or("the clone has no parent folder")?;
     let path = parent.join(format!("{name}-worktrees")).join(&branch);
+    worktree_at(hydra, env, clone, &branch, base, &path)?;
+    Ok((path, branch))
+}
+
+/// One code repo of a ticket that names none: its clone here and the branch to build on.
+pub struct RepoClone {
+    pub clone: PathBuf,
+    pub base: Option<String>,
+}
+
+/// Makes (or reuses) the folder for a ticket that doesn't name its repo: a worktree of each of
+/// the project's code repos, side by side, all on the ticket's branch, so its session works in
+/// whichever the ticket turns out to need. The folder sits beside the first clone, as
+/// `<project>-tickets/<branch>`, each worktree named after its clone's folder.
+pub fn ticket_workspace(
+    hydra: &Path,
+    env: &str,
+    project: &str,
+    repos: &[RepoClone],
+    ticket: &Ticket,
+) -> Result<(PathBuf, String), String> {
+    let branch = branch_for(ticket);
+    let first = repos.first().ok_or("the project has no code repos")?;
+    let parent = first
+        .clone
+        .parent()
+        .ok_or("the clone has no parent folder")?;
+    let folder = parent.join(format!("{project}-tickets")).join(&branch);
+    for r in repos {
+        let path = folder.join(folder_name(&r.clone)?);
+        worktree_at(hydra, env, &r.clone, &branch, r.base.as_deref(), &path)?;
+    }
+    Ok((folder, branch))
+}
+
+fn folder_name(clone: &Path) -> Result<String, String> {
+    clone
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| "the clone has no folder name".to_string())
+}
+
+/// A worktree of `clone` at `path` on `branch`, made from `base` (else the default branch)
+/// when the branch is new; an existing worktree there is reused.
+fn worktree_at(
+    hydra: &Path,
+    env: &str,
+    clone: &Path,
+    branch: &str,
+    base: Option<&str>,
+    path: &Path,
+) -> Result<(), String> {
     if path.join(".git").exists() {
-        return Ok((path, branch));
+        return Ok(());
     }
     let c = clone.display().to_string();
     // Best effort: without the network the local default branch still works.
@@ -1104,11 +1153,11 @@ pub fn ticket_worktree(
     let target = path.display().to_string();
     let head = format!("refs/heads/{branch}");
     if local(&["rev-parse", "--verify", "--quiet", &head]).is_ok() {
-        local(&["worktree", "add", &target, &branch])?;
+        local(&["worktree", "add", &target, branch])?;
     } else {
-        local(&["worktree", "add", "-b", &branch, &target, &base])?;
+        local(&["worktree", "add", "-b", branch, &target, &base])?;
     }
-    Ok((path, branch))
+    Ok(())
 }
 
 /// Records that work on `ticket` started: in progress, on `branch`, with how it was started.
@@ -2668,5 +2717,56 @@ mod tests {
         assert_eq!(age(&t, base + 2 * 86_400), "2d");
         let date: toml::value::Datetime = "2026-11-03".parse().unwrap();
         assert_eq!(unix_of(&date), Some(base - 10 * 3600));
+    }
+
+    #[test]
+    fn a_ticket_with_no_repo_gets_a_worktree_of_every_repo_on_its_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            assert!(ok, "git {args:?}");
+        };
+        let repos: Vec<RepoClone> = ["backend", "frontend"]
+            .iter()
+            .map(|name| {
+                let clone = tmp.path().join(name);
+                std::fs::create_dir_all(&clone).unwrap();
+                git(&clone, &["init", "-q"]);
+                git(&clone, &["commit", "-q", "--allow-empty", "-m", "start"]);
+                RepoClone { clone, base: None }
+            })
+            .collect();
+        let t = Ticket {
+            id: "PG-2".into(),
+            meta: TicketMeta {
+                title: "Group page".into(),
+                ..Default::default()
+            },
+            body: String::new(),
+        };
+        let none = Path::new("/no/hydra");
+        let (folder, branch) = ticket_workspace(none, "dev", "pg", &repos, &t).unwrap();
+        assert_eq!(branch, "pg-2-group-page");
+        assert_eq!(folder, tmp.path().join("pg-tickets").join(&branch));
+        for name in ["backend", "frontend"] {
+            let head = std::fs::read_to_string(folder.join(name).join(".git")).unwrap();
+            assert!(head.starts_with("gitdir:"), "{name} is a worktree");
+            git(
+                &folder.join(name),
+                &["rev-parse", "--verify", "refs/heads/pg-2-group-page"],
+            );
+        }
+        // Run again (a restarted session), it reuses them.
+        assert_eq!(
+            ticket_workspace(none, "dev", "pg", &repos, &t).unwrap().0,
+            folder
+        );
     }
 }

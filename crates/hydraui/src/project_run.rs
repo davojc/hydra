@@ -17,8 +17,6 @@ pub enum Step {
     Pause(String),
     /// Wait for the lead to say where this code repo is cloned on this machine.
     NeedClone(String),
-    /// Ask which of the project's code repos this ticket is in: it doesn't say.
-    NeedRepo(String),
     /// Every ticket is done, in review and checked, or dropped.
     Finished,
 }
@@ -80,29 +78,39 @@ pub fn next_step(
                 crate::projects::decision_name(&d.id)
             ));
         }
-        if t.meta.repo.is_empty() {
-            return Step::NeedRepo(t.id.clone());
-        }
-        if !cloned(&t.meta.repo) {
-            return Step::NeedClone(t.meta.repo.clone());
+        // A ticket that doesn't name its repo is worked across all the project's repos.
+        let repos = if t.meta.repo.is_empty() {
+            if p.file.repos.is_empty() {
+                return Step::Pause(format!(
+                    "{} doesn't name its repo and the project lists none: add its code repos \
+                     in Settings",
+                    t.id
+                ));
+            }
+            p.file.repos.clone()
+        } else {
+            vec![t.meta.repo.clone()]
+        };
+        if let Some(r) = repos.into_iter().find(|r| !cloned(r)) {
+            return Step::NeedClone(r);
         }
         return Step::Work(t.id.clone());
     }
     Step::Finished
 }
 
-/// The branch ticket `ticket` builds on: the branch of the latest earlier ticket in the same
-/// milestone and repo that's still in review, so later work sees earlier unmerged work. None
-/// means the repo's default branch.
-pub fn stack_base(p: &Project, milestone: &str, ticket: &str) -> Option<String> {
+/// The branch ticket `ticket` builds on in code repo `repo`: the branch of the latest earlier
+/// ticket in the same milestone that's still in review and is in that repo, or names none (so
+/// may have changed it), so later work sees earlier unmerged work. None means the repo's
+/// default branch; so does a branch that was never pushed to `repo`.
+pub fn stack_base(p: &Project, milestone: &str, ticket: &str, repo: &str) -> Option<String> {
     let q = queue(p, milestone);
     let at = q.iter().position(|t| t.id == ticket)?;
-    let repo = &q[at].meta.repo;
     q[..at]
         .iter()
         .rev()
         .find(|t| {
-            t.meta.repo.eq_ignore_ascii_case(repo)
+            (t.meta.repo.is_empty() || t.meta.repo.eq_ignore_ascii_case(repo))
                 && t.meta.status == TicketStatus::InReview
                 && !t.meta.branch.is_empty()
         })
@@ -204,13 +212,8 @@ mod tests {
 
     #[test]
     fn it_pauses_for_what_only_the_lead_can_give() {
-        let mut p = project(vec![ticket("PG-1", "", TicketStatus::Todo)]);
+        let mut p = project(vec![ticket("PG-1", BE, TicketStatus::Todo)]);
         let s = setup(false);
-        // A ticket that doesn't say which repo it's in: the run asks, rather than stopping.
-        assert_eq!(
-            next_step(&p, "M1", &s, |_| true),
-            Step::NeedRepo("PG-1".into())
-        );
         // A repo with no skill chosen goes ahead with the repo's own CLAUDE.md and skills.
         p.tickets[0].meta.repo = "iov42/svc-usage".into();
         assert_eq!(next_step(&p, "M1", &s, |_| true), Step::Work("PG-1".into()));
@@ -266,8 +269,31 @@ mod tests {
             ticket("PG-4", BE, TicketStatus::Todo),
             ticket("PG-5", FE, TicketStatus::Todo),
         ]);
-        assert_eq!(stack_base(&p, "M1", "PG-4").as_deref(), Some("pg-1-x"));
-        assert_eq!(stack_base(&p, "M1", "PG-5").as_deref(), Some("pg-2-x"));
-        assert_eq!(stack_base(&p, "M1", "PG-1"), None);
+        assert_eq!(stack_base(&p, "M1", "PG-4", BE).as_deref(), Some("pg-1-x"));
+        assert_eq!(stack_base(&p, "M1", "PG-5", FE).as_deref(), Some("pg-2-x"));
+        assert_eq!(stack_base(&p, "M1", "PG-1", BE), None);
+    }
+
+    #[test]
+    fn a_ticket_that_names_no_repo_is_worked_across_all_the_projects_repos() {
+        let mut p = project(vec![
+            ticket("PG-1", "", TicketStatus::InReview),
+            ticket("PG-2", "", TicketStatus::Todo),
+        ]);
+        let s = setup(false);
+        // With no repos to work in, only the lead can help.
+        assert!(
+            matches!(next_step(&p, "M1", &s, |_| true), Step::Pause(w) if w.contains("Settings"))
+        );
+        p.file.repos = vec![BE.into(), FE.into()];
+        // Every repo must be cloned here first, since the work may land in any of them.
+        assert_eq!(
+            next_step(&p, "M1", &s, |r| r != FE),
+            Step::NeedClone(FE.into())
+        );
+        assert_eq!(next_step(&p, "M1", &s, |_| true), Step::Work("PG-2".into()));
+        // In each repo it builds on the earlier unmerged ticket, which may have changed it.
+        assert_eq!(stack_base(&p, "M1", "PG-2", BE).as_deref(), Some("pg-1-x"));
+        assert_eq!(stack_base(&p, "M1", "PG-2", FE).as_deref(), Some("pg-1-x"));
     }
 }

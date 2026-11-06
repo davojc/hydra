@@ -73,6 +73,7 @@ async fn take(svc: &Svc, swarm: &str, key: &str) -> ClaimOutcome {
         context: "inbox".to_string(),
         key: key.to_string(),
         holder: holder(),
+        retake: false,
         reply,
     });
     answer.await.expect("a reply").expect("no error")
@@ -136,9 +137,17 @@ async fn one_machine(settings: ContextSettings) -> (Svc, String, tempfile::TempD
 
 /// As `one_machine`, with `wren` joined as a writer and seeing the context too.
 async fn two_machines(settings: ContextSettings) -> (Svc, Svc, String, tempfile::TempDir, PathBuf) {
+    two_machines_as(Role::Writer, settings).await
+}
+
+/// As `two_machines`, with `wren` joined with `role`.
+async fn two_machines_as(
+    role: Role,
+    settings: ContextSettings,
+) -> (Svc, Svc, String, tempfile::TempDir, PathBuf) {
     let (mut olive, id, dir, file) = one_machine(settings).await;
     let mut wren = Svc::with_claim_slack("wren", &olive.book.clone(), SLACK);
-    let code = olive.invite(&id, Role::Writer).await;
+    let code = olive.invite(&id, role).await;
     wren.join(code, "notes").await;
     let person = wren.person();
     olive
@@ -155,7 +164,9 @@ async fn two_machines(settings: ContextSettings) -> (Svc, Svc, String, tempfile:
 
 fn yours(reply: TakeReply) -> (u64, String) {
     match reply {
-        TakeReply::Yours { holder_id, swarm } => (holder_id, swarm),
+        TakeReply::Yours {
+            holder_id, swarm, ..
+        } => (holder_id, swarm),
         other => panic!("expected the claim, got {other:?}"),
     }
 }
@@ -336,17 +347,25 @@ async fn holders_survive_the_host_changing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_new_host_says_who_took_the_key_meanwhile() {
     let _slot = slot();
-    let (mut olive, mut wren, id, _dir, file) = two_machines(FAST).await;
+    let (mut olive, mut wren, id, _dir, file) = two_machines_as(Role::Owner, OUTLASTS).await;
     let (client, losses) = client_at(&file);
     let (holder_id, _) = yours(client_take(&client, &id, "k").await);
+    let author = client_list(&client).await.live[0].author.clone();
     olive.stop().await;
+    // Within the holder's deadline, an owner frees the key and takes it.
+    release(&wren, &id, "k", &author).await;
     take_once_free(&wren, &id, "k").await;
     olive.restart();
-    let reason = LostReason::Beaten {
-        person: "wren".to_string(),
-        machine: "wren-pc".to_string(),
+    // A new host that has heard already says it was beaten. One that hears only after taking the
+    // holder up says it was released.
+    let (lost, reason) = told_of_loss(&losses).await;
+    assert_eq!(lost, holder_id);
+    let by_wren = match &reason {
+        LostReason::Beaten { person, machine } => person == "wren" && machine == "wren-pc",
+        LostReason::Released { person } => person == "wren",
+        _ => false,
     };
-    assert_eq!(told_of_loss(&losses).await, (holder_id, reason));
+    assert!(by_wren, "got {reason:?}");
     olive.stop().await;
     wren.stop().await;
 }
@@ -388,30 +407,19 @@ async fn clients_do_not_keep_a_service_alive() {
 /// A host that gives the first take the claim and then closes the connection. After that, each
 /// connection answers takes with `script` in turn, repeating the last answer; it gives how many
 /// takes it has seen since the close.
-fn scripted_host(file: &Path, script: Vec<Result<TakeReply, String>>) -> Arc<Mutex<usize>> {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let secret = "ab".repeat(16);
-    let contents = serde_json::json!({ "port": port, "secret": secret });
-    std::fs::write(file, contents.to_string()).unwrap();
+fn scripted_host(
+    file: &Path,
+    script: Vec<Result<TakeReply, String>>,
+    lapse_micros: u64,
+) -> Arc<Mutex<usize>> {
+    let listener = listener_for(file);
     let seen = Arc::new(Mutex::new(0));
     let counted = Arc::clone(&seen);
     std::thread::spawn(move || {
-        let (first, _) = listener.accept().unwrap();
-        let mut lines = BufReader::new(first.try_clone().unwrap()).lines();
-        lines.next();
-        let (req, holder_id) = next_take(&mut lines).expect("the first take");
-        let reply = Ok(TakeReply::Yours {
-            holder_id,
-            swarm: "the swarm".to_string(),
-        });
-        answer(&first, req, reply);
-        drop(lines);
-        first.shutdown(std::net::Shutdown::Both).unwrap();
+        serve_first_take(&listener, lapse_micros);
 
         let (again, _) = listener.accept().unwrap();
-        let mut lines = BufReader::new(again.try_clone().unwrap()).lines();
-        lines.next();
+        let mut lines = greeted(&again);
         let mut tries = 0;
         while let Some((req, _)) = next_take(&mut lines) {
             *counted.lock().unwrap() += 1;
@@ -445,32 +453,28 @@ fn answer(mut to: &TcpStream, req: u64, reply: Result<TakeReply, String>) {
 fn holding_through_script(
     file: &Path,
     script: Vec<Result<TakeReply, String>>,
-    retake_for: Duration,
-) -> (ClaimsClient, Losses, Arc<Mutex<usize>>, u64) {
-    let seen = scripted_host(file, script);
-    let losses = Losses::default();
-    let told = Arc::clone(&losses);
-    let on_lost = Box::new(move |id, reason| told.lock().unwrap().push((id, reason)));
-    let client = ClaimsClient::start_for_tests(file.to_path_buf(), on_lost, retake_for);
+    lapse_micros: u64,
+) -> (Arc<ClaimsClient>, Losses, Arc<Mutex<usize>>, u64) {
+    let seen = scripted_host(file, script, lapse_micros);
+    let (client, losses) = client_at(file);
     let reply = client.take(None, "inbox", "k", holder()).expect("no error");
     (client, losses, seen, yours(reply).0)
 }
 
-/// Long enough that no test here waits this out when it shouldn't.
-const LONG: Duration = Duration::from_secs(600);
+/// A lapse time long enough that no test here waits it out, in microseconds.
+const LONG: u64 = 600_000_000;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_retake_that_keeps_failing_gives_up_as_lapsed() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("bridge.json");
     let script = vec![Err("That swarm isn't on this machine.".to_string())];
-    let retake_for = Duration::from_secs(3);
     let (_client, losses, seen, id) =
-        off_runtime(move || holding_through_script(&file, script, retake_for)).await;
+        off_runtime(move || holding_through_script(&file, script, 6_000_000)).await;
     let started = Instant::now();
     assert_eq!(told_of_loss(&losses).await, (id, LostReason::Lapsed));
     // Not at the first error, but after it had tried until its time ran out.
-    assert!(started.elapsed() >= Duration::from_secs(2));
+    assert!(started.elapsed() >= Duration::from_secs(5));
     assert!(*seen.lock().unwrap() >= 2);
 }
 
@@ -487,6 +491,7 @@ async fn a_retake_held_by_this_machine_is_not_a_loss() {
     let last_step = TakeReply::Yours {
         holder_id: 0,
         swarm: "the swarm".to_string(),
+        lapse_micros: LONG,
     };
     let script = vec![Ok(held), Ok(last_step)];
     let (client, losses, seen, id) =
@@ -526,6 +531,14 @@ async fn a_retake_that_finds_an_answer_says_why_at_once() {
             },
         ),
         (done, LostReason::Done { person: wren }),
+        (
+            TakeReply::Gone(LostReason::Released {
+                person: "wren".to_string(),
+            }),
+            LostReason::Released {
+                person: "wren".to_string(),
+            },
+        ),
         (TakeReply::Paused, LostReason::Lapsed),
         (TakeReply::AtLimit(1), LostReason::Lapsed),
     ];
@@ -536,4 +549,236 @@ async fn a_retake_that_finds_an_answer_says_why_at_once() {
             off_runtime(move || holding_through_script(&file, vec![Ok(reply)], LONG)).await;
         assert_eq!(told_of_loss(&losses).await, (id, reason));
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retake_of_a_key_released_meanwhile_says_so_and_claims_nothing() {
+    let _slot = slot();
+    let (mut olive, mut wren, id, _dir, file) = two_machines_as(Role::Owner, OUTLASTS).await;
+    let (client, losses) = client_at(&file);
+    let (holder_id, _) = yours(client_take(&client, &id, "k").await);
+    let author = client_list(&client).await.live[0].author.clone();
+    olive.stop().await;
+    release(&wren, &id, "k", &author).await;
+    olive.restart();
+    let reason = LostReason::Released {
+        person: "wren".to_string(),
+    };
+    assert_eq!(told_of_loss(&losses).await, (holder_id, reason));
+    assert!(client_list(&client).await.live.is_empty());
+    olive.stop().await;
+    wren.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_key_freed_after_the_lapse_is_not_claimed_afresh_by_a_new_host() {
+    let _slot = slot();
+    let (mut olive, mut wren, id, _dir, file) = two_machines(FAST).await;
+    let (client, losses) = client_at(&file);
+    yours(client_take(&client, &id, "k").await);
+    olive.stop().await;
+    // Another machine takes it once it has lapsed, and gives it up again.
+    let deadline = tokio::time::Instant::now() + WAIT;
+    let handle = loop {
+        match take(&wren, &id, "k").await {
+            ClaimOutcome::Yours(handle) => break handle,
+            ClaimOutcome::Held { .. } => {}
+            other => panic!("expected held or the claim, got {other:?}"),
+        }
+        assert!(tokio::time::Instant::now() < deadline, "it never lapsed");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    handle.release().await.expect("released");
+    olive.restart();
+    // Time for the client to reconnect and try, and for what it wrote to show.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert!(client_list(&client).await.live.is_empty());
+    assert_eq!(losses.lock().unwrap().len(), 1);
+    olive.stop().await;
+    wren.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_holder_with_no_host_is_told_after_the_lapse_time() {
+    let _slot = slot();
+    let (mut olive, id, _dir, file) = one_machine(FAST).await;
+    let (client, losses) = client_at(&file);
+    let (holder_id, _) = yours(client_take(&client, &id, "k").await);
+    olive.stop().await;
+    let stopped = Instant::now();
+    assert_eq!(told_of_loss(&losses).await, (holder_id, LostReason::Lapsed));
+    // Two renewals and the slack, less a little for the time stopping took.
+    assert!(stopped.elapsed() >= Duration::from_secs(1));
+    assert!(stopped.elapsed() < Duration::from_secs(15));
+
+    // A later host can't bring it back.
+    olive.restart();
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert!(client_list(&client).await.live.is_empty());
+    assert_eq!(losses.lock().unwrap().len(), 1);
+    olive.stop().await;
+}
+
+/// A host that gives the first take the claim and closes, then on each new connection answers
+/// one take with an error and closes again, as one that keeps restarting would. It gives how
+/// many connections it has seen since the first.
+fn flapping_host(file: &Path, lapse_micros: u64) -> Arc<Mutex<usize>> {
+    let listener = listener_for(file);
+    let seen = Arc::new(Mutex::new(0));
+    let counted = Arc::clone(&seen);
+    std::thread::spawn(move || {
+        serve_first_take(&listener, lapse_micros);
+        loop {
+            let (again, _) = listener.accept().unwrap();
+            *counted.lock().unwrap() += 1;
+            let mut lines = greeted(&again);
+            if let Some((req, _)) = next_take(&mut lines) {
+                answer(&again, req, Err("Not open yet.".to_string()));
+            }
+            let _ = again.shutdown(std::net::Shutdown::Both);
+        }
+    });
+    seen
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_that_keeps_restarting_does_not_put_the_deadline_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("bridge.json");
+    let seen = flapping_host(&file, 7_000_000);
+    let (client, losses) = client_at(&file);
+    let (id, _) = off_runtime({
+        let client = Arc::clone(&client);
+        move || yours(client.take(None, "inbox", "k", holder()).expect("no error"))
+    })
+    .await;
+    let started = Instant::now();
+    assert_eq!(told_of_loss(&losses).await, (id, LostReason::Lapsed));
+    assert!(started.elapsed() >= Duration::from_secs(6));
+    assert!(started.elapsed() < Duration::from_secs(15));
+    assert!(*seen.lock().unwrap() >= 2, "the host never came back");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_listener_that_says_nothing_does_not_stall_the_client() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("bridge.json");
+    // Whatever has the port now accepts and never answers.
+    let silent = listener_for(&file);
+    std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        while let Ok((stream, _)) = silent.accept() {
+            kept.push(stream);
+        }
+    });
+    let (client, _) = client_at(&file);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // The file then names a real host.
+    let host = listener_for(&file);
+    std::thread::spawn(move || serve_first_take(&host, 600_000_000));
+    let started = Instant::now();
+    let got = off_runtime(move || {
+        loop {
+            match client.take(None, "inbox", "k", holder()) {
+                Ok(reply) => return Some(reply),
+                Err(_) if started.elapsed() < Duration::from_secs(25) => {}
+                Err(_) => return None,
+            }
+        }
+    })
+    .await;
+    assert!(got.is_some(), "the client never reached the real host");
+    assert!(started.elapsed() < Duration::from_secs(20));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_bridge_file_is_private_and_clients_still_read_it() {
+    let _slot = slot();
+    let (mut olive, id, _dir, file) = one_machine(FAST).await;
+    assert_only_this_user_can_read(&file);
+    assert!(
+        !file.with_extension("json.tmp").exists(),
+        "the temp file stayed behind"
+    );
+    let (client, _) = client_at(&file);
+    yours(client_take(&client, &id, "k").await);
+    olive.stop().await;
+}
+
+#[cfg(unix)]
+fn assert_only_this_user_can_read(file: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(file).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+}
+
+#[cfg(windows)]
+fn assert_only_this_user_can_read(file: &Path) {
+    let shown = std::process::Command::new("icacls")
+        .arg(file)
+        .output()
+        .unwrap();
+    let shown = String::from_utf8_lossy(&shown.stdout).to_string();
+    // Inherited entries are the ones that let in more than its user.
+    assert!(!shown.contains("(I)"), "still inherits: {shown}");
+    assert_eq!(
+        shown.matches(":(").count(),
+        1,
+        "more than one grant: {shown}"
+    );
+}
+
+/// A listener on loopback, with `file` naming it.
+fn listener_for(file: &Path) -> TcpListener {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let secret = "ab".repeat(16);
+    let contents = serde_json::json!({ "port": port, "secret": secret });
+    std::fs::write(file, contents.to_string()).unwrap();
+    listener
+}
+
+/// Lines from a new connection, past its `Hello`, which it has welcomed.
+fn greeted(mut stream: &TcpStream) -> impl Iterator<Item = std::io::Result<String>> + use<> {
+    let mut lines = BufReader::new(stream.try_clone().unwrap()).lines();
+    lines.next();
+    let welcome = serde_json::to_string(&HostMsg::Welcome).unwrap();
+    let _ = writeln!(stream, "{welcome}");
+    lines
+}
+
+/// Takes one connection, gives its first take the claim, and closes it.
+fn serve_first_take(listener: &TcpListener, lapse_micros: u64) {
+    let (first, _) = listener.accept().unwrap();
+    let mut lines = greeted(&first);
+    let (req, holder_id) = next_take(&mut lines).expect("the first take");
+    let reply = Ok(TakeReply::Yours {
+        holder_id,
+        swarm: "the swarm".to_string(),
+        lapse_micros,
+    });
+    answer(&first, req, reply);
+    drop(lines);
+    first.shutdown(std::net::Shutdown::Both).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_quiet_connection_stays_up_past_the_wait_for_welcome() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("bridge.json");
+    let listener = listener_for(&file);
+    let connections = Arc::new(Mutex::new(0));
+    let counted = Arc::clone(&connections);
+    std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        while let Ok((stream, _)) = listener.accept() {
+            *counted.lock().unwrap() += 1;
+            kept.push((greeted(&stream), stream));
+        }
+    });
+    let (_client, _) = client_at(&file);
+    // Nothing to read for longer than a client waits to be welcomed.
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    assert_eq!(*connections.lock().unwrap(), 1);
 }

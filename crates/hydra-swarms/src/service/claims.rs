@@ -52,6 +52,8 @@ pub enum ClaimOutcome {
     },
     Paused,
     AtLimit(i32),
+    /// Only for a retake: the claim it came for has ended, and this is why.
+    Gone(LostReason),
 }
 
 /// Why a claim stopped being this machine's.
@@ -71,6 +73,7 @@ pub struct ClaimHandle {
     swarm: String,
     context: String,
     key: String,
+    lapse_micros: u64,
     lost: mpsc::UnboundedReceiver<LostReason>,
     worker: mpsc::UnboundedSender<Msg>,
 }
@@ -86,6 +89,11 @@ impl ClaimHandle {
 
     pub fn key(&self) -> &str {
         &self.key
+    }
+
+    /// How long, in microseconds, this claim can go unrenewed before it lapses.
+    pub fn lapse_micros(&self) -> u64 {
+        self.lapse_micros
     }
 
     /// Next loss, once; None after the swarm has gone.
@@ -350,6 +358,28 @@ fn loss_reason(
     }
 }
 
+/// Why a retake finds nothing to take up. With this machine's own record pruned too, the claim
+/// is long past its lapse.
+fn retake_loss(
+    records: &Records,
+    roster: &Roster,
+    me: &str,
+    key: &str,
+    state: Option<&KeyState>,
+) -> LostReason {
+    let mine = records
+        .claims
+        .iter()
+        .find(|(author, claim)| author == me && claim.key == key);
+    match mine {
+        Some((_, claim)) => {
+            let people = People::from_roster(roster);
+            loss_reason(records, &people, roster, me, claim, state)
+        }
+        None => LostReason::Lapsed,
+    }
+}
+
 fn context_view(
     name: &str,
     settings: ContextSettings,
@@ -411,9 +441,10 @@ impl Worker {
         context: String,
         key: String,
         holder: Holder,
+        retake: bool,
         reply: TakeReply,
     ) {
-        let answer = match self.take_step(&context, &key, holder).await {
+        let answer = match self.take_step(&context, &key, holder, retake).await {
             Ok(Step::Answer(outcome)) => Ok(outcome),
             Ok(Step::Ask {
                 node,
@@ -450,6 +481,7 @@ impl Worker {
         context: &str,
         key: &str,
         mut holder: Holder,
+        retake: bool,
     ) -> Result<Step, String> {
         check_claim(context, key)?;
         let node = self.live_node()?;
@@ -469,9 +501,16 @@ impl Worker {
                 since: entry.claim.claimed_at,
             }));
         }
-        let (_, states) = self.settled(&node, &roster, context, &settings).await?;
+        let (records, states) = self.settled(&node, &roster, context, &settings).await?;
         holder.label = holder.label.chars().take(MAX_LABEL_CHARS).collect();
-        match decide_take(&states, key, &me, &settings) {
+        let take = decide_take(&states, key, &me, &settings);
+        // A key that is free isn't this holder's any more. A new claim would look to it like the
+        // one it had, while it could have lost the key and had someone else's work done meanwhile.
+        if retake && matches!(take, Take::Go | Take::Paused | Take::AtLimit(_)) {
+            let reason = retake_loss(&records, &roster, &me, key, states.get(key));
+            return Ok(Step::Answer(ClaimOutcome::Gone(reason)));
+        }
+        match take {
             Take::Go => {
                 let now = now_micros();
                 let claim = ClaimRecord {
@@ -529,11 +568,16 @@ impl Worker {
             .own_tx
             .upgrade()
             .ok_or_else(|| format!("{} isn't open.", self.name))?;
+        let settings = self.claim_book.live.get(&id).map(|e| e.settings);
+        let lapse_micros = settings
+            .unwrap_or_default()
+            .lapse_micros(self.shared.claim_slack);
         Ok(ClaimHandle {
             id,
             swarm: self.ns.clone(),
             context: context.to_string(),
             key: key.to_string(),
+            lapse_micros,
             lost,
             worker,
         })

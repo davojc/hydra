@@ -322,6 +322,9 @@ pub enum Command {
         context: String,
         key: String,
         holder: Holder,
+        /// For a holder that had this claim through another window's host: it may only go on
+        /// with the claim this machine already has, and never makes a new one.
+        retake: bool,
         reply: TakeReply,
     },
     ClaimsList {
@@ -496,7 +499,7 @@ fn now_secs() -> u64 {
 }
 
 /// `bytes` written to `path` through a temp file and a rename.
-pub(crate) fn save_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
+fn save_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, serde_json::to_vec_pretty(value)?)
         .with_context(|| format!("writing {}", tmp.display()))?;
@@ -1005,6 +1008,7 @@ fn route(shared: &Shared, swarms: &mut HashMap<String, Handle>, cmd: Command) {
             context,
             key,
             holder,
+            retake,
             reply,
         } => match resolve_swarm(&shared.views(), swarm.as_deref(), &context) {
             Ok(id) => Command::ClaimTake {
@@ -1012,6 +1016,7 @@ fn route(shared: &Shared, swarms: &mut HashMap<String, Handle>, cmd: Command) {
                 context,
                 key,
                 holder,
+                retake,
                 reply,
             },
             Err(text) => {
@@ -1950,10 +1955,11 @@ impl Worker {
                 context,
                 key,
                 holder,
+                retake,
                 reply,
                 ..
             } => {
-                self.claim_take(context, key, holder, reply).await;
+                self.claim_take(context, key, holder, retake, reply).await;
                 Ok(())
             }
             Command::ClaimsList { context, reply, .. } => {

@@ -82,6 +82,7 @@ async fn ask_to_take(
         context: context.to_string(),
         key: key.to_string(),
         holder: holder(label),
+        retake: false,
         reply,
     });
     tokio::time::timeout(WAIT, answer)
@@ -398,6 +399,75 @@ async fn a_restart_takes_up_the_machines_own_claim() {
     let again = yours(&wren, &id, "k").await;
     assert_eq!(claimed_at(&wren, &id, "k").await, since);
     drop(again);
+    olive.stop().await;
+    wren.stop().await;
+}
+
+async fn retake(svc: &Svc, swarm: &str, key: &str) -> ClaimOutcome {
+    let (reply, answer) = oneshot::channel();
+    svc.send(Command::ClaimTake {
+        swarm: Some(swarm.to_string()),
+        context: "inbox".to_string(),
+        key: key.to_string(),
+        holder: holder("a session"),
+        retake: true,
+        reply,
+    });
+    answer.await.expect("a reply").expect("no error")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retake_only_ever_goes_on_with_the_claim_there_was() {
+    let _slot = slot();
+    let settings = ContextSettings {
+        renew_secs: 30,
+        max_per_machine: -1,
+        ..FAST
+    };
+    let (mut olive, mut wren, id) = claimers(Role::Writer, settings).await;
+
+    // Never claimed: told so, and nothing is written.
+    let never = retake(&wren, &id, "never").await;
+    assert!(
+        matches!(never, ClaimOutcome::Gone(LostReason::Lapsed)),
+        "got {never:?}"
+    );
+    let wrote = wren
+        .view("the view after a retake", |v| v.id == id)
+        .await
+        .claims[0]
+        .live
+        .clone();
+    assert!(wrote.is_empty(), "got {wrote:?}");
+
+    // Still there: taken up, with the time it was claimed unchanged.
+    let first = yours(&wren, &id, "k").await;
+    let since = claimed_at(&wren, &id, "k").await;
+    drop(first);
+    let again = match retake(&wren, &id, "k").await {
+        ClaimOutcome::Yours(handle) => handle,
+        other => panic!("expected the claim, got {other:?}"),
+    };
+    assert_eq!(claimed_at(&wren, &id, "k").await, since);
+    let author = author_of(&mut wren, &id, "k").await;
+    drop(again);
+
+    // Released meanwhile: the record is still there, and says who.
+    release(&wren, &id, "k", &author).await.expect("released");
+    let released = retake(&wren, &id, "k").await;
+    assert!(
+        matches!(
+            &released,
+            ClaimOutcome::Gone(LostReason::Released { person }) if person == "wren"
+        ),
+        "got {released:?}"
+    );
+
+    // A plain take after the same is a new claim, as ever.
+    assert!(matches!(
+        take(&wren, &id, "k").await,
+        ClaimOutcome::Yours(_)
+    ));
     olive.stop().await;
     wren.stop().await;
 }

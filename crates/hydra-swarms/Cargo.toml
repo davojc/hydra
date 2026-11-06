@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+hydra-platform.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 iroh.workspace = true

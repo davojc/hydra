@@ -17,6 +17,7 @@ use anyhow::{Context, bail};
 use futures::StreamExt;
 use futures::channel::{mpsc as fmpsc, oneshot};
 use iroh::{EndpointAddr, EndpointId, RelayUrl, SecretKey};
+use iroh_blobs::Hash;
 use iroh_docs::{Author, Capability, NamespaceId, NamespaceSecret};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -54,6 +55,9 @@ const RELAY_RETRY: Duration = Duration::from_secs(5);
 const FRESH_RETRY: Duration = Duration::from_secs(2);
 /// How many times a machine new to the roster is tried again.
 const FRESH_TRIES: u32 = 4;
+/// How long content found missing is left to iroh-docs before this machine asks for it itself.
+/// Each time asking doesn't bring it, the wait doubles, up to `PERIODIC`.
+const FETCH_AFTER: Duration = Duration::from_secs(5);
 /// How long a machine of yours waits for the roster to show another one joining through it.
 const JOINING_WAIT: Duration = Duration::from_secs(20);
 const REGISTRY_FILE: &str = "registry.json";
@@ -365,6 +369,12 @@ pub enum Command {
         swarm: String,
         context: String,
     },
+    /// From now on iroh-docs brings this machine no content, so only asking for it can.
+    #[doc(hidden)]
+    ContentUnfetchedForTests {
+        swarm: String,
+        reply: oneshot::Sender<()>,
+    },
     Stop,
 }
 
@@ -384,7 +394,8 @@ impl Command {
             | Command::ClaimContextSet { swarm, .. }
             | Command::ClaimAgeForTests { swarm, .. }
             | Command::ClaimsSilentForTests { swarm }
-            | Command::ClaimsUnreadableForTests { swarm, .. } => Some(swarm),
+            | Command::ClaimsUnreadableForTests { swarm, .. }
+            | Command::ContentUnfetchedForTests { swarm, .. } => Some(swarm),
             Command::ClaimTake { swarm, .. } | Command::ClaimsList { swarm, .. } => {
                 swarm.as_deref()
             }
@@ -1428,6 +1439,8 @@ enum Sent {
         id: u64,
         answers: Vec<ClaimAnswer>,
     },
+    /// The members were asked for the content found missing.
+    Fetched,
 }
 
 /// One swarm's task: its node, its folder and everything this machine knows of it.
@@ -1497,6 +1510,10 @@ struct Worker {
     claims_view: Vec<ContextView>,
     /// For the handles it gives out. Weak, so this task doesn't keep its own channel open.
     own_tx: mpsc::WeakUnboundedSender<Msg>,
+    /// When to ask the members for the content passes are finding missing.
+    fetch_at: Option<Instant>,
+    fetch_wait: Duration,
+    fetching: bool,
 }
 
 impl Worker {
@@ -1555,6 +1572,9 @@ impl Worker {
             claims_at: None,
             claims_view: Vec::new(),
             own_tx,
+            fetch_at: None,
+            fetch_wait: FETCH_AFTER,
+            fetching: false,
             shared,
         }
     }
@@ -1582,6 +1602,7 @@ impl Worker {
                 () = sleep_until(self.pass_at) => {
                     self.pass().await;
                     self.claims_refresh().await;
+                    self.fetch_wanted();
                 }
                 () = sleep_until(self.claims_at) => self.claims_due().await,
                 () = sleep_until(self.relay_retry_at) => {
@@ -1744,6 +1765,47 @@ impl Worker {
             }
         }
         self.syncing = false;
+    }
+
+    /// Asks the members for content this pass found missing, once iroh-docs has had its time to
+    /// bring it. A pass follows each try, to use what came and see what didn't.
+    fn fetch_wanted(&mut self) {
+        let Some(node) = self.node.clone() else {
+            return;
+        };
+        let wanted: Vec<Hash> = node.take_missing().into_iter().collect();
+        if wanted.is_empty() {
+            self.fetch_at = None;
+            self.fetch_wait = FETCH_AFTER;
+            return;
+        }
+        if self.fetching {
+            return;
+        }
+        let now = Instant::now();
+        let at = *self.fetch_at.get_or_insert(now + self.fetch_wait);
+        if now < at {
+            self.soon(at - now);
+            return;
+        }
+        let others: Vec<String> = self
+            .roster
+            .iter()
+            .flat_map(Roster::endpoints)
+            .filter(|e| *e != self.my_endpoint)
+            .collect();
+        self.fetch_at = None;
+        self.fetch_wait = (self.fetch_wait * 2).min(PERIODIC);
+        if others.is_empty() {
+            self.soon(self.fetch_wait);
+            return;
+        }
+        self.fetching = true;
+        self.shared.remember_peers(&node);
+        self.sends.spawn(async move {
+            node.fetch_content(&wanted, &others, PERIODIC).await;
+            Sent::Fetched
+        });
     }
 
     /// Ruling 9: the gate follows the roster, every new member machine is synced with, and a
@@ -2006,6 +2068,14 @@ impl Worker {
                     node.unreadable_claims_for_tests(&context);
                 }
                 Ok(())
+            }
+            Command::ContentUnfetchedForTests { reply, .. } => {
+                let done = match &self.node {
+                    Some(node) => node.leave_content_unfetched_for_tests().await,
+                    None => Ok(()),
+                };
+                let _ = reply.send(());
+                done.map_err(|e| format!("{e:#}"))
             }
             Command::Create { .. }
             | Command::Join { .. }
@@ -2651,6 +2721,10 @@ impl Worker {
             }
             Sent::Removed | Sent::Answered => {}
             Sent::ClaimAsked { id, answers } => self.claim_asked(id, answers).await,
+            Sent::Fetched => {
+                self.fetching = false;
+                self.soon(SETTLE);
+            }
         }
     }
 

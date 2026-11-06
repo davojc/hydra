@@ -32,7 +32,27 @@ async fn pair(role: Role) -> (Svc, Svc, String) {
             v.members.iter().any(|m| m.person == person)
         })
         .await;
+    // Wren's last view taken in is from joining, before its roster showed it, and says reader
+    // whatever the role. Without this, a later wait for wren to be a reader would end at once.
+    wren.view("wren's own role", |v| v.id == notes.id && v.my_role == role)
+        .await;
     (olive, wren, notes.id)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_file_whose_content_iroh_docs_never_brings_still_arrives() {
+    let _slot = slot();
+    let (mut olive, mut wren, id) = pair(Role::Writer).await;
+    let (reply, unfetched) = futures::channel::oneshot::channel();
+    wren.send(Command::ContentUnfetchedForTests {
+        swarm: id.clone(),
+        reply,
+    });
+    unfetched.await.expect("a reply");
+    std::fs::write(olive.folder("Notes").join("b.md"), "bravo").unwrap();
+    file_arrives(wren.folder("notes").join("b.md"), "bravo").await;
+    olive.stop().await;
+    wren.stop().await;
 }
 
 /// Wren edits a.md and deletes b.md, and both reach olive.
@@ -723,6 +743,9 @@ async fn olive_twice_and_wren() -> (Svc, Svc, Svc, String) {
     file_arrives(olive2.folder("notes2").join("a.md"), "alpha").await;
     let person = olive.person();
     machines_of(&mut wren, &notes.id, &person, 2).await;
+    // Olive's own last view taken in is from before olive2 came, so a later wait for one machine
+    // would end at once.
+    machines_of(&mut olive, &notes.id, &person, 2).await;
     (olive, olive2, wren, notes.id)
 }
 

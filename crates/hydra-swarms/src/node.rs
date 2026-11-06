@@ -17,13 +17,14 @@ use iroh::endpoint::{
 };
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey};
+use iroh_blobs::api::downloader::{Downloader, Shuffled};
 use iroh_blobs::store::fs::FsStore;
-use iroh_blobs::{BlobsProtocol, Hash};
+use iroh_blobs::{BlobsProtocol, Hash, HashAndFormat};
 use iroh_docs::api::Doc;
 use iroh_docs::api::protocol::{AddrInfoOptions, ShareMode};
 use iroh_docs::engine::LiveEvent;
 use iroh_docs::protocol::Docs;
-use iroh_docs::store::Query;
+use iroh_docs::store::{DownloadPolicy, Query};
 use iroh_docs::{Author, AuthorId, Capability, CapabilityKind, ContentStatus, Entry, NamespaceId};
 use iroh_gossip::net::Gossip;
 use serde::{Deserialize, Serialize};
@@ -225,6 +226,8 @@ pub(crate) struct Core {
     pub(crate) addrs: MemoryLookup,
     pub(crate) events: broadcast::Sender<NodeEvent>,
     pub(crate) invites: Invites,
+    /// Content reads have found isn't here, until the swarm's task asks.
+    missing: Mutex<HashSet<Hash>>,
     /// Claims other members told this machine about, by context, key and author, for the time
     /// until the document brings them or says they ended.
     pub(crate) heard: Mutex<HashMap<(String, String, String), ClaimRecord>>,
@@ -518,6 +521,7 @@ impl SwarmNode {
             addrs: parts.addrs,
             events,
             invites: Invites::new(&cfg.dir),
+            missing: Mutex::default(),
             heard: Mutex::default(),
             heard_dones: Mutex::default(),
             told_own: Mutex::default(),
@@ -757,6 +761,38 @@ impl SwarmNode {
         self.core.read_blob(h).await
     }
 
+    /// The content that reads have found wasn't here since this was last asked.
+    pub fn take_missing(&self) -> HashSet<Hash> {
+        std::mem::take(&mut *lock(&self.core.missing))
+    }
+
+    /// Asks `endpoints` for `hashes`, within `timeout`. iroh-docs can't be left to bring everything
+    /// itself: an entry that came from someone who may not have its content is only downloaded
+    /// when a neighbour says it has that content, and if the neighbour said so just before the
+    /// entry arrived, nobody says it again. Whatever couldn't be had shows in the next read.
+    pub async fn fetch_content(
+        &self,
+        hashes: &[Hash],
+        endpoints: &[String],
+        timeout: std::time::Duration,
+    ) {
+        let peers: Vec<EndpointId> = endpoints.iter().filter_map(|e| e.parse().ok()).collect();
+        let downloader = Downloader::new(&self.core.blobs, &self.core.endpoint);
+        let fetches = hashes.iter().map(|hash| {
+            let providers = Shuffled::new(peers.clone());
+            downloader.download(HashAndFormat::raw(*hash), providers)
+        });
+        let fetches = fetches.map(std::future::IntoFuture::into_future);
+        let _ = tokio::time::timeout(timeout, futures::future::join_all(fetches)).await;
+    }
+
+    /// From now on iroh-docs downloads nothing here, as if every entry had lost that race.
+    pub async fn leave_content_unfetched_for_tests(&self) -> anyhow::Result<()> {
+        let nothing = DownloadPolicy::NothingExcept(Vec::new());
+        self.core.doc.set_download_policy(nothing).await?;
+        Ok(())
+    }
+
     /// Replaces who this node talks to on docs, blobs and gossip; ids that don't parse are
     /// skipped. From the moment this returns, nobody outside `endpoints` is dialled or accepted
     /// on them, and every open docs, blobs or gossip connection with someone no longer in the
@@ -960,6 +996,7 @@ impl Core {
 
     pub(crate) async fn read_blob(&self, h: Hash) -> anyhow::Result<Option<Bytes>> {
         if !self.blobs.has(h).await? {
+            lock(&self.missing).insert(h);
             return Ok(None);
         }
         Ok(Some(self.blobs.get_bytes(h).await?))

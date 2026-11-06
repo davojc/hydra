@@ -99,6 +99,14 @@ pub fn next_step(
     Step::Finished
 }
 
+/// Whether starting `milestone`'s run picks up work already begun: one of its tickets is in
+/// progress, its session gone (hydraui closed, or the run was stopped). Start then says Continue.
+pub fn picks_up(p: &Project, milestone: &str) -> bool {
+    queue(p, milestone)
+        .iter()
+        .any(|t| t.meta.status == TicketStatus::InProgress)
+}
+
 /// The branch ticket `ticket` builds on in code repo `repo`: the branch of the latest earlier
 /// ticket in the same milestone that's still in review and is in that repo, or names none (so
 /// may have changed it), so later work sees earlier unmerged work. None means the repo's
@@ -295,5 +303,22 @@ mod tests {
         // In each repo it builds on the earlier unmerged ticket, which may have changed it.
         assert_eq!(stack_base(&p, "M1", "PG-2", BE).as_deref(), Some("pg-1-x"));
         assert_eq!(stack_base(&p, "M1", "PG-2", FE).as_deref(), Some("pg-1-x"));
+    }
+
+    #[test]
+    fn a_run_with_a_ticket_in_progress_picks_it_back_up() {
+        let mut p = project(vec![
+            ticket("PG-1", BE, TicketStatus::Done),
+            ticket("PG-2", FE, TicketStatus::Todo),
+        ]);
+        assert!(!picks_up(&p, "M1"));
+        p.tickets[1].meta.status = TicketStatus::InProgress;
+        assert!(picks_up(&p, "M1"));
+        assert!(!picks_up(&p, "M2"));
+        // Starting the run again works that ticket first.
+        assert_eq!(
+            next_step(&p, "M1", &setup(false), |_| true),
+            Step::Work("PG-2".into())
+        );
     }
 }

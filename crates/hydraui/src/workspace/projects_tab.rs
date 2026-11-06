@@ -2886,15 +2886,22 @@ impl Workspace {
                 if left == 0 {
                     return None;
                 }
+                let again = crate::project_run::picks_up(p, &m.id);
                 row = row.child(
                     Button::new(SharedString::from(format!("start-run-{mid}")))
-                        .label("Start milestone")
+                        .label(if again {
+                            "Continue milestone"
+                        } else {
+                            "Start milestone"
+                        })
                         .small()
                         .primary()
-                        .tooltip(
+                        .tooltip(if again {
+                            "Picks up the ticket in progress, then works the rest one at a time"
+                        } else {
                             "Works its approved tickets one at a time, each with its repo's \
-                             skill from Settings",
-                        )
+                             skill from Settings"
+                        })
                         .on_click(cx.listener(move |ws, _, window, cx| {
                             ws.start_run(&e, &s, &mid, window, cx)
                         })),
@@ -5384,7 +5391,7 @@ impl Workspace {
         p: &Project,
         t: &Ticket,
         lead: bool,
-        _member: bool,
+        member: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let unsent = pj::ticket_unsent(&e.pending, &p.slug, &t.id);
@@ -5539,6 +5546,29 @@ impl Workspace {
                         .on_click(
                             cx.listener(move |ws, _, window, cx| ws.show_terminal(id, window, cx)),
                         ),
+                ),
+            );
+        } else if (lead || member)
+            && t.meta.status == TicketStatus::InProgress
+            && t.meta.review == Review::Approved
+            && !self
+                .projects_data
+                .runs
+                .contains_key(&(env.to_string(), p.slug.clone()))
+        {
+            // Its session is gone (hydraui closed, or the run stopped): pick its milestone back
+            // up, which works this ticket first.
+            let (e2, s2, mid) = (env_s.clone(), slug_s.clone(), t.meta.milestone.clone());
+            card = card.child(
+                h_flex().child(
+                    Button::new(SharedString::from(format!("continue-{}", t.id)))
+                        .label("Continue")
+                        .xsmall()
+                        .primary()
+                        .tooltip("Starts its session again and carries on with the milestone")
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.start_run(&e2, &s2, &mid, window, cx)
+                        })),
                 ),
             );
         }

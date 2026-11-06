@@ -196,11 +196,11 @@ own. There are no free-standing claims and no hand-offs.
 - **Inside hydraui**: pipelines and any later feature call the core directly. A new user is a
   new caller, with no change to the service.
 - **Claude sessions**, through hydraui's MCP server, beside `tasks_*` and `stage_*`:
-  `claims_take(context, key)`, `claims_release(key)`, `claims_done(key)`,
-  `claims_list(context)`. A session's claims are tied to its terminal (§5.2). When a session
-  loses a claim, hydraui types it into the session's prompt, as it already tells an
-  orchestrator that a stage reported. Which swarm a session's context is in: the builder's call
-  (by the terminal's environment, or named in the call).
+  `claims_take(context, key, swarm?)`, `claims_release(key)`, `claims_done(key)`,
+  `claims_list(context)`. `swarm` is optional, an id or a name; without it the call uses the one
+  swarm that has the context, and fails if there is none or more than one. A session's claims
+  are tied to its terminal (§5.2). When a session loses a claim, hydraui types it into the
+  session's prompt, as it already tells an orchestrator that a stage reported.
 - **Later, maybe**: a `hydra claim …` command for scripts. Not in this work.
 
 ### 5.4 In hydraui
@@ -234,10 +234,13 @@ changes from someone without standing.
 
 ## 7. Storage
 
-- Claims, releases, done records and context settings are entries in the **swarm document**
-  under their own prefix (e.g. `claims/<context>/…`), beside `log/`, `files/` and `parents/`.
+- Claims, releases and done records are entries in the **swarm document** under their own
+  prefix (`claims/<context>/…`), beside `log/`, `files/` and `parents/`.
   The document is stored in hydra's state folder (`<state root>/swarms/<id>/docs/`), on every
   member machine; folder sync ignores this prefix, so nothing shows in the swarm folder.
+- Context settings are not under that prefix. They are signed changes in the roster's `log/`
+  (like the file types), so who may change them, and when, is judged as for any roster change,
+  and they survive the owner who set them being removed.
 - Each machine writes its own entries; renewing overwrites its own claim entry, so renewals
   don't pile up.
 - Gossip announces claims, releases and done at once; the document is what lasts and what a
@@ -282,3 +285,32 @@ limit when each was made, so lowering it takes nothing away; a resumed run or se
 its machine's still-live claim; readers can't claim; any owner can release any claim. Left to
 the builder: the key layout and encoding, the timeout on asking, how a session's context finds its
 swarm, the channel between windows, and the Claims section's layout.
+
+The builder's choices, as built:
+
+- **Settings** are a signed `SetClaimContext` change in `log/` (§7). Older hydras skip it.
+- **Records** are `claims/<context>/<blake3(key) hex>/claim`, `/done` and
+  `/release/<target author>`, one each per author; the plain key is inside the record, since
+  Message-IDs hold `/` and `<`. A machine releasing its own claim deletes its claim entry; only
+  someone else's release writes a release record. A release ends only the claim it names.
+- **Limits**: a key is up to 1024 bytes; a context name is 1 to 64 of `a-z 0-9 - _`.
+- **Lapse time** is `renew_secs` x `lapse_after` + 30 s of clock slack, so 210 s by default.
+- **Asking** all members at once waits at most 3 s.
+- **Finding the swarm**: `claims_take` takes an optional `swarm` (§5.3).
+- **Two sessions on one machine** can't share a key: a key this machine holds through a live
+  handle answers "held" (by this machine). Taking up (§4.7) applies only when no live handle
+  exists.
+- **Between windows** the window running the swarms listens on loopback TCP, with JSON lines and
+  a secret, found in `<running_dir>/swarms-claims.json`. A dropped connection tells the host its
+  holders ended. If that window closes, another takes over and renews the holders without
+  telling them they lost anything.
+- **A re-take** after the window running the swarms changes never claims afresh. If the claim
+  has gone, the holder is told it lost it.
+- **Done from a removed member** still counts; their claims don't, so removing a teammate
+  doesn't make their last 30 days of work claimable again.
+- **Limit in force** is carried in each claim record, since settings history isn't kept. It is
+  self-reported, which is acceptable: the rule catches bugs, it isn't a security check.
+- **Settings changed** reaches the page through `SwarmView`; there is no separate event.
+- **The `claims_*` tools** are pre-approved like the other hydraui tools, so sessions call them
+  without a permission prompt. A claim only frees or holds a key. This is still for the user to
+  confirm.

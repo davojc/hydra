@@ -48,6 +48,10 @@ mod claims;
 
 /// A parent record holds at most a few hundred hashes, and a claim far less.
 const MAX_RECORD_BYTES: u64 = 64 * 1024;
+/// How many downloads one try at fetching content runs at once. A few, so a try on a slow link adds
+/// little to what iroh-docs may still be bringing and each download not yet started finds whatever
+/// came meanwhile, yet one member that is slow or gone doesn't hold up the rest.
+const FETCHES_AT_ONCE: usize = 4;
 
 /// What one author's file entry for a path was made from, so other machines can tell an edit
 /// made on top of theirs from one made at the same time. `hash` is the entry's (None for a
@@ -761,6 +765,11 @@ impl SwarmNode {
         self.core.read_blob(h).await
     }
 
+    /// Whether the content of `h` is all here. Unlike a read, this doesn't note it as missing.
+    pub async fn has_content(&self, h: Hash) -> anyhow::Result<bool> {
+        Ok(self.core.blobs.has(h).await?)
+    }
+
     /// The content that reads have found wasn't here since this was last asked.
     pub fn take_missing(&self) -> HashSet<Hash> {
         std::mem::take(&mut *lock(&self.core.missing))
@@ -778,12 +787,13 @@ impl SwarmNode {
     ) {
         let peers: Vec<EndpointId> = endpoints.iter().filter_map(|e| e.parse().ok()).collect();
         let downloader = Downloader::new(&self.core.blobs, &self.core.endpoint);
-        let fetches = hashes.iter().map(|hash| {
+        let fetches = hashes.iter().copied().map(|hash| {
             let providers = Shuffled::new(peers.clone());
-            downloader.download(HashAndFormat::raw(*hash), providers)
+            downloader.download(HashAndFormat::raw(hash), providers)
         });
         let fetches = fetches.map(std::future::IntoFuture::into_future);
-        let _ = tokio::time::timeout(timeout, futures::future::join_all(fetches)).await;
+        let fetches = futures::stream::iter(fetches).buffer_unordered(FETCHES_AT_ONCE);
+        let _ = tokio::time::timeout(timeout, fetches.collect::<Vec<_>>()).await;
     }
 
     /// From now on iroh-docs downloads nothing here, as if every entry had lost that race.

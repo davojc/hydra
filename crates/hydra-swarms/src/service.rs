@@ -56,7 +56,7 @@ const FRESH_RETRY: Duration = Duration::from_secs(2);
 /// How many times a machine new to the roster is tried again.
 const FRESH_TRIES: u32 = 4;
 /// How long content found missing is left to iroh-docs before this machine asks for it itself.
-/// Each time asking doesn't bring it, the wait doubles, up to `PERIODIC`.
+/// Each time asking doesn't bring a piece of it, that piece's wait doubles, up to `PERIODIC`.
 const FETCH_AFTER: Duration = Duration::from_secs(5);
 /// How long a machine of yours waits for the roster to show another one joining through it.
 const JOINING_WAIT: Duration = Duration::from_secs(20);
@@ -1439,8 +1439,62 @@ enum Sent {
         id: u64,
         answers: Vec<ClaimAnswer>,
     },
-    /// The members were asked for the content found missing.
-    Fetched,
+    /// The members were asked for this content, found missing.
+    Fetched {
+        hashes: Vec<Hash>,
+    },
+}
+
+/// How long one piece of missing content has left, and how long it waits after that if asking
+/// doesn't bring it.
+struct FetchWait {
+    due: Instant,
+    wait: Duration,
+}
+
+/// When to ask the members for each piece of content passes are finding missing. Each has its own
+/// wait, so what iroh-docs is still bringing is left to it, and something nobody has doesn't hold
+/// up what was found missing since.
+#[derive(Default)]
+struct FetchWaits {
+    waits: HashMap<Hash, FetchWait>,
+}
+
+impl FetchWaits {
+    /// What a pass found missing. What is new starts its wait, and what it no longer found, such
+    /// as content a later version replaced, is forgotten.
+    fn noted(&mut self, noted: &HashSet<Hash>, now: Instant) {
+        self.waits.retain(|hash, _| noted.contains(hash));
+        for hash in noted {
+            self.waits.entry(*hash).or_insert(FetchWait {
+                due: now + FETCH_AFTER,
+                wait: FETCH_AFTER,
+            });
+        }
+    }
+
+    fn due(&self, now: Instant) -> Vec<Hash> {
+        let due = self.waits.iter().filter(|(_, w)| w.due <= now);
+        due.map(|(hash, _)| *hash).collect()
+    }
+
+    fn forget(&mut self, hash: &Hash) {
+        self.waits.remove(hash);
+    }
+
+    /// Asking for `hashes` has finished as of `now`, and whatever is still wanted waits longer.
+    fn asked(&mut self, hashes: &[Hash], now: Instant) {
+        for hash in hashes {
+            if let Some(w) = self.waits.get_mut(hash) {
+                w.wait = (w.wait * 2).min(PERIODIC);
+                w.due = now + w.wait;
+            }
+        }
+    }
+
+    fn next_due(&self) -> Option<Instant> {
+        self.waits.values().map(|w| w.due).min()
+    }
 }
 
 /// One swarm's task: its node, its folder and everything this machine knows of it.
@@ -1510,9 +1564,10 @@ struct Worker {
     claims_view: Vec<ContextView>,
     /// For the handles it gives out. Weak, so this task doesn't keep its own channel open.
     own_tx: mpsc::WeakUnboundedSender<Msg>,
-    /// When to ask the members for the content passes are finding missing.
+    /// When to ask the members for each piece of content passes are finding missing.
+    fetches: FetchWaits,
+    /// When the first of those is due. None during a try, as a pass follows that anyway.
     fetch_at: Option<Instant>,
-    fetch_wait: Duration,
     fetching: bool,
 }
 
@@ -1572,8 +1627,8 @@ impl Worker {
             claims_at: None,
             claims_view: Vec::new(),
             own_tx,
+            fetches: FetchWaits::default(),
             fetch_at: None,
-            fetch_wait: FETCH_AFTER,
             fetching: false,
             shared,
         }
@@ -1602,8 +1657,9 @@ impl Worker {
                 () = sleep_until(self.pass_at) => {
                     self.pass().await;
                     self.claims_refresh().await;
-                    self.fetch_wanted();
+                    self.fetch_wanted().await;
                 }
+                () = sleep_until(self.fetch_at) => self.fetch_due().await,
                 () = sleep_until(self.claims_at) => self.claims_due().await,
                 () = sleep_until(self.relay_retry_at) => {
                     self.relay_retry_at = None;
@@ -1768,44 +1824,64 @@ impl Worker {
     }
 
     /// Asks the members for content this pass found missing, once iroh-docs has had its time to
-    /// bring it. A pass follows each try, to use what came and see what didn't.
-    fn fetch_wanted(&mut self) {
+    /// bring each piece. A pass follows each try, to use what came and see what didn't.
+    async fn fetch_wanted(&mut self) {
+        self.fetch_at = None;
         let Some(node) = self.node.clone() else {
             return;
         };
-        let wanted: Vec<Hash> = node.take_missing().into_iter().collect();
-        if wanted.is_empty() {
-            self.fetch_at = None;
-            self.fetch_wait = FETCH_AFTER;
-            return;
-        }
+        self.fetches.noted(&node.take_missing(), Instant::now());
         if self.fetching {
             return;
         }
-        let now = Instant::now();
-        let at = *self.fetch_at.get_or_insert(now + self.fetch_wait);
-        if now < at {
-            self.soon(at - now);
-            return;
+        let hashes = self.still_missing(&node).await;
+        if !hashes.is_empty() {
+            let others: Vec<String> = self
+                .roster
+                .iter()
+                .flat_map(Roster::endpoints)
+                .filter(|e| *e != self.my_endpoint)
+                .collect();
+            if !others.is_empty() {
+                self.fetching = true;
+                self.shared.remember_peers(&node);
+                self.sends.spawn(async move {
+                    node.fetch_content(&hashes, &others, PERIODIC).await;
+                    Sent::Fetched { hashes }
+                });
+                return;
+            }
+            self.fetches.asked(&hashes, Instant::now());
         }
-        let others: Vec<String> = self
-            .roster
-            .iter()
-            .flat_map(Roster::endpoints)
-            .filter(|e| *e != self.my_endpoint)
-            .collect();
+        self.fetch_at = self.fetches.next_due();
+    }
+
+    /// A wait has run out. If what it was for is still missing, a pass says whether it's still
+    /// wanted and asks for it. If it came meanwhile, as it does when a read was merely early,
+    /// nothing needs a pass.
+    async fn fetch_due(&mut self) {
         self.fetch_at = None;
-        self.fetch_wait = (self.fetch_wait * 2).min(PERIODIC);
-        if others.is_empty() {
-            self.soon(self.fetch_wait);
+        let Some(node) = self.node.clone() else {
             return;
+        };
+        if self.still_missing(&node).await.is_empty() {
+            self.fetch_at = self.fetches.next_due();
+        } else {
+            self.soon(Duration::ZERO);
         }
-        self.fetching = true;
-        self.shared.remember_peers(&node);
-        self.sends.spawn(async move {
-            node.fetch_content(&wanted, &others, PERIODIC).await;
-            Sent::Fetched
-        });
+    }
+
+    /// What is due and still isn't here. What has arrived is forgotten.
+    async fn still_missing(&mut self, node: &SwarmNode) -> Vec<Hash> {
+        let mut missing = Vec::new();
+        for hash in self.fetches.due(Instant::now()) {
+            if matches!(node.has_content(hash).await, Ok(true)) {
+                self.fetches.forget(&hash);
+            } else {
+                missing.push(hash);
+            }
+        }
+        missing
     }
 
     /// Ruling 9: the gate follows the roster, every new member machine is synced with, and a
@@ -2721,7 +2797,8 @@ impl Worker {
             }
             Sent::Removed | Sent::Answered => {}
             Sent::ClaimAsked { id, answers } => self.claim_asked(id, answers).await,
-            Sent::Fetched => {
+            Sent::Fetched { hashes } => {
+                self.fetches.asked(&hashes, Instant::now());
                 self.fetching = false;
                 self.soon(SETTLE);
             }
@@ -2848,6 +2925,97 @@ fn copy_machine(copy: &RelPath) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn noted(hashes: &[Hash]) -> HashSet<Hash> {
+        hashes.iter().copied().collect()
+    }
+
+    #[test]
+    fn a_hash_noted_just_before_anothers_deadline_is_not_due_with_it() {
+        let (a, b) = (Hash::new(b"a"), Hash::new(b"b"));
+        let start = Instant::now();
+        let mut waits = FetchWaits::default();
+        waits.noted(&noted(&[a]), start);
+        let just_before = start + FETCH_AFTER - Duration::from_millis(1);
+        waits.noted(&noted(&[a, b]), just_before);
+        assert!(waits.due(just_before).is_empty());
+        // Being noted again doesn't start a's wait over.
+        assert_eq!(waits.due(start + FETCH_AFTER), vec![a]);
+        assert_eq!(
+            waits.due(just_before + FETCH_AFTER).len(),
+            2,
+            "b's own wait has run out too",
+        );
+    }
+
+    #[test]
+    fn a_stuck_hash_backing_off_does_not_delay_a_new_hash() {
+        let (stuck, new) = (Hash::new(b"stuck"), Hash::new(b"new"));
+        let mut now = Instant::now();
+        let mut waits = FetchWaits::default();
+        waits.noted(&noted(&[stuck]), now);
+        now += FETCH_AFTER;
+        assert_eq!(waits.due(now), vec![stuck]);
+        // Each try that doesn't bring it doubles its wait, up to `PERIODIC`.
+        for wait in [10, 20, 40, 60, 60] {
+            waits.asked(&[stuck], now);
+            let wait = Duration::from_secs(wait);
+            assert_eq!(waits.next_due(), Some(now + wait));
+            assert!(waits.due(now + wait - Duration::from_millis(1)).is_empty());
+            now += wait;
+            assert_eq!(waits.due(now), vec![stuck]);
+        }
+        waits.asked(&[stuck], now);
+        waits.noted(&noted(&[stuck, new]), now);
+        assert_eq!(waits.next_due(), Some(now + FETCH_AFTER));
+        assert_eq!(waits.due(now + FETCH_AFTER), vec![new]);
+    }
+
+    #[test]
+    fn an_arrived_or_no_longer_noted_hash_is_forgotten() {
+        let (arrived, superseded, stuck) = (
+            Hash::new(b"arrived"),
+            Hash::new(b"old"),
+            Hash::new(b"stuck"),
+        );
+        let start = Instant::now();
+        let mut waits = FetchWaits::default();
+        waits.noted(&noted(&[arrived, superseded, stuck]), start);
+        waits.forget(&arrived);
+        waits.noted(&noted(&[stuck]), start);
+        let later = start + FETCH_AFTER;
+        assert_eq!(waits.due(later), vec![stuck]);
+        // Forgotten, it starts over if something wants it again, and a try that ended after it
+        // went doesn't bring it back.
+        waits.asked(&[arrived, stuck], later);
+        waits.noted(&noted(&[stuck, superseded]), later);
+        assert_eq!(waits.next_due(), Some(later + FETCH_AFTER));
+        assert_eq!(waits.due(later + FETCH_AFTER), vec![superseded]);
+        waits.noted(&noted(&[]), later);
+        assert_eq!(waits.next_due(), None);
+    }
+
+    #[test]
+    fn the_next_due_time_is_the_earliest_hash_waits_for() {
+        let (a, b, c) = (Hash::new(b"a"), Hash::new(b"b"), Hash::new(b"c"));
+        let start = Instant::now();
+        let mut waits = FetchWaits::default();
+        assert_eq!(waits.next_due(), None);
+        waits.noted(&noted(&[a]), start);
+        assert_eq!(waits.next_due(), Some(start + FETCH_AFTER));
+        let later = start + Duration::from_secs(3);
+        waits.noted(&noted(&[a, b]), later);
+        assert_eq!(waits.next_due(), Some(start + FETCH_AFTER));
+        // Once a has been asked for, b is next.
+        let asked = start + FETCH_AFTER;
+        waits.asked(&[a], asked);
+        assert_eq!(waits.next_due(), Some(later + FETCH_AFTER));
+        // With b gone, a's longer wait is next, until c comes in ahead of it.
+        waits.noted(&noted(&[a]), asked);
+        assert_eq!(waits.next_due(), Some(asked + FETCH_AFTER * 2));
+        waits.noted(&noted(&[a, c]), asked);
+        assert_eq!(waits.next_due(), Some(asked + FETCH_AFTER));
+    }
 
     fn view_with_contexts(id: &str, name: &str, contexts: &[&str]) -> SwarmView {
         SwarmView {

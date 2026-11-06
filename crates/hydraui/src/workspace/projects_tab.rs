@@ -3070,15 +3070,27 @@ impl Workspace {
         let exe = hydra_exe();
         let (env_s, slug_s, ticket_s) = (env.to_string(), slug.to_string(), ticket.to_string());
         let (env_bg, slug_bg) = (env_s.clone(), slug_s.clone());
+        let claude_json = EnvName::parse(env).ok().map(|n| {
+            self.hydra
+                .paths
+                .state_dir(&n)
+                .join("claude")
+                .join(".claude.json")
+        });
         cx.spawn_in(window, async move |this, cx| {
             let made = cx
                 .background_spawn(async move {
-                    match clones.as_slice() {
+                    let made = match clones.as_slice() {
                         [one] if !several => {
                             pj::ticket_worktree(&exe, &env_bg, &one.clone, &t, one.base.as_deref())
                         }
                         _ => pj::ticket_workspace(&exe, &env_bg, &slug_bg, &clones, &t),
+                    }?;
+                    // Else its session waits at Claude's "trust this folder?" prompt.
+                    if let Some(file) = claude_json {
+                        pj::trust_folder(&file, &made.0)?;
                     }
+                    Ok(made)
                 })
                 .await;
             let _ = this.update_in(cx, |ws, window, cx| {

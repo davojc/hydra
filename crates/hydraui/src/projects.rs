@@ -1160,6 +1160,41 @@ fn worktree_at(
     Ok(())
 }
 
+/// Marks `folder` as trusted in an environment's Claude state (`.claude.json` in its
+/// CLAUDE_CONFIG_DIR), as accepting Claude Code's "trust this folder?" prompt would. hydraui
+/// does this only for the folders it makes for a milestone run's sessions, from the user's own
+/// clones: otherwise each new ticket's session sits at that prompt. Without that file (Claude
+/// never ran there) it does nothing; the prompt then shows as usual.
+pub fn trust_folder(claude_json: &Path, folder: &Path) -> Result<(), String> {
+    let Ok(text) = std::fs::read_to_string(claude_json) else {
+        return Ok(());
+    };
+    let mut state: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("{} doesn't read: {e}", claude_json.display()))?;
+    let root = state
+        .as_object_mut()
+        .ok_or_else(|| format!("{} isn't a JSON object", claude_json.display()))?;
+    let projects = root
+        .entry("projects")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or("its projects entry isn't an object")?;
+    let entry = projects
+        .entry(folder.display().to_string())
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or("its entry for the folder isn't an object")?;
+    if entry.get("hasTrustDialogAccepted") == Some(&serde_json::Value::Bool(true)) {
+        return Ok(());
+    }
+    entry.insert("hasTrustDialogAccepted".into(), true.into());
+    let out = serde_json::to_string_pretty(&state).map_err(|e| e.to_string())?;
+    // Written whole and renamed into place, so Claude never reads half a file.
+    let tmp = claude_json.with_extension("json.hydraui-tmp");
+    std::fs::write(&tmp, out).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, claude_json).map_err(|e| e.to_string())
+}
+
 /// Records that work on `ticket` started: in progress, on `branch`, with how it was started.
 pub fn start_work(
     dir: &Path,
@@ -2768,5 +2803,32 @@ mod tests {
             ticket_workspace(none, "dev", "pg", &repos, &t).unwrap().0,
             folder
         );
+    }
+
+    #[test]
+    fn a_run_folder_is_trusted_without_losing_claudes_other_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join(".claude.json");
+        let folder = Path::new("/Users/me/Projects/pg-tickets/pg-2-group-page");
+        // No state file yet: nothing to do.
+        trust_folder(&file, folder).unwrap();
+        assert!(!file.exists());
+        std::fs::write(
+            &file,
+            r#"{"oauthAccount":{"emailAddress":"a@b"},"projects":{"/x":{"hasTrustDialogAccepted":true},"/Users/me/Projects/pg-tickets/pg-2-group-page":{"allowedTools":["Bash"]}}}"#,
+        )
+        .unwrap();
+        trust_folder(&file, folder).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let entry = &v["projects"][folder.display().to_string()];
+        assert_eq!(entry["hasTrustDialogAccepted"], true);
+        assert_eq!(entry["allowedTools"][0], "Bash");
+        assert_eq!(v["projects"]["/x"]["hasTrustDialogAccepted"], true);
+        assert_eq!(v["oauthAccount"]["emailAddress"], "a@b");
+        // A file that doesn't read is left alone, with an error.
+        std::fs::write(&file, "{nope").unwrap();
+        assert!(trust_folder(&file, folder).is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "{nope");
     }
 }

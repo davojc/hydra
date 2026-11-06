@@ -193,6 +193,9 @@ pub struct TicketMeta {
     pub started_by: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<Datetime>,
+    /// When its work session reported it finished (spec §14.5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<Datetime>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub skill: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]

@@ -895,6 +895,7 @@ fn work(dir: &Path, ticket: &str, name: &str, args: &Value) -> Result<String, St
             } else {
                 TicketStatus::InReview
             };
+            t.meta.finished_at = Some(progress::now());
             t.body = format!("{}\n\n## Work\n\n{summary}\n", t.body.trim_end());
             repo::write_ticket(dir, &t).map_err(|e| e.to_string())?;
             Ok(if done {
@@ -1334,6 +1335,7 @@ mod tests {
         let t = repo::load(&dir).unwrap().tickets.remove(0);
         assert_eq!(t.meta.status, TicketStatus::Done);
         assert!(t.meta.prs.is_empty());
+        assert!(t.meta.finished_at.is_some());
         assert!(
             t.body
                 .contains("## Work\n\nnewRecords misses location types.")

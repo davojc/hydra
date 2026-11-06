@@ -121,6 +121,24 @@ pub fn session_questions<'a>(p: &'a Project, ticket: &str) -> Vec<&'a Decision> 
         .collect()
 }
 
+/// The milestone's tickets that have a reported outcome, latest first: by when their session
+/// finished, then (for ones reported before that was recorded) the highest number first.
+pub fn latest_outcomes<'a>(p: &'a Project, milestone: &str) -> Vec<&'a Ticket> {
+    let mut out: Vec<&Ticket> = p
+        .tickets
+        .iter()
+        .filter(|t| t.meta.milestone == milestone)
+        .filter(|t| !crate::projects::ticket_sections(&t.body).work.is_empty())
+        .collect();
+    out.sort_by_key(|t| {
+        std::cmp::Reverse((
+            t.meta.finished_at.map(|d| d.to_string()),
+            hydraui_projects::number_of(&t.id),
+        ))
+    });
+    out
+}
+
 /// Whether starting `milestone`'s run picks up work already begun: one of its tickets is in
 /// progress, its session gone (hydraui closed, or the run was stopped). Start then says Continue.
 pub fn picks_up(p: &Project, milestone: &str) -> bool {
@@ -387,5 +405,26 @@ mod tests {
             .map(|d| d.id.as_str())
             .collect();
         assert_eq!(ids, ["D-4"]);
+    }
+
+    #[test]
+    fn the_latest_outcomes_come_first() {
+        let mut p = project(vec![
+            ticket("PG-1", BE, TicketStatus::Done),
+            ticket("PG-2", BE, TicketStatus::InReview),
+            ticket("PG-3", FE, TicketStatus::InReview),
+            ticket("PG-4", FE, TicketStatus::Todo),
+        ]);
+        for t in &mut p.tickets[..3] {
+            t.body = format!("Ask.\n\n## Work\n\n{} done.\n", t.id);
+        }
+        p.tickets[1].meta.finished_at = Some("2026-11-06T10:00:00Z".parse().unwrap());
+        p.tickets[2].meta.finished_at = Some("2026-11-06T09:00:00Z".parse().unwrap());
+        let ids: Vec<&str> = latest_outcomes(&p, "M1")
+            .iter()
+            .map(|t| t.id.as_str())
+            .collect();
+        // Timed ones latest first; one reported before times were kept comes after.
+        assert_eq!(ids, ["PG-2", "PG-3", "PG-1"]);
     }
 }

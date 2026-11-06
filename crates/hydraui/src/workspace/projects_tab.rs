@@ -65,6 +65,12 @@ pub(super) enum Page {
         env: String,
         slug: String,
     },
+    /// One ticket: what it asks and what came of it.
+    Ticket {
+        env: String,
+        slug: String,
+        id: String,
+    },
     Waiting,
 }
 
@@ -367,7 +373,8 @@ impl Workspace {
             let project = |p: &Page| match p {
                 Page::Project { env, slug }
                 | Page::Milestone { env, slug, .. }
-                | Page::Settings { env, slug } => Some((env.clone(), slug.clone())),
+                | Page::Settings { env, slug }
+                | Page::Ticket { env, slug, .. } => Some((env.clone(), slug.clone())),
                 _ => None,
             };
             // Another project opens on its Overview; a milestone's way back keeps the tab.
@@ -3711,6 +3718,7 @@ impl Workspace {
             Page::Project { env, slug } => self.project_page(env, slug, cx),
             Page::Milestone { env, slug, id } => self.milestone_page(env, slug, id, cx),
             Page::Settings { env, slug } => self.project_settings_page(env, slug, cx),
+            Page::Ticket { env, slug, id } => self.ticket_page(env, slug, id, cx),
             Page::Waiting => self.waiting_page(cx),
         };
         // The planning session sits beside its project's pages.
@@ -3826,6 +3834,37 @@ impl Workspace {
                     .child(crumb("crumb-p", name_of(env, slug), Some(back), cx))
                     .child(sep())
                     .child(crumb("crumb-m", title, None, cx));
+            }
+            Page::Ticket { env, slug, id } => {
+                let back = Page::Project {
+                    env: env.clone(),
+                    slug: slug.clone(),
+                };
+                trail =
+                    trail
+                        .child(sep())
+                        .child(crumb("crumb-p", name_of(env, slug), Some(back), cx));
+                let milestone = self
+                    .find_project(env, slug)
+                    .and_then(|p| p.tickets.iter().find(|t| &t.id == id))
+                    .map(|t| t.meta.milestone.clone())
+                    .filter(|m| !m.is_empty());
+                if let Some(m) = milestone {
+                    let to = Page::Milestone {
+                        env: env.clone(),
+                        slug: slug.clone(),
+                        id: m.clone(),
+                    };
+                    trail = trail.child(sep()).child(crumb(
+                        "crumb-m",
+                        pj::milestone_name(&m),
+                        Some(to),
+                        cx,
+                    ));
+                }
+                trail = trail
+                    .child(sep())
+                    .child(crumb("crumb-t", id.clone(), None, cx));
             }
             Page::Settings { env, slug } => {
                 let back = Page::Project {
@@ -5453,8 +5492,321 @@ impl Workspace {
             .gap_5()
             .child(head)
             .children(self.run_controls(env, p, m, cx))
+            .child(self.milestone_progress(env, p, m, &c, cx))
             .child(board)
             .into_any_element()
+    }
+
+    /// Where a milestone is up to: how many tickets stand where, and the latest outcomes,
+    /// each opening its ticket.
+    fn milestone_progress(
+        &self,
+        env: &str,
+        p: &Project,
+        m: &Milestone,
+        c: &Counts,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut panel = v_flex()
+            .gap_3()
+            .p_4()
+            .rounded_lg()
+            .bg(color(theme::RAISED))
+            .border_1()
+            .border_color(color(theme::BORDER_SUBTLE))
+            .child(
+                h_flex()
+                    .gap_3()
+                    .items_baseline()
+                    .flex_wrap()
+                    .child(section_title("Where it's up to"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(color(theme::TEXT_SECONDARY))
+                            .child(format!(
+                                "{} of {} done · {} in review · {} in progress · {} to do",
+                                c.done,
+                                c.total(),
+                                c.in_review,
+                                c.in_progress,
+                                c.todo
+                            )),
+                    ),
+            )
+            .child(status_bar(c, 6.));
+        let latest = crate::project_run::latest_outcomes(p, &m.id);
+        if latest.is_empty() {
+            return panel
+                .child(muted("No ticket has reported back yet."))
+                .into_any_element();
+        }
+        let now = pj::now_secs();
+        for t in latest.into_iter().take(5) {
+            let report = pj::ticket_sections(&t.body);
+            let line = report
+                .work
+                .last()
+                .map(|w| pj::headline(w))
+                .unwrap_or_default();
+            let to = Page::Ticket {
+                env: env.to_string(),
+                slug: p.slug.clone(),
+                id: t.id.clone(),
+            };
+            panel = panel.child(
+                v_flex()
+                    .id(SharedString::from(format!("latest-{}", t.id)))
+                    .gap_1()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(color(theme::SURFACE)))
+                    .on_click(cx.listener(move |ws, _, _, cx| ws.go(to.clone(), cx)))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .size(px(8.))
+                                    .rounded_full()
+                                    .bg(color(status_colour(t.meta.status))),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .child(format!("{} · {}", t.id, t.meta.title)),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(color(theme::TEXT_MUTED))
+                                    .child(match t.meta.finished_at {
+                                        Some(at) => format!(
+                                            "{} · {} ago",
+                                            t.meta.status.label(),
+                                            pj::age(&at, now)
+                                        ),
+                                        None => t.meta.status.label().to_string(),
+                                    }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .pl(px(16.))
+                            .text_sm()
+                            .text_color(color(theme::TEXT_SECONDARY))
+                            .whitespace_normal()
+                            .child(line),
+                    ),
+            );
+        }
+        panel.into_any_element()
+    }
+
+    /// One ticket's page: what came of it (the work sessions' reports, its pull requests and
+    /// checks), the decisions made on it, then what it asked for.
+    fn ticket_page(&self, env: &str, slug: &str, id: &str, cx: &mut Context<Self>) -> AnyElement {
+        let Some(p) = self.find_project(env, slug) else {
+            return muted("This project isn't in the repo any more.").into_any_element();
+        };
+        let Some(t) = p.tickets.iter().find(|t| t.id == id) else {
+            return muted("This ticket isn't in the project any more.").into_any_element();
+        };
+        let report = pj::ticket_sections(&t.body);
+        let now = pj::now_secs();
+        let kind = match t.meta.kind {
+            TicketKind::Feature => "feature",
+            TicketKind::Bug => "bug",
+            TicketKind::Chore => "chore",
+        };
+        let colour = status_colour(t.meta.status);
+        let mut facts: Vec<String> = Vec::new();
+        facts.push(if t.meta.repo.is_empty() {
+            "any of the project's repos".to_string()
+        } else {
+            t.meta.repo.clone()
+        });
+        if !t.meta.assignee.is_empty() {
+            facts.push(t.meta.assignee.clone());
+        }
+        if let Some(at) = t.meta.started_at {
+            facts.push(format!("started {} ago", pj::age(&at, now)));
+        }
+        if let Some(at) = t.meta.finished_at {
+            facts.push(format!("finished {} ago", pj::age(&at, now)));
+        }
+        let mut page = v_flex().gap_5().max_w(px(960.)).child(
+            v_flex()
+                .gap_2()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .flex_wrap()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(color(theme::TEXT_MUTED))
+                                .child(t.id.clone()),
+                        )
+                        .child(pill(t.meta.status.label(), colour, theme::SURFACE))
+                        .child(pill(kind, theme::TEXT_SECONDARY, theme::SURFACE))
+                        .when(t.meta.review != Review::Approved, |d| {
+                            d.child(review_pill(t.meta.review))
+                        })
+                        .when(t.meta.change.is_some(), |d| d.child(change_pill())),
+                )
+                .child(
+                    div()
+                        .text_2xl()
+                        .whitespace_normal()
+                        .child(t.meta.title.clone()),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(color(theme::TEXT_SECONDARY))
+                        .child(facts.join(" · ")),
+                ),
+        );
+        if let Some(pane) = self.worker(env, slug, id) {
+            page =
+                page.child(
+                    h_flex().gap_3().items_center().child(
+                        Button::new("ticket-open-session")
+                            .label("Open session")
+                            .small()
+                            .primary()
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                ws.show_terminal(pane, window, cx)
+                            })),
+                    ),
+                );
+        }
+        // What came of it.
+        let mut outcome = v_flex().gap_3().child(section_title("Outcome"));
+        if report.work.is_empty() && t.meta.prs.is_empty() {
+            outcome = outcome.child(muted(match t.meta.status {
+                TicketStatus::Todo => "Not started yet.",
+                TicketStatus::InProgress => "Its session hasn't reported back yet.",
+                _ => "Nothing was reported.",
+            }));
+        }
+        for (i, url) in t.meta.prs.iter().enumerate() {
+            let u = url.clone();
+            outcome = outcome.child(
+                div()
+                    .id(SharedString::from(format!("ticket-pr-{i}")))
+                    .text_sm()
+                    .text_color(color(theme::TEAL))
+                    .cursor_pointer()
+                    .hover(|s| s.underline())
+                    .child(pr_label(url))
+                    .on_click(move |_, _, cx| cx.open_url(&u)),
+            );
+        }
+        if !t.meta.check.is_empty() {
+            let passed = t.meta.check == "passed";
+            outcome = outcome.child(notice(
+                &format!(
+                    "Check {}: {}",
+                    if passed { "passed" } else { "failed" },
+                    t.meta.check_note
+                ),
+                if passed { theme::GREEN } else { theme::RED },
+                if passed {
+                    theme::SURFACE
+                } else {
+                    theme::RED_TINT
+                },
+            ));
+        }
+        // The latest report first; earlier ones (from a restarted session) after it.
+        for (i, w) in report.work.iter().rev().enumerate() {
+            outcome = outcome.child(
+                div()
+                    .p_4()
+                    .rounded_lg()
+                    .bg(color(theme::RAISED))
+                    .border_1()
+                    .border_color(color(theme::BORDER_SUBTLE))
+                    .child(
+                        gpui_base::TextView::markdown(
+                            SharedString::from(format!("ticket-work-{id}-{i}")),
+                            w.clone(),
+                        )
+                        .selectable(true),
+                    ),
+            );
+        }
+        page = page.child(outcome);
+        // The decisions made (or waiting) on it.
+        let decisions: Vec<&Decision> =
+            p.decisions.iter().filter(|d| d.meta.ticket == id).collect();
+        if !decisions.is_empty() {
+            let mut list = v_flex().gap_2().child(section_title("Decisions"));
+            for d in decisions {
+                list = list.child(
+                    v_flex()
+                        .gap_1()
+                        .px_4()
+                        .py_3()
+                        .rounded_md()
+                        .bg(color(if d.is_open() {
+                            theme::AMBER_TINT
+                        } else {
+                            theme::SURFACE
+                        }))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(color(theme::TEXT_MUTED))
+                                .child(pj::decision_name(&d.id)),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .whitespace_normal()
+                                .child(d.meta.question.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .whitespace_normal()
+                                .text_color(color(if d.is_open() {
+                                    theme::AMBER
+                                } else {
+                                    theme::TEXT_SECONDARY
+                                }))
+                                .child(if d.is_open() {
+                                    "Waiting for an answer in Decisions.".to_string()
+                                } else {
+                                    format!("Answer: {}", d.meta.answer.trim())
+                                }),
+                        ),
+                );
+            }
+            page = page.child(list);
+        }
+        // What it asked for.
+        page = page.child(v_flex().gap_2().child(section_title("The ticket")).child(
+            if report.brief.is_empty() {
+                muted("No description.").into_any_element()
+            } else {
+                gpui_base::TextView::markdown(
+                    SharedString::from(format!("ticket-brief-{id}")),
+                    report.brief.clone(),
+                )
+                .selectable(true)
+                .into_any_element()
+            },
+        ));
+        page.into_any_element()
     }
 
     #[allow(clippy::too_many_arguments)] // The card's inputs, all read-only.
@@ -5538,7 +5890,20 @@ impl Workspace {
                         )
                     }),
             )
-            .child(div().text_sm().child(t.meta.title.clone()))
+            .child({
+                let to = Page::Ticket {
+                    env: env.to_string(),
+                    slug: p.slug.clone(),
+                    id: t.id.clone(),
+                };
+                div()
+                    .id(SharedString::from(format!("open-ticket-{}", t.id)))
+                    .text_sm()
+                    .cursor_pointer()
+                    .hover(|s| s.underline())
+                    .child(t.meta.title.clone())
+                    .on_click(cx.listener(move |ws, _, _, cx| ws.go(to.clone(), cx)))
+            })
             .when(waiting && !t.body.trim().is_empty(), |d| {
                 d.child(
                     div()

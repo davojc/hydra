@@ -1160,6 +1160,63 @@ fn worktree_at(
     Ok(())
 }
 
+/// A ticket's body split into what was asked and what came of it: the brief, then the work
+/// sessions' reports (`## Work`) and the checks (`## Check`) appended after it, in order.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct TicketSections {
+    pub brief: String,
+    pub work: Vec<String>,
+    pub check: Vec<String>,
+}
+
+pub fn ticket_sections(body: &str) -> TicketSections {
+    enum At {
+        Brief,
+        Work,
+        Check,
+    }
+    let mut out = TicketSections::default();
+    let mut at = At::Brief;
+    let mut text = String::new();
+    let flush = |at: &At, text: &mut String, out: &mut TicketSections| {
+        let t = std::mem::take(text).trim().to_string();
+        match at {
+            At::Brief => out.brief = t,
+            At::Work if !t.is_empty() => out.work.push(t),
+            At::Check if !t.is_empty() => out.check.push(t),
+            _ => {}
+        }
+    };
+    for line in body.lines() {
+        let next = match line.trim_end() {
+            "## Work" => Some(At::Work),
+            "## Check" => Some(At::Check),
+            _ => None,
+        };
+        match next {
+            Some(n) => {
+                flush(&at, &mut text, &mut out);
+                at = n;
+            }
+            None => {
+                text.push_str(line);
+                text.push('\n');
+            }
+        }
+    }
+    flush(&at, &mut text, &mut out);
+    out
+}
+
+/// The first line of a report, for a one-line "latest" entry.
+pub fn headline(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// Marks `folder` as trusted in an environment's Claude state (`.claude.json` in its
 /// CLAUDE_CONFIG_DIR), as accepting Claude Code's "trust this folder?" prompt would. hydraui
 /// does this only for the folders it makes for a milestone run's sessions, from the user's own
@@ -2830,5 +2887,24 @@ mod tests {
         std::fs::write(&file, "{nope").unwrap();
         assert!(trust_folder(&file, folder).is_err());
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "{nope");
+    }
+
+    #[test]
+    fn a_tickets_outcome_is_read_apart_from_its_brief() {
+        let body = "**Why:** x\n\n**What to do**\n- a\n\n## Work\n\nFound three gaps.\nMore.\n\n\
+                    ## Check\n\nPassed: fine\n\n## Work\n\nFixed the gaps.\n";
+        let s = ticket_sections(body);
+        assert_eq!(s.brief, "**Why:** x\n\n**What to do**\n- a");
+        assert_eq!(s.work, ["Found three gaps.\nMore.", "Fixed the gaps."]);
+        assert_eq!(s.check, ["Passed: fine"]);
+        assert_eq!(headline(&s.work[0]), "Found three gaps.");
+        // A ticket nobody has worked yet is all brief.
+        assert_eq!(
+            ticket_sections("Just the ask."),
+            TicketSections {
+                brief: "Just the ask.".into(),
+                ..Default::default()
+            }
+        );
     }
 }

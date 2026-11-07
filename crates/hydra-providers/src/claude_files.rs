@@ -330,7 +330,7 @@ pub fn render_claude_md(env: &str, base: Option<&str>, over: Option<&str>) -> Op
 /// The MCP server hydra registers in every environment (§3).
 pub const HYDRAUI_SERVER: &str = "hydraui";
 
-/// The tools that server offers; Claude Code may call them without asking.
+/// The tools that server offers.
 pub const HYDRAUI_TOOLS: [&str; 17] = [
     "tasks_read",
     "tasks_add",
@@ -351,7 +351,25 @@ pub const HYDRAUI_TOOLS: [&str; 17] = [
     "claims_list",
 ];
 
-/// Appends each missing `mcp__hydraui__<tool>` to `permissions.allow` in the settings JSON
+/// The tools of that server that Claude Code may call without asking. The claims tools are left
+/// to the session's permission mode: nothing undoes a done, which holds the key for everyone.
+pub const HYDRAUI_ALLOWED: [&str; 13] = [
+    "tasks_read",
+    "tasks_add",
+    "tasks_take",
+    "tasks_verify",
+    "tasks_mine",
+    "hydra_access",
+    "run_start",
+    "stage_start",
+    "run_status",
+    "stage_brief",
+    "stage_report",
+    "stage_ask",
+    "stage_answer",
+];
+
+/// Appends each missing `mcp__hydraui__<tool>` of [`HYDRAUI_ALLOWED`] to `permissions.allow` in the settings JSON
 /// (creating permissions/allow as needed, keeping every other key and rule). Idempotent.
 pub fn add_hydraui_allow(settings_json: &str) -> Result<String, String> {
     let mut root: Value = serde_json::from_str(settings_json).map_err(|e| e.to_string())?;
@@ -368,7 +386,7 @@ pub fn add_hydraui_allow(settings_json: &str) -> Result<String, String> {
         .or_insert_with(|| Value::Array(Vec::new()))
         .as_array_mut()
         .ok_or("settings.json: permissions.allow isn't a list")?;
-    for tool in HYDRAUI_TOOLS {
+    for tool in HYDRAUI_ALLOWED {
         let rule = format!("mcp__{HYDRAUI_SERVER}__{tool}");
         if !allow.iter().any(|r| r.as_str() == Some(&rule)) {
             allow.push(Value::String(rule));
@@ -471,13 +489,11 @@ mod tests {
                 "mcp__hydraui__stage_brief",
                 "mcp__hydraui__stage_report",
                 "mcp__hydraui__stage_ask",
-                "mcp__hydraui__stage_answer",
-                "mcp__hydraui__claims_take",
-                "mcp__hydraui__claims_release",
-                "mcp__hydraui__claims_done",
-                "mcp__hydraui__claims_list"
+                "mcp__hydraui__stage_answer"
             ])
         );
+        // Claims follow the session's permission mode: nothing undoes a done.
+        assert!(!once.contains("claims_"), "{once}");
         assert!(
             add_hydraui_allow("{}")
                 .unwrap()

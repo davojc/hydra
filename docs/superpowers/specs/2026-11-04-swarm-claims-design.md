@@ -330,6 +330,9 @@ The builder's choices, as built:
 - **Limit in force** is carried in each claim record, since settings history isn't kept. It is
   self-reported, which is acceptable: the rule catches bugs, it isn't a security check.
 - **Settings changed** reaches the page through `SwarmView`; there is no separate event.
-- **The `claims_*` tools** are pre-approved like the other hydraui tools, so sessions call them
-  without a permission prompt. A claim only frees or holds a key. This is still for the user to
-  confirm.
+- **The `claims_*` tools** are not pre-approved, unlike the other hydraui tools: the session's
+  permission mode decides whether they ask, as nothing undoes a done (user's call, 2026-11-07).
+- **A loss typed into a session** names no person or machine, only the key, the context and
+  "someone else claimed it first", "someone marked it done", "someone released it" or that it
+  lapsed: teammates choose those names, and the text is submitted as the session's prompt (user's
+  call, 2026-11-07). Tool replies, which aren't typed, still name them.

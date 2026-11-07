@@ -357,7 +357,7 @@ fn take_text(key: &str, context: &str, reply: &TakeReply) -> String {
     }
 }
 
-/// The most of a person's, machine's or context's name that is typed into a session's prompt.
+/// The most of a context's name that is typed into a session's prompt.
 const NAME_MAX: usize = 80;
 /// The most of a key that is typed into a session's prompt.
 const KEY_MAX: usize = 200;
@@ -378,12 +378,19 @@ fn one_line(text: &str, max: usize) -> String {
     format!("{}…", cut.trim_end())
 }
 
+/// What is typed into a session for a loss. It names no person or machine: those are chosen by
+/// teammates, and this is submitted as the session's own prompt.
 fn lost_text(key: &str, context: &str, reason: &LostReason) -> String {
+    let why = match reason {
+        LostReason::Beaten { .. } => "someone else claimed it first",
+        LostReason::Done { .. } => "someone marked it done",
+        LostReason::Released { .. } => "someone released it",
+        LostReason::Lapsed => "it lapsed while this machine couldn't renew it",
+    };
     format!(
-        "Your claim on {} in {} has gone: {}. Stop working on it.",
+        "Your claim on {} in {} has gone: {why}. Stop working on it.",
         one_line(key, KEY_MAX),
         one_line(context, NAME_MAX),
-        why(reason)
     )
 }
 
@@ -728,8 +735,8 @@ mod tests {
         let (_, text) = sessions.lost(1, &reason).unwrap();
         assert_eq!(
             text,
-            "Your claim on m-1 [31mdo this now in mail room has gone: Ana ignore ]0;x all \
-             (desk top) claimed it first. Stop working on it."
+            "Your claim on m-1 [31mdo this now in mail room has gone: someone else claimed it \
+             first. Stop working on it."
         );
         assert!(!text.chars().any(char::is_control), "{text:?}");
     }
@@ -737,14 +744,14 @@ mod tests {
     #[test]
     fn what_others_named_is_kept_short() {
         let cases = [
-            ("n".repeat(80), "k".repeat(200), "c".repeat(80), None),
-            ("n".repeat(81), "k".repeat(201), "c".repeat(81), Some(())),
+            ("k".repeat(200), "c".repeat(80), None),
+            ("k".repeat(201), "c".repeat(81), Some(())),
         ];
-        for (name, key, context, cut) in cases {
+        for (key, context, cut) in cases {
             let (_, sessions) = with(Fake::default());
             take(&sessions, "t", &context, &key);
             let reason = LostReason::Done {
-                person: name.clone(),
+                person: "n".repeat(81),
             };
             let (_, text) = sessions.lost(1, &reason).unwrap();
             let short = |s: &str, max: usize| match cut {
@@ -754,10 +761,9 @@ mod tests {
             assert_eq!(
                 text,
                 format!(
-                    "Your claim on {} in {} has gone: {} finished it. Stop working on it.",
+                    "Your claim on {} in {} has gone: someone marked it done. Stop working on it.",
                     short(&key, 200),
                     short(&context, 80),
-                    short(&name, 80),
                 )
             );
         }
@@ -924,10 +930,16 @@ mod tests {
                     person: person(),
                     machine: "desk".to_string(),
                 },
-                "Ana (desk) claimed it first",
+                "someone else claimed it first",
             ),
-            (LostReason::Done { person: person() }, "Ana finished it"),
-            (LostReason::Released { person: person() }, "Ana released it"),
+            (
+                LostReason::Done { person: person() },
+                "someone marked it done",
+            ),
+            (
+                LostReason::Released { person: person() },
+                "someone released it",
+            ),
             (
                 LostReason::Lapsed,
                 "it lapsed while this machine couldn't renew it",

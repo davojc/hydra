@@ -468,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn the_list_offers_exactly_the_pre_approved_tools() {
+    fn the_list_offers_exactly_hydras_tools() {
         let names: Vec<_> = list()
             .as_array()
             .unwrap()

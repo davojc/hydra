@@ -13,7 +13,7 @@ use tokio::time::Instant;
 use super::{Msg, SETTLE, Sent, SwarmView, Worker};
 use crate::claims::{
     ClaimRecord, ContextSettings, DoneRecord, Holder, KeyState, People, Records, ReleaseRecord,
-    Take, decide_take, settle, valid_context_name,
+    ReopenRecord, Take, decide_take, settle, valid_context_name,
 };
 use crate::ids::PersonId;
 use crate::node::{SwarmNode, now_micros};
@@ -877,6 +877,28 @@ impl Worker {
                 .await
                 .map_err(|e| format!("{}: {e:#}", self.name))?;
         }
+        self.claims_refresh().await;
+        Ok(())
+    }
+
+    pub(super) async fn claim_reopen(&mut self, context: &str, key: &str) -> Result<(), String> {
+        check_claim(context, key)?;
+        let node = self.live_node()?;
+        let roster = self.fresh_roster(&node).await?;
+        if !People::from_roster(&roster).writes(&node.author()) {
+            return Err(format!(
+                "Only writers can reopen a finished key in {}.",
+                self.name
+            ));
+        }
+        let reopen = ReopenRecord {
+            context: context.to_string(),
+            key: key.to_string(),
+            at: now_micros(),
+        };
+        node.write_reopen(&reopen)
+            .await
+            .map_err(|e| format!("{}: {e:#}", self.name))?;
         self.claims_refresh().await;
         Ok(())
     }

@@ -15,8 +15,10 @@ use iroh_docs::store::Query;
 use serde::Serialize;
 
 use super::{Core, CoreSlot, MAX_RECORD_BYTES, NodeEvent, SwarmNode, lock, now_micros};
-use crate::claims::{ClaimRecord, ContextSettings, DoneRecord, Records, ReleaseRecord};
-use crate::paths::{claim_key, claims_context_prefix, done_key, release_key};
+use crate::claims::{
+    ClaimRecord, ContextSettings, DoneRecord, Records, ReleaseRecord, ReopenRecord,
+};
+use crate::paths::{claim_key, claims_context_prefix, done_key, release_key, reopen_key};
 use crate::roster::{Role, Roster};
 use crate::wire::{CLAIMS_ALPN, ClaimAnswer, ClaimAsk, OwnRecords, read_msg, write_msg};
 
@@ -110,6 +112,7 @@ enum Record {
     Claim(ClaimRecord),
     Done(DoneRecord),
     Release(ReleaseRecord),
+    Reopen(ReopenRecord),
 }
 
 /// What `bytes` say, as long as they say it about the document key they are stored under: an
@@ -129,6 +132,11 @@ fn parse_record(doc_key: &[u8], bytes: &[u8]) -> Option<Record> {
         && doc_key == release_key(&r.context, &r.key, &r.target)
     {
         return Some(Record::Release(r));
+    }
+    if let Ok(r) = serde_json::from_slice::<ReopenRecord>(bytes)
+        && doc_key == reopen_key(&r.context, &r.key)
+    {
+        return Some(Record::Reopen(r));
     }
     None
 }
@@ -162,6 +170,11 @@ impl SwarmNode {
     pub async fn write_release(&self, release: &ReleaseRecord) -> anyhow::Result<()> {
         let key = release_key(&release.context, &release.key, &release.target);
         self.core.write_record(key, release).await
+    }
+
+    pub async fn write_reopen(&self, reopen: &ReopenRecord) -> anyhow::Result<()> {
+        let key = reopen_key(&reopen.context, &reopen.key);
+        self.core.write_record(key, reopen).await
     }
 
     /// What this machine knows about a context: its document and what members have told it, with
@@ -250,6 +263,8 @@ impl SwarmNode {
                 Some(Record::Claim(c)) => now.saturating_sub(c.renewed_at) > lapse,
                 Some(Record::Done(d)) => now.saturating_sub(d.at) > keep,
                 Some(Record::Release(r)) => now.saturating_sub(r.at) > keep.max(lapse),
+                // Every done it covers is at or before it, so has aged out by then.
+                Some(Record::Reopen(r)) => now.saturating_sub(r.at) > keep,
                 None => false,
             };
             if old {
@@ -363,6 +378,7 @@ impl Core {
                 Some(Record::Claim(c)) => records.claims.push((author, c)),
                 Some(Record::Done(d)) => records.dones.push((author, d)),
                 Some(Record::Release(r)) => records.releases.push((author, r)),
+                Some(Record::Reopen(r)) => records.reopens.push((author, r)),
                 None => {}
             }
         }
@@ -577,6 +593,7 @@ mod tests {
             claims: vec![("me".into(), claim("a", 5)), ("them".into(), claim("b", 9))],
             dones: vec![("them".into(), done("c", 9)), ("me".into(), done("d", 2))],
             releases: vec![],
+            reopens: vec![],
         };
         let own = own_records("inbox", "me", &records, 3, 1 << 20).unwrap();
         assert_eq!(own.context, "inbox");
@@ -612,6 +629,7 @@ mod tests {
                 ("me".into(), done("mid", 2)),
             ],
             releases: vec![],
+            reopens: vec![],
         };
         let room = sent_size(&claim("a", 5)) + 2 * sent_size(&done("new", 3));
         let own = own_records("inbox", "me", &records, 0, room).unwrap();

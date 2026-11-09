@@ -344,6 +344,13 @@ pub enum Command {
         author: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Undoes a done on `key`, so it can be claimed again. Writers only.
+    ClaimReopen {
+        swarm: String,
+        context: String,
+        key: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Makes the context `name`, or changes its settings.
     ClaimContextSet {
         swarm: String,
@@ -391,6 +398,7 @@ impl Command {
             | Command::Leave { swarm }
             | Command::Resolve { swarm, .. }
             | Command::ClaimRelease { swarm, .. }
+            | Command::ClaimReopen { swarm, .. }
             | Command::ClaimContextSet { swarm, .. }
             | Command::ClaimAgeForTests { swarm, .. }
             | Command::ClaimsSilentForTests { swarm }
@@ -1087,7 +1095,7 @@ fn to_swarm(shared: &Shared, swarms: &mut HashMap<String, Handle>, cmd: Command)
             let _ = reply.send(Err(text));
             return;
         }
-        Command::ClaimRelease { reply, .. } => {
+        Command::ClaimRelease { reply, .. } | Command::ClaimReopen { reply, .. } => {
             let _ = reply.send(Err(text));
             return;
         }
@@ -2119,6 +2127,15 @@ impl Worker {
                 ..
             } => {
                 let _ = reply.send(self.claim_release(&context, &key, &author).await);
+                Ok(())
+            }
+            Command::ClaimReopen {
+                context,
+                key,
+                reply,
+                ..
+            } => {
+                let _ = reply.send(self.claim_reopen(&context, &key).await);
                 Ok(())
             }
             Command::ClaimContextSet { name, settings, .. } => {

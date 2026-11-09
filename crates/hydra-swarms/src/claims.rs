@@ -101,6 +101,15 @@ pub struct DoneRecord {
     pub at: u64,
 }
 
+/// A writer undoing a finished key: every done and claim on it made at or before `at` stops
+/// counting.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct ReopenRecord {
+    pub context: String,
+    pub key: String,
+    pub at: u64,
+}
+
 /// A machine ending one claim, its own or another's: the one `target` made at `claimed_at`.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct ReleaseRecord {
@@ -135,7 +144,7 @@ impl People {
         }
     }
 
-    fn writes(&self, author: &str) -> bool {
+    pub(crate) fn writes(&self, author: &str) -> bool {
         self.members
             .get(author)
             .is_some_and(|(_, role)| *role >= Role::Writer)
@@ -161,6 +170,7 @@ pub struct Records {
     pub claims: Vec<(String, ClaimRecord)>,
     pub dones: Vec<(String, DoneRecord)>,
     pub releases: Vec<(String, ReleaseRecord)>,
+    pub reopens: Vec<(String, ReopenRecord)>,
 }
 
 /// Where a key stands once the records are settled.
@@ -181,12 +191,23 @@ pub fn settle(
     slack: Duration,
 ) -> BTreeMap<String, KeyState> {
     let keep = settings.keep_done_secs.saturating_mul(1_000_000);
+    // The newest reopen by a current writer, per key. A reader's or a retired machine's changes
+    // nothing.
+    let mut reopened: BTreeMap<&str, u64> = BTreeMap::new();
+    for (author, r) in &records.reopens {
+        if people.writes(author) {
+            let at = reopened.entry(r.key.as_str()).or_insert(r.at);
+            *at = (*at).max(r.at);
+        }
+    }
+    let covered = |key: &str, at: u64| reopened.get(key).is_some_and(|&r| at <= r);
     // A retired machine's finished keys still count; its claims never do.
     let dones: Vec<_> = records
         .dones
         .iter()
         .filter(|(author, d)| {
             (people.writes(author) || people.retired.contains(author))
+                && !covered(&d.key, d.at)
                 && now.saturating_sub(d.at) <= keep
         })
         .collect();
@@ -207,6 +228,7 @@ pub fn settle(
         if people.writes(author)
             && !finished.contains(c.key.as_str())
             && !released(author, c)
+            && !covered(&c.key, c.claimed_at)
             && now.saturating_sub(c.renewed_at) <= lapse
         {
             by_author.entry(author).or_default().push(c);
@@ -618,6 +640,113 @@ mod tests {
         let s = settle_at(&r, 1, 300);
         assert!(matches!(s.get("k1"), Some(KeyState::Done { .. })));
         assert_eq!(holder_of(&s, "k2").as_deref(), Some("a"));
+    }
+
+    fn reopen(key: &str, at: u64) -> ReopenRecord {
+        ReopenRecord {
+            context: "inbox".into(),
+            key: key.into(),
+            at,
+        }
+    }
+
+    #[test]
+    fn a_reopen_frees_a_finished_key() {
+        let mut r = Records::default();
+        r.dones.push(("a".into(), done("k", 10 * SEC)));
+        r.reopens.push(("b".into(), reopen("k", 20 * SEC)));
+        assert!(!settle_at(&r, -1, 30 * SEC).contains_key("k"));
+    }
+
+    #[test]
+    fn a_done_after_a_reopen_counts() {
+        let mut r = Records::default();
+        r.dones.push(("a".into(), done("k", 10 * SEC)));
+        r.reopens.push(("b".into(), reopen("k", 20 * SEC)));
+        r.dones.push(("c".into(), done("k", 30 * SEC)));
+        assert_eq!(
+            settle_at(&r, -1, 40 * SEC).get("k"),
+            Some(&KeyState::Done {
+                author: "c".into(),
+                at: 30 * SEC
+            })
+        );
+    }
+
+    #[test]
+    fn a_done_at_the_reopens_time_is_covered() {
+        let mut r = Records::default();
+        r.dones.push(("a".into(), done("k", 20 * SEC)));
+        r.reopens.push(("b".into(), reopen("k", 20 * SEC)));
+        assert!(!settle_at(&r, -1, 30 * SEC).contains_key("k"));
+    }
+
+    #[test]
+    fn a_reopen_ends_claims_made_before_it() {
+        let mut c = claim("k", 5 * SEC, -1);
+        c.renewed_at = 30 * SEC;
+        let mut r = records(&[("a", c)]);
+        r.dones.push(("a".into(), done("k", 10 * SEC)));
+        r.reopens.push(("b".into(), reopen("k", 20 * SEC)));
+        assert!(!settle_at(&r, -1, 30 * SEC).contains_key("k"));
+        r.claims.push(("b".into(), claim("k", 25 * SEC, -1)));
+        assert_eq!(
+            holder_of(&settle_at(&r, -1, 30 * SEC), "k").as_deref(),
+            Some("b")
+        );
+    }
+
+    #[test]
+    fn a_readers_reopen_changes_nothing() {
+        for who in ["reader", "stranger"] {
+            let mut r = Records::default();
+            r.dones.push(("a".into(), done("k", 10 * SEC)));
+            r.reopens.push((who.into(), reopen("k", 20 * SEC)));
+            assert!(matches!(
+                settle_at(&r, -1, 30 * SEC).get("k"),
+                Some(KeyState::Done { .. })
+            ));
+        }
+        let mut p = people();
+        p.members.remove("c");
+        p.retired.insert("c".into());
+        let mut r = Records::default();
+        r.dones.push(("a".into(), done("k", 10 * SEC)));
+        r.reopens.push(("c".into(), reopen("k", 20 * SEC)));
+        let s = settle(&r, &p, &settings(-1), 30 * SEC, Duration::from_secs(30));
+        assert!(matches!(s.get("k"), Some(KeyState::Done { .. })));
+    }
+
+    #[test]
+    fn only_the_newest_reopen_matters() {
+        let mut r = Records::default();
+        r.reopens.push(("b".into(), reopen("k", 20 * SEC)));
+        r.dones.push(("a".into(), done("k", 30 * SEC)));
+        r.reopens.push(("b".into(), reopen("k", 40 * SEC)));
+        assert!(!settle_at(&r, -1, 50 * SEC).contains_key("k"));
+    }
+
+    #[test]
+    fn a_covered_claim_does_not_count_against_the_limit() {
+        let mut r = records(&[
+            ("a", claim("k1", 100 * SEC, 1)),
+            ("a", claim("k2", 200 * SEC, 1)),
+        ]);
+        r.reopens.push(("b".into(), reopen("k1", 150 * SEC)));
+        let s = settle_at(&r, 1, 200 * SEC);
+        assert!(!s.contains_key("k1"));
+        assert_eq!(holder_of(&s, "k2").as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn a_reopen_is_for_its_own_key_only() {
+        let mut r = Records::default();
+        r.dones.push(("a".into(), done("k", 10 * SEC)));
+        r.reopens.push(("b".into(), reopen("other", 20 * SEC)));
+        assert!(matches!(
+            settle_at(&r, -1, 30 * SEC).get("k"),
+            Some(KeyState::Done { .. })
+        ));
     }
 
     #[test]

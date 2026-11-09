@@ -116,6 +116,17 @@ async fn release(svc: &Svc, swarm: &str, key: &str, author: &str) -> Result<(), 
     answer.await.expect("a reply")
 }
 
+async fn reopen(svc: &Svc, swarm: &str, key: &str) -> Result<(), String> {
+    let (reply, answer) = oneshot::channel();
+    svc.send(Command::ClaimReopen {
+        swarm: swarm.to_string(),
+        context: "inbox".to_string(),
+        key: key.to_string(),
+        reply,
+    });
+    answer.await.expect("a reply")
+}
+
 /// The author of the claim on `key`, once `svc` knows of it.
 async fn author_of(svc: &mut Svc, swarm: &str, key: &str) -> String {
     let v = svc
@@ -276,6 +287,46 @@ async fn done_stays_done() {
     // A done key doesn't count, so the machine's one slot is free again.
     let next = yours(&olive, &id, "next").await;
     drop(next);
+    olive.stop().await;
+    wren.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_writer_reopens_a_done_key_and_it_can_be_claimed_again() {
+    let _slot = slot();
+    let (mut olive, mut wren, id) = claimers(Role::Writer, FAST).await;
+    yours(&olive, &id, "k").await.done().await.expect("done");
+    match take(&wren, &id, "k").await {
+        ClaimOutcome::Done { person, .. } => assert_eq!(person, "olive"),
+        other => panic!("expected done, got {other:?}"),
+    }
+    reopen(&wren, &id, "k").await.expect("reopened");
+    // Either machine may now take it.
+    let mine = yours(&wren, &id, "k").await;
+    mine.release().await.expect("released");
+    olive
+        .view("k no longer done", |v| {
+            v.id == id && v.claims[0].done.iter().all(|d| d.key != "k")
+        })
+        .await;
+    drop(yours(&olive, &id, "k").await);
+    olive.stop().await;
+    wren.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reader_cannot_reopen() {
+    let _slot = slot();
+    let (mut olive, mut wren, id) = claimers(Role::Reader, FAST).await;
+    yours(&olive, &id, "k").await.done().await.expect("done");
+    assert_eq!(
+        reopen(&wren, &id, "k").await,
+        Err("Only writers can reopen a finished key in Notes.".to_string())
+    );
+    assert!(matches!(
+        take(&olive, &id, "k").await,
+        ClaimOutcome::Done { .. }
+    ));
     olive.stop().await;
     wren.stop().await;
 }

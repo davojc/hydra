@@ -205,6 +205,10 @@ pub fn done_key(context: &str, key: &str) -> Vec<u8> {
     claims_record_key(context, "done", &[key])
 }
 
+pub fn reopen_key(context: &str, key: &str) -> Vec<u8> {
+    claims_record_key(context, "reopen", &[key])
+}
+
 /// `target` is the author whose claim on `key` the release ends.
 pub fn release_key(context: &str, key: &str, target: &str) -> Vec<u8> {
     claims_record_key(context, "release", &[key, target])
@@ -384,6 +388,16 @@ mod tests {
             release_key("inbox", "k", "a"),
             release_key("inbox", "k", "b")
         );
+        for other in [
+            claim_key("inbox", "k"),
+            done_key("inbox", "k"),
+            release_key("inbox", "k", "a"),
+        ] {
+            assert_ne!(reopen_key("inbox", "k"), other);
+            assert!(!reopen_key("inbox", "k").starts_with(&other));
+            assert!(!other.starts_with(&reopen_key("inbox", "k")));
+        }
+        assert!(!reopen_key("inbox", "abcd").starts_with(&reopen_key("inbox", "abc")));
     }
 
     #[test]

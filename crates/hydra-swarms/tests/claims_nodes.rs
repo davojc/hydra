@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use hydra_swarms::claims::{
     ClaimRecord, ContextSettings, DoneRecord, Holder, HolderKind, KeyState, People, Records,
-    ReleaseRecord, Take, decide_take, settle,
+    ReleaseRecord, ReopenRecord, Take, decide_take, settle,
 };
 use hydra_swarms::ids::{PersonId, PersonKey};
 use hydra_swarms::node::{NodeConfig, NodeEvent, SwarmNode};
@@ -613,6 +613,40 @@ async fn a_release_outlasts_a_short_keep_done_until_its_claim_must_have_lapsed()
     let releases: Vec<&str> = held.releases.iter().map(|(_, r)| r.key.as_str()).collect();
     assert_eq!(releases, ["may-still-run"]);
     assert!(held.dones.is_empty());
+    a.node.shutdown().await;
+    b.node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reopen_outlasts_a_short_keep_done_until_a_claim_it_covers_must_have_lapsed() {
+    let (a, b, _roster) = pair(Role::Writer).await;
+    let settings = ContextSettings {
+        keep_done_secs: 60,
+        ..ContextSettings::default()
+    };
+    let t = now();
+    let reopen = |key: &str, at: u64| ReopenRecord {
+        context: CONTEXT.into(),
+        key: key.into(),
+        at,
+    };
+    a.node
+        .write_reopen(&reopen("may-still-cover", t - 100 * SEC))
+        .await
+        .unwrap();
+    a.node
+        .write_reopen(&reopen("has-lapsed", t - 211 * SEC))
+        .await
+        .unwrap();
+
+    a.node
+        .prune_claims(CONTEXT, &settings, t, SLACK)
+        .await
+        .unwrap();
+
+    let held = records(&a.node).await;
+    let reopens: Vec<&str> = held.reopens.iter().map(|(_, r)| r.key.as_str()).collect();
+    assert_eq!(reopens, ["may-still-cover"]);
     a.node.shutdown().await;
     b.node.shutdown().await;
 }

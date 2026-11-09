@@ -263,8 +263,10 @@ impl SwarmNode {
                 Some(Record::Claim(c)) => now.saturating_sub(c.renewed_at) > lapse,
                 Some(Record::Done(d)) => now.saturating_sub(d.at) > keep,
                 Some(Record::Release(r)) => now.saturating_sub(r.at) > keep.max(lapse),
-                // Every done it covers is at or before it, so has aged out by then.
-                Some(Record::Reopen(r)) => now.saturating_sub(r.at) > keep,
+                // It also covers claims, which can run on out of sight for the lapse time, so like
+                // a release it is kept at least that long. Every done it covers is at or before
+                // it, so those have aged out by then.
+                Some(Record::Reopen(r)) => now.saturating_sub(r.at) > keep.max(lapse),
                 None => false,
             };
             if old {

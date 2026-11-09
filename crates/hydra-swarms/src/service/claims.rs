@@ -891,6 +891,13 @@ impl Worker {
                 self.name
             ));
         }
+        let settings = self.context_settings(&roster, context)?;
+        let (_, states) = self.settled(&node, &roster, context, &settings).await?;
+        if !matches!(states.get(key), Some(KeyState::Done { .. })) {
+            return Err(format!(
+                "{key} isn't finished in {context}, so there's nothing to reopen."
+            ));
+        }
         let reopen = ReopenRecord {
             context: context.to_string(),
             key: key.to_string(),

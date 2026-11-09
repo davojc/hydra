@@ -315,6 +315,33 @@ async fn a_writer_reopens_a_done_key_and_it_can_be_claimed_again() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_key_that_is_not_done_cannot_be_reopened() {
+    let _slot = slot();
+    let (mut olive, mut wren, id) = claimers(Role::Writer, FAST).await;
+    let mut held = yours(&olive, &id, "k").await;
+    assert_eq!(
+        reopen(&wren, &id, "k").await,
+        Err("k isn't finished in inbox, so there's nothing to reopen.".to_string())
+    );
+    assert_eq!(
+        reopen(&wren, &id, "never-seen").await,
+        Err("never-seen isn't finished in inbox, so there's nothing to reopen.".to_string())
+    );
+    // The holder still holds it.
+    assert!(matches!(
+        take(&wren, &id, "k").await,
+        ClaimOutcome::Held { .. }
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), held.lost())
+            .await
+            .is_err()
+    );
+    olive.stop().await;
+    wren.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_reader_cannot_reopen() {
     let _slot = slot();
     let (mut olive, mut wren, id) = claimers(Role::Reader, FAST).await;

@@ -784,6 +784,23 @@ impl Workspace {
                 vec![super::accounts::accounts_list(self, &ws, env, cx).into_any_element()],
                 cx,
             ))
+            .when(!self.ui.setup_plugins.is_empty(), |page| {
+                let lines = self.plugin_lines(env, "env-plugin", cx);
+                page.child(group(
+                    "Team plugins",
+                    Some(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child(
+                                "Installed once in your own Claude, so every environment has them.",
+                            )
+                            .into_any_element(),
+                    ),
+                    lines,
+                    cx,
+                ))
+            })
             .child(group(
                 "Variables",
                 Some(action_button(

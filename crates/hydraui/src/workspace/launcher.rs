@@ -6,15 +6,17 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{Context, Hsla, Window, div, px, rgb};
+use gpui::{Context, Hsla, SharedString, Window, div, px, rgb};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::command::{Command, CommandItem, CommandState};
 use gpui_component::input::{Input, InputState};
 use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, Disableable, Theme, ThemeMode, WindowExt, h_flex, v_flex};
+use hydra_core::envedit::ToolValues;
 
 use super::{Workspace, env_item};
+use crate::accounts::SIGN_IN_TOOLS;
 use crate::config::{self, ThemeChoice};
 use crate::hydra::Hydra;
 use crate::jev::JevKey;
@@ -22,6 +24,7 @@ use crate::keys::Launcher;
 use crate::launcher::{Action, entries};
 use crate::palette::Palette;
 use crate::pane_view::TermStyle;
+use crate::setup::{ESSENTIALS, label as tool_label};
 
 impl Workspace {
     pub(super) fn open_launcher(
@@ -1095,6 +1098,11 @@ impl Workspace {
     /// is typed; Create stays off until it is free and valid.
     pub(super) fn new_env_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, like work"));
+        // The tools to add with it, all ticked: most people need each (spec §48).
+        let picks: Vec<(&'static str, Rc<Cell<bool>>)> = ESSENTIALS
+            .iter()
+            .map(|t| (*t, Rc::new(Cell::new(true))))
+            .collect();
         let workspace = cx.entity();
         let first = Cell::new(true);
         window.open_dialog(cx, move |dialog, window, cx| {
@@ -1113,9 +1121,40 @@ impl Workspace {
                     .child("Lowercase letters, digits and '-'."),
             };
             let ws = workspace.clone();
+            let mut tools = v_flex()
+                .gap_1()
+                .pt_1()
+                .child(div().text_sm().child("Add these tools to it"));
+            for (tool, on) in &picks {
+                let flag = on.clone();
+                tools = tools.child(
+                    Checkbox::new(SharedString::from(format!("new-env-{tool}")))
+                        .label(tool_label(tool))
+                        .checked(on.get())
+                        .on_click(move |v, window, _| {
+                            flag.set(*v);
+                            window.refresh();
+                        }),
+                );
+            }
+            tools = tools.child(div().text_xs().text_color(muted).whitespace_normal().child(
+                "Each environment has its own logins, so you sign in to each tool here \
+                 even if you already have elsewhere. Pipelines need Claude.",
+            ));
+            let chosen: Vec<&'static str> = picks
+                .iter()
+                .filter(|(_, on)| on.get())
+                .map(|(t, _)| *t)
+                .collect();
             dialog
                 .title("New environment")
-                .child(v_flex().gap_2().child(Input::new(&name)).child(hint))
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(Input::new(&name))
+                        .child(hint)
+                        .child(tools),
+                )
                 .footer(
                     h_flex()
                         .gap_2()
@@ -1132,27 +1171,61 @@ impl Workspace {
                                 .disabled(problem.is_some())
                                 .on_click(move |_, window, cx| {
                                     let env = typed.trim().to_string();
-                                    ws.update(cx, |ws, cx| ws.create_env(env, window, cx));
+                                    let chosen = chosen.clone();
+                                    ws.update(cx, |ws, cx| ws.create_env(env, chosen, window, cx));
                                 }),
                         ),
                 )
         });
     }
 
-    fn create_env(&mut self, env: String, window: &mut Window, cx: &mut Context<Self>) {
+    /// Creates `env` with `tools` turned on, then opens Claude's sign-in and Git's form when
+    /// they were chosen; the sidebar's checklist has the rest (spec §48).
+    fn create_env(
+        &mut self,
+        env: String,
+        tools: Vec<&'static str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Err(e) = self.hydra.create_env(&env) {
             window.push_notification(Notification::error(e).title("New environment"), cx);
             return;
         }
         window.close_dialog(cx);
-        window.push_notification(
-            Notification::success(format!(
-                "Created {env}. Click its name in the status bar to add accounts."
-            ))
-            .title("New environment"),
-            cx,
-        );
+        let mut problems = Vec::new();
+        for tool in tools.iter().filter(|t| SIGN_IN_TOOLS.contains(t)) {
+            if let Err(e) = self.hydra.add_tool(&env, tool, &ToolValues::default()) {
+                problems.push(format!("{tool}: {e}"));
+            }
+        }
         self.add_env(&env, window, cx);
+        if problems.is_empty() {
+            window.push_notification(
+                Notification::success(format!(
+                    "Created {env}. The sidebar lists what's left to set up."
+                ))
+                .title("New environment"),
+                cx,
+            );
+        } else {
+            window.push_notification(
+                Notification::error(format!(
+                    "Created {env}, but couldn't add {}",
+                    problems.join("; ")
+                ))
+                .title("New environment"),
+                cx,
+            );
+        }
+        if tools.contains(&"claude") && self.hydra.tools(&env).iter().any(|t| t == "claude") {
+            self.sign_in(&env, "claude", window, cx);
+        }
+        // Git asks for a name and email, so it's added through its form, not ticked on silently.
+        if tools.contains(&"git") {
+            self.set_up_tool(env.clone(), "git".into(), window, cx);
+        }
+        self.recheck_accounts(&env, cx);
     }
 
     /// Reads hydraui's and hydra's config.toml again: font, colours, theme, default

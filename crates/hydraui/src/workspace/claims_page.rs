@@ -7,7 +7,7 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
 use hydra_swarms::claims::{ContextSettings, Holder, HolderKind, valid_context_name};
-use hydra_swarms::{ClaimView, Command, ContextView, SwarmView};
+use hydra_swarms::{ClaimView, Command, ContextView, Role, SwarmView};
 use jiff::tz::TimeZone;
 
 use super::Workspace;
@@ -202,8 +202,20 @@ impl Workspace {
         let done: Vec<AnyElement> = context
             .done
             .iter()
-            .map(|d| {
-                div()
+            .enumerate()
+            .map(|(i, d)| {
+                let reopen = can_reopen(swarm.my_role).then(|| {
+                    let (id, ctx, key) = (swarm.id.clone(), name.clone(), d.key.clone());
+                    Button::new(SharedString::from(format!("claim-reopen-{name}-{i}")))
+                        .label("Reopen")
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.claim_reopen(id.clone(), ctx.clone(), key.clone(), window, cx)
+                        }))
+                });
+                h_flex()
+                    .gap_3()
                     .text_sm()
                     .text_color(muted)
                     .child(format!(
@@ -212,6 +224,7 @@ impl Workspace {
                         d.person,
                         when(d.at / MICROS, now, tz)
                     ))
+                    .when_some(reopen, |d, b| d.child(b))
                     .into_any_element()
             })
             .collect();
@@ -329,6 +342,60 @@ impl Workspace {
         );
     }
 
+    /// Asks first, since a reopened key that really was finished may be done twice. A refusal
+    /// comes back as a notification.
+    fn claim_reopen(
+        &mut self,
+        swarm: String,
+        context: String,
+        key: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = format!("Reopen {key}?");
+        let body =
+            format!("{key} can be claimed again. If it really was finished, it may be done twice.");
+        self.swarms_confirm(
+            title,
+            body,
+            "Reopen",
+            false,
+            move |ws, window, cx| {
+                ws.claim_reopen_now(swarm.clone(), context.clone(), key.clone(), window, cx)
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn claim_reopen_now(
+        &mut self,
+        swarm: String,
+        context: String,
+        key: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (reply, answer) = oneshot::channel();
+        self.swarms_command(Command::ClaimReopen {
+            swarm,
+            context,
+            key,
+            reply,
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let problem = match answer.await {
+                Ok(Ok(())) => return,
+                Ok(Err(e)) => e,
+                Err(_) => "The swarms stopped before the reopen was made.".to_string(),
+            };
+            let _ = this.update_in(cx, |_, window, cx| {
+                window.push_notification(Notification::error(problem).title("Claims"), cx)
+            });
+        })
+        .detach();
+    }
+
     fn claim_release_now(
         &mut self,
         swarm: String,
@@ -363,6 +430,11 @@ impl Workspace {
 /// Your own claims, and anyone's for an owner.
 fn can_release(claim: &ClaimView, owner: bool) -> bool {
     claim.mine || owner
+}
+
+/// Writers and owners; the service refuses anyone else.
+fn can_reopen(my_role: Role) -> bool {
+    my_role != Role::Reader
 }
 
 /// "Olive · olive-pc · terminal api · renewed 12 s ago". `now` is in seconds.
@@ -473,6 +545,13 @@ mod tests {
             },
             mine,
         }
+    }
+
+    #[test]
+    fn writers_and_owners_can_reopen_a_done_key_but_readers_cannot() {
+        assert!(can_reopen(Role::Writer));
+        assert!(can_reopen(Role::Owner));
+        assert!(!can_reopen(Role::Reader));
     }
 
     #[test]

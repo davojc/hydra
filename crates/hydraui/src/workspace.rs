@@ -147,6 +147,9 @@ pub struct Workspace {
     status: StatusCache,
     /// Each environment's borrowed logins and possible lenders, read with its accounts.
     borrowing: HashMap<String, Borrowing>,
+    /// How each of config.toml's `setup_plugins` stands in an environment, read with its
+    /// accounts (spec §48).
+    plugins_on: HashMap<String, Vec<crate::setup::PluginState>>,
     refreshing: HashSet<String>,
     /// The focused pane's repository summary, for the folder it was read in; `None` text when
     /// that folder isn't in a repository.
@@ -481,6 +484,7 @@ impl Workspace {
             next_pane: 0,
             status: StatusCache::default(),
             borrowing: HashMap::new(),
+            plugins_on: HashMap::new(),
             refreshing: HashSet::new(),
             git: None,
             git_busy: false,
@@ -1397,14 +1401,22 @@ impl Workspace {
             return;
         }
         let hydra = self.hydra.clone();
+        let plugins = self.ui.setup_plugins.clone();
         cx.spawn(async move |this, cx| {
             let e = env.clone();
-            let (reports, borrowing) = cx
-                .background_spawn(async move { (hydra.whoami(&e), hydra.borrowing(&e)) })
+            let (reports, borrowing, plugins_on) = cx
+                .background_spawn(async move {
+                    (
+                        hydra.whoami(&e),
+                        hydra.borrowing(&e),
+                        hydra.plugin_states(&e, &plugins),
+                    )
+                })
                 .await;
             let _ = this.update(cx, |ws, cx| {
                 ws.refreshing.remove(&env);
                 ws.borrowing.insert(env.clone(), borrowing);
+                ws.plugins_on.insert(env.clone(), plugins_on);
                 ws.status.store(env, reports, Instant::now());
                 cx.notify();
             });

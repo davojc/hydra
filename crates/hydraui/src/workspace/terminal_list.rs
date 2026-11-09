@@ -9,13 +9,14 @@ use gpui::{Context, SharedString, Window, div, px};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
+use gpui_component::{ActiveTheme, Selectable, Sizable, WindowExt, h_flex, v_flex};
 
 use super::Workspace;
 use crate::activity::Activity;
 use crate::envs::PaneId;
 use crate::orchestrator_theme::color;
 use crate::pane_view::label_for;
+use crate::setup::{self, ToolState};
 
 /// `terminals` (each with its project) grouped by project: groups in the order their first
 /// terminal came, terminals in their order within each.
@@ -120,8 +121,16 @@ impl Workspace {
         list = list
             .child(self.render_all_tasks_entry(tint, cx))
             .child(div().h(px(1.)).mx_2().my_0p5().bg(cx.theme().border));
+        // Until the environment's essential tools are added and signed in, a checklist says
+        // what's left, each with its next step (spec §48).
+        let tools = self.hydra.tools(&env);
+        let reports = self.status.get(&env);
+        if !self.ui.setup_hidden.contains(&env) {
+            list = list.children(self.render_setup_checklist(&env, &tools, reports, tint, cx));
+        }
         // Pipelines start where Claude is set up: their orchestrator is a Claude session.
-        let claude = self.hydra.sign_ins(&env).iter().any(|t| t == "claude");
+        let claude_state = setup::tool_state("claude", &tools, reports);
+        let claude = claude_state == ToolState::Ready;
         let (start_env, new_env) = (env.clone(), env.clone());
         let open = Button::new("list-new-terminal")
             .label("Open session")
@@ -201,8 +210,16 @@ impl Workspace {
                 ListTab::Pipelines
             });
         list = list.child(self.render_list_tabs(tab_now, plain, cards.len(), tint, cx));
-        if tab_now == ListTab::Pipelines {
+        if tab_now == ListTab::Pipelines && self.ui.pipelines_condensed {
+            // Condensed: only what's running, one line per ticket (spec §49).
+            list = list.child(self.render_condensed_pipelines(&cards, shown, cx));
+        } else if tab_now == ListTab::Pipelines {
             list = list.children(pipeline_actions);
+            // Whether the team's plugins (the skill router) are on where stages will run.
+            let plugin_lines = self.plugin_lines(&tab.env, "list-plugin", cx);
+            if !plugin_lines.is_empty() {
+                list = list.child(v_flex().px_2().pb_1p5().gap_0p5().children(plugin_lines));
+            }
             for &idx in &interrupted {
                 list = list.child(self.render_interrupted_card(idx, cx));
             }
@@ -295,12 +312,27 @@ impl Workspace {
                 list = list.child(block);
             }
             if cards.is_empty() && interrupted.is_empty() {
-                list = list.child(list_hint(if claude {
-                    "No pipeline is running here. Start one to have an orchestrator work through \
-                     tickets or pull requests."
-                } else {
-                    "Pipelines need Claude signed in to this environment."
-                }));
+                list = list.child(list_hint(setup::pipeline_hint(claude_state)));
+                if !claude {
+                    let env = tab.env.clone();
+                    let label = if claude_state == ToolState::NotAdded {
+                        "Add Claude"
+                    } else {
+                        "Sign in to Claude"
+                    };
+                    list = list.child(
+                        div().px_2().pb_1p5().child(
+                            Button::new("list-claude-next")
+                                .label(label)
+                                .primary()
+                                .small()
+                                .w_full()
+                                .on_click(cx.listener(move |ws, _, window, cx| {
+                                    ws.set_up_tool(env.clone(), "claude".into(), window, cx);
+                                })),
+                        ),
+                    );
+                }
             }
         } else {
             list = list.child(div().px_2().pt_1().pb_1p5().child(open));
@@ -636,6 +668,22 @@ impl Workspace {
             .bg(cx.theme().muted.opacity(0.5))
             .child(tab(ListTab::Sessions, "Sessions", sessions))
             .child(tab(ListTab::Pipelines, "Pipelines", pipelines))
+            .when(now == ListTab::Pipelines, |row| {
+                let on = self.ui.pipelines_condensed;
+                row.child(
+                    Button::new("list-condensed")
+                        .label("≡")
+                        .ghost()
+                        .xsmall()
+                        .selected(on)
+                        .tooltip(if on {
+                            "Show full pipeline cards"
+                        } else {
+                            "Condensed: just what's running, one line each"
+                        })
+                        .on_click(cx.listener(|ws, _, window, cx| ws.toggle_condensed(window, cx))),
+                )
+            })
             .into_any_element()
     }
 
@@ -852,6 +900,306 @@ impl Workspace {
         // Again on the next frame, after the closing dialog hands the focus back.
         if let Some(shown) = self.envs.active().and_then(|t| t.shown) {
             self.focus_soon(shown, window, cx);
+        }
+        cx.notify();
+    }
+}
+
+impl Workspace {
+    /// The environment's set-up checklist (spec §48): each essential tool with where it stands
+    /// and a button for its next step; nothing once they're all ready.
+    fn render_setup_checklist(
+        &self,
+        env: &str,
+        tools: &[String],
+        reports: Option<&[hydra_core::provider::IdentityReport]>,
+        tint: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let plugins: Vec<(String, setup::PluginState)> = self
+            .plugin_states(env)
+            .into_iter()
+            .map(|(_, label, state)| (label, state))
+            .collect();
+        let items = setup::checklist(tools, reports, &plugins);
+        if items.is_empty() {
+            return None;
+        }
+        let theme = cx.theme();
+        let (ok, muted, warn) = (theme.success, theme.muted_foreground, theme.warning);
+        let hide_env = env.to_string();
+        let mut block =
+            v_flex()
+                .mx_1()
+                .my_1()
+                .p_2()
+                .gap_1()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(tint.opacity(0.45))
+                .bg(tint.opacity(0.06))
+                .child(
+                    h_flex()
+                        .justify_between()
+                        .child(div().text_sm().child(format!("Set up {env}")))
+                        .child(
+                            Button::new("setup-hide")
+                                .label("Hide")
+                                .ghost()
+                                .xsmall()
+                                .tooltip("Hide this list for this environment")
+                                .on_click(cx.listener(move |ws, _, window, cx| {
+                                    ws.hide_setup(&hide_env, window, cx);
+                                })),
+                        ),
+                )
+                .child(div().text_xs().text_color(muted).whitespace_normal().child(
+                    "Each environment has its own logins: add each tool here, then sign in.",
+                ));
+        for item in items {
+            let (mark, mark_color) = match item.state {
+                ToolState::Ready => ("✓", ok),
+                ToolState::NotSignedIn => ("!", warn),
+                ToolState::NotAdded => ("○", muted),
+            };
+            let mut row = h_flex()
+                .gap_2()
+                .items_center()
+                .child(div().w(px(12.)).text_color(mark_color).child(mark))
+                .child(div().text_sm().child(item.label.clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(setup::state_text(&item)),
+                );
+            if let Some(action) = setup::action_text(&item) {
+                let (env, subject) = (env.to_string(), item.subject);
+                let id = match subject {
+                    setup::Subject::Tool(t) => format!("setup-{t}"),
+                    setup::Subject::Plugin(i, _) => format!("setup-plugin-{i}"),
+                };
+                let mut button = Button::new(SharedString::from(id))
+                    .label(action)
+                    .outline()
+                    .xsmall();
+                if let setup::Subject::Plugin(..) = subject {
+                    button = button
+                        .tooltip("Installs it in your own Claude, so every environment has it");
+                }
+                row = row.child(button.on_click(cx.listener(
+                    move |ws, _, window, cx| match subject {
+                        setup::Subject::Tool(t) => {
+                            ws.set_up_tool(env.clone(), t.to_string(), window, cx)
+                        }
+                        setup::Subject::Plugin(i, _) => ws.install_plugin(&env, i, window, cx),
+                    },
+                )));
+            }
+            block = block.child(row);
+        }
+        Some(block.into_any_element())
+    }
+
+    /// Each of config.toml's `setup_plugins` with its label and how it stands in `env`. One not
+    /// read yet counts as on, so nothing flashes up as missing while the check runs.
+    pub(super) fn plugin_states(&self, env: &str) -> Vec<(usize, String, setup::PluginState)> {
+        self.ui
+            .setup_plugins
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let state = self.plugins_on.get(env).and_then(|v| v.get(i).copied());
+                (
+                    i,
+                    setup::plugin_label(p),
+                    state.unwrap_or(setup::PluginState::On),
+                )
+            })
+            .collect()
+    }
+
+    /// One line per team plugin, saying whether it is on in `env`, with Install or Reinstall
+    /// when it isn't (spec §48). Shown on the Pipelines tab and the environment's Settings
+    /// page, so it stays visible after the set-up checklist goes.
+    pub(super) fn plugin_lines(
+        &self,
+        env: &str,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let theme = cx.theme();
+        let (ok, muted, warn) = (theme.success, theme.muted_foreground, theme.warning);
+        self.plugin_states(env)
+            .into_iter()
+            .map(|(i, label, state)| {
+                let on = state == setup::PluginState::On;
+                let plugin = self.ui.setup_plugins[i].plugin.clone();
+                let mut row = h_flex()
+                    .id(SharedString::from(format!("{id}-{i}")))
+                    .gap_1p5()
+                    .items_center()
+                    .text_xs()
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(format!(
+                            "Claude plugin {plugin}, from hydraui's config. Shared by every \
+                             environment."
+                        ))
+                        .build(window, cx)
+                    })
+                    .child(div().text_color(if on { ok } else { warn }).child(if on {
+                        "✓"
+                    } else {
+                        "!"
+                    }))
+                    .child(div().child(label))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_color(muted)
+                            .child(setup::plugin_state_text(state)),
+                    );
+                if !on {
+                    let env = env.to_string();
+                    let action = if state == setup::PluginState::Missing {
+                        "Reinstall"
+                    } else {
+                        "Install"
+                    };
+                    row = row.child(
+                        Button::new(SharedString::from(format!("{id}-install-{i}")))
+                            .label(action)
+                            .outline()
+                            .xsmall()
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                ws.install_plugin(&env, i, window, cx)
+                            })),
+                    );
+                }
+                row.into_any_element()
+            })
+            .collect()
+    }
+
+    /// The condensed Pipelines tab (spec §49): every open ticket in this environment's
+    /// pipelines, one line each (its pipeline's colour, the ticket, its current stage, and its
+    /// state when it isn't simply working). A click shows the current stage's session, else the
+    /// orchestrator.
+    fn render_condensed_pipelines(
+        &self,
+        cards: &[(PaneId, crate::pipeline_card::Card, Vec<PaneId>)],
+        shown: Option<PaneId>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        use crate::pipeline_card::{CardState, glance, ticket_title};
+        let theme = cx.theme();
+        let (muted, warn, hover) = (theme.muted_foreground, theme.warning, theme.muted);
+        let mut rows = Vec::new();
+        for (orch, card, _) in cards {
+            for (run, _, panes) in self.open_lanes(*orch, cx) {
+                let g = glance(&run);
+                let target = g
+                    .session
+                    .as_deref()
+                    .and_then(|t| {
+                        self.panes
+                            .iter()
+                            .find(|(_, v)| v.read(cx).mcp_token() == Some(t))
+                            .map(|(id, _)| *id)
+                    })
+                    .unwrap_or(*orch);
+                let here = shown == Some(target) || panes.iter().any(|p| Some(*p) == shown);
+                let accent = color(card.accent);
+                let state = (g.state != CardState::Working).then(|| {
+                    let tone = match g.state {
+                        CardState::NeedsYou | CardState::Checking | CardState::Asking => warn,
+                        _ => muted,
+                    };
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(tone)
+                        .child(g.state.word())
+                });
+                let pipeline = card.name.clone();
+                rows.push(
+                    h_flex()
+                        .id(SharedString::from(format!("condensed-{}", run.id)))
+                        .px_2()
+                        .py_0p5()
+                        .gap_2()
+                        .items_center()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .when(here, |d| d.bg(accent.opacity(0.2)))
+                        .hover(|d| d.bg(hover))
+                        .tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(pipeline.clone())
+                                .build(window, cx)
+                        })
+                        .child(div().flex_none().text_xs().text_color(accent).child("●"))
+                        .child(
+                            div()
+                                .flex_none()
+                                .max_w(px(140.))
+                                .truncate()
+                                .text_sm()
+                                .child(ticket_title(&run.ticket, run.link.as_deref())),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(g.stage),
+                        )
+                        .children(state)
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.show_terminal(target, window, cx)
+                        }))
+                        .into_any_element(),
+                );
+            }
+        }
+        if rows.is_empty() {
+            return list_hint("Nothing running right now.").into_any_element();
+        }
+        v_flex()
+            .px_1()
+            .py_1()
+            .gap_0p5()
+            .children(rows)
+            .into_any_element()
+    }
+
+    /// Switches the Pipelines tab between full cards and the condensed list, remembered in
+    /// config.toml as `pipelines_condensed`.
+    fn toggle_condensed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ui.pipelines_condensed = !self.ui.pipelines_condensed;
+        let value = self.ui.pipelines_condensed.then_some(true.into());
+        if let Err(e) = crate::config::set(&self.hydra.paths, "pipelines_condensed", value) {
+            window.push_notification(
+                gpui_component::notification::Notification::error(e).title("Pipelines"),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    /// Hides `env`'s set-up checklist, remembered in config.toml as `setup_hidden`.
+    fn hide_setup(&mut self, env: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.ui.setup_hidden.iter().any(|e| e == env) {
+            self.ui.setup_hidden.push(env.to_string());
+        }
+        let value: toml_edit::Array = self.ui.setup_hidden.iter().map(String::as_str).collect();
+        if let Err(e) = crate::config::set(&self.hydra.paths, "setup_hidden", Some(value.into())) {
+            window.push_notification(
+                gpui_component::notification::Notification::error(e).title("Set up"),
+                cx,
+            );
         }
         cx.notify();
     }

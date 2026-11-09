@@ -1037,3 +1037,40 @@ A pipeline running tickets in several orchestrators boxes each orchestrator's ti
 Turning Automatic on was refused when another orchestrator already watched the same Linear team. That kept hydra-triage off: it picks unassigned PRE tickets in Next up, while PRE tickets picks `hydra-xs`/`hydra-s` tickets in the same state, whoever they're assigned to. Since labels and assignee rules exist, one team can feed several pipelines.
 
 The one-watcher rule now compares `linear_watch::pick_key`: team, pick state, assignee rule, `sla_only` and labels, ignoring case and order. Only an identical key is refused ("Another orchestrator already picks PRE tickets in Next up the same way"). A Slack trigger still compares its channel. Where two pipelines' picks overlap (an unassigned `hydra-xs` ticket), a ticket with a run open or waiting to resume in any pipeline is passed over, so it is never run twice at once.
+
+## 48. Setting up an environment (added 2026-11-03)
+
+A new person could sign in to Claude and still be told "Pipelines need Claude signed in to this environment". Two things were wrong. The check behind that line asked whether `[claude]` was in env.toml, not whether anyone was signed in. And on macOS, Claude Code keeps each config dir's token in the Keychain (`Claude Code-credentials-<first 8 hex of sha256(config dir)>`) and never writes `.credentials.json`, so hydra reported every Mac environment as not signed in.
+
+- **Signed in** now means `.credentials.json` is there *or* `.claude.json` names an `oauthAccount`. hydra still doesn't read the Keychain item, which would prompt for it.
+- **A tool's state** (`setup::tool_state`) is one of: not added (not in env.toml); not signed in (its check says `Missing`); or ready (anything else, or not checked yet, so nothing flashes up as missing while the check runs).
+- **The Pipelines tab** says what Claude is missing, with **Add Claude** or **Sign in to Claude**. Start pipeline shows only once Claude is ready.
+- **New environment** has Claude, GitHub and Git ticked. Create adds Claude and GitHub, opens Claude's sign-in, and opens Git's form, since Git needs a name and email.
+- **The sidebar checklist** ("Set up <env>") lists Claude, GitHub and Git while any of them isn't ready. Each row shows its state and an **Add** or **Sign in** button. It goes once all three are ready. **Hide** drops it for that environment and records it in hydraui's config.toml as `setup_hidden = ["<env>"]`, a new optional key.
+- **Team plugins** (added 2026-11-05). A team can list the Claude plugins it expects in hydraui's config.toml, for example the skill router that makes Claude load the team's skills before editing code:
+
+  ```toml
+  setup_plugins = [{ plugin = "skill-router@iov42", marketplace = "iov42/iov42-marketplace", label = "Team skills" }]
+  ```
+
+  `plugin` is `name@marketplace` (anything else is reported and the key ignored). `marketplace` is where `claude plugin marketplace add` finds the marketplace, and is needed only when people won't have it yet. `label` is what the checklist shows; the plugin's name when left out. The key is optional and empty by default, so hydra assumes no team.
+
+  Every environment links the shared `~/.claude/plugins` (or `claude_base`'s), and its settings.json is rebuilt at launch from the shared one plus the environment's own. So a plugin is **on** for an environment when the shared settings.json turns it on in `enabledPlugins` and the environment's own settings.json doesn't turn it off. This is read with the environment's accounts and is counted as on until it has been read.
+
+  A plugin is **on** only when it is turned on *and* its files are there: `plugins/installed_plugins.json` records it at an `installPath` that is still a folder. Turned on with the files gone is **turned on, but its files are missing**, with **Reinstall**, since Claude would skip it.
+
+  So that people can always see whether the router is working, each listed plugin also has a line that stays after the checklist goes (or is hidden): on the Pipelines tab under Start pipeline, and in a **Team plugins** group on the environment's Settings page. Each line shows ✓ and "on", or ! with the state and Install or Reinstall. Its tooltip names the plugin.
+
+  Each listed plugin is a checklist row after the tools: **ready**, or **not installed** with an **Install** button. Install opens a terminal in the environment that runs `claude plugin marketplace add <marketplace>` (skipped when `plugins/known_marketplaces.json` already names it), then `claude plugin install <plugin>`. It runs with the environment's `CLAUDE_CONFIG_DIR` dropped, or pointed at `claude_base` when that is set, so the plugin is installed once for every environment, not into one that is rebuilt at the next launch. The row turns ready at the next check after the install finishes. A plugin is installed or not; it has no sign-in.
+
+## 49. Condensed Pipelines view (added 2026-11-09)
+
+For seeing at a glance what is running. On the Pipelines tab, a **≡** button beside the tabs switches between the full pipeline cards and a condensed list. The choice is kept in hydraui's config.toml as `pipelines_condensed = true`, a new optional key.
+
+The condensed list has one line per open ticket (`open_lanes`) of every orchestrator in the environment, in card order. Orchestrators waiting for a ticket, Start pipeline, the team-plugin lines and closed runs are left out. Each line shows:
+- a dot in its pipeline's colour (hover for the pipeline's name);
+- the ticket, named as in its box (`ticket_title`);
+- its current stage as `n/m Title`: the stage running, else the first not yet passed (`pipeline_card::glance`);
+- its state word when it isn't simply Working, in the warning colour for Needs you, Check it and Asked product.
+
+A click shows the current stage's latest session, or the orchestrator when that stage has no session yet. The line is highlighted while one of its sessions is shown. With nothing open, it says "Nothing running right now."

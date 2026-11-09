@@ -57,6 +57,7 @@ pub mod runs;
 pub mod save_dialog;
 pub mod search;
 pub mod settings;
+pub mod setup;
 pub mod skills_list;
 pub mod slack;
 pub mod slack_connect;

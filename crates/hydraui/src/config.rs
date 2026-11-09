@@ -77,6 +77,26 @@ pub struct UiConfig {
     /// The team's Canopy, which finishes **Connect Slack**'s sign-in (it holds the Slack app's
     /// secret) and hands each person's own token back, e.g. `https://canopy.dev.iov42.net`.
     pub slack_connect_url: Option<String>,
+    /// Environments whose set-up checklist was hidden from the sidebar (spec §48).
+    pub setup_hidden: Vec<String>,
+    /// Claude plugins the team expects in every environment, listed on the set-up checklist
+    /// (spec §48).
+    pub setup_plugins: Vec<SetupPlugin>,
+    /// The Pipelines tab shows only what's running, one line per ticket (spec §49).
+    pub pipelines_condensed: bool,
+}
+
+/// A Claude plugin the set-up checklist asks for, e.g. the team's skill router.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetupPlugin {
+    /// `name@marketplace`, as `claude plugin install` takes it.
+    pub plugin: String,
+    /// The marketplace's source for `claude plugin marketplace add`, such as `owner/repo`;
+    /// left out when the marketplace is one everyone already has.
+    pub marketplace: Option<String>,
+    /// What the checklist calls it; the plugin's name when left out.
+    pub label: Option<String>,
 }
 
 impl Default for UiConfig {
@@ -96,6 +116,9 @@ impl Default for UiConfig {
             machine_name: None,
             min_week_left: crate::runs::MIN_WEEK_LEFT,
             slack_connect_url: None,
+            setup_hidden: Vec::new(),
+            setup_plugins: Vec::new(),
+            pipelines_condensed: false,
         }
     }
 }
@@ -165,6 +188,20 @@ pub fn parse(text: &str) -> (UiConfig, Vec<String>) {
                 }
                 cfg.slack_connect_url = Some(u);
                 Ok(())
+            }),
+            "setup_hidden" => get(value).map(|e| cfg.setup_hidden = e),
+            "pipelines_condensed" => get(value).map(|c| cfg.pipelines_condensed = c),
+            "setup_plugins" => get::<Vec<SetupPlugin>>(value).and_then(|p| {
+                match p.iter().find(|p| !p.plugin.contains('@')) {
+                    Some(bad) => Err(format!(
+                        "{:?} isn't name@marketplace, as claude plugin install takes it",
+                        bad.plugin
+                    )),
+                    None => {
+                        cfg.setup_plugins = p;
+                        Ok(())
+                    }
+                }
             }),
             "colors" => match value {
                 toml::Value::Table(colors) => {
@@ -381,6 +418,9 @@ default_shell = "bash"
 editor = "code"
 min_week_left = 25
 slack_connect_url = "https://canopy.dev.iov42.net/"
+setup_hidden = ["work"]
+pipelines_condensed = true
+setup_plugins = [{ plugin = "skill-router@iov42", marketplace = "iov42/iov42-marketplace", label = "Team skills" }]
 
 [colors]
 background = "#101010"
@@ -396,6 +436,16 @@ new_terminal = "ctrl-alt-d"
         assert_eq!(cfg.default_env.as_deref(), Some("work"));
         assert_eq!(cfg.default_shell.as_deref(), Some("bash"));
         assert_eq!(cfg.editor.as_deref(), Some("code"));
+        assert_eq!(cfg.setup_hidden, vec!["work".to_string()]);
+        assert!(cfg.pipelines_condensed);
+        assert_eq!(
+            cfg.setup_plugins,
+            vec![SetupPlugin {
+                plugin: "skill-router@iov42".into(),
+                marketplace: Some("iov42/iov42-marketplace".into()),
+                label: Some("Team skills".into()),
+            }]
+        );
         assert_eq!(cfg.min_week_left, 25);
         assert_eq!(
             cfg.slack_connect_url.as_deref(),
@@ -411,6 +461,13 @@ new_terminal = "ctrl-alt-d"
         let (cfg, problems) = parse("slack_connect_url = \"http://canopy\"\n");
         assert_eq!(cfg.slack_connect_url, None);
         assert!(problems[0].contains("https"), "{problems:?}");
+    }
+
+    #[test]
+    fn a_setup_plugin_without_its_marketplace_is_reported() {
+        let (cfg, problems) = parse("setup_plugins = [{ plugin = \"skill-router\" }]\n");
+        assert!(cfg.setup_plugins.is_empty());
+        assert!(problems[0].contains("name@marketplace"), "{problems:?}");
     }
 
     #[test]

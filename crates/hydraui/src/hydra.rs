@@ -26,8 +26,10 @@ use hydraui_term::{GridSize, Pane, SpawnSpec, TermEvent};
 use hydra_providers::claude::is_session_marker;
 
 use crate::accounts::{AddChoice, add_choices};
+use crate::config::SetupPlugin;
 use crate::linear::LinearError;
 use crate::palette::env_tint;
+use crate::setup;
 
 /// Where an environment's logins come from: the tools it borrows (tool -> owner), and for
 /// each tool, the other environments that could lend it (their own login; git never).
@@ -492,6 +494,94 @@ impl Hydra {
             ..Default::default()
         };
         self.add_tool(env, tool, &values)
+    }
+
+    /// The shared Claude config folder every environment's is built from: `claude_base` in
+    /// config.toml, else `~/.claude`.
+    fn claude_base(&self) -> PathBuf {
+        match &self.global.claude_base {
+            Some(b) => expand_tilde(b, &self.user_home),
+            None => self.user_home.join(".claude"),
+        }
+    }
+
+    /// How each of `plugins` stands in `env` (spec §48). Plugins are shared by every
+    /// environment: installed once in the shared Claude config, and turned on in the shared
+    /// settings.json unless the environment's own one says otherwise.
+    pub fn plugin_states(&self, env: &str, plugins: &[SetupPlugin]) -> Vec<setup::PluginState> {
+        let read = |p: PathBuf| std::fs::read_to_string(p).ok();
+        let base = read(self.claude_base().join("settings.json"));
+        let installed = read(
+            self.claude_base()
+                .join("plugins")
+                .join("installed_plugins.json"),
+        );
+        let over = EnvName::parse(env)
+            .ok()
+            .and_then(|n| read(self.paths.env_dir(&n).join("claude").join("settings.json")));
+        plugins
+            .iter()
+            .map(|p| {
+                setup::plugin_state(
+                    setup::plugin_enabled(base.as_deref(), over.as_deref(), &p.plugin),
+                    setup::plugin_installed(installed.as_deref(), &p.plugin, |d| d.is_dir()),
+                )
+            })
+            .collect()
+    }
+
+    /// A pane in `env` that installs `plugin` into the shared Claude config, so every
+    /// environment has it: the environment's own `CLAUDE_CONFIG_DIR` is dropped (or pointed at
+    /// `claude_base` when one is set) for the install only.
+    pub fn plugin_install_request(
+        &self,
+        env: &str,
+        plugin: &SetupPlugin,
+        cwd: PathBuf,
+        shell: ShellKind,
+    ) -> PaneRequest {
+        let base = self.claude_base();
+        let known =
+            std::fs::read_to_string(base.join("plugins").join("known_marketplaces.json")).ok();
+        let commands: Vec<String> = setup::plugin_install_commands(
+            plugin,
+            setup::marketplace_known(known.as_deref(), &plugin.plugin),
+        )
+        .iter()
+        .map(|argv| command_line(shell, argv))
+        .collect();
+        let mut req = PaneRequest::new(env, cwd, shell);
+        req.drop_vars = vec!["CLAUDE_CONFIG_DIR".into()];
+        let run = commands.join(" && ");
+        req.command = Some(match (&self.global.claude_base, shell) {
+            (None, _) => run,
+            (Some(_), ShellKind::Pwsh) => {
+                let dir = pwsh_quote(&base.to_string_lossy());
+                format!("$env:CLAUDE_CONFIG_DIR = {dir}; {run}; Remove-Item Env:CLAUDE_CONFIG_DIR")
+            }
+            (Some(_), _) => {
+                let dir = sh_quote(&base.to_string_lossy());
+                commands
+                    .iter()
+                    .map(|c| format!("CLAUDE_CONFIG_DIR={dir} {c}"))
+                    .collect::<Vec<_>>()
+                    .join(" && ")
+            }
+        });
+        req
+    }
+
+    /// The tools in `env`'s env.toml (`[claude]`, `[git]`, …), in file order; none when it
+    /// can't be read.
+    pub fn tools(&self, env: &str) -> Vec<String> {
+        let Ok(text) = self.env_text(env) else {
+            return Vec::new();
+        };
+        envedit::tools_in(&text)
+            .unwrap_or_default()
+            .into_iter()
+            .map(str::to_string)
+            .collect()
     }
 
     /// Where `env`'s logins come from and who could lend each tool.
@@ -1618,6 +1708,126 @@ email = \"p@example.com\"
                 .contains("empty")
         );
         assert!(f.hydra.set_secret("no-slash", "x").is_err());
+    }
+
+    #[test]
+    fn tools_are_what_env_toml_has_whether_or_not_they_sign_in() {
+        let f = fx("");
+        assert!(f.hydra.tools("gh").contains(&"github".to_string()));
+        assert!(!f.hydra.tools("work").contains(&"claude".to_string()));
+        f.hydra
+            .add_tool("work", "claude", &ToolValues::default())
+            .unwrap();
+        assert!(f.hydra.tools("work").contains(&"claude".to_string()));
+        assert!(f.hydra.tools("nobody").is_empty());
+    }
+
+    fn router() -> SetupPlugin {
+        SetupPlugin {
+            plugin: "skill-router@iov42".into(),
+            marketplace: Some("iov42/iov42-marketplace".into()),
+            label: None,
+        }
+    }
+
+    #[test]
+    fn a_plugin_is_on_in_every_environment_once_installed_and_turned_on_in_the_shared_config() {
+        use setup::PluginState::{Missing, Off, On};
+        let f = fx("");
+        let p = [router()];
+        assert_eq!(f.hydra.plugin_states("work", &p), vec![Off]);
+        let shared = f.hydra.user_home.join(".claude");
+        std::fs::create_dir_all(shared.join("plugins")).unwrap();
+        std::fs::write(
+            shared.join("settings.json"),
+            r#"{"enabledPlugins":{"skill-router@iov42":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(f.hydra.plugin_states("work", &p), vec![Missing]);
+        let files = shared.join("plugins/cache/iov42/skill-router/0.7.0");
+        std::fs::create_dir_all(&files).unwrap();
+        let record = serde_json::json!({
+            "version": 2,
+            "plugins": {"skill-router@iov42": [{"scope": "user", "installPath": files}]}
+        });
+        std::fs::write(
+            shared.join("plugins/installed_plugins.json"),
+            record.to_string(),
+        )
+        .unwrap();
+        assert_eq!(f.hydra.plugin_states("work", &p), vec![On]);
+        assert_eq!(f.hydra.plugin_states("personal", &p), vec![On]);
+        let own = f
+            .hydra
+            .paths
+            .env_dir(&EnvName::parse("personal").unwrap())
+            .join("claude");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(
+            own.join("settings.json"),
+            r#"{"enabledPlugins":{"skill-router@iov42":false}}"#,
+        )
+        .unwrap();
+        assert_eq!(f.hydra.plugin_states("personal", &p), vec![Off]);
+        assert_eq!(f.hydra.plugin_states("work", &p), vec![On]);
+        std::fs::remove_dir_all(&files).unwrap();
+        assert_eq!(f.hydra.plugin_states("work", &p), vec![Missing]);
+    }
+
+    #[test]
+    fn installing_a_plugin_runs_claude_against_the_shared_config_not_the_environments() {
+        let f = fx("");
+        let req = f
+            .hydra
+            .plugin_install_request("work", &router(), f.free.clone(), ShellKind::Zsh);
+        assert_eq!(
+            req.command.as_deref(),
+            Some(
+                "'claude' 'plugin' 'marketplace' 'add' 'iov42/iov42-marketplace' && \
+                 'claude' 'plugin' 'install' 'skill-router@iov42'"
+            )
+        );
+        assert_eq!(req.drop_vars, vec!["CLAUDE_CONFIG_DIR".to_string()]);
+        let plugins = f.hydra.user_home.join(".claude").join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        std::fs::write(plugins.join("known_marketplaces.json"), r#"{"iov42":{}}"#).unwrap();
+        let req =
+            f.hydra
+                .plugin_install_request("work", &router(), f.free.clone(), ShellKind::Pwsh);
+        assert_eq!(
+            req.command.as_deref(),
+            Some("& 'claude' 'plugin' 'install' 'skill-router@iov42'")
+        );
+    }
+
+    #[test]
+    fn with_a_claude_base_the_install_points_claude_at_it() {
+        let f = fx("claude_base = \"/team/claude\"\n");
+        let req =
+            f.hydra
+                .plugin_install_request("work", &router(), f.free.clone(), ShellKind::Bash);
+        let cmd = req.command.unwrap();
+        assert!(
+            cmd.starts_with("CLAUDE_CONFIG_DIR='/team/claude' 'claude' 'plugin' 'marketplace'"),
+            "{cmd}"
+        );
+        assert!(
+            cmd.contains("&& CLAUDE_CONFIG_DIR='/team/claude' 'claude' 'plugin' 'install'"),
+            "{cmd}"
+        );
+        let pwsh = f
+            .hydra
+            .plugin_install_request("work", &router(), f.free.clone(), ShellKind::Pwsh)
+            .command
+            .unwrap();
+        assert!(
+            pwsh.starts_with("$env:CLAUDE_CONFIG_DIR = '/team/claude'; "),
+            "{pwsh}"
+        );
+        assert!(
+            pwsh.ends_with("; Remove-Item Env:CLAUDE_CONFIG_DIR"),
+            "{pwsh}"
+        );
     }
 
     #[test]

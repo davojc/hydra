@@ -280,6 +280,42 @@ pub fn quit_warning(runs: &[Run]) -> Option<String> {
     ))
 }
 
+/// One open run as the condensed Pipelines view shows it (core spec §49): the ticket, its
+/// current stage as `n/m Title`, the card's state, and the session to jump to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Glance {
+    pub stage: String,
+    pub state: CardState,
+    /// The token of the current stage's latest session, when it has opened one.
+    pub session: Option<String>,
+}
+
+/// `run` at a glance: the stage running, else the first not passed.
+pub fn glance(run: &Run) -> Glance {
+    let current = run
+        .stages
+        .iter()
+        .position(|s| matches!(s.status, StageStatus::Starting | StageStatus::Running))
+        .or_else(|| {
+            run.stages
+                .iter()
+                .position(|s| s.status != StageStatus::Passed)
+        });
+    let n = run.stages.len();
+    match current {
+        Some(i) => Glance {
+            stage: format!("{}/{n} {}", i + 1, run.pipeline.stages[i].title),
+            state: card(run).state,
+            session: run.stages[i].latest().and_then(|a| a.session.clone()),
+        },
+        None => Glance {
+            stage: "Done".into(),
+            state: card(run).state,
+            session: None,
+        },
+    }
+}
+
 /// The orchestrator's line in the status bar (the design's status text): the pipeline, the
 /// ticket, and what the run is doing or why it waits; `true` when it needs a person (red).
 pub fn status_text(run: &Run) -> (String, bool) {
@@ -679,6 +715,40 @@ mod tests {
             !red && text.ends_with("stopped: stopped by you at Understand & replicate"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_glance_names_the_current_stage_its_state_and_its_session() {
+        let (mut runs, id) = runs_of(&STAGES);
+        let g = |runs: &Runs| glance(runs.run(&id).unwrap());
+        assert_eq!(
+            g(&runs),
+            Glance {
+                stage: "1/3 Understand & replicate".into(),
+                state: CardState::Working,
+                session: None,
+            }
+        );
+        start(&mut runs, &id, "replicate", "t1");
+        assert_eq!(g(&runs).session.as_deref(), Some("t1"));
+        runs.report("t1", rated(92)).unwrap();
+        assert_eq!(g(&runs).stage, "2/3 Develop");
+        start(&mut runs, &id, "develop", "t2");
+        runs.report("t2", rated(10)).unwrap();
+        let now = g(&runs);
+        assert_eq!(
+            (now.stage.as_str(), now.state, now.session.as_deref()),
+            ("2/3 Develop", CardState::NeedsYou, Some("t2"))
+        );
+    }
+
+    #[test]
+    fn a_glance_at_a_finished_run_says_done() {
+        let (mut runs, id) = runs_of(&STAGES[..1]);
+        start(&mut runs, &id, "replicate", "t1");
+        runs.report("t1", rated(95)).unwrap();
+        let g = glance(runs.run(&id).unwrap());
+        assert_eq!((g.stage.as_str(), g.state), ("Done", CardState::Done));
     }
 
     #[test]

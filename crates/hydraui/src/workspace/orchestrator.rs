@@ -1641,17 +1641,19 @@ impl Workspace {
                             .text_color(color(theme::TEXT_SECONDARY))
                             .child(c.line.clone()),
                     )
-                    .child(
-                        div()
-                            .flex_none()
-                            .px(px(6.))
-                            .py(px(2.))
-                            .rounded(px(4.))
-                            .text_xs()
-                            .bg(pill_bg)
-                            .text_color(pill_fg)
-                            .child(c.state.word()),
-                    ),
+                    .when(c.state.has_pill(), |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .px(px(6.))
+                                .py(px(2.))
+                                .rounded(px(4.))
+                                .text_xs()
+                                .bg(pill_bg)
+                                .text_color(pill_fg)
+                                .child(c.state.word()),
+                        )
+                    }),
             )
             .when(!c.segments.is_empty(), |d| {
                 d.child(h_flex().gap(px(3.)).children(segments))
@@ -1723,17 +1725,19 @@ impl Workspace {
                             .text_color(color(theme::TEXT))
                             .child(title),
                     )
-                    .child(
-                        div()
-                            .flex_none()
-                            .px(px(6.))
-                            .py(px(1.))
-                            .rounded(px(4.))
-                            .text_xs()
-                            .bg(bg)
-                            .text_color(fg)
-                            .child(c.state.word()),
-                    ),
+                    .when(c.state.has_pill(), |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .px(px(6.))
+                                .py(px(1.))
+                                .rounded(px(4.))
+                                .text_xs()
+                                .bg(bg)
+                                .text_color(fg)
+                                .child(c.state.word()),
+                        )
+                    }),
             )
             .children(self.render_question(orchestrator, Some(&run.id), cx))
             .children(link)

@@ -37,6 +37,11 @@ impl CardState {
             CardState::Stopped => "Stopped",
         }
     }
+    /// Whether the card shows its state as a pill. Working is the usual state, and each
+    /// stage's own line already says so; a pill is kept for what's worth a glance.
+    pub fn has_pill(self) -> bool {
+        self != CardState::Working
+    }
 }
 
 /// One stage's segment of the card's progress bar.
@@ -330,6 +335,17 @@ pub fn meter(week_used: Option<f64>, floor: u8) -> Option<Meter> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_states_worth_a_glance_get_a_pill() {
+        use super::CardState::*;
+        assert!(!Working.has_pill(), "working is the usual state: no pill");
+        for s in [
+            Ready, NeedsYou, Asking, Waiting, Checking, Paused, Done, Stopped,
+        ] {
+            assert!(s.has_pill(), "{s:?}");
+        }
+    }
+
     #[test]
     fn a_collapsed_pipeline_says_its_sessions_and_mode() {
         use super::collapsed_line;

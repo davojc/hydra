@@ -394,17 +394,19 @@ impl Workspace {
                             .text_color(color(crate::orchestrator_theme::TEXT))
                             .child(c.name.clone()),
                     )
-                    .child(
-                        div()
-                            .flex_none()
-                            .px(px(6.))
-                            .py(px(1.))
-                            .rounded(px(4.))
-                            .text_xs()
-                            .bg(bg)
-                            .text_color(fg)
-                            .child(c.state.word()),
-                    )
+                    .when(c.state.has_pill(), |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .px(px(6.))
+                                .py(px(1.))
+                                .rounded(px(4.))
+                                .text_xs()
+                                .bg(bg)
+                                .text_color(fg)
+                                .child(c.state.word()),
+                        )
+                    })
                     .child(self.collapse_toggle(lead, true, cx)),
             )
             .child(

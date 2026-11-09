@@ -1217,13 +1217,41 @@ pub fn headline(text: &str) -> String {
         .to_string()
 }
 
-/// The headings a ticket's outcome summary is written under, in order.
-pub const SUMMARY_HEADINGS: [&str; 4] = [
-    "What it did",
-    "What worked or passed",
-    "What it missed or failed",
-    "Gaps",
-];
+/// A ticket's outcome, short enough to take in at a glance: a headline, then a few
+/// one-line points per part. Written by Claude from the sessions' reports (as JSON).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OutcomeSummary {
+    /// Where the ticket stands, in one sentence.
+    #[serde(default)]
+    pub headline: String,
+    #[serde(default)]
+    pub did: Vec<String>,
+    #[serde(default)]
+    pub passed: Vec<String>,
+    #[serde(default)]
+    pub missed: Vec<String>,
+    #[serde(default)]
+    pub gaps: Vec<String>,
+    /// What a person has to do next, if anything.
+    #[serde(default)]
+    pub next: Vec<String>,
+}
+
+impl OutcomeSummary {
+    /// Reads Claude's reply: the JSON object in it, fenced or not.
+    pub fn parse(reply: &str) -> Result<Self, String> {
+        let (start, end) = (reply.find('{'), reply.rfind('}'));
+        let (Some(start), Some(end)) = (start, end) else {
+            return Err("Claude's summary wasn't JSON".into());
+        };
+        let s: Self = serde_json::from_str(&reply[start..=end])
+            .map_err(|e| format!("Claude's summary didn't read: {e}"))?;
+        if s.headline.trim().is_empty() {
+            return Err("Claude's summary had no headline".into());
+        }
+        Ok(s)
+    }
+}
 
 /// Everything a ticket's sessions reported, for summarising: their reports, its checks and
 /// its pull requests. Empty when nothing was reported.
@@ -1237,22 +1265,25 @@ pub fn outcome_text(t: &Ticket) -> String {
     out.join("\n\n")
 }
 
-/// The prompt that turns a ticket's outcome into a short summary under [`SUMMARY_HEADINGS`].
+/// The prompt that turns a ticket's outcome into an [`OutcomeSummary`].
 pub fn summary_prompt(t: &Ticket, outcome: &str) -> String {
-    let headings = SUMMARY_HEADINGS
-        .iter()
-        .map(|h| format!("## {h}"))
-        .collect::<Vec<_>>()
-        .join("\n");
     format!(
-        "Summarise what came of ticket {id} \"{title}\" for its project lead, who wants to see \
-         at a glance what happened. Use only the report below; don't add anything it doesn't \
-         say. Write exactly these four headings, in this order, each followed by 1 to 5 short \
-         bullet points (one line each, plain words, no code blocks):\n{headings}\n\
-         Under a heading with nothing to say, write one bullet: \"- Nothing\". Reply with \
-         just the summary.\n\n---\n{outcome}",
+        "Summarise what came of ticket {id} \"{title}\" (now {status}) for its project lead, \
+         who wants to take it in within ten seconds. Use only the report below; add nothing it \
+         doesn't say. Reply with one JSON object and nothing else:\n\
+         {{\"headline\": one plain sentence on where it stands (e.g. \"Draft PR ready; the \
+         flag still has to be created in GrowthBook\"),\n\
+         \"did\": what was done,\n\
+         \"passed\": what was checked and passed,\n\
+         \"missed\": what failed, was skipped or wasn't verified,\n\
+         \"gaps\": what's still missing or open,\n\
+         \"next\": what a person has to do next}}\n\
+         Every list holds 0 to 4 strings of at most 12 words each, in plain words: no file \
+         names, class names or code unless the lead needs them to act. An empty list is \
+         fine.\n\n---\n{outcome}",
         id = t.id,
         title = t.meta.title,
+        status = t.meta.status.label().to_lowercase(),
     )
 }
 
@@ -1277,21 +1308,21 @@ fn outcome_key(outcome: &str) -> String {
 }
 
 /// The saved summary of `outcome`; None when there's none, or it summed up an older report.
-pub fn cached_summary(file: &Path, outcome: &str) -> Option<String> {
+pub fn cached_summary(file: &Path, outcome: &str) -> Option<OutcomeSummary> {
     let text = std::fs::read_to_string(file).ok()?;
     let (first, rest) = text.split_once('\n')?;
-    (first == format!("<!-- outcome {} -->", outcome_key(outcome))).then(|| rest.to_string())
+    if first != format!("<!-- outcome v2 {} -->", outcome_key(outcome)) {
+        return None;
+    }
+    serde_json::from_str(rest).ok()
 }
 
-pub fn save_summary(file: &Path, outcome: &str, summary: &str) -> Result<(), String> {
+pub fn save_summary(file: &Path, outcome: &str, summary: &OutcomeSummary) -> Result<(), String> {
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let text = format!(
-        "<!-- outcome {} -->\n{}",
-        outcome_key(outcome),
-        summary.trim()
-    );
+    let json = serde_json::to_string_pretty(summary).map_err(|e| e.to_string())?;
+    let text = format!("<!-- outcome v2 {} -->\n{json}", outcome_key(outcome));
     std::fs::write(file, text).map_err(|e| e.to_string())
 }
 
@@ -1303,7 +1334,7 @@ pub fn summarise(
     cwd: &Path,
     t: &Ticket,
     outcome: &str,
-) -> Result<String, String> {
+) -> Result<OutcomeSummary, String> {
     std::fs::create_dir_all(cwd).map_err(|e| e.to_string())?;
     let mut cmd = std::process::Command::new(hydra);
     cmd.args(["run", env, "--", "claude", "-p"])
@@ -1315,7 +1346,7 @@ pub fn summarise(
     let out = crate::branch_rule::output_within(cmd, Duration::from_secs(240))?;
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if out.status.success() && !text.is_empty() {
-        Ok(text)
+        OutcomeSummary::parse(&text)
     } else {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         Err(if err.is_empty() {
@@ -3037,21 +3068,38 @@ mod tests {
             "{outcome}"
         );
         let prompt = summary_prompt(&t, &outcome);
-        for h in SUMMARY_HEADINGS {
-            assert!(prompt.contains(&format!("## {h}")), "{prompt}");
+        for key in ["headline", "did", "passed", "missed", "gaps", "next"] {
+            assert!(prompt.contains(&format!("\"{key}\"")), "{prompt}");
         }
         assert!(prompt.contains("Found two gaps.") && prompt.contains("PG-1"));
+
+        // Claude's reply, fenced or not, reads as the summary.
+        let reply = "```json\n{\"headline\": \"Done; two gaps open\", \"did\": [\"Read code\"], \
+                     \"gaps\": [\"Keep-as-new not counted\"]}\n```";
+        let summary = OutcomeSummary::parse(reply).unwrap();
+        assert_eq!(summary.headline, "Done; two gaps open");
+        assert_eq!(summary.did, ["Read code"]);
+        assert!(summary.passed.is_empty() && summary.next.is_empty());
+        assert!(OutcomeSummary::parse("Sorry, no.").is_err());
+        assert!(
+            OutcomeSummary::parse("{\"did\": []}").is_err(),
+            "a headline is needed"
+        );
 
         let tmp = tempfile::tempdir().unwrap();
         let file = summary_file(tmp.path(), "dev", "pg", "PG-1");
         assert_eq!(cached_summary(&file, &outcome), None);
-        save_summary(&file, &outcome, "## What it did\n- Read code\n").unwrap();
-        assert_eq!(
-            cached_summary(&file, &outcome).as_deref(),
-            Some("## What it did\n- Read code")
-        );
+        save_summary(&file, &outcome, &summary).unwrap();
+        assert_eq!(cached_summary(&file, &outcome), Some(summary.clone()));
         // A new report (the session ran again) needs a new summary.
         assert_eq!(cached_summary(&file, &format!("{outcome}\nMore.")), None);
+        // One saved in the old, markdown form is written again.
+        std::fs::write(
+            &file,
+            format!("<!-- outcome {} -->\n## What it did", outcome_key(&outcome)),
+        )
+        .unwrap();
+        assert_eq!(cached_summary(&file, &outcome), None);
         // Nothing reported: nothing to summarise.
         let fresh = Ticket {
             body: "Ask.".into(),

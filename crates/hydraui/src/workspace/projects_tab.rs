@@ -195,8 +195,8 @@ pub(super) struct ProjectsData {
     /// Ticket outcomes being summarised (None), or why it failed, by (environment, project,
     /// ticket). A finished summary lives in its cache file.
     summarising: BTreeMap<(String, String, String), Option<String>>,
-    /// Tickets whose page shows the full report rather than its summary.
-    full_report: BTreeSet<(String, String, String)>,
+    /// The parts of a ticket's page opened by hand, as (environment, project, ticket, part).
+    open_parts: BTreeSet<(String, String, String, &'static str)>,
 }
 
 impl ProjectsData {
@@ -429,6 +429,7 @@ impl Workspace {
 
     pub(super) fn projects_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_finished_planners(window, cx);
+        self.summarise_open_ticket(cx);
         self.tick_runs(window, cx);
         // Sessions ask and propose while the tab is closed too.
         let sessions =
@@ -5613,16 +5614,34 @@ impl Workspace {
         panel.into_any_element()
     }
 
+    /// The ticket page on show gets its summary written as soon as it has an outcome and none
+    /// is saved for it (once: a failure waits for Try again).
+    fn summarise_open_ticket(&mut self, cx: &mut Context<Self>) {
+        let Some(Page::Ticket { env, slug, id }) = self.projects.as_ref().map(|t| t.page.clone())
+        else {
+            return;
+        };
+        let key = (env.clone(), slug.clone(), id.clone());
+        if self.projects_data.summarising.contains_key(&key) {
+            return;
+        }
+        let Some(t) = self
+            .find_project(&env, &slug)
+            .and_then(|p| p.tickets.iter().find(|t| t.id == id))
+        else {
+            return;
+        };
+        let outcome = pj::outcome_text(t);
+        let file = pj::summary_file(self.hydra.paths.root(), &env, &slug, &id);
+        if outcome.is_empty() || pj::cached_summary(&file, &outcome).is_some() {
+            return;
+        }
+        self.summarise_ticket(&env, &slug, &id, cx);
+    }
+
     /// Asks Claude, in the background, for a short summary of ticket `id`'s outcome, kept in
     /// this Mac's cache; the page shows it once written.
-    fn summarise_ticket(
-        &mut self,
-        env: &str,
-        slug: &str,
-        id: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn summarise_ticket(&mut self, env: &str, slug: &str, id: &str, cx: &mut Context<Self>) {
         let Some(t) = self
             .find_project(env, slug)
             .and_then(|p| p.tickets.iter().find(|t| t.id == id))
@@ -5641,18 +5660,17 @@ impl Workspace {
         let file = pj::summary_file(&root, env, slug, id);
         let cwd = root.join("hydraui").join("summaries");
         let (exe, env_s) = (hydra_exe(), env.to_string());
-        cx.spawn_in(window, async move |this, cx| {
+        cx.spawn(async move |this, cx| {
             let made = cx
                 .background_spawn(async move {
-                    let text = pj::summarise(&exe, &env_s, &cwd, &t, &outcome)?;
-                    pj::save_summary(&file, &outcome, &text)
+                    let summary = pj::summarise(&exe, &env_s, &cwd, &t, &outcome)?;
+                    pj::save_summary(&file, &outcome, &summary)
                 })
                 .await;
             let _ = this.update(cx, |ws, cx| {
                 match made {
                     Ok(()) => {
                         ws.projects_data.summarising.remove(&key);
-                        ws.projects_data.full_report.remove(&key);
                     }
                     Err(e) => {
                         ws.projects_data.summarising.insert(key, Some(e));
@@ -5664,8 +5682,10 @@ impl Workspace {
         .detach();
     }
 
-    /// One ticket's page: what came of it (the work sessions' reports, its pull requests and
-    /// checks), the decisions made on it, then what it asked for.
+    /// One ticket's page, made to be taken in at a glance: where it stands in a sentence, its
+    /// pull requests, check and decisions as chips, then a few short points on what it did,
+    /// what passed, what it missed, the gaps and what's next. Everything long (the reports,
+    /// the check, the decisions, what it asked for) is folded away until opened.
     fn ticket_page(&self, env: &str, slug: &str, id: &str, cx: &mut Context<Self>) -> AnyElement {
         let Some(p) = self.find_project(env, slug) else {
             return muted("This project isn't in the repo any more.").into_any_element();
@@ -5675,43 +5695,59 @@ impl Workspace {
         };
         let report = pj::ticket_sections(&t.body);
         let now = pj::now_secs();
+        let key = (env.to_string(), slug.to_string(), id.to_string());
+        let outcome = pj::outcome_text(t);
+        let summary = (!outcome.is_empty())
+            .then(|| {
+                pj::cached_summary(
+                    &pj::summary_file(self.hydra.paths.root(), env, slug, id),
+                    &outcome,
+                )
+            })
+            .flatten();
+        let state = self.projects_data.summarising.get(&key);
+        let decisions: Vec<&Decision> =
+            p.decisions.iter().filter(|d| d.meta.ticket == id).collect();
+        let open_decisions = decisions.iter().filter(|d| d.is_open()).count();
+
+        // Header: what it is, in two lines.
         let kind = match t.meta.kind {
             TicketKind::Feature => "feature",
             TicketKind::Bug => "bug",
             TicketKind::Chore => "chore",
         };
-        let colour = status_colour(t.meta.status);
-        let mut facts: Vec<String> = Vec::new();
-        facts.push(if t.meta.repo.is_empty() {
-            "any of the project's repos".to_string()
+        let mut facts: Vec<String> = vec![if t.meta.repo.is_empty() {
+            "any repo".to_string()
         } else {
             t.meta.repo.clone()
-        });
+        }];
         if !t.meta.assignee.is_empty() {
             facts.push(t.meta.assignee.clone());
         }
-        if let Some(at) = t.meta.started_at {
-            facts.push(format!("started {} ago", pj::age(&at, now)));
+        match (t.meta.finished_at, t.meta.started_at) {
+            (Some(at), _) => facts.push(format!("finished {} ago", pj::age(&at, now))),
+            (None, Some(at)) => facts.push(format!("started {} ago", pj::age(&at, now))),
+            _ => {}
         }
-        if let Some(at) = t.meta.finished_at {
-            facts.push(format!("finished {} ago", pj::age(&at, now)));
-        }
-        let mut page = v_flex().gap_5().max_w(px(960.)).child(
+        let mut page = v_flex().gap_5().max_w(px(1000.)).child(
             v_flex()
-                .gap_2()
+                .gap_1()
                 .child(
                     h_flex()
                         .gap_2()
                         .items_center()
                         .flex_wrap()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(color(theme::TEXT_MUTED))
-                                .child(t.id.clone()),
-                        )
-                        .child(pill(t.meta.status.label(), colour, theme::SURFACE))
-                        .child(pill(kind, theme::TEXT_SECONDARY, theme::SURFACE))
+                        .text_sm()
+                        .text_color(color(theme::TEXT_MUTED))
+                        .child(t.id.clone())
+                        .child(pill(
+                            t.meta.status.label(),
+                            status_colour(t.meta.status),
+                            theme::SURFACE,
+                        ))
+                        .child(kind)
+                        .child("·")
+                        .child(facts.join(" · "))
                         .when(t.meta.review != Review::Approved, |d| {
                             d.child(review_pill(t.meta.review))
                         })
@@ -5719,21 +5755,108 @@ impl Workspace {
                 )
                 .child(
                     div()
-                        .text_2xl()
+                        .text_xl()
                         .whitespace_normal()
                         .child(t.meta.title.clone()),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(color(theme::TEXT_SECONDARY))
-                        .child(facts.join(" · ")),
                 ),
         );
+
+        // Where it stands: the headline, then the chips.
+        let headline = match (&summary, state) {
+            (Some(s), _) => s.headline.clone(),
+            (None, _) if outcome.is_empty() => match t.meta.status {
+                TicketStatus::Todo => "Not started yet.".to_string(),
+                TicketStatus::InProgress => "Being worked on; nothing reported yet.".to_string(),
+                _ => "Nothing was reported.".to_string(),
+            },
+            (None, Some(Some(_))) => "Couldn't summarise the report.".to_string(),
+            (None, _) => "Summarising what happened…".to_string(),
+        };
+        let mut chips = h_flex().gap_2().flex_wrap().items_center();
+        for (i, url) in t.meta.prs.iter().enumerate() {
+            let u = url.clone();
+            chips = chips.child(
+                div()
+                    .id(SharedString::from(format!("ticket-pr-{i}")))
+                    .px_2()
+                    .py(px(2.))
+                    .rounded(px(4.))
+                    .text_xs()
+                    .bg(color(theme::SURFACE))
+                    .text_color(color(theme::TEAL))
+                    .cursor_pointer()
+                    .hover(|s| s.underline())
+                    .child(format!("PR {}", pr_label(url)))
+                    .on_click(move |_, _, cx| cx.open_url(&u)),
+            );
+        }
+        match t.meta.check.as_str() {
+            "passed" => chips = chips.child(pill("Check passed", theme::GREEN, theme::SURFACE)),
+            "failed" => chips = chips.child(pill("Check failed", theme::RED, theme::RED_TINT)),
+            _ if !t.meta.prs.is_empty() && t.meta.status == TicketStatus::InReview => {
+                chips = chips.child(pill("Not checked yet", theme::TEXT_MUTED, theme::SURFACE))
+            }
+            _ => {}
+        }
+        if open_decisions > 0 {
+            chips = chips.child(pill(
+                &format!(
+                    "{open_decisions} decision{} waiting",
+                    if open_decisions == 1 { "" } else { "s" }
+                ),
+                theme::AMBER,
+                theme::AMBER_TINT,
+            ));
+        }
+        let mut stands = v_flex()
+            .gap_3()
+            .p_4()
+            .rounded_lg()
+            .bg(color(theme::RAISED))
+            .border_1()
+            .border_color(color(theme::BORDER_SUBTLE))
+            .child(
+                div()
+                    .text_lg()
+                    .whitespace_normal()
+                    .text_color(color(if summary.is_some() || outcome.is_empty() {
+                        theme::TEXT
+                    } else {
+                        theme::TEXT_SECONDARY
+                    }))
+                    .child(headline),
+            )
+            .child(chips);
+        if let Some(Some(err)) = state {
+            let (e2, s2, i2) = (env.to_string(), slug.to_string(), id.to_string());
+            stands = stands.child(
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(color(theme::RED))
+                            .truncate()
+                            .child(err.clone()),
+                    )
+                    .child(
+                        Button::new("ticket-summarise-again")
+                            .label("Try again")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(move |ws, _, _, cx| {
+                                ws.summarise_ticket(&e2, &s2, &i2, cx)
+                            })),
+                    ),
+            );
+        }
         if let Some(pane) = self.worker(env, slug, id) {
-            page =
-                page.child(
-                    h_flex().gap_3().items_center().child(
+            stands =
+                stands.child(
+                    h_flex().child(
                         Button::new("ticket-open-session")
                             .label("Open session")
                             .small()
@@ -5744,203 +5867,193 @@ impl Workspace {
                     ),
                 );
         }
-        // What came of it: the summary when there is one, else the reports in full.
-        let key = (env.to_string(), slug.to_string(), id.to_string());
-        let outcome_all = pj::outcome_text(t);
-        let summary = (!outcome_all.is_empty())
-            .then(|| {
-                pj::cached_summary(
-                    &pj::summary_file(self.hydra.paths.root(), env, slug, id),
-                    &outcome_all,
-                )
-            })
-            .flatten();
-        let full = summary.is_none() || self.projects_data.full_report.contains(&key);
-        let state = self.projects_data.summarising.get(&key);
-        let mut controls = h_flex().gap_2().items_center();
-        if matches!(state, Some(None)) {
-            controls = controls.child(muted("Summarising…"));
-        } else if summary.is_some() {
-            let k = key.clone();
-            controls = controls.child(
-                Button::new("ticket-summary-toggle")
-                    .label(if full {
-                        "Show summary"
-                    } else {
-                        "Show full report"
-                    })
-                    .small()
-                    .ghost()
-                    .on_click(cx.listener(move |ws, _, _, cx| {
-                        let shown = &mut ws.projects_data.full_report;
-                        if !shown.remove(&k) {
-                            shown.insert(k.clone());
-                        }
-                        cx.notify();
-                    })),
-            );
-        } else if !outcome_all.is_empty() {
-            let (e2, s2, i2) = (env.to_string(), slug.to_string(), id.to_string());
-            controls = controls.child(
-                Button::new("ticket-summarise")
-                    .label("Summarise")
-                    .small()
-                    .primary()
-                    .tooltip("What it did, what worked, what it missed and the gaps, in bullets")
-                    .on_click(cx.listener(move |ws, _, window, cx| {
-                        ws.summarise_ticket(&e2, &s2, &i2, window, cx)
-                    })),
-            );
-        }
-        let mut outcome = v_flex().gap_3().child(
-            h_flex()
-                .gap_3()
-                .items_center()
-                .child(section_title("Outcome"))
-                .child(div().flex_1())
-                .child(controls),
-        );
-        if let Some(Some(err)) = state {
-            outcome = outcome.child(notice(
-                &format!("Couldn't summarise it: {err}"),
-                theme::RED,
-                theme::RED_TINT,
-            ));
-        }
-        if report.work.is_empty() && t.meta.prs.is_empty() {
-            outcome = outcome.child(muted(match t.meta.status {
-                TicketStatus::Todo => "Not started yet.",
-                TicketStatus::InProgress => "Its session hasn't reported back yet.",
-                _ => "Nothing was reported.",
-            }));
-        }
-        for (i, url) in t.meta.prs.iter().enumerate() {
-            let u = url.clone();
-            outcome = outcome.child(
-                div()
-                    .id(SharedString::from(format!("ticket-pr-{i}")))
-                    .text_sm()
-                    .text_color(color(theme::TEAL))
-                    .cursor_pointer()
-                    .hover(|s| s.underline())
-                    .child(pr_label(url))
-                    .on_click(move |_, _, cx| cx.open_url(&u)),
-            );
-        }
-        if !t.meta.check.is_empty() {
-            let passed = t.meta.check == "passed";
-            outcome = outcome.child(notice(
-                &format!(
-                    "Check {}: {}",
-                    if passed { "passed" } else { "failed" },
-                    t.meta.check_note
-                ),
-                if passed { theme::GREEN } else { theme::RED },
-                if passed {
-                    theme::SURFACE
-                } else {
-                    theme::RED_TINT
-                },
-            ));
-        }
-        if let (Some(text), false) = (&summary, full) {
-            outcome = outcome.child(
-                div()
-                    .p_4()
+        page = page.child(stands);
+
+        // The points, as cards: next first when there is anything, since it's what you act on.
+        if let Some(s) = &summary {
+            let card = |title: &str, points: &[String], accent: u32| {
+                let mut c = v_flex()
+                    .flex_1()
+                    .min_w(px(260.))
+                    .gap_2()
+                    .p_3()
                     .rounded_lg()
-                    .bg(color(theme::RAISED))
-                    .border_1()
-                    .border_color(color(theme::BORDER_SUBTLE))
-                    .child(
-                        gpui_base::TextView::markdown(
-                            SharedString::from(format!("ticket-summary-{id}")),
-                            text.clone(),
-                        )
-                        .selectable(true),
-                    ),
-            );
-        }
-        // The latest report first; earlier ones (from a restarted session) after it.
-        for (i, w) in report.work.iter().rev().enumerate().filter(|_| full) {
-            outcome = outcome.child(
-                div()
-                    .p_4()
-                    .rounded_lg()
-                    .bg(color(theme::RAISED))
-                    .border_1()
-                    .border_color(color(theme::BORDER_SUBTLE))
-                    .child(
-                        gpui_base::TextView::markdown(
-                            SharedString::from(format!("ticket-work-{id}-{i}")),
-                            w.clone(),
-                        )
-                        .selectable(true),
-                    ),
-            );
-        }
-        page = page.child(outcome);
-        // The decisions made (or waiting) on it.
-        let decisions: Vec<&Decision> =
-            p.decisions.iter().filter(|d| d.meta.ticket == id).collect();
-        if !decisions.is_empty() {
-            let mut list = v_flex().gap_2().child(section_title("Decisions"));
-            for d in decisions {
-                list = list.child(
-                    v_flex()
-                        .gap_1()
-                        .px_4()
-                        .py_3()
-                        .rounded_md()
-                        .bg(color(if d.is_open() {
-                            theme::AMBER_TINT
-                        } else {
-                            theme::SURFACE
-                        }))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(color(theme::TEXT_MUTED))
-                                .child(pj::decision_name(&d.id)),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .whitespace_normal()
-                                .child(d.meta.question.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .whitespace_normal()
-                                .text_color(color(if d.is_open() {
-                                    theme::AMBER
-                                } else {
-                                    theme::TEXT_SECONDARY
-                                }))
-                                .child(if d.is_open() {
-                                    "Waiting for an answer in Decisions.".to_string()
-                                } else {
-                                    format!("Answer: {}", d.meta.answer.trim())
-                                }),
-                        ),
-                );
+                    .bg(color(theme::SURFACE))
+                    .border_l_2()
+                    .border_color(color(accent))
+                    .child(section_title(title));
+                if points.is_empty() {
+                    c = c.child(muted("Nothing"));
+                }
+                for point in points {
+                    c = c.child(
+                        h_flex()
+                            .gap_2()
+                            .items_start()
+                            .text_sm()
+                            .child(div().flex_none().text_color(color(accent)).child("•"))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .whitespace_normal()
+                                    .child(point.clone()),
+                            ),
+                    );
+                }
+                c
+            };
+            if !s.next.is_empty() {
+                page = page.child(card("Needs a person", &s.next, theme::AMBER));
             }
-            page = page.child(list);
+            page = page
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .items_start()
+                        .flex_wrap()
+                        .child(card("What it did", &s.did, theme::TEAL))
+                        .child(card("What passed", &s.passed, theme::GREEN)),
+                )
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .items_start()
+                        .flex_wrap()
+                        .child(card("Missed or failed", &s.missed, theme::RED))
+                        .child(card("Gaps", &s.gaps, theme::AMBER)),
+                );
         }
-        // What it asked for.
-        page = page.child(v_flex().gap_2().child(section_title("The ticket")).child(
-            if report.brief.is_empty() {
+
+        // Everything long, folded away.
+        let mut more = v_flex().gap_1();
+        let part_open = |part: &'static str| {
+            self.projects_data.open_parts.contains(&(
+                key.0.clone(),
+                key.1.clone(),
+                key.2.clone(),
+                part,
+            ))
+        };
+        let fold = |part: &'static str, label: String, open: bool, cx: &mut Context<Self>| {
+            let k = (key.0.clone(), key.1.clone(), key.2.clone(), part);
+            h_flex()
+                .id(SharedString::from(format!("fold-{part}")))
+                .gap_2()
+                .items_center()
+                .py_2()
+                .cursor_pointer()
+                .text_sm()
+                .text_color(color(theme::TEXT_SECONDARY))
+                .hover(|s| s.text_color(color(theme::TEXT)))
+                .child(
+                    div()
+                        .w(px(10.))
+                        .text_xs()
+                        .child(if open { "▾" } else { "▸" }),
+                )
+                .child(label)
+                .on_click(cx.listener(move |ws, _, _, cx| {
+                    let parts = &mut ws.projects_data.open_parts;
+                    if !parts.remove(&k) {
+                        parts.insert(k.clone());
+                    }
+                    cx.notify();
+                }))
+        };
+        let md = |name: String, text: String| {
+            div().p_4().rounded_lg().bg(color(theme::SURFACE)).child(
+                gpui_base::TextView::markdown(SharedString::from(name), text).selectable(true),
+            )
+        };
+        // Decisions: open while one waits.
+        if !decisions.is_empty() {
+            let open = part_open("decisions") != (open_decisions > 0);
+            more = more.child(fold(
+                "decisions",
+                format!("Decisions ({})", decisions.len()),
+                open,
+                cx,
+            ));
+            if open {
+                for d in &decisions {
+                    more = more.child(
+                        v_flex()
+                            .gap_1()
+                            .mb_2()
+                            .px_4()
+                            .py_2()
+                            .rounded_md()
+                            .bg(color(if d.is_open() {
+                                theme::AMBER_TINT
+                            } else {
+                                theme::SURFACE
+                            }))
+                            .child(div().text_sm().whitespace_normal().child(format!(
+                                "{}: {}",
+                                pj::decision_name(&d.id),
+                                d.meta.question
+                            )))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .whitespace_normal()
+                                    .text_color(color(if d.is_open() {
+                                        theme::AMBER
+                                    } else {
+                                        theme::TEXT_SECONDARY
+                                    }))
+                                    .child(if d.is_open() {
+                                        "Waiting for an answer in Decisions.".to_string()
+                                    } else {
+                                        format!("→ {}", d.meta.answer.trim())
+                                    }),
+                            ),
+                    );
+                }
+            }
+        }
+        // The full report: open by itself only while there's no summary to read instead.
+        if !report.work.is_empty() {
+            let open = part_open("report") != (summary.is_none() && !matches!(state, Some(None)));
+            more = more.child(fold(
+                "report",
+                if report.work.len() == 1 {
+                    "Full report".to_string()
+                } else {
+                    format!("Full reports ({}, latest first)", report.work.len())
+                },
+                open,
+                cx,
+            ));
+            if open {
+                for (i, w) in report.work.iter().rev().enumerate() {
+                    more = more.child(md(format!("ticket-work-{id}-{i}"), w.clone()).mb_2());
+                }
+            }
+        }
+        if !report.check.is_empty() || !t.meta.check_note.is_empty() {
+            let open = part_open("check");
+            more = more.child(fold("check", "Check details".into(), open, cx));
+            if open {
+                let text = if report.check.is_empty() {
+                    t.meta.check_note.clone()
+                } else {
+                    report.check.join("\n\n")
+                };
+                more = more.child(md(format!("ticket-check-{id}"), text).mb_2());
+            }
+        }
+        let open = part_open("brief") != outcome.is_empty();
+        more = more.child(fold("brief", "What the ticket asked for".into(), open, cx));
+        if open {
+            more = more.child(if report.brief.is_empty() {
                 muted("No description.").into_any_element()
             } else {
-                gpui_base::TextView::markdown(
-                    SharedString::from(format!("ticket-brief-{id}")),
-                    report.brief.clone(),
-                )
-                .selectable(true)
-                .into_any_element()
-            },
-        ));
-        page.into_any_element()
+                md(format!("ticket-brief-{id}"), report.brief.clone()).into_any_element()
+            });
+        }
+        page.child(more).into_any_element()
     }
 
     #[allow(clippy::too_many_arguments)] // The card's inputs, all read-only.

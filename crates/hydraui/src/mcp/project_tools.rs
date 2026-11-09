@@ -275,6 +275,11 @@ pub fn schemas() -> Vec<Value> {
                 "prs": {"type": "array", "items": {"type": "string"},
                     "description": "The pull request URLs; none when the work changed no code."},
                 "summary": s("What you did, and anything a reviewer should know."),
+                "for_a_person": {"type": "array", "items": {"type": "object", "properties": {
+                        "task": {"type": "string", "description": "What they have to do, as a short title: \"Create the review-received-data-stepper flag in GrowthBook\"."},
+                        "why": {"type": "string", "description": "Why, and anything they need to do it."}},
+                    "required": ["task"]},
+                    "description": "What's left that only a person can do (create a flag, set a secret, ask another team, run something by hand). Each becomes a task for a person in the milestone; Claude never works those."},
             }),
             vec!["prs", "summary"],
         ),
@@ -898,13 +903,45 @@ fn work(dir: &Path, ticket: &str, name: &str, args: &Value) -> Result<String, St
             t.meta.finished_at = Some(progress::now());
             t.body = format!("{}\n\n## Work\n\n{summary}\n", t.body.trim_end());
             repo::write_ticket(dir, &t).map_err(|e| e.to_string())?;
+            let mut filed = Vec::new();
+            for item in args
+                .get("for_a_person")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let field = |k: &str| item.get(k).and_then(Value::as_str).unwrap_or_default();
+                if field("task").trim().is_empty() {
+                    continue;
+                }
+                let p = repo::load(dir).map_err(|e| e.to_string())?;
+                if let Some(id) = crate::projects::new_person_task(
+                    dir,
+                    &p,
+                    &t.meta.milestone,
+                    &t.id,
+                    field("task"),
+                    field("why"),
+                    ASKED_BY_CLAUDE,
+                )? {
+                    filed.push(id);
+                }
+            }
+            let filed = if filed.is_empty() {
+                String::new()
+            } else {
+                format!(" Filed for a person: {}.", filed.join(", "))
+            };
             Ok(if done {
                 format!(
-                    "Reported: {} is done, with your summary as its result.",
+                    "Reported: {} is done, with your summary as its result.{filed}",
                     t.id
                 )
             } else {
-                format!("Reported: {} is in review with its pull requests.", t.id)
+                format!(
+                    "Reported: {} is in review with its pull requests.{filed}",
+                    t.id
+                )
             })
         }
         "ticket_checked" => {
@@ -1336,6 +1373,21 @@ mod tests {
         assert_eq!(t.meta.status, TicketStatus::Done);
         assert!(t.meta.prs.is_empty());
         assert!(t.meta.finished_at.is_some());
+        // What only a person can do becomes their task in the milestone, once.
+        let with_tasks = json!({"prs": [], "summary": "Done.", "for_a_person": [
+            {"task": "Create the flag in GrowthBook", "why": "QA turns it on"},
+            {"task": "create the flag in growthbook"},
+            {"task": " "}]});
+        let out = run(&reg, "work", "ticket_report", with_tasks);
+        assert!(
+            out.text.contains("Filed for a person: PG-2."),
+            "{}",
+            out.text
+        );
+        let p = repo::load(&dir).unwrap();
+        let task = p.tickets.iter().find(|t| t.id == "PG-2").unwrap();
+        assert!(task.meta.person && task.meta.milestone == "M1");
+        assert_eq!(p.tickets.iter().filter(|t| t.meta.person).count(), 1);
         assert!(
             t.body
                 .contains("## Work\n\nnewRecords misses location types.")

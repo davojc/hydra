@@ -21,12 +21,14 @@ pub enum Step {
     Finished,
 }
 
-/// The milestone's approved tickets in the order they're worked: by number.
+/// The milestone's approved tickets for Claude, in the order they're worked: by number.
 pub fn queue<'a>(p: &'a Project, milestone: &str) -> Vec<&'a Ticket> {
     let mut out: Vec<&Ticket> = p
         .tickets
         .iter()
         .filter(|t| t.meta.milestone == milestone && t.meta.review == Review::Approved)
+        // A task for a person is theirs to do: the run never starts Claude on it.
+        .filter(|t| !t.meta.person)
         .collect();
     out.sort_by_key(|t| hydraui_projects::number_of(&t.id).unwrap_or(u32::MAX));
     out
@@ -426,5 +428,23 @@ mod tests {
             .collect();
         // Timed ones latest first; one reported before times were kept comes after.
         assert_eq!(ids, ["PG-2", "PG-3", "PG-1"]);
+    }
+
+    #[test]
+    fn a_run_leaves_tasks_for_a_person_to_them() {
+        let mut p = project(vec![
+            ticket("PG-1", BE, TicketStatus::Todo),
+            ticket("PG-2", FE, TicketStatus::Todo),
+        ]);
+        p.tickets[0].meta.person = true;
+        assert_eq!(
+            next_step(&p, "M1", &setup(false), |_| true),
+            Step::Work("PG-2".into())
+        );
+        p.tickets[1].meta.status = TicketStatus::Done;
+        // The person's task still open doesn't hold the run.
+        assert_eq!(next_step(&p, "M1", &setup(false), |_| true), Step::Finished);
+        p.tickets[0].meta.status = TicketStatus::InProgress;
+        assert!(!picks_up(&p, "M1"));
     }
 }

@@ -334,6 +334,59 @@ pub fn new_ticket(
     Ok(id)
 }
 
+/// Adds a task for a person to `milestone`, found while working ticket `from`: `why` says what
+/// it's for. None when the milestone already has an open one with that title.
+pub fn new_person_task(
+    dir: &Path,
+    p: &Project,
+    milestone: &str,
+    from: &str,
+    task: &str,
+    why: &str,
+    by: &str,
+) -> Result<Option<String>, String> {
+    let task = task.trim().trim_end_matches('.');
+    if task.is_empty() {
+        return Err("Say what the person has to do.".into());
+    }
+    if person_task(p, milestone, task).is_some() {
+        return Ok(None);
+    }
+    let id = next_id(&p.file.key, p.tickets.iter().map(|t| t.id.as_str()));
+    let why = why.trim();
+    let t = Ticket {
+        id: id.clone(),
+        meta: TicketMeta {
+            title: task.to_string(),
+            kind: TicketKind::Chore,
+            status: TicketStatus::Todo,
+            milestone: milestone.to_string(),
+            person: true,
+            created_by: by.to_string(),
+            created: Some(progress::now()),
+            ..Default::default()
+        },
+        body: if why.is_empty() {
+            format!("Follows {from}.")
+        } else {
+            format!("Follows {from}: {why}")
+        },
+    };
+    repo::write_ticket(dir, &t).map_err(|e| e.to_string())?;
+    Ok(Some(id))
+}
+
+/// The milestone's open person task with this title, if there is one.
+pub fn person_task<'a>(p: &'a Project, milestone: &str, task: &str) -> Option<&'a Ticket> {
+    let task = task.trim().trim_end_matches('.');
+    p.tickets.iter().find(|t| {
+        t.meta.person
+            && t.meta.milestone == milestone
+            && t.meta.status != TicketStatus::Dropped
+            && t.meta.title.eq_ignore_ascii_case(task)
+    })
+}
+
 /// Attaches link `url` to the project or draft in `dir`, titled `title` (the link itself when
 /// empty). Only web links.
 pub fn add_link(dir: &Path, url: &str, title: &str) -> Result<(), String> {
@@ -3107,5 +3160,55 @@ mod tests {
             ..t
         };
         assert_eq!(outcome_text(&fresh), "");
+    }
+
+    #[test]
+    fn a_task_for_a_person_is_filed_once_beside_the_ticket_it_came_from() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("pg");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("project.toml"),
+            "name = \"PG\"\nkey = \"PG\"\nlead = \"me\"\n",
+        )
+        .unwrap();
+        let p = repo::load(&dir).unwrap();
+        let id = new_person_task(
+            &dir,
+            &p,
+            "M1",
+            "PG-4",
+            "Create the flag in GrowthBook.",
+            "QA needs it",
+            "claude",
+        )
+        .unwrap()
+        .unwrap();
+        let p = repo::load(&dir).unwrap();
+        let t = p.tickets.iter().find(|t| t.id == id).unwrap();
+        assert!(t.meta.person);
+        assert_eq!(t.meta.title, "Create the flag in GrowthBook");
+        assert_eq!(t.meta.milestone, "M1");
+        assert_eq!(t.meta.review, Review::Approved);
+        assert_eq!(t.body.trim(), "Follows PG-4: QA needs it");
+        // Asked again (another report, or the button): no second one.
+        assert_eq!(
+            new_person_task(
+                &dir,
+                &p,
+                "M1",
+                "PG-5",
+                "create the flag in growthbook",
+                "",
+                "me"
+            )
+            .unwrap(),
+            None
+        );
+        assert!(person_task(&p, "M1", "Create the flag in GrowthBook").is_some());
+        assert!(person_task(&p, "M2", "Create the flag in GrowthBook").is_none());
+        // A ticket written before tasks for people existed reads as Claude's.
+        let raw = std::fs::read_to_string(dir.join("tickets").join(format!("{id}.md"))).unwrap();
+        assert!(raw.contains("person = true"), "{raw}");
     }
 }

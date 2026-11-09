@@ -193,6 +193,10 @@ pub struct TicketMeta {
     pub started_by: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<Datetime>,
+    /// A task for a person, not Claude (creating a flag, setting a secret, asking another
+    /// team): a milestone run never works it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub person: bool,
     /// When its work session reported it finished (spec §14.5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<Datetime>,

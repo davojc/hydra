@@ -713,7 +713,12 @@ was wrong). Work starts on a milestone and runs its tickets one after another.
 - **The run lives in this hydraui**, not in the repo. After a restart, Start milestone picks up
   where it was: a ticket that was in progress starts again in its existing worktree.
 
-
+- **Tasks for a person (added 2026-11-09).** What only a person can do (create a feature flag,
+  set a secret, ask another team) is a ticket with `person = true`, filed in the same
+  milestone. A work session files these through `ticket_report`'s `for_a_person`, and the
+  lead files them from a ticket page's "Needs a person" with Add as a task. A run never
+  starts Claude on a person task, and one left open doesn't hold the run. The board marks it
+  "For a person", and the milestone page lists the open ones, each with Done.
 
 ### 14.6 New requirements (added 2026-11-05)
 

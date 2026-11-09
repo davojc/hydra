@@ -5498,9 +5498,89 @@ impl Workspace {
             .gap_5()
             .child(head)
             .children(self.run_controls(env, p, m, cx))
+            .children(self.person_tasks(env, p, m, cx))
             .child(self.milestone_progress(env, p, m, &c, cx))
             .child(board)
             .into_any_element()
+    }
+
+    /// The milestone's open tasks for a person, each with Done: the run never works them, so
+    /// they'd be easy to miss among Claude's tickets. None when there are none.
+    fn person_tasks(
+        &self,
+        env: &str,
+        p: &Project,
+        m: &Milestone,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let open: Vec<&Ticket> = p
+            .tickets
+            .iter()
+            .filter(|t| t.meta.person && t.meta.milestone == m.id)
+            .filter(|t| !matches!(t.meta.status, TicketStatus::Done | TicketStatus::Dropped))
+            .collect();
+        if open.is_empty() {
+            return None;
+        }
+        let mut panel = v_flex()
+            .gap_2()
+            .p_4()
+            .rounded_lg()
+            .bg(color(theme::AMBER_TINT))
+            .border_l_2()
+            .border_color(color(theme::AMBER))
+            .child(section_title(&format!("For a person · {}", open.len())));
+        for t in open {
+            let to = Page::Ticket {
+                env: env.to_string(),
+                slug: p.slug.clone(),
+                id: t.id.clone(),
+            };
+            let (e2, s2, tc) = (env.to_string(), p.slug.clone(), t.clone());
+            panel = panel.child(
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("person-{}", t.id)))
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .whitespace_normal()
+                            .cursor_pointer()
+                            .hover(|s| s.underline())
+                            .child(format!("{} · {}", t.id, t.meta.title))
+                            .on_click(cx.listener(move |ws, _, _, cx| ws.go(to.clone(), cx))),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(color(theme::TEXT_SECONDARY))
+                            .child(if t.meta.assignee.is_empty() {
+                                "nobody yet".to_string()
+                            } else {
+                                t.meta.assignee.clone()
+                            }),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("person-done-{}", t.id)))
+                            .label("Done")
+                            .xsmall()
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                let _ = ws.edit_project(
+                                    &e2,
+                                    &s2,
+                                    |dir, _, _| pj::move_ticket(dir, &tc, TicketStatus::Done),
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    ),
+            );
+        }
+        Some(panel.into_any_element())
     }
 
     /// Where a milestone is up to: how many tickets stand where, and the latest outcomes,
@@ -5748,6 +5828,7 @@ impl Workspace {
                         .child(kind)
                         .child("·")
                         .child(facts.join(" · "))
+                        .when(t.meta.person, |d| d.child(person_pill()))
                         .when(t.meta.review != Review::Approved, |d| {
                             d.child(review_pill(t.meta.review))
                         })
@@ -5904,7 +5985,81 @@ impl Workspace {
                 c
             };
             if !s.next.is_empty() {
-                page = page.child(card("Needs a person", &s.next, theme::AMBER));
+                let mut needs = v_flex()
+                    .gap_2()
+                    .p_3()
+                    .rounded_lg()
+                    .bg(color(theme::AMBER_TINT))
+                    .border_l_2()
+                    .border_color(color(theme::AMBER))
+                    .child(section_title("Needs a person"));
+                for (i, point) in s.next.iter().enumerate() {
+                    let filed = pj::person_task(p, &t.meta.milestone, point);
+                    let action = match filed {
+                        Some(task) => {
+                            let to = Page::Ticket {
+                                env: env.to_string(),
+                                slug: slug.to_string(),
+                                id: task.id.clone(),
+                            };
+                            div()
+                                .id(SharedString::from(format!("person-task-{i}")))
+                                .flex_none()
+                                .text_xs()
+                                .text_color(color(theme::TEAL))
+                                .cursor_pointer()
+                                .hover(|s| s.underline())
+                                .child(format!("Task {}", task.id))
+                                .on_click(cx.listener(move |ws, _, _, cx| ws.go(to.clone(), cx)))
+                                .into_any_element()
+                        }
+                        None if t.meta.milestone.is_empty() => div().into_any_element(),
+                        None => {
+                            let (e2, s2, from, task, ms) = (
+                                env.to_string(),
+                                slug.to_string(),
+                                t.id.clone(),
+                                point.clone(),
+                                t.meta.milestone.clone(),
+                            );
+                            Button::new(SharedString::from(format!("add-person-task-{i}")))
+                                .label("Add as a task")
+                                .xsmall()
+                                .ghost()
+                                .on_click(cx.listener(move |ws, _, window, cx| {
+                                    let _ = ws.edit_project(
+                                        &e2,
+                                        &s2,
+                                        |dir, p, login| {
+                                            pj::new_person_task(
+                                                dir, p, &ms, &from, &task, "", login,
+                                            )
+                                            .map(|_| ())
+                                        },
+                                        window,
+                                        cx,
+                                    );
+                                }))
+                                .into_any_element()
+                        }
+                    };
+                    needs = needs.child(
+                        h_flex()
+                            .gap_2()
+                            .items_start()
+                            .text_sm()
+                            .child(div().flex_none().text_color(color(theme::AMBER)).child("•"))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .whitespace_normal()
+                                    .child(point.clone()),
+                            )
+                            .child(action),
+                    );
+                }
+                page = page.child(needs);
             }
             page = page
                 .child(
@@ -6086,7 +6241,8 @@ impl Workspace {
             .rounded_md()
             .bg(color(theme::RAISED))
             .border_1()
-            .border_color(color(if waiting {
+            .when(t.meta.person, |d| d.border_l_2())
+            .border_color(color(if waiting || t.meta.person {
                 theme::AMBER
             } else if unsent {
                 theme::TEAL_BORDER
@@ -6128,6 +6284,7 @@ impl Workspace {
                         d.child(review_pill(t.meta.review))
                     })
                     .when(t.meta.change.is_some(), |d| d.child(change_pill()))
+                    .when(t.meta.person, |d| d.child(person_pill()))
                     .when(unsent && t.meta.review == Review::Approved, |d| {
                         d.child(
                             div()
@@ -7242,7 +7399,10 @@ fn work_prompt(p: &Project, t: &Ticket, branch: &str, skill: Option<&Path>) -> S
          {ship} Finish by calling ticket_report with the pull request URL(s) and a short \
          summary. If the ticket needs no code change (an investigation, a check, a write-up), \
          open no pull request: call ticket_report with none and your findings as the summary, \
-         which is what the lead reads. Either way hydraui then closes this session and moves on to the milestone's next \
+         which is what the lead reads. Anything left that only a person can do (create a feature \
+         flag, set a secret, ask another team, run something by hand) goes in ticket_report's \
+         for_a_person, one task each, so it lands on the milestone as theirs rather than buried \
+         in your summary. Either way hydraui then closes this session and moves on to the milestone's next \
          ticket. If you need a decision, ask it with ticket_ask, never in this terminal: it \
          shows in hydraui and the answer comes back to you here.",
         id = t.id,
@@ -7455,6 +7615,11 @@ fn count_badge(n: usize, yours: bool) -> gpui::Div {
 }
 
 /// An approved item with a change from new requirements waiting for the lead (spec §14.6).
+/// Marks a task for a person: Claude never works it.
+fn person_pill() -> gpui::Div {
+    pill("For a person", theme::AMBER, theme::AMBER_TINT)
+}
+
 fn change_pill() -> gpui::Div {
     pill("Change waiting", theme::AMBER, theme::AMBER_TINT)
 }
@@ -7759,6 +7924,7 @@ mod tests {
                 && any.contains("In each repo you change")
                 && any.contains("PG-3 in its title")
                 && any.contains("needs no code change")
+                && any.contains("for_a_person")
                 && !any.contains("{id}"),
             "{any}"
         );

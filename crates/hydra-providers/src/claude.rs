@@ -434,13 +434,10 @@ impl Provider for Claude {
             return report("claude", Status::Info, format!("uses {var} from [env]"));
         }
         let dir = ctx.provider_dir("claude");
-        if !dir.join(".credentials.json").is_file() {
+        let account = oauth_account(&dir);
+        if !signed_in(&dir, account.as_ref()) {
             return report("claude", Status::Missing, "not signed in");
         }
-        let account = std::fs::read_to_string(dir.join(".claude.json"))
-            .ok()
-            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-            .and_then(|v| v.get("oauthAccount").cloned());
         match account
             .as_ref()
             .and_then(|a| a.get("emailAddress"))
@@ -469,12 +466,25 @@ impl Provider for Claude {
         if api_key_var(ctx.env).is_some() {
             return None;
         }
-        (!ctx
-            .provider_dir("claude")
-            .join(".credentials.json")
-            .is_file())
-        .then(|| "not signed in - run claude auth login".to_string())
+        let dir = ctx.provider_dir("claude");
+        (!signed_in(&dir, oauth_account(&dir).as_ref()))
+            .then(|| "not signed in - run claude auth login".to_string())
     }
+}
+
+/// The account Claude Code last signed in as, from `.claude.json` in its config dir.
+fn oauth_account(dir: &Path) -> Option<serde_json::Value> {
+    std::fs::read_to_string(dir.join(".claude.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("oauthAccount").cloned())
+}
+
+/// Whether Claude Code is signed in in `dir`: its token file is there (Windows, Linux), or
+/// `.claude.json` names the account (macOS keeps the token in the Keychain, under an item
+/// hydra doesn't read so as not to prompt for it).
+fn signed_in(dir: &Path, account: Option<&serde_json::Value>) -> bool {
+    dir.join(".credentials.json").is_file() || account.is_some_and(|a| !a.is_null())
 }
 
 /// False when `[claude] mcp.exclude` opts out of the `hydraui` server.
@@ -1189,6 +1199,31 @@ mod tests {
                 (Status::Info, format!("uses {key} from [env]"))
             );
         }
+    }
+
+    #[test]
+    fn a_login_kept_in_the_keychain_counts_once_claude_json_names_the_account() {
+        // Claude Code on macOS keeps the token in the Keychain, not .credentials.json; the
+        // account it signed in as is still written to .claude.json.
+        let f = Fixture::new("[claude]\n");
+        Claude.materialise(&f.ctx()).unwrap();
+        let dir = cfg_dir(&f);
+        std::fs::write(dir.join(".claude.json"), r#"{"numStartups":3}"#).unwrap();
+        assert_eq!(
+            Claude.check(&f.ctx(), &FakeRunner::default()).status,
+            Status::Missing
+        );
+        std::fs::write(
+            dir.join(".claude.json"),
+            r#"{"oauthAccount":{"emailAddress":"work@example.com"}}"#,
+        )
+        .unwrap();
+        assert_eq!(Claude.sign_in_hint(&f.ctx()), None);
+        let r = Claude.check(&f.ctx(), &FakeRunner::default());
+        assert_eq!(
+            (r.status, r.detail.as_str()),
+            (Status::Ok, "work@example.com")
+        );
     }
 
     #[test]

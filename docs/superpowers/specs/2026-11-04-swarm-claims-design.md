@@ -155,6 +155,28 @@ is simply taken up again: it is this machine's. If the key has lapsed and someon
 or it is done, the resume is told so, the same as a lost claim (§4.5), and the person sees it
 *(our call)*.
 
+### 4.8 Reopening a finished key
+
+Added 2026-11-09, at the user's request: a done marked by mistake would otherwise block its key
+for `keep_done`.
+
+- **Who:** any writer in the swarm, the same people who can mark a key done.
+- **How:** reopening writes a reopen record for the key, stamped with the time. It doesn't delete
+  dones, because a machine can only remove its own records and others pass on dones they've
+  heard of.
+- **Effect:** every done and every claim on that key made at or before the newest reopen by a
+  writer stops counting, wherever it came from: the document, a teammate's answer, or memory. So
+  the key is free and can be claimed again, and a holder that lost the key when it was marked
+  done doesn't hold it again.
+- **A later done still counts.** If someone marks the key done again after the reopen, it is
+  done again.
+- **Where:** a **Reopen** button on each Recent done row of the swarm page, with a confirm step,
+  shown to writers. Sessions have no tool for it, so only a person can undo a done (user's call).
+- **Kept** for `keep_done`, like a done, then pruned by its writer: by then every done it covered
+  has also aged out.
+- **Clocks:** a done stamped by a clock running ahead of the reopener's can survive the reopen.
+  Reopening again fixes it.
+
 ## 5. How it's exposed
 
 ### 5.1 The core

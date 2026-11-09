@@ -160,7 +160,9 @@ or it is done, the resume is told so, the same as a lost claim (Â§4.5), and the 
 Added 2026-11-09, at the user's request: a done marked by mistake would otherwise block its key
 for `keep_done`.
 
-- **Who:** any writer in the swarm, the same people who can mark a key done.
+- **Who:** any writer in the swarm, the same people who can mark a key done. A reopen by a
+  machine that has since been retired still counts, like its dones, so removing a person doesn't
+  bring back a mistake they fixed. A reader's reopen changes nothing.
 - **How:** reopening writes a reopen record for the key, stamped with the time. It doesn't delete
   dones, because a machine can only remove its own records and others pass on dones they've
   heard of.
@@ -172,6 +174,12 @@ for `keep_done`.
   done again.
 - **Where:** a **Reopen** button on each Recent done row of the swarm page, with a confirm step,
   shown to writers. Sessions have no tool for it, so only a person can undo a done (user's call).
+- **A stale row is refused.** The button sends the time of the done the person saw. If the key
+  was marked done again since, the reopen is refused ("{key} was marked done again since you
+  looked, so it wasn't reopened."), so a second person can't undo a done they never saw.
+- **Older dones:** Recent done shows only 20, so each context also has a **Reopen a key…** field
+  for writers and owners. It takes a typed key and goes through the same confirm step; it reopens
+  whatever done is current for the key, and an empty box does nothing.
 - **Kept** for `keep_done`, like a done, then pruned by its writer: by then every done it covered
   has also aged out.
 - **Clocks:** a done stamped by a clock running ahead of the reopener's can survive the reopen.

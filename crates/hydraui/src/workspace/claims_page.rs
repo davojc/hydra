@@ -205,13 +205,20 @@ impl Workspace {
             .enumerate()
             .map(|(i, d)| {
                 let reopen = can_reopen(swarm.my_role).then(|| {
-                    let (id, ctx, key) = (swarm.id.clone(), name.clone(), d.key.clone());
+                    let (id, ctx, key, at) = (swarm.id.clone(), name.clone(), d.key.clone(), d.at);
                     Button::new(SharedString::from(format!("claim-reopen-{name}-{i}")))
                         .label("Reopen")
                         .ghost()
                         .small()
                         .on_click(cx.listener(move |ws, _, window, cx| {
-                            ws.claim_reopen(id.clone(), ctx.clone(), key.clone(), window, cx)
+                            ws.claim_reopen(
+                                id.clone(),
+                                ctx.clone(),
+                                key.clone(),
+                                Some(at),
+                                window,
+                                cx,
+                            )
                         }))
                 });
                 h_flex()
@@ -228,6 +235,31 @@ impl Workspace {
                     .into_any_element()
             })
             .collect();
+        // Dones past the 20 shown still block their key, so a writer can name one.
+        let reopen_any = can_reopen(swarm.my_role).then(|| {
+            let (id, ctx) = (swarm.id.clone(), name.clone());
+            Button::new(SharedString::from(format!("claim-reopen-key-{name}")))
+                .label("Reopen a key…")
+                .ghost()
+                .small()
+                .on_click(cx.listener(move |ws, _, window, cx| {
+                    let (id, ctx) = (id.clone(), ctx.clone());
+                    ws.text_dialog(
+                        format!("Reopen a done key ({ctx})"),
+                        String::new(),
+                        "The key, like ticket-7",
+                        move |ws, typed, window, cx| {
+                            // An empty box does nothing; the dialog closes.
+                            if let Some(key) = typed_key(&typed) {
+                                ws.claim_reopen(id.clone(), ctx.clone(), key, None, window, cx);
+                            }
+                            Ok(())
+                        },
+                        window,
+                        cx,
+                    )
+                }))
+        });
         let settings = owner.then(|| {
             let buttons: Vec<Button> = SETTINGS
                 .iter()
@@ -291,6 +323,7 @@ impl Workspace {
                 "Keep done keys longer than anything rescanning this context looks back, or an old item can be claimed again.",
             ))
             .when_some(settings, |d, s| d.child(s))
+            .when_some(reopen_any, |d, b| d.child(h_flex().child(b)))
             .child(v_flex().gap_1().pt_1().children(live))
             .when(!done.is_empty(), |d| {
                 d.child(
@@ -349,6 +382,7 @@ impl Workspace {
         swarm: String,
         context: String,
         key: String,
+        done_at: Option<u64>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -361,7 +395,14 @@ impl Workspace {
             "Reopen",
             false,
             move |ws, window, cx| {
-                ws.claim_reopen_now(swarm.clone(), context.clone(), key.clone(), window, cx)
+                ws.claim_reopen_now(
+                    swarm.clone(),
+                    context.clone(),
+                    key.clone(),
+                    done_at,
+                    window,
+                    cx,
+                )
             },
             window,
             cx,
@@ -373,6 +414,7 @@ impl Workspace {
         swarm: String,
         context: String,
         key: String,
+        done_at: Option<u64>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -381,6 +423,7 @@ impl Workspace {
             swarm,
             context,
             key,
+            done_at,
             reply,
         });
         cx.spawn_in(window, async move |this, cx| {
@@ -430,6 +473,12 @@ impl Workspace {
 /// Your own claims, and anyone's for an owner.
 fn can_release(claim: &ClaimView, owner: bool) -> bool {
     claim.mine || owner
+}
+
+/// The key typed into "Reopen a key…", or nothing when it is empty.
+fn typed_key(typed: &str) -> Option<String> {
+    let key = typed.trim();
+    (!key.is_empty()).then(|| key.to_string())
 }
 
 /// Writers and owners; the service refuses anyone else.
@@ -545,6 +594,19 @@ mod tests {
             },
             mine,
         }
+    }
+
+    #[test]
+    fn a_typed_key_to_reopen_is_trimmed_and_empty_does_nothing() {
+        assert_eq!(
+            typed_key(
+                "  ticket-7 
+"
+            ),
+            Some("ticket-7".to_string())
+        );
+        assert_eq!(typed_key("   "), None);
+        assert_eq!(typed_key(""), None);
     }
 
     #[test]

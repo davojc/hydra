@@ -881,7 +881,12 @@ impl Worker {
         Ok(())
     }
 
-    pub(super) async fn claim_reopen(&mut self, context: &str, key: &str) -> Result<(), String> {
+    pub(super) async fn claim_reopen(
+        &mut self,
+        context: &str,
+        key: &str,
+        done_at: Option<u64>,
+    ) -> Result<(), String> {
         check_claim(context, key)?;
         let node = self.live_node()?;
         let roster = self.fresh_roster(&node).await?;
@@ -893,9 +898,14 @@ impl Worker {
         }
         let settings = self.context_settings(&roster, context)?;
         let (_, states) = self.settled(&node, &roster, context, &settings).await?;
-        if !matches!(states.get(key), Some(KeyState::Done { .. })) {
+        let Some(KeyState::Done { at, .. }) = states.get(key) else {
             return Err(format!(
                 "{key} isn't finished in {context}, so there's nothing to reopen."
+            ));
+        };
+        if done_at.is_some_and(|seen| seen != *at) {
+            return Err(format!(
+                "{key} was marked done again since you looked, so it wasn't reopened."
             ));
         }
         let reopen = ReopenRecord {

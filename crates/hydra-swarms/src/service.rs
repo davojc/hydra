@@ -344,11 +344,13 @@ pub enum Command {
         author: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
-    /// Undoes a done on `key`, so it can be claimed again. Writers only.
+    /// Undoes a done on `key`, so it can be claimed again. Writers only. With `done_at` (the
+    /// `at` of the done the person saw), refused unless that done is still the current one.
     ClaimReopen {
         swarm: String,
         context: String,
         key: String,
+        done_at: Option<u64>,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Makes the context `name`, or changes its settings.
@@ -2132,10 +2134,11 @@ impl Worker {
             Command::ClaimReopen {
                 context,
                 key,
+                done_at,
                 reply,
                 ..
             } => {
-                let _ = reply.send(self.claim_reopen(&context, &key).await);
+                let _ = reply.send(self.claim_reopen(&context, &key, done_at).await);
                 Ok(())
             }
             Command::ClaimContextSet { name, settings, .. } => {

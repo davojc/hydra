@@ -117,11 +117,21 @@ async fn release(svc: &Svc, swarm: &str, key: &str, author: &str) -> Result<(), 
 }
 
 async fn reopen(svc: &Svc, swarm: &str, key: &str) -> Result<(), String> {
+    reopen_seen(svc, swarm, key, None).await
+}
+
+async fn reopen_seen(
+    svc: &Svc,
+    swarm: &str,
+    key: &str,
+    done_at: Option<u64>,
+) -> Result<(), String> {
     let (reply, answer) = oneshot::channel();
     svc.send(Command::ClaimReopen {
         swarm: swarm.to_string(),
         context: "inbox".to_string(),
         key: key.to_string(),
+        done_at,
         reply,
     });
     answer.await.expect("a reply")
@@ -310,6 +320,46 @@ async fn a_writer_reopens_a_done_key_and_it_can_be_claimed_again() {
         })
         .await;
     drop(yours(&olive, &id, "k").await);
+    olive.stop().await;
+    wren.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reopen_of_a_done_that_was_replaced_is_refused() {
+    let _slot = slot();
+    let (mut olive, mut wren, id) = claimers(Role::Writer, FAST).await;
+    yours(&olive, &id, "k").await.done().await.expect("done");
+    let seen = match take(&wren, &id, "k").await {
+        ClaimOutcome::Done { at, .. } => at,
+        other => panic!("expected done, got {other:?}"),
+    };
+    // Someone reopens it, and the work is properly done again.
+    reopen_seen(&wren, &id, "k", Some(seen))
+        .await
+        .expect("reopened");
+    yours(&olive, &id, "k")
+        .await
+        .done()
+        .await
+        .expect("done again");
+    let current = match take(&wren, &id, "k").await {
+        ClaimOutcome::Done { at, .. } => at,
+        other => panic!("expected done, got {other:?}"),
+    };
+    assert_ne!(current, seen);
+    // A second person still holding the old row is refused, and the key stays done.
+    assert_eq!(
+        reopen_seen(&wren, &id, "k", Some(seen)).await,
+        Err("k was marked done again since you looked, so it wasn't reopened.".to_string())
+    );
+    assert!(matches!(
+        take(&wren, &id, "k").await,
+        ClaimOutcome::Done { .. }
+    ));
+    // The current done can be reopened by naming it.
+    reopen_seen(&wren, &id, "k", Some(current))
+        .await
+        .expect("reopened");
     olive.stop().await;
     wren.stop().await;
 }

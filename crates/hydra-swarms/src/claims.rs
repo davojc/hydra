@@ -191,11 +191,11 @@ pub fn settle(
     slack: Duration,
 ) -> BTreeMap<String, KeyState> {
     let keep = settings.keep_done_secs.saturating_mul(1_000_000);
-    // The newest reopen by a current writer, per key. A reader's or a retired machine's changes
-    // nothing.
+    // The newest reopen by a writer or a retired machine, per key, like dones: a machine that
+    // has left doesn't take its reopens back. A reader's changes nothing.
     let mut reopened: BTreeMap<&str, u64> = BTreeMap::new();
     for (author, r) in &records.reopens {
-        if people.writes(author) {
+        if people.writes(author) || people.retired.contains(author) {
             let at = reopened.entry(r.key.as_str()).or_insert(r.at);
             *at = (*at).max(r.at);
         }
@@ -697,7 +697,7 @@ mod tests {
     }
 
     #[test]
-    fn a_readers_reopen_changes_nothing() {
+    fn a_readers_or_strangers_reopen_changes_nothing() {
         for who in ["reader", "stranger"] {
             let mut r = Records::default();
             r.dones.push(("a".into(), done("k", 10 * SEC)));
@@ -707,6 +707,10 @@ mod tests {
                 Some(KeyState::Done { .. })
             ));
         }
+    }
+
+    #[test]
+    fn a_retired_machines_reopen_still_counts() {
         let mut p = people();
         p.members.remove("c");
         p.retired.insert("c".into());
@@ -714,7 +718,7 @@ mod tests {
         r.dones.push(("a".into(), done("k", 10 * SEC)));
         r.reopens.push(("c".into(), reopen("k", 20 * SEC)));
         let s = settle(&r, &p, &settings(-1), 30 * SEC, Duration::from_secs(30));
-        assert!(matches!(s.get("k"), Some(KeyState::Done { .. })));
+        assert!(!s.contains_key("k"));
     }
 
     #[test]

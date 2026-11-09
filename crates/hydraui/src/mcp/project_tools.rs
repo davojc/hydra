@@ -53,6 +53,10 @@ pub const WORK: [&str; 4] = [
 /// Who asked a question a Claude session raised: its answer goes back to the session.
 pub const ASKED_BY_CLAUDE: &str = "claude";
 
+/// Failed tests before the run stops for a person: the first failure goes back to a work
+/// session to fix (spec §14.5).
+pub const FAILURES_BEFORE_A_PERSON: u32 = 2;
+
 /// Every tool this module answers.
 pub fn names() -> impl Iterator<Item = &'static str> {
     PLAN.into_iter().chain(WORK)
@@ -286,7 +290,9 @@ pub fn schemas() -> Vec<Value> {
         tool(
             "ticket_checked",
             "Testing: report your check of the ticket's pull requests, done with the testing \
-             skill. A pass lets the milestone run move on; a fail pauses it for the lead.",
+             skill. A pass puts the ticket in review; a first fail sends it back to a work \
+             session to fix, with your summary as what to fix; a second stops the run for a \
+             person.",
             json!({
                 "passed": {"type": "boolean", "description": "Whether the work passes."},
                 "summary": s("What you checked and, if it failed, what's wrong."),
@@ -898,8 +904,10 @@ fn work(dir: &Path, ticket: &str, name: &str, args: &Value) -> Result<String, St
             t.meta.status = if done {
                 TicketStatus::Done
             } else {
-                TicketStatus::InReview
+                TicketStatus::Testing
             };
+            // New work, or a fix after a failed test: tested afresh either way.
+            t.meta.check.clear();
             t.meta.finished_at = Some(progress::now());
             t.body = format!("{}\n\n## Work\n\n{summary}\n", t.body.trim_end());
             repo::write_ticket(dir, &t).map_err(|e| e.to_string())?;
@@ -939,7 +947,7 @@ fn work(dir: &Path, ticket: &str, name: &str, args: &Value) -> Result<String, St
                 )
             } else {
                 format!(
-                    "Reported: {} is in review with its pull requests.{filed}",
+                    "Reported: {} goes to testing with its pull requests.{filed}",
                     t.id
                 )
             })
@@ -953,6 +961,20 @@ fn work(dir: &Path, ticket: &str, name: &str, args: &Value) -> Result<String, St
             let mut t = t.clone();
             t.meta.check = if passed { "passed" } else { "failed" }.into();
             t.meta.check_note = summary.clone();
+            let next = if passed {
+                t.meta.status = TicketStatus::InReview;
+                "It's in review."
+            } else {
+                t.meta.check_failures += 1;
+                if t.meta.check_failures < FAILURES_BEFORE_A_PERSON {
+                    // Back to a work session, which reads what failed and fixes it.
+                    t.meta.status = TicketStatus::InProgress;
+                    "A work session fixes it next, then it's tested again."
+                } else {
+                    t.meta.status = TicketStatus::Testing;
+                    "It failed before, so the run stops here for a person."
+                }
+            };
             t.body = format!(
                 "{}\n\n## Check\n\n{}: {summary}\n",
                 t.body.trim_end(),
@@ -960,7 +982,7 @@ fn work(dir: &Path, ticket: &str, name: &str, args: &Value) -> Result<String, St
             );
             repo::write_ticket(dir, &t).map_err(|e| e.to_string())?;
             Ok(format!(
-                "Recorded: {}'s check {}.",
+                "Recorded: {}'s check {}. {next}",
                 t.id,
                 if passed { "passed" } else { "failed" }
             ))
@@ -1362,7 +1384,8 @@ mod tests {
         );
         assert!(!out.is_error, "{}", out.text);
         let t = repo::load(&dir).unwrap().tickets.remove(0);
-        assert_eq!(t.meta.status, TicketStatus::InReview);
+        // Pull requests are tested before anyone reviews them.
+        assert_eq!(t.meta.status, TicketStatus::Testing);
         assert_eq!(t.meta.prs, [pr]);
         assert!(t.body.contains("## Work\n\nAdded the tables."));
         // Work that changes no code, such as an investigation, finishes with its findings.
@@ -1747,11 +1770,12 @@ mod tests {
             },
         );
         assert!(!run(&reg, "check", "ticket_show", json!({})).is_error);
-        let report = json!({"prs": ["https://github.com/iov42/a/pull/1"], "summary": "x"});
+        let pr = "https://github.com/iov42/a/pull/1";
+        let report = json!({"prs": [pr], "summary": "x"});
         assert!(run(&reg, "check", "ticket_report", report).is_error);
         let checked = json!({"passed": false, "summary": "Two tests fail in the stepper."});
         assert!(run(&reg, "work", "ticket_checked", checked.clone()).is_error);
-        let out = run(&reg, "check", "ticket_checked", checked);
+        let out = run(&reg, "check", "ticket_checked", checked.clone());
         assert!(!out.is_error, "{}", out.text);
         let t = repo::load(&dir).unwrap().tickets.remove(0);
         assert_eq!(
@@ -1761,6 +1785,35 @@ mod tests {
         assert!(
             t.body
                 .contains("## Check\n\nFailed: Two tests fail in the stepper.")
+        );
+        // A first failure goes back to a work session to fix.
+        assert_eq!(
+            (t.meta.status, t.meta.check_failures),
+            (TicketStatus::InProgress, 1)
+        );
+        // The fix is reported on the same pull request: tested again from scratch.
+        let fixed = json!({"prs": [pr], "summary": "Fixed the stepper tests."});
+        assert!(!run(&reg, "work", "ticket_report", fixed).is_error);
+        let t = repo::load(&dir).unwrap().tickets.remove(0);
+        assert_eq!(
+            (t.meta.status, t.meta.check.as_str()),
+            (TicketStatus::Testing, "")
+        );
+        assert!(t.body.contains("## Work\n\nFixed the stepper tests."));
+        // Failing again stays in testing, failed, for a person.
+        assert!(!run(&reg, "check", "ticket_checked", checked).is_error);
+        let t = repo::load(&dir).unwrap().tickets.remove(0);
+        assert_eq!(
+            (t.meta.status, t.meta.check.as_str(), t.meta.check_failures),
+            (TicketStatus::Testing, "failed", 2)
+        );
+        // A pass puts it in review.
+        let passed = json!({"passed": true, "summary": "All green."});
+        assert!(!run(&reg, "check", "ticket_checked", passed).is_error);
+        let t = repo::load(&dir).unwrap().tickets.remove(0);
+        assert_eq!(
+            (t.meta.status, t.meta.check.as_str()),
+            (TicketStatus::InReview, "passed")
         );
         assert!(
             run(

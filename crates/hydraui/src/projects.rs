@@ -413,6 +413,19 @@ pub fn move_ticket(dir: &Path, ticket: &Ticket, status: TicketStatus) -> Result<
     repo::write_ticket(dir, &t).map_err(|e| e.to_string())
 }
 
+/// After testing failed again, a person's call: `fix` sends the ticket back to a work session
+/// with what failed; otherwise it's tested again as it is (say, after they fixed it by hand).
+pub fn retry_failed_test(dir: &Path, ticket: &Ticket, fix: bool) -> Result<(), String> {
+    let mut t = ticket.clone();
+    if fix {
+        t.meta.status = TicketStatus::InProgress;
+    } else {
+        t.meta.status = TicketStatus::Testing;
+        t.meta.check.clear();
+    }
+    repo::write_ticket(dir, &t).map_err(|e| e.to_string())
+}
+
 /// Sets who works on `ticket` (empty for nobody).
 pub fn assign_ticket(dir: &Path, ticket: &Ticket, assignee: &str) -> Result<(), String> {
     let mut t = ticket.clone();
@@ -954,7 +967,10 @@ pub fn take_linear(
 pub fn started(s: TicketStatus) -> bool {
     matches!(
         s,
-        TicketStatus::InProgress | TicketStatus::InReview | TicketStatus::Done
+        TicketStatus::InProgress
+            | TicketStatus::Testing
+            | TicketStatus::InReview
+            | TicketStatus::Done
     )
 }
 
@@ -1572,18 +1588,20 @@ pub fn set_planning_skill(
 pub struct WorkSetup {
     /// Skill folders by code repo (`owner/name`).
     pub skills: BTreeMap<String, PathBuf>,
-    /// How each pull request is checked before the run moves on; `None`: it isn't.
-    pub testing: Option<Testing>,
+    /// How each pull request is tested before it's in review: always, with the skill router's
+    /// skills unless one is chosen.
+    pub testing: Testing,
     pub model: Option<String>,
     pub effort: Option<String>,
 }
 
-/// How a milestone run checks each pull request (spec §14.5).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// How a milestone run tests each pull request (spec §14.5).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Testing {
     /// With this skill folder.
     Skill(PathBuf),
     /// With no skill named: the repo's own and those the team's skill router asks for.
+    #[default]
     Team,
 }
 
@@ -1630,10 +1648,11 @@ pub fn work_setup(hydra_root: &Path, repo: &str, slug: &str) -> WorkSetup {
                     .collect()
             })
             .unwrap_or_default(),
-        testing: text("testing").map(|t| match t.as_str() {
-            TEAM_TESTING => Testing::Team,
-            _ => Testing::Skill(PathBuf::from(t)),
-        }),
+        // Unset (or "team", as hydraui used to write it) is the skill router.
+        testing: match text("testing") {
+            Some(t) if t != TEAM_TESTING => Testing::Skill(PathBuf::from(t)),
+            _ => Testing::Team,
+        },
         model: text("model"),
         effort: text("effort"),
     }
@@ -2054,7 +2073,7 @@ mod tests {
         let w = work_setup(root, "o/r", "pg");
         assert_eq!(w.skills["iov42/version2-frontend"], PathBuf::from("/s/fe"));
         assert_eq!(w.skills["iov42/version-2-backend"], PathBuf::from("/s/be"));
-        assert_eq!(w.testing, Some(Testing::Skill("/s/qa".into())));
+        assert_eq!(w.testing, Testing::Skill("/s/qa".into()));
         assert_eq!(
             (w.model.as_deref(), w.effort.as_deref()),
             (Some("opus"), Some("high"))
@@ -2072,10 +2091,7 @@ mod tests {
         set_work(root, "o/r", "pg", WorkSetting::Model, None).unwrap();
         let w = work_setup(root, "o/r", "pg");
         assert!(!w.skills.contains_key("iov42/version2-frontend"));
-        assert_eq!(
-            (w.model, w.testing),
-            (None, Some(Testing::Skill("/s/qa".into())))
-        );
+        assert_eq!((w.model, w.testing), (None, Testing::Skill("/s/qa".into())));
         assert_eq!(
             planning_skill_of(root, "o/r", "pg").as_deref(),
             Some("/s/plan")
@@ -2083,13 +2099,16 @@ mod tests {
     }
 
     #[test]
-    fn pull_requests_can_be_checked_with_the_team_skills_alone() {
+    fn pull_requests_are_always_tested_with_the_team_skills_unless_one_is_chosen() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        set_work(root, "o/r", "pg", WorkSetting::Testing, Some(TEAM_TESTING)).unwrap();
-        assert_eq!(work_setup(root, "o/r", "pg").testing, Some(Testing::Team));
+        assert_eq!(work_setup(root, "o/r", "pg").testing, Testing::Team);
+        set_work(root, "o/r", "pg", WorkSetting::Testing, Some("/s/qa")).unwrap();
         set_work(root, "o/r", "pg", WorkSetting::Testing, None).unwrap();
-        assert_eq!(work_setup(root, "o/r", "pg").testing, None);
+        assert_eq!(work_setup(root, "o/r", "pg").testing, Testing::Team);
+        // As earlier versions wrote it.
+        set_work(root, "o/r", "pg", WorkSetting::Testing, Some(TEAM_TESTING)).unwrap();
+        assert_eq!(work_setup(root, "o/r", "pg").testing, Testing::Team);
     }
 
     #[test]
@@ -2799,6 +2818,34 @@ mod tests {
         assert_eq!(
             (t.meta.status, t.meta.assignee.as_str()),
             (TicketStatus::InReview, "aza")
+        );
+    }
+
+    #[test]
+    fn a_ticket_that_failed_testing_again_is_fixed_or_tested_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("pg");
+        let p = project(&dir);
+        new_ticket(&dir, &p, "Schema", "M1", TicketKind::Feature, "me").unwrap();
+        let stuck = |dir: &Path| {
+            let mut t = repo::load(dir).unwrap().tickets.remove(0);
+            (t.meta.status, t.meta.check) = (TicketStatus::Testing, "failed".into());
+            t.meta.check_note = "Stepper tests fail.".into();
+            repo::write_ticket(dir, &t).unwrap();
+            t
+        };
+        retry_failed_test(&dir, &stuck(&dir), true).unwrap();
+        let t = repo::load(&dir).unwrap().tickets.remove(0);
+        // Back to a work session, which reads what failed.
+        assert_eq!(
+            (t.meta.status, t.meta.check.as_str()),
+            (TicketStatus::InProgress, "failed")
+        );
+        retry_failed_test(&dir, &stuck(&dir), false).unwrap();
+        let t = repo::load(&dir).unwrap().tickets.remove(0);
+        assert_eq!(
+            (t.meta.status, t.meta.check.as_str()),
+            (TicketStatus::Testing, "")
         );
     }
 

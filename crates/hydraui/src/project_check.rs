@@ -3,7 +3,7 @@
 //! Every 5 minutes, each engineer's hydraui looks at their own work in the project's code
 //! repos: their pull requests, through the environment's gh, and their branches and recent
 //! commits in the local clone. A ticket key (`PG-12`) in a branch, commit or pull request
-//! moves that ticket forward: in progress, in review, done. The moves are local edits, part of
+//! moves that ticket forward: in progress, testing, done. The moves are local edits, part of
 //! the engineer's pending change. At the project's sync times the pending change gets a short
 //! write-up in `progress/<login>/<date>.md` and is sent.
 
@@ -48,7 +48,7 @@ struct RawPr {
 /// The `--json` fields [`prs_observed`] reads.
 const PR_FIELDS: &str = "title,headRefName,state,url";
 
-/// Pull requests in `gh pr list --json` output: open ones say "in review", merged ones "done".
+/// Pull requests in `gh pr list --json` output: open ones say "testing", merged ones "done".
 /// Closed without merging say nothing.
 pub fn prs_observed(json: &str) -> Result<Vec<Observation>, String> {
     let raw: Vec<RawPr> = serde_json::from_str(json)
@@ -365,7 +365,8 @@ mod tests {
         apply(dir, &p, &moves(&p, &seen)).unwrap();
         let mut again = p.clone();
         again.tickets[0] = repo::load(dir).unwrap().tickets.remove(0);
-        assert_eq!(again.tickets[0].meta.status, TicketStatus::InReview);
+        // An open pull request is tested before it's in review.
+        assert_eq!(again.tickets[0].meta.status, TicketStatus::Testing);
         assert_eq!(again.tickets[0].meta.prs, vec!["u1".to_string()]);
         assert!(moves(&again, &seen).is_empty());
     }

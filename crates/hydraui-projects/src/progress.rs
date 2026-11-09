@@ -9,13 +9,14 @@ use crate::model::*;
 pub struct Counts {
     pub todo: usize,
     pub in_progress: usize,
+    pub testing: usize,
     pub in_review: usize,
     pub done: usize,
 }
 
 impl Counts {
     pub fn total(&self) -> usize {
-        self.todo + self.in_progress + self.in_review + self.done
+        self.todo + self.in_progress + self.testing + self.in_review + self.done
     }
 
     /// Done tickets as a share of all of them, 0 to 1; 0 for a milestone with no tickets.
@@ -30,6 +31,7 @@ impl Counts {
         match status {
             TicketStatus::Todo => self.todo,
             TicketStatus::InProgress => self.in_progress,
+            TicketStatus::Testing => self.testing,
             TicketStatus::InReview => self.in_review,
             TicketStatus::Done => self.done,
             TicketStatus::Dropped => 0,
@@ -40,6 +42,7 @@ impl Counts {
         match status {
             TicketStatus::Todo => self.todo += 1,
             TicketStatus::InProgress => self.in_progress += 1,
+            TicketStatus::Testing => self.testing += 1,
             TicketStatus::InReview => self.in_review += 1,
             TicketStatus::Done => self.done += 1,
             TicketStatus::Dropped => {}
@@ -172,7 +175,7 @@ pub enum Signal {
 pub fn move_for(current: TicketStatus, signal: Signal) -> Option<TicketStatus> {
     let to = match signal {
         Signal::Commit => TicketStatus::InProgress,
-        Signal::PrOpened => TicketStatus::InReview,
+        Signal::PrOpened => TicketStatus::Testing,
         Signal::PrMerged => TicketStatus::Done,
     };
     (current != TicketStatus::Dropped && to > current).then_some(to)
@@ -292,7 +295,11 @@ mod tests {
     fn the_check_only_moves_forward() {
         use TicketStatus::*;
         assert_eq!(move_for(Todo, Signal::Commit), Some(InProgress));
-        assert_eq!(move_for(InProgress, Signal::PrOpened), Some(InReview));
+        // An open pull request is tested before anyone reviews it.
+        assert_eq!(move_for(InProgress, Signal::PrOpened), Some(Testing));
+        assert_eq!(move_for(Testing, Signal::PrOpened), None);
+        assert_eq!(move_for(InReview, Signal::PrOpened), None);
+        assert_eq!(move_for(Testing, Signal::PrMerged), Some(Done));
         assert_eq!(move_for(Todo, Signal::PrMerged), Some(Done));
         assert_eq!(move_for(InReview, Signal::Commit), None);
         assert_eq!(move_for(Done, Signal::PrOpened), None);

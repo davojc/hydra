@@ -4,8 +4,6 @@
 
 use hydraui_projects::{Decision, Project, Review, Ticket, TicketStatus};
 
-use crate::projects::WorkSetup;
-
 /// What a milestone run does next.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
@@ -35,19 +33,18 @@ pub fn queue<'a>(p: &'a Project, milestone: &str) -> Vec<&'a Ticket> {
 }
 
 /// The next step for `milestone`'s run. `cloned` says whether a code repo is cloned here.
-pub fn next_step(
-    p: &Project,
-    milestone: &str,
-    setup: &WorkSetup,
-    cloned: impl Fn(&str) -> bool,
-) -> Step {
+///
+/// Every ticket with pull requests is tested before it's in review. A failure goes back to a
+/// work session to fix (the check tool moves it back to in progress); failing again stops the
+/// run for a person.
+pub fn next_step(p: &Project, milestone: &str, cloned: impl Fn(&str) -> bool) -> Step {
     for t in queue(p, milestone) {
         match t.meta.status {
             TicketStatus::Done | TicketStatus::Dropped => continue,
-            TicketStatus::InReview => match t.meta.check.as_str() {
+            TicketStatus::Testing | TicketStatus::InReview => match t.meta.check.as_str() {
                 "failed" => {
                     return Step::Pause(format!(
-                        "{}'s check failed: {}",
+                        "{} failed testing again: {}",
                         t.id,
                         if t.meta.check_note.is_empty() {
                             "see its pull request"
@@ -56,9 +53,7 @@ pub fn next_step(
                         }
                     ));
                 }
-                "" if setup.testing.is_some() && !t.meta.prs.is_empty() => {
-                    return Step::Check(t.id.clone());
-                }
+                "" if !t.meta.prs.is_empty() => return Step::Check(t.id.clone()),
                 _ => continue,
             },
             TicketStatus::Todo | TicketStatus::InProgress => {}
@@ -101,12 +96,43 @@ pub fn next_step(
     Step::Finished
 }
 
-/// Whether ticket `t`'s work session has finished: it reported pull requests (in review), or
+/// Where a ticket's testing stands, for the people looking at it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestState {
+    /// Waiting for, or in, a testing session.
+    Testing,
+    /// Failed testing; a work session fixes it.
+    Fixing,
+    /// Failed again: a person decides.
+    Stuck,
+    Passed,
+    /// In review without a test, from before testing was a stage.
+    NotTested,
+}
+
+/// Ticket `t`'s testing; `None` before it has pull requests to test.
+pub fn test_state(t: &Ticket) -> Option<TestState> {
+    if t.meta.prs.is_empty() {
+        return None;
+    }
+    let failed = t.meta.check == "failed";
+    Some(match t.meta.status {
+        TicketStatus::InProgress if failed => TestState::Fixing,
+        TicketStatus::Testing if failed => TestState::Stuck,
+        TicketStatus::Testing => TestState::Testing,
+        _ if t.meta.check == "passed" => TestState::Passed,
+        TicketStatus::InReview if failed => TestState::Stuck,
+        TicketStatus::InReview => TestState::NotTested,
+        _ => return None,
+    })
+}
+
+/// Whether ticket `t`'s work session has finished: it reported pull requests (testing), or
 /// work that changed no code (done, with its findings).
 pub fn work_finished(t: &Ticket) -> bool {
     match t.meta.status {
         TicketStatus::Done => true,
-        TicketStatus::InReview => !t.meta.prs.is_empty(),
+        TicketStatus::Testing | TicketStatus::InReview => !t.meta.prs.is_empty(),
         _ => false,
     }
 }
@@ -150,7 +176,7 @@ pub fn picks_up(p: &Project, milestone: &str) -> bool {
 }
 
 /// The branch ticket `ticket` builds on in code repo `repo`: the branch of the latest earlier
-/// ticket in the same milestone that's still in review and is in that repo, or names none (so
+/// ticket in the same milestone that's unmerged (testing or in review) and is in that repo, or names none (so
 /// may have changed it), so later work sees earlier unmerged work. None means the repo's
 /// default branch; so does a branch that was never pushed to `repo`.
 pub fn stack_base(p: &Project, milestone: &str, ticket: &str, repo: &str) -> Option<String> {
@@ -161,7 +187,10 @@ pub fn stack_base(p: &Project, milestone: &str, ticket: &str, repo: &str) -> Opt
         .rev()
         .find(|t| {
             (t.meta.repo.is_empty() || t.meta.repo.eq_ignore_ascii_case(repo))
-                && t.meta.status == TicketStatus::InReview
+                && matches!(
+                    t.meta.status,
+                    TicketStatus::Testing | TicketStatus::InReview
+                )
                 && !t.meta.branch.is_empty()
         })
         .map(|t| t.meta.branch.clone())
@@ -171,7 +200,6 @@ pub fn stack_base(p: &Project, milestone: &str, ticket: &str, repo: &str) -> Opt
 mod tests {
     use super::*;
     use hydraui_projects::{Decision, DecisionMeta, TicketMeta};
-    use std::path::PathBuf;
 
     const FE: &str = "iov42/version2-frontend";
     const BE: &str = "iov42/version-2-backend";
@@ -207,19 +235,6 @@ mod tests {
         }
     }
 
-    fn setup(testing: bool) -> WorkSetup {
-        WorkSetup {
-            skills: [
-                (FE.to_string(), PathBuf::from("/fe")),
-                (BE.into(), "/be".into()),
-            ]
-            .into_iter()
-            .collect(),
-            testing: testing.then(|| crate::projects::Testing::Skill(PathBuf::from("/qa"))),
-            ..Default::default()
-        }
-    }
-
     #[test]
     fn tickets_run_in_number_order_and_the_milestone_finishes() {
         let mut p = project(vec![
@@ -227,51 +242,73 @@ mod tests {
             ticket("PG-2", BE, TicketStatus::Done),
             ticket("PG-3", BE, TicketStatus::Todo),
         ]);
-        let s = setup(false);
-        assert_eq!(next_step(&p, "M1", &s, |_| true), Step::Work("PG-3".into()));
+        assert_eq!(next_step(&p, "M1", |_| true), Step::Work("PG-3".into()));
         p.tickets[2].meta.status = TicketStatus::InReview;
-        assert_eq!(
-            next_step(&p, "M1", &s, |_| true),
-            Step::Work("PG-10".into())
-        );
+        assert_eq!(next_step(&p, "M1", |_| true), Step::Work("PG-10".into()));
         p.tickets[0].meta.status = TicketStatus::InReview;
-        assert_eq!(next_step(&p, "M1", &s, |_| true), Step::Finished);
+        assert_eq!(next_step(&p, "M1", |_| true), Step::Finished);
     }
 
     #[test]
-    fn with_a_testing_skill_each_pull_request_is_checked_before_moving_on() {
+    fn every_pull_request_is_tested_and_a_failure_goes_back_to_be_fixed() {
         let mut p = project(vec![
-            ticket("PG-1", BE, TicketStatus::InReview),
+            ticket("PG-1", BE, TicketStatus::Testing),
             ticket("PG-2", FE, TicketStatus::Todo),
         ]);
         p.tickets[0].meta.prs = vec!["u1".into()];
-        let s = setup(true);
+        // Tested whatever Settings say: there's no turning it off.
+        assert_eq!(next_step(&p, "M1", |_| true), Step::Check("PG-1".into()));
+        // The first failure sends it back to a work session with what failed.
+        let t = &mut p.tickets[0].meta;
+        (t.status, t.check, t.check_failures) = (TicketStatus::InProgress, "failed".into(), 1);
+        t.check_note = "two tests fail".into();
+        assert_eq!(next_step(&p, "M1", |_| true), Step::Work("PG-1".into()));
+        // Fixed and reported again: tested again.
+        let t = &mut p.tickets[0].meta;
+        (t.status, t.check) = (TicketStatus::Testing, String::new());
+        assert_eq!(next_step(&p, "M1", |_| true), Step::Check("PG-1".into()));
+        // Failing again stops the run for a person.
+        let t = &mut p.tickets[0].meta;
+        (t.check, t.check_failures) = ("failed".into(), 2);
         assert_eq!(
-            next_step(&p, "M1", &s, |_| true),
-            Step::Check("PG-1".into())
+            next_step(&p, "M1", |_| true),
+            Step::Pause("PG-1 failed testing again: two tests fail".into())
         );
-        p.tickets[0].meta.check = "failed".into();
-        p.tickets[0].meta.check_note = "two tests fail".into();
-        assert_eq!(
-            next_step(&p, "M1", &s, |_| true),
-            Step::Pause("PG-1's check failed: two tests fail".into())
-        );
-        p.tickets[0].meta.check = "passed".into();
-        assert_eq!(next_step(&p, "M1", &s, |_| true), Step::Work("PG-2".into()));
+        // Passed, it's in review and the run moves on.
+        let t = &mut p.tickets[0].meta;
+        (t.status, t.check) = (TicketStatus::InReview, "passed".into());
+        assert_eq!(next_step(&p, "M1", |_| true), Step::Work("PG-2".into()));
+        // One left in review untested, from before testing was a stage, is tested too.
+        p.tickets[0].meta.check.clear();
+        assert_eq!(next_step(&p, "M1", |_| true), Step::Check("PG-1".into()));
+    }
+
+    #[test]
+    fn a_tickets_testing_reads_as_one_state() {
+        let mut t = ticket("PG-1", BE, TicketStatus::InProgress);
+        assert_eq!(test_state(&t), None, "no pull request, nothing to test");
+        t.meta.prs = vec!["u".into()];
+        assert_eq!(test_state(&t), None, "still being worked on");
+        t.meta.status = TicketStatus::Testing;
+        assert_eq!(test_state(&t), Some(TestState::Testing));
+        (t.meta.status, t.meta.check) = (TicketStatus::InProgress, "failed".into());
+        assert_eq!(test_state(&t), Some(TestState::Fixing));
+        t.meta.status = TicketStatus::Testing;
+        assert_eq!(test_state(&t), Some(TestState::Stuck));
+        (t.meta.status, t.meta.check) = (TicketStatus::InReview, "passed".into());
+        assert_eq!(test_state(&t), Some(TestState::Passed));
+        t.meta.check.clear();
+        assert_eq!(test_state(&t), Some(TestState::NotTested));
     }
 
     #[test]
     fn it_pauses_for_what_only_the_lead_can_give() {
         let mut p = project(vec![ticket("PG-1", BE, TicketStatus::Todo)]);
-        let s = setup(false);
         // A repo with no skill chosen goes ahead with the repo's own CLAUDE.md and skills.
         p.tickets[0].meta.repo = "iov42/svc-usage".into();
-        assert_eq!(next_step(&p, "M1", &s, |_| true), Step::Work("PG-1".into()));
+        assert_eq!(next_step(&p, "M1", |_| true), Step::Work("PG-1".into()));
         p.tickets[0].meta.repo = BE.into();
-        assert_eq!(
-            next_step(&p, "M1", &s, |_| false),
-            Step::NeedClone(BE.into())
-        );
+        assert_eq!(next_step(&p, "M1", |_| false), Step::NeedClone(BE.into()));
         p.decisions.push(Decision {
             id: "D-4".into(),
             meta: DecisionMeta {
@@ -282,14 +319,14 @@ mod tests {
             body: String::new(),
         });
         assert_eq!(
-            next_step(&p, "M1", &s, |_| true),
+            next_step(&p, "M1", |_| true),
             Step::Pause("PG-1 waits on Decision 4".into())
         );
         // Unapproved and other milestones' tickets aren't part of the run.
         let mut q = project(vec![ticket("PG-1", BE, TicketStatus::Todo)]);
         q.tickets[0].meta.review = Review::Proposed;
-        assert_eq!(next_step(&q, "M1", &s, |_| true), Step::Finished);
-        assert_eq!(next_step(&p, "M2", &s, |_| true), Step::Finished);
+        assert_eq!(next_step(&q, "M1", |_| true), Step::Finished);
+        assert_eq!(next_step(&p, "M2", |_| true), Step::Finished);
     }
 
     #[test]
@@ -302,19 +339,18 @@ mod tests {
             why: "Joshua".into(),
             ..Default::default()
         });
-        let s = setup(false);
         assert!(
-            matches!(next_step(&p, "M1", &s, |_| true), Step::Pause(w) if w.starts_with("PG-2 has a change"))
+            matches!(next_step(&p, "M1", |_| true), Step::Pause(w) if w.starts_with("PG-2 has a change"))
         );
         p.tickets[1].meta.change = None;
-        assert_eq!(next_step(&p, "M1", &s, |_| true), Step::Work("PG-2".into()));
+        assert_eq!(next_step(&p, "M1", |_| true), Step::Work("PG-2".into()));
     }
 
     #[test]
     fn a_ticket_builds_on_the_last_unmerged_one_in_its_repo() {
         let p = project(vec![
             ticket("PG-1", BE, TicketStatus::InReview),
-            ticket("PG-2", FE, TicketStatus::InReview),
+            ticket("PG-2", FE, TicketStatus::Testing),
             ticket("PG-3", BE, TicketStatus::Done),
             ticket("PG-4", BE, TicketStatus::Todo),
             ticket("PG-5", FE, TicketStatus::Todo),
@@ -330,18 +366,12 @@ mod tests {
             ticket("PG-1", "", TicketStatus::InReview),
             ticket("PG-2", "", TicketStatus::Todo),
         ]);
-        let s = setup(false);
         // With no repos to work in, only the lead can help.
-        assert!(
-            matches!(next_step(&p, "M1", &s, |_| true), Step::Pause(w) if w.contains("Settings"))
-        );
+        assert!(matches!(next_step(&p, "M1", |_| true), Step::Pause(w) if w.contains("Settings")));
         p.file.repos = vec![BE.into(), FE.into()];
         // Every repo must be cloned here first, since the work may land in any of them.
-        assert_eq!(
-            next_step(&p, "M1", &s, |r| r != FE),
-            Step::NeedClone(FE.into())
-        );
-        assert_eq!(next_step(&p, "M1", &s, |_| true), Step::Work("PG-2".into()));
+        assert_eq!(next_step(&p, "M1", |r| r != FE), Step::NeedClone(FE.into()));
+        assert_eq!(next_step(&p, "M1", |_| true), Step::Work("PG-2".into()));
         // In each repo it builds on the earlier unmerged ticket, which may have changed it.
         assert_eq!(stack_base(&p, "M1", "PG-2", BE).as_deref(), Some("pg-1-x"));
         assert_eq!(stack_base(&p, "M1", "PG-2", FE).as_deref(), Some("pg-1-x"));
@@ -358,10 +388,7 @@ mod tests {
         assert!(picks_up(&p, "M1"));
         assert!(!picks_up(&p, "M2"));
         // Starting the run again works that ticket first.
-        assert_eq!(
-            next_step(&p, "M1", &setup(false), |_| true),
-            Step::Work("PG-2".into())
-        );
+        assert_eq!(next_step(&p, "M1", |_| true), Step::Work("PG-2".into()));
     }
 
     #[test]
@@ -374,6 +401,9 @@ mod tests {
             "in review but no pull request reported yet"
         );
         t.meta.prs = vec!["u".into()];
+        assert!(work_finished(&t));
+        // Reporting pull requests sends it to testing.
+        t.meta.status = TicketStatus::Testing;
         assert!(work_finished(&t));
         let mut found = ticket("PG-2", BE, TicketStatus::Done);
         found.meta.prs.clear();
@@ -437,13 +467,10 @@ mod tests {
             ticket("PG-2", FE, TicketStatus::Todo),
         ]);
         p.tickets[0].meta.person = true;
-        assert_eq!(
-            next_step(&p, "M1", &setup(false), |_| true),
-            Step::Work("PG-2".into())
-        );
+        assert_eq!(next_step(&p, "M1", |_| true), Step::Work("PG-2".into()));
         p.tickets[1].meta.status = TicketStatus::Done;
         // The person's task still open doesn't hold the run.
-        assert_eq!(next_step(&p, "M1", &setup(false), |_| true), Step::Finished);
+        assert_eq!(next_step(&p, "M1", |_| true), Step::Finished);
         p.tickets[0].meta.status = TicketStatus::InProgress;
         assert!(!picks_up(&p, "M1"));
     }

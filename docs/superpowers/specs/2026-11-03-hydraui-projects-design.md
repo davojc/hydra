@@ -719,6 +719,15 @@ was wrong). Work starts on a milestone and runs its tickets one after another.
   lead files them from a ticket page's "Needs a person" with Add as a task. A run never
   starts Claude on a person task, and one left open doesn't hold the run. The board marks it
   "For a person", and the milestone page lists the open ones, each with Done.
+- **Testing is a stage (added 2026-11-09).** A ticket's life is Todo → In progress →
+  Testing → In review → Done. A work session that reports pull requests puts the ticket in
+  Testing (so does the local check, for a pull request opened by hand), and the run tests it
+  before moving on. Testing can't be turned off: Settings picks a testing skill, or leaves it
+  to the skill router. A pass puts the ticket in review. The first failure sends it back to
+  In progress, and a work session fixes what failed on the same pull requests and reports
+  them again, to be tested again. A second failure (`check_failures` reaches 2) stops the run
+  for a person, whose ticket page offers Fix again or Test again. Tickets that change no code
+  have nothing to test and go straight to Done.
 
 ### 14.6 New requirements (added 2026-11-05)
 

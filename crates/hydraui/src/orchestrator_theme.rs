@@ -48,6 +48,9 @@ pub const RED_TINT: u32 = 0x331916;
 pub const AMBER: u32 = 0xe5b53e;
 pub const AMBER_TINT: u32 = 0x2e2511;
 pub const GREEN: u32 = 0x62c98d;
+/// Tickets being tested (Projects).
+pub const VIOLET: u32 = 0x9d8cf0;
+pub const VIOLET_TINT: u32 = 0x221f33;
 pub const GREEN_TINT: u32 = 0x12291c;
 pub const BORDER_STRONG: u32 = 0x2f3635;
 /// The stopped banner's background.

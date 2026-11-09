@@ -2678,11 +2678,11 @@ impl Workspace {
         let (default_name, use_default) = match slot {
             Slot::Planning => ("Default", "Use default"),
             Slot::Repo(_) => ("Skill router", "Use skill router"),
-            Slot::Testing => ("Off", "Turn off"),
+            // Testing can't be off: clearing a chosen skill goes back to the skill router.
+            Slot::Testing => ("Skill router", "Use skill router"),
         };
         let (e1, s1, slot1) = (env.to_string(), slug.to_string(), slot.clone());
         let (e2, s2, slot2) = (env.to_string(), slug.to_string(), slot.clone());
-        let (e3, s3) = (env.to_string(), slug.to_string());
         let mut others = h_flex().gap_1();
         if !matches!(current, SkillChoice::Default(_)) {
             others = others.child(
@@ -2692,24 +2692,6 @@ impl Workspace {
                     .small()
                     .on_click(cx.listener(move |ws, _, window, cx| {
                         ws.set_skill_slot(&e2, &s2, &slot2, None, window, cx)
-                    })),
-            );
-        }
-        if matches!(slot, Slot::Testing) && !matches!(current, SkillChoice::Team) {
-            others = others.child(
-                Button::new("team-testing")
-                    .label("Use skill router")
-                    .ghost()
-                    .small()
-                    .on_click(cx.listener(move |ws, _, window, cx| {
-                        ws.set_work_setting(
-                            &e3,
-                            &s3,
-                            pj::WorkSetting::Testing,
-                            Some(pj::TEAM_TESTING),
-                            window,
-                            cx,
-                        )
                     })),
             );
         }
@@ -2734,7 +2716,6 @@ impl Workspace {
         let selected = match current {
             SkillChoice::Default(d) if !d.is_empty() => two_line(default_name.to_string(), d),
             SkillChoice::Default(_) => value_text(default_name),
-            SkillChoice::Team => value_text("Skill router"),
             SkillChoice::Yours(name, place) => two_line(name, place),
         };
         setting_row(label, hint, selected, Some(others))
@@ -2859,8 +2840,17 @@ impl Workspace {
                         c.ticket, asked[0].meta.question
                     ),
                     (Some(c), None) => match c.phase {
+                        Phase::Work
+                            if p.tickets.iter().any(|t| {
+                                t.id == c.ticket
+                                    && crate::project_run::test_state(t)
+                                        == Some(crate::project_run::TestState::Fixing)
+                            }) =>
+                        {
+                            format!("Fixing what failed testing on {}", c.ticket)
+                        }
                         Phase::Work => format!("Working on {}", c.ticket),
-                        Phase::Check => format!("Checking {}'s pull request", c.ticket),
+                        Phase::Check => format!("Testing {}", c.ticket),
                     },
                     (None, None) => "Starting…".to_string(),
                 };
@@ -3033,9 +3023,8 @@ impl Workspace {
 
     fn run_step(&self, env: &str, slug: &str, milestone: &str) -> Option<Step> {
         let p = self.find_project(env, slug)?;
-        let setup = self.work_setup(env, slug);
         let root = self.hydra.paths.root().to_path_buf();
-        Some(crate::project_run::next_step(p, milestone, &setup, |r| {
+        Some(crate::project_run::next_step(p, milestone, |r| {
             pj::clone_of(&root, r).is_some()
         }))
     }
@@ -3211,9 +3200,8 @@ impl Workspace {
                 .find(|(r, _)| r.eq_ignore_ascii_case(&t.meta.repo))
                 .map(|(_, s)| s.clone()),
             Phase::Check => match setup.testing.clone() {
-                Some(pj::Testing::Skill(s)) => Some(s),
-                Some(pj::Testing::Team) => None,
-                None => return Err("its testing skill isn't set any more".into()),
+                pj::Testing::Skill(s) => Some(s),
+                pj::Testing::Team => None,
             },
         };
         let clone = pj::clone_of(self.hydra.paths.root(), &t.meta.repo);
@@ -3271,7 +3259,7 @@ impl Workspace {
             .ok_or("its terminal didn't open")?;
         let label = match phase {
             Phase::Work => format!("{} · {}", t.id, t.meta.title),
-            Phase::Check => format!("{} · checking", t.id),
+            Phase::Check => format!("{} · testing", t.id),
         };
         view.update(cx, |v, cx| v.set_name(Some(label), cx));
         let token = view
@@ -4551,7 +4539,7 @@ impl Workspace {
                 .filter(|t| {
                     matches!(
                         t.meta.status,
-                        TicketStatus::InProgress | TicketStatus::InReview
+                        TicketStatus::InProgress | TicketStatus::Testing | TicketStatus::InReview
                     )
                 })
                 .collect();
@@ -5611,10 +5599,12 @@ impl Workspace {
                             .text_sm()
                             .text_color(color(theme::TEXT_SECONDARY))
                             .child(format!(
-                                "{} of {} done · {} in review · {} in progress · {} to do",
+                                "{} of {} done · {} in review · {} testing · {} in progress · \
+                                 {} to do",
                                 c.done,
                                 c.total(),
                                 c.in_review,
+                                c.testing,
                                 c.in_progress,
                                 c.todo
                             )),
@@ -5848,6 +5838,7 @@ impl Workspace {
             (None, _) if outcome.is_empty() => match t.meta.status {
                 TicketStatus::Todo => "Not started yet.".to_string(),
                 TicketStatus::InProgress => "Being worked on; nothing reported yet.".to_string(),
+                TicketStatus::Testing => "Being tested.".to_string(),
                 _ => "Nothing was reported.".to_string(),
             },
             (None, Some(Some(_))) => "Couldn't summarise the report.".to_string(),
@@ -5871,13 +5862,75 @@ impl Workspace {
                     .on_click(move |_, _, cx| cx.open_url(&u)),
             );
         }
-        match t.meta.check.as_str() {
-            "passed" => chips = chips.child(pill("Check passed", theme::GREEN, theme::SURFACE)),
-            "failed" => chips = chips.child(pill("Check failed", theme::RED, theme::RED_TINT)),
-            _ if !t.meta.prs.is_empty() && t.meta.status == TicketStatus::InReview => {
-                chips = chips.child(pill("Not checked yet", theme::TEXT_MUTED, theme::SURFACE))
+        let tests = crate::project_run::test_state(t);
+        if let Some(state) = tests {
+            use crate::project_run::TestState;
+            let (label, fg, bg) = match state {
+                TestState::Testing => ("Being tested", theme::VIOLET, theme::VIOLET_TINT),
+                TestState::Fixing => (
+                    "Failed testing · being fixed",
+                    theme::AMBER,
+                    theme::AMBER_TINT,
+                ),
+                TestState::Stuck => ("Failed testing again", theme::RED, theme::RED_TINT),
+                TestState::Passed => ("Tests passed", theme::GREEN, theme::SURFACE),
+                TestState::NotTested => ("Not tested yet", theme::TEXT_MUTED, theme::SURFACE),
+            };
+            chips = chips.child(pill(label, fg, bg));
+        }
+        // Failed twice: a person says whether Claude fixes it again or it's tested as it is.
+        if tests == Some(crate::project_run::TestState::Stuck) {
+            for (fix, label, tip) in [
+                (
+                    true,
+                    "Fix again",
+                    "A work session fixes what failed, then it's tested again",
+                ),
+                (
+                    false,
+                    "Test again",
+                    "Test it as it is, say after you fixed it yourself",
+                ),
+            ] {
+                let (e, sl, ticket) = (env.to_string(), slug.to_string(), t.clone());
+                chips = chips.child(
+                    Button::new(SharedString::from(format!("retest-{fix}")))
+                        .label(label)
+                        .small()
+                        .when(fix, |b| b.primary())
+                        .when(!fix, |b| b.ghost())
+                        .tooltip(tip)
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            let res = ws.edit_project(
+                                &e,
+                                &sl,
+                                |dir, _, _| pj::retry_failed_test(dir, &ticket, fix),
+                                window,
+                                cx,
+                            );
+                            match res {
+                                Err(err) => window.push_notification(Notification::error(err), cx),
+                                Ok(()) => {
+                                    let paused = ws
+                                        .projects_data
+                                        .runs
+                                        .get(&(e.clone(), sl.clone()))
+                                        .is_some_and(|r| r.paused.is_some());
+                                    if paused {
+                                        ws.carry_on_run(&e, &sl, window, cx);
+                                    } else {
+                                        window.push_notification(
+                                            Notification::info(
+                                                "Start the milestone run to pick it up.",
+                                            ),
+                                            cx,
+                                        );
+                                    }
+                                }
+                            }
+                        })),
+                );
             }
-            _ => {}
         }
         if open_decisions > 0 {
             chips = chips.child(pill(
@@ -6421,6 +6474,7 @@ impl Workspace {
             for status in [
                 TicketStatus::Todo,
                 TicketStatus::InProgress,
+                TicketStatus::Testing,
                 TicketStatus::InReview,
                 TicketStatus::Done,
                 TicketStatus::Dropped,
@@ -6815,17 +6869,16 @@ impl Workspace {
             .iter()
             .filter_map(|r| pj::clone_of(&root, r))
             .collect();
-        let testing = match setup.testing.as_ref() {
-            Some(pj::Testing::Team) => SkillChoice::Team,
+        let testing = match &setup.testing {
+            pj::Testing::Team => SkillChoice::Default(String::new()),
             // In whichever of the project's repos holds it, if any.
-            Some(pj::Testing::Skill(t)) => SkillChoice::yours(
+            pj::Testing::Skill(t) => SkillChoice::yours(
                 &clones
                     .iter()
                     .map(|c| pj::SkillSource::of(Some(t), Some(c)))
                     .find(|s| matches!(s, pj::SkillSource::InRepo(_)))
                     .unwrap_or_else(|| pj::SkillSource::Yours(t.to_path_buf())),
             ),
-            None => SkillChoice::Default("Pull requests aren't checked".to_string()),
         };
         let mut mine = settings_card(
             "How Claude works, on this Mac",
@@ -6954,8 +7007,6 @@ enum Slot {
 enum SkillChoice {
     /// hydraui's default, with what that means.
     Default(String),
-    /// Testing with the team's skills.
-    Team,
     /// A skill of yours: its name and where it is.
     Yours(String, String),
 }
@@ -7372,6 +7423,9 @@ fn start_prompt(p: &Project, guide: &str) -> String {
 /// A ticket that names no repo is worked in a folder holding a worktree of each of the
 /// project's repos: Claude finds out which the work needs and changes those.
 fn work_prompt(p: &Project, t: &Ticket, branch: &str, skill: Option<&Path>) -> String {
+    if t.meta.check == "failed" && !t.meta.prs.is_empty() {
+        return fix_prompt(p, t, branch, skill);
+    }
     let (place, ship) = if t.meta.repo.is_empty() {
         (
             format!(
@@ -7413,6 +7467,37 @@ fn work_prompt(p: &Project, t: &Ticket, branch: &str, skill: Option<&Path>) -> S
     )
 }
 
+/// A work session's prompt after testing failed (spec §14.5): fix what failed on the ticket's
+/// own pull requests, then report them again to be tested again.
+fn fix_prompt(p: &Project, t: &Ticket, branch: &str, skill: Option<&Path>) -> String {
+    format!(
+        "Ticket {id} \"{title}\" of the project \"{name}\" failed testing. Its pull \
+         request(s) {prs} are checked out {place} on branch {branch}. {follow} Call \
+         ticket_show for what the ticket asks; its Check section has the whole report.\n\
+         What failed: {note}\n\
+         Fix that within the ticket's scope: commit and push to this branch, so the same pull \
+         requests update; open no new ones. Then call ticket_report with the same pull \
+         request URL(s) and a short summary of the fix: hydraui tests it again. If a failure \
+         isn't this ticket's to fix, or needs a decision, ask with ticket_ask, never in this \
+         terminal; anything only a person can do goes in ticket_report's for_a_person.",
+        id = t.id,
+        title = t.meta.title,
+        name = p.file.name,
+        prs = t.meta.prs.join(", "),
+        place = if t.meta.repo.is_empty() {
+            "in this folder's worktrees, one subfolder per code repo,"
+        } else {
+            "in this worktree"
+        },
+        note = if t.meta.check_note.is_empty() {
+            "see the ticket's Check section"
+        } else {
+            &t.meta.check_note
+        },
+        follow = follow(skill, "skill for this work"),
+    )
+}
+
 /// A testing session's prompt (spec §14.5): check one ticket's pull requests with `skill`.
 fn check_prompt(p: &Project, t: &Ticket, skill: Option<&Path>) -> String {
     format!(
@@ -7422,8 +7507,9 @@ fn check_prompt(p: &Project, t: &Ticket, skill: Option<&Path>) -> String {
          Check that the work does what the ticket says and passes the checks its skills call \
          for. You may \
          fix small problems within the ticket's scope: commit and push them to this branch. \
-         Finish with ticket_checked: passed, or not with what's wrong. A failed check pauses \
-         the milestone for the lead. If you need a decision, ask it with ticket_ask.",
+         Finish with ticket_checked: passed, or not with exactly what's wrong and how to \
+         reproduce it, since a work session reads that to fix it before testing again. If \
+         you need a decision, ask it with ticket_ask.",
         id = t.id,
         title = t.meta.title,
         name = p.file.name,
@@ -7686,13 +7772,14 @@ fn status_colour(s: TicketStatus) -> u32 {
     match s {
         TicketStatus::Todo => theme::BORDER_STRONG,
         TicketStatus::InProgress => theme::AMBER,
+        TicketStatus::Testing => theme::VIOLET,
         TicketStatus::InReview => theme::TEAL,
         TicketStatus::Done => theme::GREEN,
         TicketStatus::Dropped => theme::TEXT_MUTED,
     }
 }
 
-/// A bar split by ticket status: done, in review, in progress, then todo (spec §8.2).
+/// A bar split by ticket status: done, in review, testing, in progress, then todo (spec §8.2).
 /// A milestone on one line: its name, its whole title (cut short only when the window is
 /// narrow), a short bar, how many tickets are done, and what it waits on or its target.
 fn milestone_line(m: &Milestone, c: &Counts, today: &str) -> gpui::Div {
@@ -7751,6 +7838,7 @@ fn status_bar(c: &Counts, height: f32) -> AnyElement {
         for status in [
             TicketStatus::Done,
             TicketStatus::InReview,
+            TicketStatus::Testing,
             TicketStatus::InProgress,
             TicketStatus::Todo,
         ] {
@@ -7776,6 +7864,7 @@ fn counts_line(c: &Counts) -> AnyElement {
         .text_color(color(theme::TEXT_SECONDARY))
         .child(format!("{} done", c.done))
         .child(format!("{} in review", c.in_review))
+        .child(format!("{} testing", c.testing))
         .child(format!("{} in progress", c.in_progress))
         .child(format!("{} todo", c.todo))
         .into_any_element()
@@ -7929,6 +8018,22 @@ mod tests {
             "{any}"
         );
         assert!(check_prompt(&p, &anywhere, None).contains("one subfolder per code repo"));
+        // After a failed test, the work session fixes what failed on the same pull requests.
+        let mut failed = t.clone();
+        failed.meta.status = TicketStatus::InProgress;
+        failed.meta.check = "failed".into();
+        failed.meta.check_note = "Two stepper tests fail.".into();
+        let fix = work_prompt(&p, &failed, "pg-3-share-dialog", None);
+        assert!(
+            fix.contains("failed testing")
+                && fix.contains("Two stepper tests fail.")
+                && fix.contains("https://github.com/iov42/fe/pull/7")
+                && fix.contains("ticket_report")
+                && !fix.contains("gh pr create"),
+            "{fix}"
+        );
+        // Testing says what a failure leads to.
+        assert!(check_prompt(&p, &t, None).contains("fix"));
         let started = start_prompt(&p, "Use the /our-planning skill throughout.");
         assert!(started.contains("plan_propose_milestone") && started.contains("/our-planning"));
     }

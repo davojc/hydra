@@ -189,6 +189,10 @@ pub struct TicketMeta {
     /// The testing session's summary.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub check_note: String,
+    /// How many times testing has failed: each failure goes back to a work session to fix,
+    /// until the run stops for a person (spec §14.5).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub check_failures: u32,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub started_by: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -244,6 +248,10 @@ impl Review {
     }
 }
 
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TicketKind {
@@ -262,6 +270,9 @@ pub enum TicketStatus {
     Todo,
     #[serde(rename = "in progress")]
     InProgress,
+    /// Pull requests open, being tested before anyone reviews them (spec §14.5).
+    #[serde(rename = "testing")]
+    Testing,
     #[serde(rename = "in review")]
     InReview,
     #[serde(rename = "done")]
@@ -272,9 +283,10 @@ pub enum TicketStatus {
 
 impl TicketStatus {
     /// The board's columns, in order. Dropped tickets aren't on the board.
-    pub const BOARD: [TicketStatus; 4] = [
+    pub const BOARD: [TicketStatus; 5] = [
         TicketStatus::Todo,
         TicketStatus::InProgress,
+        TicketStatus::Testing,
         TicketStatus::InReview,
         TicketStatus::Done,
     ];
@@ -283,6 +295,7 @@ impl TicketStatus {
         match self {
             TicketStatus::Todo => "Todo",
             TicketStatus::InProgress => "In progress",
+            TicketStatus::Testing => "Testing",
             TicketStatus::InReview => "In review",
             TicketStatus::Done => "Done",
             TicketStatus::Dropped => "Dropped",

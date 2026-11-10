@@ -87,6 +87,10 @@ pub fn items(run: &str, text: &str) -> Vec<Item> {
         };
         let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
         let at = s("at");
+        // A stage added since the run started (core spec §56) reads by its title too.
+        if v.get("event").and_then(Value::as_str) == Some("stage added") && !s("title").is_empty() {
+            titles.insert(s("stage"), s("title"));
+        }
         // A stage by its title, else its id as a sentence (`verify-2` is a later attempt's id).
         let stage = |id: &str| {
             titles
@@ -278,6 +282,9 @@ pub fn items(run: &str, text: &str) -> Vec<Item> {
                 )
             }
             Some("resumed after restart") => push("Resumed".into(), Tone::Neutral),
+            Some("stage added") => {
+                push(format!("Added stage {}", stage(&s("stage"))), Tone::Neutral)
+            }
             Some("went back") => push(
                 format!("Went back to {}", stage(&s("stage"))),
                 Tone::Neutral,
@@ -551,6 +558,21 @@ mod tests {
         assert_eq!(seen, vec![("a", "Done"), ("b", "Verify started")]);
         let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3_600);
         assert!(read(d.path(), "2026-11-10 08:00:00.000", later).is_empty());
+    }
+
+    #[test]
+    fn an_added_stage_reads_by_its_title() {
+        let text = log(&[
+            started("2026-11-10 08:00:00.000"),
+            json!({"at": "2026-11-10 09:00:00.000", "event": "stage added", "stage": "lint",
+                "title": "Run the linter", "prompt": "p", "after": "replicate"}),
+            json!({"at": "2026-11-10 09:00:01.000", "event": "went back", "stage": "lint"}),
+        ]);
+        let texts: Vec<String> = items("r", &text).into_iter().map(|i| i.text).collect();
+        assert_eq!(
+            texts,
+            ["Added stage Run the linter", "Went back to Run the linter"]
+        );
     }
 
     #[test]

@@ -86,6 +86,14 @@ const SCORE_AGAIN: &str = "A person has worked on this stage in this session sin
      Look at the stage's work as it is now, check it again the way the stage asks, then call \
      stage_report again: a fresh score, evidence, and reasons for and against.";
 
+/// A stage Go back can return to: one that passed (its id and title), or one added to the
+/// pipeline since the run started (core spec §56).
+#[derive(Clone)]
+enum BackTo {
+    Passed(String, String),
+    New(crate::runs::NewStage),
+}
+
 /// The note a person started an attempt with (Re-run or Go back), under its panel's header.
 fn note_strip(note: Option<&str>) -> Option<AnyElement> {
     let note = note.map(str::trim).filter(|n| !n.is_empty())?;
@@ -316,6 +324,60 @@ impl Workspace {
                 tell(changes);
             }
             Err(e) => window.push_notification(Notification::error(e).title("Pipeline"), cx),
+        }
+    }
+
+    /// **Go back** to a stage added to the pipeline since the run started (core spec §56): it
+    /// joins the run and starts afresh with `note`; logged as the stage added, then the choice.
+    fn back_to_new_stage(
+        &mut self,
+        orch: PaneId,
+        run: &str,
+        new: crate::runs::NewStage,
+        note: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sv) = server::get() else {
+            return;
+        };
+        let id = new.spec.id.clone();
+        let done = {
+            let mut reg = server::lock(sv.registry());
+            let fields = crate::run_log::stage_added_fields(&new.spec, new.after.as_deref());
+            let done = reg
+                .runs
+                .back_to_new(run, new.spec, new.after.as_deref(), &note);
+            if let (Ok(_), Some(root)) = (&done, &reg.hydra_root) {
+                let file = crate::run_log::file_for(root, run);
+                for (event, fields) in [
+                    ("stage added", fields),
+                    (
+                        "person",
+                        json!({"choice": "back", "note": note.trim(), "stage": id}),
+                    ),
+                ] {
+                    if let Err(e) = crate::run_log::append(&file, event, fields) {
+                        crate::action_log::write(format!("run log {run}: {e}"));
+                    }
+                }
+            }
+            done
+        };
+        match done {
+            Ok(changes) => {
+                crate::action_log::write(format!(
+                    "run {run}: the user went back to new stage {id}"
+                ));
+                self.pipeline_tab_update(orch, cx, |t| {
+                    t.selected = None;
+                    t.stepped_in = false;
+                    t.confirm_stop = false;
+                });
+                self.focus_active(window, cx);
+                tell(changes);
+            }
+            Err(e) => window.push_notification(Notification::error(e).title("Go back"), cx),
         }
     }
 
@@ -580,19 +642,30 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let stages: Vec<(String, String)> = server::get()
+        // Earlier stages that passed, with any stage added to the file since that would come
+        // among them (core spec §56), in the order the run would take them.
+        let root = self.hydra.paths.root().to_path_buf();
+        let stages: Vec<BackTo> = server::get()
             .and_then(|sv| {
                 let reg = server::lock(sv.registry());
                 let r = reg.runs.run(&run)?;
-                Some(
-                    r.pipeline
-                        .stages
-                        .iter()
-                        .zip(&r.stages)
-                        .take_while(|(_, s)| s.status == StageStatus::Passed)
-                        .map(|(spec, _)| (spec.id.clone(), spec.title.clone()))
-                        .collect(),
-                )
+                let passed = r
+                    .stages
+                    .iter()
+                    .take_while(|s| s.status == StageStatus::Passed)
+                    .count();
+                let added = crate::pipeline::load(&root, &r.pipeline.file)
+                    .map(|file| crate::runs::new_stages(r, &file))
+                    .unwrap_or_default();
+                let mut out = Vec::new();
+                for i in 0..=passed {
+                    out.extend(added.iter().filter(|n| n.at == i).cloned().map(BackTo::New));
+                    if i < passed {
+                        let spec = &r.pipeline.stages[i];
+                        out.push(BackTo::Passed(spec.id.clone(), spec.title.clone()));
+                    }
+                }
+                Some(out)
             })
             .unwrap_or_default();
         if stages.is_empty() {
@@ -603,6 +676,17 @@ impl Workspace {
             );
             return;
         }
+        // A preselected stage is the run's index; find it among the choices.
+        let preselect = preselect.and_then(|p| {
+            let mut n = 0;
+            stages.iter().position(|b| match b {
+                BackTo::Passed(..) => {
+                    n += 1;
+                    n - 1 == p
+                }
+                BackTo::New(_) => false,
+            })
+        });
         let input = cx.new(|cx| {
             InputState::new(window, cx).placeholder(
                 "What should it fix? e.g. Rename the branch to INTH-166 and reopen the PR",
@@ -641,18 +725,30 @@ impl Workspace {
                         return;
                     }
                     window.close_dialog(cx);
-                    let stage = stages[picked.get()].0.clone();
                     let run = run.clone();
-                    ws.update(cx, |ws, cx| {
-                        ws.person_choice(orch, &run, Choice::Back { stage, note }, window, cx)
-                    });
+                    match stages[picked.get()].clone() {
+                        BackTo::Passed(stage, _) => ws.update(cx, |ws, cx| {
+                            ws.person_choice(orch, &run, Choice::Back { stage, note }, window, cx)
+                        }),
+                        BackTo::New(n) => ws.update(cx, |ws, cx| {
+                            ws.back_to_new_stage(orch, &run, n, note, window, cx)
+                        }),
+                    }
                 }
             };
             let on_ok = submit.clone();
-            let choices = stages.iter().enumerate().map(|(i, (_, title))| {
+            let mut n = 0;
+            let choices = stages.iter().enumerate().map(|(i, b)| {
                 let picked = picked.clone();
+                let label = match b {
+                    BackTo::Passed(_, title) => {
+                        n += 1;
+                        format!("{n}. {title}")
+                    }
+                    BackTo::New(new) => format!("+ {} (new)", new.spec.title),
+                };
                 Button::new(SharedString::from(format!("back-to-{i}")))
-                    .label(format!("{}. {title}", i + 1))
+                    .label(label)
                     .when(picked.get() == i, |b| b.primary())
                     .when(picked.get() != i, |b| b.outline())
                     .small()
@@ -674,8 +770,10 @@ impl Workspace {
                         .child(Input::new(&input))
                         .child(text(12.5, theme::TEXT_SECONDARY).child(
                             "That stage's own session reopens with your note and reports again; \
-                             it still has to clear its bar. The stages after it run again, with \
-                             fresh tries.",
+                             it still has to clear its bar. A stage marked new was added to the \
+                             pipeline since this ticket started: it joins the run here and starts \
+                             afresh with your note. The stages after it run again, with fresh \
+                             tries.",
                         )),
                 )
                 .footer(

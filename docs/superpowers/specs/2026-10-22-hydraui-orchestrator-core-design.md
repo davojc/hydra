@@ -1183,3 +1183,17 @@ Pipeline settings now says whether the team skills router guides the steps, so a
   - No line when config lists no router.
 - **A stage with no skill.** It reads **Router only** while the router is on, and **No skill** otherwise, on its button and in the picker. Its tooltip says the skill is the one the step must use before it reports.
 - **What doesn't change.** A set skill is still required before a stage reports (§4). The router's own `skill-router:start-ticket` can be picked as a stage's skill like any other.
+
+## 56. Stages added while a run is open (added 2026-11-10)
+
+A run used to keep the stage list it started with (§2), so a stage added in Pipeline settings couldn't be reached by a ticket already under way. Now a stage added to the file can join an open run. Removing and reordering stages still wait for the next ticket.
+
+- **Where a new stage goes.** Each stage in the file that the run lacks goes after the nearest stage before it that the run has, or first if there's none. If the run and the file share stages in a different order, nothing joins.
+- **After where the run has got to: joins on Save.** If a new stage comes after the last stage with any attempt, it joins the run when Pipeline settings saves, and again whenever a report re-reads the file. It waits and runs in its turn.
+- **Earlier: through Go back.** A new stage placed among the stages that passed, or just before the waiting one, is offered in **Go back** as `+ Title (new)`, in run order. Picking it with a note:
+  - it joins the run;
+  - it waits with the note, signalled as a re-run, so the orchestrator starts it with `stage_start` and its session gets the note;
+  - the stages after it wait again, with fresh tries.
+
+  A new stage has no earlier session to reopen. Going back to it needs the run to be waiting for you, as Go back always does.
+- **Logged and replayed.** Each joining is logged as `stage added`, with the stage's settings and `after`. A Go back to a new stage then logs the `person` back choice. A restart replays both, so the run comes back with its added stages. History shows `Added stage <title>`, and a new stage reads by its title throughout.

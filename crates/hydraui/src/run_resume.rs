@@ -288,6 +288,11 @@ fn replay(id: &str, pipeline: Pipeline, events: &[Value]) -> Option<Run> {
             "paused" => {
                 runs.pause(id, true).ok()?;
             }
+            // A stage added to the file since it started joined it (core spec §56).
+            "stage added" => {
+                let (spec, after) = crate::run_log::read_stage_added(e)?;
+                runs.add_stage(id, spec, after.as_deref()).ok()?;
+            }
             // A person marked a reason against Must address, and sent the stage back for it.
             "marked" => {
                 let i = stage_index(&runs, id, text(e, "stage"))?;
@@ -498,6 +503,34 @@ mod tests {
             r#","env":"iov42","folder":"/w/orch","pid":4242"#,
         ));
         assert!(interrupted(home_with(&log).path(), |pid| pid == 4242).is_empty());
+    }
+
+    #[test]
+    fn a_stage_added_since_the_start_comes_back_with_it() {
+        let mut log = mid_run();
+        let spec = crate::pipeline::Stage {
+            id: "c".into(),
+            title: "Lint".into(),
+            bar: Some(80),
+            skill: Some("qa".into()),
+            folder: None,
+            worktree: true,
+            prompt: "Lint {ticket}.".into(),
+        };
+        log.push(line(
+            "stage added",
+            &format!(
+                ",{}",
+                crate::run_log::stage_added_fields(&spec, Some("b"))
+                    .to_string()
+                    .trim_start_matches('{')
+                    .trim_end_matches('}')
+            ),
+        ));
+        let r = &interrupted(home_with(&log).path(), |_| false)[0].run;
+        assert_eq!(r.pipeline.stages.len(), 3);
+        assert_eq!(r.pipeline.stages[2], spec);
+        assert_eq!(r.stages[2].status, StageStatus::Waiting);
     }
 
     #[test]

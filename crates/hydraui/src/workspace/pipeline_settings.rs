@@ -761,10 +761,12 @@ impl Workspace {
         match saved {
             Ok(p) => {
                 // Open runs take the new bars at once (spec §2, §5.1).
+                // A stage added after where a run is joins it (core spec §56).
                 if let Some(sv) = server::get() {
-                    server::lock(sv.registry())
+                    let added = server::lock(sv.registry())
                         .runs
                         .refresh_from_file(&file, &p);
+                    crate::run_log::record_added(&root, &added);
                 }
                 crate::action_log::write(format!("pipeline {file}: settings saved"));
                 let fresh = self.new_draft(orch, file, Edit::from(&p), skills, window, cx);

@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::pipeline::{Pipeline, PromptVars, render};
+use crate::pipeline::{Pipeline, PromptVars, Stage, render};
 use crate::rating::{Rating, Side, passes};
 
 /// Attempts a failed stage gets before it waits for a person (§5.2, the user's decision).
@@ -260,6 +260,61 @@ pub enum Decided {
     /// Its orchestrator's terminal closed while it ran: it stays open, set aside for a person to
     /// resume or stop (core spec §52).
     SetAside,
+}
+
+/// A stage the pipeline file has and run `r` doesn't (added since it started), and where it
+/// would join: before index `at` of the run's stages, after stage `after` (first when none).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewStage {
+    pub at: usize,
+    pub after: Option<String>,
+    pub spec: Stage,
+}
+
+/// A stage that joined an open run on Save, for its log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Added {
+    pub run: String,
+    pub spec: Stage,
+    pub after: Option<String>,
+}
+
+/// The stages of `file` that run `r` doesn't have, in file order, each placed after the
+/// nearest stage before it that the run has (core spec §56). None when the stages both have
+/// are in another order: a reordered file waits for the next ticket.
+pub fn new_stages(r: &Run, file: &Pipeline) -> Vec<NewStage> {
+    let has = |id: &str| r.pipeline.stages.iter().position(|s| s.id == id);
+    let in_file = |id: &str| file.stages.iter().any(|s| s.id == id);
+    let shared_file: Vec<&str> = file
+        .stages
+        .iter()
+        .map(|s| s.id.as_str())
+        .filter(|id| has(id).is_some())
+        .collect();
+    let shared_run: Vec<&str> = r
+        .pipeline
+        .stages
+        .iter()
+        .map(|s| s.id.as_str())
+        .filter(|id| in_file(id))
+        .collect();
+    if shared_file != shared_run {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut after: Option<&str> = None;
+    for s in &file.stages {
+        if has(&s.id).is_some() {
+            after = Some(&s.id);
+        } else {
+            out.push(NewStage {
+                at: after.and_then(has).map_or(0, |i| i + 1),
+                after: after.map(str::to_string),
+                spec: s.clone(),
+            });
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -930,7 +985,7 @@ impl Runs {
     /// The pipeline file `file` now reads `now` (Pipeline settings saved it, or a stage is about
     /// to report): open runs of it take its name, its bar, and each stage's settings for the
     /// stages they share. Their stage lists stay as they started (§2).
-    pub fn refresh_from_file(&mut self, file: &str, now: &Pipeline) {
+    pub fn refresh_from_file(&mut self, file: &str, now: &Pipeline) -> Vec<Added> {
         for r in self
             .runs
             .iter_mut()
@@ -942,14 +997,126 @@ impl Runs {
             r.pipeline.color = now.color;
             r.pipeline.product_channel = now.product_channel.clone();
             r.pipeline.product_style = now.product_style.clone();
-            // A stage's own settings reach it from its next start; only the list (adding,
-            // removing, reordering) waits for the next ticket.
+            // A stage's own settings reach it from its next start; removing and reordering
+            // wait for the next ticket.
             for stage in &mut r.pipeline.stages {
                 if let Some(same) = now.stages.iter().find(|s| s.id == stage.id) {
                     *stage = same.clone();
                 }
             }
         }
+        // A stage added after where a run has got to joins it, to run in its turn (core spec
+        // §56); one added earlier waits for a person's Go back.
+        let mut added = Vec::new();
+        let ids: Vec<String> = self
+            .runs
+            .iter()
+            .filter(|r| r.pipeline.file == file && r.state.open())
+            .map(|r| r.id.clone())
+            .collect();
+        for id in ids {
+            while let Some(r) = self.run(&id) {
+                let reached = r.stages.iter().rposition(|s| !s.attempts.is_empty());
+                let next = new_stages(r, now)
+                    .into_iter()
+                    .find(|n| reached.is_none_or(|at| n.at > at));
+                let Some(n) = next else { break };
+                if self
+                    .add_stage(&id, n.spec.clone(), n.after.as_deref())
+                    .is_err()
+                {
+                    break;
+                }
+                added.push(Added {
+                    run: id.clone(),
+                    spec: n.spec,
+                    after: n.after,
+                });
+            }
+        }
+        added
+    }
+
+    /// Stage `spec`, added to the pipeline file since run `run` started, joins it after stage
+    /// `after` (first when none), waiting (core spec §56). Its index.
+    pub fn add_stage(
+        &mut self,
+        run: &str,
+        spec: Stage,
+        after: Option<&str>,
+    ) -> Result<usize, String> {
+        let ri = self.index(run).ok_or(format!("no run {run}"))?;
+        let r = &mut self.runs[ri];
+        if !r.state.open() {
+            return Err(format!("run {run} has ended"));
+        }
+        if r.pipeline.stages.iter().any(|s| s.id == spec.id) {
+            return Err(format!("run {run} has a stage {} already", spec.id));
+        }
+        let at = match after {
+            None => 0,
+            Some(a) => {
+                r.pipeline
+                    .stages
+                    .iter()
+                    .position(|s| s.id == a)
+                    .ok_or(format!("no stage {a} in run {run}"))?
+                    + 1
+            }
+        };
+        r.pipeline.stages.insert(at, spec);
+        r.stages.insert(at, StageRun::default());
+        Ok(at)
+    }
+
+    /// A person's **Go back** to `spec`, a stage added to the file since the run started and
+    /// placed before where it waits (core spec §56): it joins after `after` and starts afresh
+    /// with `note`, and the stages after it run again.
+    pub fn back_to_new(
+        &mut self,
+        run: &str,
+        spec: Stage,
+        after: Option<&str>,
+        note: &str,
+    ) -> Result<Vec<Change>, String> {
+        let ri = self.index(run).ok_or(format!("no run {run}"))?;
+        let r = &self.runs[ri];
+        if !matches!(r.state, RunState::NeedsYou(_)) {
+            return Err(format!("run {run} isn't waiting for you"));
+        }
+        if r.asking.is_some() {
+            return Err(format!(
+                "run {run} is waiting for the answer to its stage's question"
+            ));
+        }
+        if note.trim().is_empty() {
+            return Err("going back needs a note for that stage's session".into());
+        }
+        let passed = r
+            .stages
+            .iter()
+            .take_while(|s| s.status == StageStatus::Passed)
+            .count();
+        let at = match after {
+            None => 0,
+            Some(a) => {
+                r.pipeline
+                    .stages
+                    .iter()
+                    .position(|s| s.id == a)
+                    .ok_or(format!("no stage {a} in run {run}"))?
+                    + 1
+            }
+        };
+        if at > passed {
+            return Err(format!(
+                "stage {} would come after the waiting stage: it runs in its turn",
+                spec.id
+            ));
+        }
+        let id = spec.id.clone();
+        self.add_stage(run, spec, after)?;
+        self.go_back(ri, &id, note.trim())
     }
 
     /// A person paused or resumed `run` (§5.4).
@@ -1188,6 +1355,17 @@ impl Runs {
         let Some(t) = r.pipeline.stages.iter().position(|s| s.id == stage) else {
             return Err(format!("no stage {stage} in pipeline {}", r.pipeline.name));
         };
+        // Added since the run started (core spec §56): it has no session to reopen, so it
+        // starts afresh with the note, once every stage before it has passed.
+        if r.stages[t].attempts.is_empty() {
+            if !r.stages[..t]
+                .iter()
+                .all(|s| s.status == StageStatus::Passed)
+            {
+                return Err(format!("stage {stage} comes after the waiting stage"));
+            }
+            return Ok(self.restart_from(ri, t, note));
+        }
         let waiting = r
             .stages
             .iter()
@@ -1199,6 +1377,34 @@ impl Runs {
             ));
         }
         Ok(self.reopen(ri, t, note))
+    }
+
+    /// The run goes back to stage `t`, never run, which waits to start with `note`; the stages
+    /// after it wait again, their earlier tries no longer counted.
+    fn restart_from(&mut self, ri: usize, t: usize, note: &str) -> Vec<Change> {
+        let r = &mut self.runs[ri];
+        r.stages[t].status = StageStatus::Waiting;
+        r.stages[t].note = Some(note.to_string());
+        for later in &mut r.stages[t + 1..] {
+            later.status = StageStatus::Waiting;
+            later.note = None;
+            later.counted_from = later.attempts.len();
+        }
+        r.state = RunState::Running;
+        let id = r.id.clone();
+        // Started as a re-run is: the orchestrator starts it, and its session gets the note.
+        vec![
+            Change {
+                run: id.clone(),
+                stage: Some(t),
+                what: Decided::Retrying,
+            },
+            Change {
+                run: id,
+                stage: None,
+                what: Decided::RunResumed,
+            },
+        ]
     }
 
     /// The run goes back to stage `t`, whose own session goes on as a new attempt with `note`
@@ -2143,6 +2349,105 @@ mod tests {
                 .any(|c| c.what == Decided::Reopened && c.stage == Some(0))
         );
         assert_eq!(status(&runs, &id, 0), StageStatus::Starting);
+    }
+
+    fn ids(runs: &Runs, id: &str) -> Vec<String> {
+        runs.run(id)
+            .unwrap()
+            .pipeline
+            .stages
+            .iter()
+            .map(|s| s.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn new_stages_are_placed_after_the_nearest_stage_the_run_has() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b"]);
+        let r = runs.run(&id).unwrap();
+        let found = new_stages(r, &pipeline(&["x", "a", "y", "z", "b", "w"]));
+        let placed: Vec<(usize, Option<&str>, &str)> = found
+            .iter()
+            .map(|n| (n.at, n.after.as_deref(), n.spec.id.as_str()))
+            .collect();
+        assert_eq!(
+            placed,
+            [
+                (0, None, "x"),
+                (1, Some("a"), "y"),
+                (1, Some("a"), "z"),
+                (2, Some("b"), "w"),
+            ]
+        );
+        // Reordered: nothing joins.
+        assert!(new_stages(r, &pipeline(&["b", "a", "c"])).is_empty());
+        // Removed ones don't matter.
+        assert_eq!(new_stages(r, &pipeline(&["b", "c"])).len(), 1);
+    }
+
+    #[test]
+    fn saving_a_stage_after_where_a_run_is_adds_it_to_run_in_turn() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b"]);
+        started(&mut runs, &id, "a", "tok-a");
+        let added = runs.refresh_from_file("t", &pipeline(&["x", "a", "y", "z", "b"]));
+        // x comes before a, which has started: it waits for a Go back.
+        assert_eq!(ids(&runs, &id), ["a", "y", "z", "b"]);
+        let joined: Vec<(&str, Option<&str>)> = added
+            .iter()
+            .map(|a| (a.spec.id.as_str(), a.after.as_deref()))
+            .collect();
+        assert_eq!(joined, [("y", Some("a")), ("z", Some("y"))]);
+        assert_eq!(status(&runs, &id, 1), StageStatus::Waiting);
+        // Saving again adds nothing more.
+        assert!(
+            runs.refresh_from_file("t", &pipeline(&["x", "a", "y", "z", "b"]))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn going_back_to_a_new_stage_starts_it_afresh_and_runs_the_rest_again() {
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        let file = pipeline(&["a", "lint", "b"]);
+        let n = new_stages(runs.run(&id).unwrap(), &file).remove(0);
+        assert_eq!((n.at, n.after.as_deref()), (1, Some("a")));
+        assert!(
+            runs.back_to_new(&id, n.spec.clone(), n.after.as_deref(), " ")
+                .is_err()
+        );
+        let changes = runs
+            .back_to_new(&id, n.spec, n.after.as_deref(), "run the linter first")
+            .unwrap();
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.what == Decided::Retrying && c.stage == Some(1))
+        );
+        assert_eq!(ids(&runs, &id), ["a", "lint", "b"]);
+        let r = runs.run(&id).unwrap();
+        assert_eq!(r.state, RunState::Running);
+        assert_eq!(r.stages[1].status, StageStatus::Waiting);
+        assert_eq!(r.stages[1].note.as_deref(), Some("run the linter first"));
+        assert_eq!(r.stages[2].status, StageStatus::Waiting);
+        assert_eq!(r.stages[2].tries(), 0);
+        // It starts as any waiting stage does, with the note.
+        let s = runs.begin("orch", &id, "lint", "", 30).unwrap();
+        assert_eq!(s.stage, 1);
+    }
+
+    #[test]
+    fn a_new_stage_after_the_waiting_one_isnt_gone_back_to() {
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        let n = new_stages(runs.run(&id).unwrap(), &pipeline(&["a", "b", "c"])).remove(0);
+        assert!(
+            runs.back_to_new(&id, n.spec, n.after.as_deref(), "x")
+                .is_err()
+        );
+        assert_eq!(ids(&runs, &id), ["a", "b"]);
     }
 
     #[test]

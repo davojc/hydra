@@ -2,6 +2,7 @@
 //! pipeline**, which hands that ticket to a pipeline's orchestrator (starting one when none is
 //! open). Opened by the Tickets button between Projects and History.
 
+use crate::inbox::{Note, PushNote};
 use std::cell::Cell;
 
 use gpui::prelude::*;
@@ -9,7 +10,6 @@ use gpui::{AnyElement, App, Context, Entity, SharedString, Subscription, Window,
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_component::command::{Command, CommandItem, CommandState};
-use gpui_component::notification::Notification;
 use gpui_component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_component::{Sizable, WindowExt, h_flex, v_flex};
 
@@ -343,7 +343,7 @@ impl Workspace {
             "tickets_assignee",
             Some(mode.clone().into()),
         ) {
-            window.push_notification(Notification::error(e).title("Tickets"), cx);
+            window.push_note(Note::error(e).title("Tickets"), cx);
             return;
         }
         for (key, list) in [
@@ -354,7 +354,7 @@ impl Workspace {
         ] {
             let value: toml_edit::Array = list.iter().map(String::as_str).collect();
             if let Err(e) = crate::config::set(&self.hydra.paths, key, Some(value.into())) {
-                window.push_notification(Notification::error(e).title("Tickets"), cx);
+                window.push_note(Note::error(e).title("Tickets"), cx);
                 return;
             }
         }
@@ -370,8 +370,8 @@ impl Workspace {
         {
             t.filter_open = false;
         }
-        window.push_notification(
-            Notification::info("Saved. Tickets opens on this filter next time.").title("Tickets"),
+        window.push_note(
+            Note::info("Saved. Tickets opens on this filter next time.").title("Tickets"),
             cx,
         );
         cx.notify();
@@ -427,9 +427,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Ok(p) = crate::pipeline::load(self.hydra.paths.root(), pipeline) else {
-            window.push_notification(
-                Notification::error(format!("Couldn't read the pipeline {pipeline}"))
-                    .title("Run pipeline"),
+            window.push_note(
+                Note::error(format!("Couldn't read the pipeline {pipeline}")).title("Run pipeline"),
                 cx,
             );
             return;
@@ -458,8 +457,8 @@ impl Workspace {
             "tickets: {} handed to {pipeline} in {env}",
             ticket.identifier
         ));
-        window.push_notification(
-            Notification::info(format!(
+        window.push_note(
+            Note::info(format!(
                 "{} goes to {}. Its card shows on the Pipelines tab.",
                 ticket.identifier, p.name
             ))

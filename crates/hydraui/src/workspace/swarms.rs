@@ -4,14 +4,13 @@
 //!
 //! Commands go to the service and its events come back to the window, which shows the swarms and
 //! raises their notices.
+use crate::inbox::{Note, PushNote};
 use std::time::Duration;
 
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::prelude::*;
 use gpui::{Context, Task, Window};
-use gpui_component::WindowExt;
-use gpui_component::notification::Notification;
 use hydra_core::paths::HydraPaths;
 use hydra_swarms::{Command, Identity, ServiceConfig, ServiceEvent, SwarmsService};
 
@@ -359,18 +358,18 @@ impl Workspace {
                     self.swarms_pending.clear();
                 }
                 action_log::write(format!("swarms: {why}"));
-                window.push_notification(Notification::error(why).title("Swarms"), cx);
+                window.push_note(Note::error(why).title("Swarms"), cx);
             }
             Opened::Elsewhere if refused => {
                 self.swarms_pending.clear();
                 let text = "Swarms run in another hydraui window: make or join the swarm there.";
-                window.push_notification(Notification::warning(text).title("Swarms"), cx);
+                window.push_note(Note::warning(text).title("Swarms"), cx);
             }
             // With a swarm being made or joined, only a missing name stops them.
             Opened::Off if refused => {
                 self.swarms_pending.clear();
                 let text = "Set your name before making or joining a swarm.";
-                window.push_notification(Notification::warning(text).title("Swarms"), cx);
+                window.push_note(Note::warning(text).title("Swarms"), cx);
             }
             Opened::Elsewhere | Opened::Off => {}
         }
@@ -385,11 +384,11 @@ impl Workspace {
             }
             ServiceEvent::Toast { text, .. } => {
                 action_log::write(format!("swarms: {text}"));
-                window.push_notification(Notification::warning(text).title("Swarms"), cx);
+                window.push_note(Note::warning(text).title("Swarms"), cx);
             }
             ServiceEvent::Failed(text) => {
                 action_log::write(format!("swarms: {text}"));
-                window.push_notification(Notification::error(text).title("Swarms"), cx);
+                window.push_note(Note::error(text).title("Swarms"), cx);
             }
             ServiceEvent::Machines(view) => {
                 self.swarm_machines = Some(view);

@@ -2,6 +2,7 @@
 //! orchestrator's name, the default bar, the stages (reorder, name, skill, bar, remove, add),
 //! the limits, and a save bar. Saving rewrites the pipeline file (`pipeline::save`) and open
 //! runs take the new bars at once; stage changes apply from the next ticket.
+use crate::inbox::{Note, PushNote};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -12,7 +13,6 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandItem, CommandState};
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_component::notification::Notification;
 use gpui_component::select::{Select, SelectEvent, SelectState};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::{Disableable, Sizable, WindowExt, h_flex, v_flex};
@@ -207,8 +207,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some((file, env, cwd)) = self.settings_target(orch, cx) else {
-            window.push_notification(
-                Notification::info("Start a run first: settings edit its pipeline.")
+            window.push_note(
+                Note::info("Start a run first: settings edit its pipeline.")
                     .title("Pipeline settings"),
                 cx,
             );
@@ -218,7 +218,7 @@ impl Workspace {
         let saved = match pipeline::load(&root, &file) {
             Ok(p) => Edit::from(&p),
             Err(e) => {
-                window.push_notification(Notification::error(e).title("Pipeline settings"), cx);
+                window.push_note(Note::error(e).title("Pipeline settings"), cx);
                 return;
             }
         };
@@ -750,7 +750,7 @@ impl Workspace {
         };
         let edit = draft.edit(cx);
         if let Err(why) = validate(&edit) {
-            window.push_notification(Notification::warning(why).title("Pipeline settings"), cx);
+            window.push_note(Note::warning(why).title("Pipeline settings"), cx);
             return;
         }
         let (file, skills) = (draft.file.clone(), draft.skills.clone());
@@ -771,15 +771,13 @@ impl Workspace {
                 crate::action_log::write(format!("pipeline {file}: settings saved"));
                 let fresh = self.new_draft(orch, file, Edit::from(&p), skills, window, cx);
                 self.pipeline_settings.insert(orch, fresh);
-                window.push_notification(
-                    Notification::success("A stage's settings apply when it next starts.")
+                window.push_note(
+                    Note::success("A stage's settings apply when it next starts.")
                         .title("Pipeline saved"),
                     cx,
                 );
             }
-            Err(e) => {
-                window.push_notification(Notification::error(e).title("Pipeline settings"), cx)
-            }
+            Err(e) => window.push_note(Note::error(e).title("Pipeline settings"), cx),
         }
         cx.notify();
     }

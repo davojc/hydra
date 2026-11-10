@@ -2,6 +2,7 @@
 //! terminal, the run's timeline on the left and the selected session on the right: its live
 //! terminal, its rating, or the stopped banner with the person's choices (§5.3). The rules are
 //! in `crate::pipeline_view`; this is the drawing and the wiring.
+use crate::inbox::{Note, PushNote};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -14,7 +15,6 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
-use gpui_component::notification::Notification;
 use gpui_component::{Disableable, Sizable, WindowExt, h_flex, v_flex};
 use serde_json::json;
 
@@ -323,7 +323,7 @@ impl Workspace {
                 self.focus_active(window, cx);
                 tell(changes);
             }
-            Err(e) => window.push_notification(Notification::error(e).title("Pipeline"), cx),
+            Err(e) => window.push_note(Note::error(e).title("Pipeline"), cx),
         }
     }
 
@@ -377,7 +377,7 @@ impl Workspace {
                 self.focus_active(window, cx);
                 tell(changes);
             }
-            Err(e) => window.push_notification(Notification::error(e).title("Go back"), cx),
+            Err(e) => window.push_note(Note::error(e).title("Go back"), cx),
         }
     }
 
@@ -417,7 +417,7 @@ impl Workspace {
                 });
                 tell(changes);
             }
-            Err(e) => window.push_notification(Notification::error(e).title("Score again"), cx),
+            Err(e) => window.push_note(Note::error(e).title("Score again"), cx),
         }
     }
 
@@ -447,7 +447,7 @@ impl Workspace {
         );
         match done {
             Ok(_) => cx.notify(),
-            Err(e) => window.push_notification(Notification::error(e).title(title), cx),
+            Err(e) => window.push_note(Note::error(e).title(title), cx),
         }
     }
 
@@ -478,7 +478,7 @@ impl Workspace {
                 cx.notify();
                 tell(changes);
             }
-            Err(e) => window.push_notification(Notification::error(e).title("Send back"), cx),
+            Err(e) => window.push_note(Note::error(e).title("Send back"), cx),
         }
     }
 
@@ -497,7 +497,7 @@ impl Workspace {
         );
         match done {
             Ok(_) => cx.notify(),
-            Err(e) => window.push_notification(Notification::error(e).title("Send back"), cx),
+            Err(e) => window.push_note(Note::error(e).title("Send back"), cx),
         }
     }
 
@@ -525,8 +525,8 @@ impl Workspace {
                 move |window: &mut Window, cx: &mut App| {
                     let note = input.read(cx).value().trim().to_string();
                     if note.is_empty() {
-                        window.push_notification(
-                            Notification::warning("A re-run needs a note for its next session.")
+                        window.push_note(
+                            Note::warning("A re-run needs a note for its next session.")
                                 .title("Re-run"),
                             cx,
                         );
@@ -669,8 +669,8 @@ impl Workspace {
             })
             .unwrap_or_default();
         if stages.is_empty() {
-            window.push_notification(
-                Notification::info("No earlier stage has passed yet: re-run the waiting one.")
+            window.push_note(
+                Note::info("No earlier stage has passed yet: re-run the waiting one.")
                     .title("Go back"),
                 cx,
             );
@@ -715,11 +715,9 @@ impl Workspace {
                 move |window: &mut Window, cx: &mut App| {
                     let note = input.read(cx).value().trim().to_string();
                     if note.is_empty() {
-                        window.push_notification(
-                            Notification::warning(
-                                "Going back needs a note for that stage's session.",
-                            )
-                            .title("Go back"),
+                        window.push_note(
+                            Note::warning("Going back needs a note for that stage's session.")
+                                .title("Go back"),
                             cx,
                         );
                         return;

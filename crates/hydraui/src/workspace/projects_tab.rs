@@ -4,6 +4,7 @@
 //! planning session and reviewed here by the lead; approved tickets are worked by sessions
 //! started here. Reading and writing the repo is `crate::projects`.
 
+use crate::inbox::{Note, PushNote};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -13,7 +14,6 @@ use gpui::{AnyElement, Context, Entity, ExternalPaths, SharedString, Window, div
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_component::notification::Notification;
 use gpui_component::{Disableable, Selectable, Sizable, WindowExt, h_flex, v_flex};
 use hydra_core::name::EnvName;
 use hydraui_projects::progress::{Counts, is_late, milestone_counts, today};
@@ -422,8 +422,8 @@ impl Workspace {
                 self.projects_data.planners.remove(&key);
                 self.close_terminal_now(id, window, cx);
             }
-            window.push_notification(
-                Notification::info(format!("Claude finished planning {name}.\n{summary}")),
+            window.push_note(
+                Note::info(format!("Claude finished planning {name}.\n{summary}")),
                 cx,
             );
         }
@@ -605,7 +605,7 @@ impl Workspace {
         self.projects_data.asked = Some(now);
         self.projects_data.toasts.pending.extend(fresh);
         if let Some(text) = self.projects_data.toasts.take(Instant::now()) {
-            window.push_notification(Notification::info(text), cx);
+            window.push_note(Note::info(text), cx);
         }
     }
 
@@ -722,7 +722,7 @@ impl Workspace {
         let r = edit(&dir, &project, &login);
         if let Err(e) = &r {
             eprintln!("projects: editing {env}/{slug} failed: {e}");
-            window.push_notification(Notification::error(e.clone()), cx);
+            window.push_note(Note::error(e.clone()), cx);
         }
         self.reload_env(env, cx);
         r
@@ -749,8 +749,8 @@ impl Workspace {
         };
         if !pj::is_github(&e.repo) {
             if !quiet {
-                window.push_notification(
-                    Notification::error(
+                window.push_note(
+                    Note::error(
                         "Sending needs a GitHub repo (owner/name) as the environment's projects repo.",
                     ),
                     cx,
@@ -759,8 +759,8 @@ impl Workspace {
             return;
         }
         let Some(login) = e.login.clone() else {
-            window.push_notification(
-                Notification::error("hydraui doesn't know your GitHub login yet: is gh signed in?"),
+            window.push_note(
+                Note::error("hydraui doesn't know your GitHub login yet: is gh signed in?"),
                 cx,
             );
             return;
@@ -831,16 +831,14 @@ impl Workspace {
             Ok(sent) => {
                 data.keep_mine.remove(&key);
                 match sent {
-                    Sent::Merged(_) => Some(Notification::success("Sent: it's in the repo.")),
-                    Sent::Queued(_) => Some(Notification::success(
+                    Sent::Merged(_) => Some(Note::success("Sent: it's in the repo.")),
+                    Sent::Queued(_) => Some(Note::success(
                         "Sent: it merges as soon as the repo's check passes.",
                     )),
-                    Sent::Waiting(_) => Some(Notification::success(format!(
-                        "Sent to {lead} for approval."
-                    ))),
-                    Sent::Nothing => Some(Notification::info(
-                        "Nothing to send: the repo has all of it.",
-                    )),
+                    Sent::Waiting(_) => {
+                        Some(Note::success(format!("Sent to {lead} for approval.")))
+                    }
+                    Sent::Nothing => Some(Note::info("Nothing to send: the repo has all of it.")),
                 }
                 .filter(|_| !quiet)
             }
@@ -850,11 +848,11 @@ impl Workspace {
             }
             Err(SendError::Failed(why)) => {
                 eprintln!("projects: sending {}/{} failed: {why}", key.0, key.1);
-                Some(Notification::error(format!("Couldn't send: {why}")))
+                Some(Note::error(format!("Couldn't send: {why}")))
             }
         };
         if let Some(n) = said {
-            window.push_notification(n, cx);
+            window.push_note(n, cx);
         }
         // Fetch again soon, for the pull request's state.
         data.next_fetch = None;
@@ -886,7 +884,7 @@ impl Workspace {
                 cwd: &e.checkout,
             };
             if let Err(why) = ps::take_theirs(&r, &e.checkout, path) {
-                window.push_notification(Notification::error(why), cx);
+                window.push_note(Note::error(why), cx);
                 return;
             }
         }
@@ -926,15 +924,15 @@ impl Workspace {
                 ws.projects_data.reviewing.remove(&url);
                 ws.projects_data.next_fetch = None;
                 let n = match result {
-                    Ok(true) => Notification::success(format!(
-                        "Approved {author}'s change: it's in the repo."
-                    )),
-                    Ok(false) => Notification::success(format!(
+                    Ok(true) => {
+                        Note::success(format!("Approved {author}'s change: it's in the repo."))
+                    }
+                    Ok(false) => Note::success(format!(
                         "Approved {author}'s change: it merges as soon as the repo's check passes."
                     )),
-                    Err(why) => Notification::error(format!("Couldn't approve it: {why}")),
+                    Err(why) => Note::error(format!("Couldn't approve it: {why}")),
                 };
-                window.push_notification(n, cx);
+                window.push_note(n, cx);
                 cx.notify();
             });
         })
@@ -981,8 +979,8 @@ impl Workspace {
                         ws.projects_data.reviewing.remove(&url);
                         ws.projects_data.next_fetch = None;
                         if let Err(why) = result {
-                            window.push_notification(
-                                Notification::error(format!("Couldn't send it back: {why}")),
+                            window.push_note(
+                                Note::error(format!("Couldn't send it back: {why}")),
                                 cx,
                             );
                         }
@@ -1417,13 +1415,13 @@ impl Workspace {
         {
             let typed = view.update(cx, |v, cx| v.type_prompt(&prompt, cx));
             if !typed {
-                window.push_notification(
-                    Notification::error("The planning session isn't running; start it again."),
+                window.push_note(
+                    Note::error("The planning session isn't running; start it again."),
                     cx,
                 );
             }
         } else if let Err(e) = self.start_planner(env, slug, prompt, window, cx) {
-            window.push_notification(Notification::error(e), cx);
+            window.push_note(Note::error(e), cx);
             return;
         }
         self.tab_flag(cx, |t| t.show_claude = true);
@@ -1505,7 +1503,7 @@ impl Workspace {
         let guide = match self.planning_guide(&env, &slug) {
             Ok(guide) => guide,
             Err(why) => {
-                window.push_notification(Notification::error(why), cx);
+                window.push_note(Note::error(why), cx);
                 return;
             }
         };
@@ -1524,7 +1522,7 @@ impl Workspace {
         let guide = match self.planning_guide(&env, &slug) {
             Ok(guide) => guide,
             Err(why) => {
-                window.push_notification(Notification::error(why), cx);
+                window.push_note(Note::error(why), cx);
                 return;
             }
         };
@@ -1595,10 +1593,10 @@ impl Workspace {
         }
         match running {
             Some(view) if view.update(cx, |v, cx| v.type_prompt(&text, cx)) => {
-                window.push_notification(Notification::success(format!("Recorded, and sent to the session that asked for {}.", pj::decision_name(&q.id))), cx);
+                window.push_note(Note::success(format!("Recorded, and sent to the session that asked for {}.", pj::decision_name(&q.id))), cx);
             }
-            _ => window.push_notification(
-                Notification::info(format!(
+            _ => window.push_note(
+                Note::info(format!(
                     "Recorded. The session that asked for {} isn't running; it sees the answer when it next reads the project.",
                     pj::decision_name(&q.id)
                 )),
@@ -1639,9 +1637,7 @@ impl Workspace {
                             Ok(file) => {
                                 ws.review_requirements(&env, &slug, &file, &from, window, cx)
                             }
-                            Err(e) => {
-                                window.push_notification(Notification::error(e.to_string()), cx)
-                            }
+                            Err(e) => window.push_note(Note::error(e.to_string()), cx),
                         }
                     });
                     return Ok(());
@@ -1669,12 +1665,12 @@ impl Workspace {
         let guide = match self.planning_guide(env, slug) {
             Ok(g) => g.instruction(),
             Err(why) => {
-                window.push_notification(Notification::error(why), cx);
+                window.push_note(Note::error(why), cx);
                 return;
             }
         };
-        window.push_notification(
-            Notification::info(format!(
+        window.push_note(
+            Note::info(format!(
                 "Saved as {file}. Claude is working out what it changes; each change shows \
                  on the Overview for you to accept."
             )),
@@ -2060,10 +2056,8 @@ impl Workspace {
                     Ok(None) => {
                         ws.reload_env(env, cx);
                         if by_hand {
-                            window.push_notification(
-                                Notification::info(
-                                    "Nothing has changed in Linear since the last read.",
-                                ),
+                            window.push_note(
+                                Note::info("Nothing has changed in Linear since the last read."),
                                 cx,
                             );
                         }
@@ -2071,7 +2065,7 @@ impl Workspace {
                     Err(e) => {
                         eprintln!("projects: reading Linear for {env}/{slug} failed: {e}");
                         if by_hand {
-                            window.push_notification(Notification::error(e), cx);
+                            window.push_note(Note::error(e), cx);
                         }
                     }
                 }
@@ -2633,7 +2627,7 @@ impl Workspace {
             cx,
             move |ws, picked, window, cx| match pj::skill_folder(&picked) {
                 Ok(dir) => then(ws, dir, window, cx),
-                Err(e) => window.push_notification(Notification::error(e), cx),
+                Err(e) => window.push_note(Note::error(e), cx),
             },
         );
     }
@@ -2652,7 +2646,7 @@ impl Workspace {
             return;
         };
         if let Err(e) = pj::set_work(self.hydra.paths.root(), &repo, slug, setting, value) {
-            window.push_notification(Notification::error(e), cx);
+            window.push_note(Note::error(e), cx);
         }
         cx.notify();
     }
@@ -2741,7 +2735,7 @@ impl Workspace {
                 if let Err(e) =
                     pj::set_planning_skill(self.hydra.paths.root(), &repo, slug, value.as_deref())
                 {
-                    window.push_notification(Notification::error(e), cx);
+                    window.push_note(Note::error(e), cx);
                 }
                 cx.notify();
             }
@@ -2994,8 +2988,8 @@ impl Workspace {
         let milestone = run.milestone.clone();
         let step = self.run_step(env, slug, &milestone);
         if let Some(Step::NeedClone(repo)) = step {
-            window.push_notification(
-                Notification::info(format!(
+            window.push_note(
+                Note::info(format!(
                     "Where is {repo} cloned on this Mac? Pick its folder."
                 )),
                 cx,
@@ -3008,7 +3002,7 @@ impl Workspace {
                 cx,
                 move |ws, path, window, cx| match pj::set_clone(&root, &repo, &path) {
                     Ok(()) => ws.advance_run(&env, &slug, window, cx),
-                    Err(e) => window.push_notification(Notification::error(e), cx),
+                    Err(e) => window.push_note(Note::error(e), cx),
                 },
             );
             return;
@@ -3063,8 +3057,8 @@ impl Workspace {
             }
             Step::Finished => {
                 self.projects_data.runs.remove(&key);
-                window.push_notification(
-                    Notification::success(format!(
+                window.push_note(
+                    Note::success(format!(
                         "{} is done: every ticket is in review or done. Start the next \
                          milestone when you're ready.",
                         pj::milestone_name(&milestone)
@@ -3329,8 +3323,8 @@ impl Workspace {
                     .map(|d| (d.id.clone(), d.meta.question.clone()))
                     .collect();
                 for (id, question) in new {
-                    window.push_notification(
-                        Notification::warning(format!(
+                    window.push_note(
+                        Note::warning(format!(
                             "{ticket}'s session is waiting for your answer: {question} \
                              Answer it in the project's Decisions."
                         )),
@@ -3406,12 +3400,12 @@ impl Workspace {
         }
         for path in &files {
             if let Err(e) = repo::add_resource(&dir, path) {
-                window.push_notification(Notification::error(e.to_string()), cx);
+                window.push_note(Note::error(e.to_string()), cx);
             }
         }
         if files.len() > 1 {
-            window.push_notification(
-                Notification::info(format!(
+            window.push_note(
+                Note::info(format!(
                     "Attached {} files under their own names; Rename changes them.",
                     files.len()
                 )),
@@ -4631,7 +4625,7 @@ impl Workspace {
                             let guide = match ws.planning_guide(&env_b, &slug_b) {
                                 Ok(guide) => guide,
                                 Err(why) => {
-                                    window.push_notification(Notification::error(why), cx);
+                                    window.push_note(Note::error(why), cx);
                                     return;
                                 }
                             };
@@ -5911,7 +5905,7 @@ impl Workspace {
                                 cx,
                             );
                             match res {
-                                Err(err) => window.push_notification(Notification::error(err), cx),
+                                Err(err) => window.push_note(Note::error(err), cx),
                                 Ok(()) => {
                                     let paused = ws
                                         .projects_data
@@ -5921,10 +5915,8 @@ impl Workspace {
                                     if paused {
                                         ws.carry_on_run(&e, &sl, window, cx);
                                     } else {
-                                        window.push_notification(
-                                            Notification::info(
-                                                "Start the milestone run to pick it up.",
-                                            ),
+                                        window.push_note(
+                                            Note::info("Start the milestone run to pick it up."),
                                             cx,
                                         );
                                     }
@@ -6723,7 +6715,7 @@ impl Workspace {
                         let (repo, root) = (repo.clone(), root.clone());
                         ws.open_dialog_path(true, window, cx, move |_, path, window, cx| {
                             if let Err(e) = pj::set_clone(&root, &repo, &path) {
-                                window.push_notification(Notification::error(e), cx);
+                                window.push_note(Note::error(e), cx);
                             }
                             cx.notify();
                         });

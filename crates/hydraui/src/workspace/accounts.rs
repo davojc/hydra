@@ -1,6 +1,7 @@
 //! An environment's accounts, on its Settings page (the status bar's name opens it): what each provider is signed
 //! in as, checked again on demand; and adding one, by signing in or borrowing another
 //! environment's login.
+use crate::inbox::{Note, PushNote};
 use std::cell::Cell;
 
 use gpui::prelude::*;
@@ -8,7 +9,6 @@ use gpui::{App, Context, Hsla, SharedString, Window, div, px, rgb};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandItem, CommandState};
 use gpui_component::input::{Input, InputState};
-use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, Disableable, Sizable, WindowExt, h_flex, v_flex};
 use hydra_core::envedit::ToolValues;
 use hydra_core::provider::Status;
@@ -94,8 +94,8 @@ impl Workspace {
     fn pick_account(&mut self, env: String, window: &mut Window, cx: &mut Context<Self>) {
         let choices = self.hydra.account_choices(&env);
         if choices.is_empty() {
-            window.push_notification(
-                Notification::info(format!(
+            window.push_note(
+                Note::info(format!(
                     "{env} has every account hydraui can add; others: hydra add <tool> {env}"
                 ))
                 .title("Add account"),
@@ -151,14 +151,14 @@ impl Workspace {
             }
         };
         if let Err(e) = self.hydra.add_tool(&env, tool, &values) {
-            window.push_notification(Notification::error(e).title("Add account"), cx);
+            window.push_note(Note::error(e).title("Add account"), cx);
             return;
         }
         match choice {
             AddChoice::SignIn(tool) => self.added(&env, &tool, window, cx),
             AddChoice::Borrow { tool, from } => {
-                window.push_notification(
-                    Notification::success(format!(
+                window.push_note(
+                    Note::success(format!(
                         "{tool} in {env} now uses {from}'s login. {}",
                         reopen(&env)
                     ))
@@ -227,9 +227,8 @@ impl Workspace {
         if self.hydra.sign_ins(env).iter().any(|t| t == tool) {
             self.sign_in(env, tool, window, cx);
         }
-        window.push_notification(
-            Notification::info(format!("{tool} is on in {env}. {}", reopen(env)))
-                .title("Add account"),
+        window.push_note(
+            Note::info(format!("{tool} is on in {env}. {}", reopen(env))).title("Add account"),
             cx,
         );
         self.recheck_accounts(env, cx);

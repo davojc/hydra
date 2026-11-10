@@ -1,12 +1,12 @@
 //! The window's layout file (spec §7.12, env-tabs design §3): opening a version 2 layout into
 //! environment tabs and terminals, saving the window back to it on every change, Save layout
 //! as…, and asking before stopping running commands.
+use crate::inbox::{Note, PushNote};
 use std::path::{Path, PathBuf};
 
 use gpui::prelude::*;
 use gpui::{App, Context, Window, div};
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::notification::Notification;
 use gpui_component::{WindowExt, h_flex, v_flex};
 use hydraui_sets::layout::{
     EnvFile, FilesFile, LAYOUT_VERSION, Layout, LayoutError, ListFile, RESUME_CLAUDE, TasksTab,
@@ -189,8 +189,8 @@ impl Workspace {
         }
         let layout = crate::window_layout::with_unopened(self.current_layout(cx), &self.unopened);
         if let Err(e) = write_layout(path, &layout) {
-            window.push_notification(
-                Notification::warning(format!("can't save the layout to {}: {e}", path.display()))
+            window.push_note(
+                Note::warning(format!("can't save the layout to {}: {e}", path.display()))
                     .title("hydraui"),
                 cx,
             );
@@ -236,9 +236,8 @@ impl Workspace {
                 .as_deref()
                 .is_some_and(|m| hydraui_sets::same_path(m, &path));
             if !mine && let Err(e) = crate::window_layout::spawn_hydraui(Some(&path)) {
-                window.push_notification(
-                    Notification::error(format!("can't start another hydraui: {e}"))
-                        .title("Open layout"),
+                window.push_note(
+                    Note::error(format!("can't start another hydraui: {e}")).title("Open layout"),
                     cx,
                 );
             }
@@ -258,8 +257,7 @@ impl Workspace {
                     let _ = hydraui_sets::forget_recent(&paths, &path);
                     cx.notify();
                 }
-                window
-                    .push_notification(Notification::error(e.to_string()).title("Open layout"), cx);
+                window.push_note(Note::error(e.to_string()).title("Open layout"), cx);
                 return false;
             }
         };
@@ -287,8 +285,8 @@ impl Workspace {
             self.claim = None;
             self.layout = None;
             self.unopened = Layout::default();
-            window.push_notification(
-                Notification::warning(format!(
+            window.push_note(
+                Note::warning(format!(
                     "Nothing in {} could be opened; the file is unchanged",
                     file.display()
                 ))
@@ -316,10 +314,7 @@ impl Workspace {
     ) -> bool {
         let plan = plan_layout(&self.layout_context(), layout);
         for problem in &plan.problems {
-            window.push_notification(
-                Notification::warning(problem.clone()).title("Can't reopen"),
-                cx,
-            );
+            window.push_note(Note::warning(problem.clone()).title("Can't reopen"), cx);
         }
         self.unopened = plan.unopened;
         if plan.envs.is_empty() {
@@ -443,8 +438,8 @@ impl Workspace {
         let claim = match crate::claim::take(&running, &path, crate::claim::hwnd_of(window)) {
             crate::claim::Taken::Mine(c) => c,
             crate::claim::Taken::Elsewhere(_) => {
-                window.push_notification(
-                    Notification::error(format!(
+                window.push_note(
+                    Note::error(format!(
                         "{} is open in another hydraui window",
                         path.display()
                     ))
@@ -506,7 +501,7 @@ impl Workspace {
             Ok(Err(e)) => {
                 let e = e.to_string();
                 let _ = this.update_in(cx, |_, window, cx| {
-                    window.push_notification(Notification::error(e).title("Save"), cx)
+                    window.push_note(Note::error(e).title("Save"), cx)
                 });
             }
             _ => {}
@@ -555,10 +550,10 @@ impl Workspace {
         cx: &mut App,
     ) {
         let note = match result {
-            Ok(()) => Notification::success(format!("Saved {what} to {}", path.display())),
-            Err(e) => Notification::error(format!("can't save {}: {e}", path.display())),
+            Ok(()) => Note::success(format!("Saved {what} to {}", path.display())),
+            Err(e) => Note::error(format!("can't save {}: {e}", path.display())),
         };
-        window.push_notification(note.title("Save"), cx);
+        window.push_note(note.title("Save"), cx);
     }
 
     /// Save layout as…: starts in the current file's folder, else the layouts folder.

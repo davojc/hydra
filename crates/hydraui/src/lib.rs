@@ -21,6 +21,7 @@ pub mod git_status;
 pub mod git_watch;
 pub mod grammars;
 pub mod hydra;
+pub mod inbox;
 pub mod input;
 pub mod jev;
 pub mod keys;

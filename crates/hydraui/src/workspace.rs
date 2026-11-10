@@ -7,6 +7,7 @@ mod asking;
 mod busy;
 mod finder;
 mod history_tab;
+mod inbox_panel;
 mod launcher;
 mod layout_file;
 mod linear;
@@ -33,6 +34,7 @@ mod tree_ops;
 mod usage;
 mod worktree;
 
+use crate::inbox::{Note, PushNote};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -49,7 +51,6 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandItem, CommandState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, IconName, Selectable, Sizable, WindowExt, h_flex, v_flex};
 use hydraui_sets::layout::Layout;
 
@@ -217,6 +218,8 @@ pub struct Workspace {
     projects: Option<projects_tab::ProjectsTab>,
     /// History (core spec §50), when shown.
     history: Option<history_tab::HistoryTab>,
+    /// The notifications panel under the bell, while open (core spec §57).
+    inbox: Option<inbox_panel::InboxPanel>,
     /// Tickets (core spec §53), when shown.
     tickets: Option<tickets_tab::TicketsTab>,
     /// Every environment's projects, as last read.
@@ -532,6 +535,7 @@ impl Workspace {
             settings: None,
             projects: None,
             history: None,
+            inbox: None,
             tickets: None,
             projects_data: Default::default(),
             tasks_tabs: HashMap::new(),
@@ -597,12 +601,12 @@ impl Workspace {
     ) {
         self.start_update_checks(cx);
         for p in problems {
-            window.push_notification(Notification::warning(p).title("hydraui settings"), cx);
+            window.push_note(Note::warning(p).title("hydraui settings"), cx);
         }
         // A ticket left mid-run waits on its environment's card (orchestrator §13).
         for i in &self.interrupted {
-            window.push_notification(
-                Notification::info(format!(
+            window.push_note(
+                Note::info(format!(
                     "{} was running when hydraui closed. Open {} to resume it.",
                     i.run.ticket, i.env
                 ))
@@ -1127,10 +1131,7 @@ impl Workspace {
                                         }
                                     }
                                     match failed {
-                                        Some(e) => w.push_notification(
-                                            Notification::error(e).title("Save"),
-                                            cx,
-                                        ),
+                                        Some(e) => w.push_note(Note::error(e).title("Save"), cx),
                                         None => save_then(ws, w, cx),
                                     }
                                 });
@@ -1512,7 +1513,7 @@ impl Workspace {
             TreeEvent::Delete(path) => return self.delete_dialog(path.clone(), window, cx),
             TreeEvent::Reveal(path) => {
                 if let Err(e) = crate::file_ops::reveal_in_explorer(path) {
-                    window.push_notification(Notification::error(e), cx);
+                    window.push_note(Note::error(e), cx);
                 }
                 return;
             }
@@ -1641,8 +1642,8 @@ impl Workspace {
             std::env::var_os("PATHEXT").as_deref(),
         );
         if let Err(e) = cmd.spawn() {
-            window.push_notification(
-                Notification::error(format!("can't start {editor}: {e}")).title("Open file"),
+            window.push_note(
+                Note::error(format!("can't start {editor}: {e}")).title("Open file"),
                 cx,
             );
         }
@@ -1990,6 +1991,7 @@ impl Workspace {
             .child(self.projects_button(cx))
             .child(self.tickets_button(cx))
             .child(self.history_button(cx))
+            .child(self.inbox_button(cx))
             .child(
                 Button::new("open-settings")
                     .icon(IconName::Settings)
@@ -2120,6 +2122,8 @@ impl Render for Workspace {
             .text_color(fg)
             .track_focus(&self.focus)
             .key_context("Workspace")
+            .relative()
+            .children(self.render_inbox_panel(cx))
             .on_action(cx.listener(Self::new_terminal_action))
             .on_action(cx.listener(Self::close_pane))
             .on_action(cx.listener(Self::next_tab))

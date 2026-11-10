@@ -2,6 +2,7 @@
 //! environment's terminals in creation order, grouped by project with a line between groups,
 //! each with its activity dot, its name and × on hover; click shows one, right-click opens its
 //! Tasks tab, renames, restarts or closes it.
+use crate::inbox::PushNote;
 use std::cell::Cell;
 
 use gpui::prelude::*;
@@ -1181,10 +1182,7 @@ impl Workspace {
         self.ui.pipelines_condensed = !self.ui.pipelines_condensed;
         let value = self.ui.pipelines_condensed.then_some(true.into());
         if let Err(e) = crate::config::set(&self.hydra.paths, "pipelines_condensed", value) {
-            window.push_notification(
-                gpui_component::notification::Notification::error(e).title("Pipelines"),
-                cx,
-            );
+            window.push_note(crate::inbox::Note::error(e).title("Pipelines"), cx);
         }
         cx.notify();
     }
@@ -1196,10 +1194,7 @@ impl Workspace {
         }
         let value: toml_edit::Array = self.ui.setup_hidden.iter().map(String::as_str).collect();
         if let Err(e) = crate::config::set(&self.hydra.paths, "setup_hidden", Some(value.into())) {
-            window.push_notification(
-                gpui_component::notification::Notification::error(e).title("Set up"),
-                cx,
-            );
+            window.push_note(crate::inbox::Note::error(e).title("Set up"), cx);
         }
         cx.notify();
     }

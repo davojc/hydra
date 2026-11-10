@@ -1,13 +1,13 @@
 //! The Settings tab: hydraui's own settings, each environment's page and the credentials,
 //! shown in the middle in place of a terminal until a terminal is picked or it is closed. An
 //! environment's name in the status bar opens its page.
+use crate::inbox::{Note, PushNote};
 use std::cell::Cell;
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Hsla, SharedString, Window, div, px, rgb};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
-use gpui_component::notification::Notification;
 use gpui_component::switch::Switch;
 use gpui_component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
 
@@ -82,7 +82,7 @@ impl Workspace {
     ) {
         match config::set(&self.hydra.paths, key, value) {
             Ok(()) => self.apply_config(false, window, cx),
-            Err(e) => window.push_notification(Notification::error(e).title("Settings"), cx),
+            Err(e) => window.push_note(Note::error(e).title("Settings"), cx),
         }
     }
 
@@ -100,7 +100,7 @@ impl Workspace {
                 self.tints.insert(env.to_string(), tint);
                 self.recheck_accounts(env, cx);
             }
-            Err(e) => window.push_notification(Notification::error(e).title(env.to_string()), cx),
+            Err(e) => window.push_note(Note::error(e).title(env.to_string()), cx),
         }
         cx.notify();
     }

@@ -1,5 +1,6 @@
 //! Stage terminals (orchestrator spec §3.2): the gate let a stage start, so hydraui opens its
 //! terminal beside the user, in the run's worktree or the orchestrator's folder, and links it.
+use crate::inbox::{Note, PushNote};
 use std::path::PathBuf;
 
 use gpui::prelude::*;
@@ -7,7 +8,6 @@ use gpui::{AnimationExt, AnyElement, Context, SharedString, Window, div, px, rel
 use gpui_component::WindowExt;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_component::notification::Notification;
 use gpui_component::{Sizable, h_flex, v_flex};
 
 use super::Workspace;
@@ -471,8 +471,8 @@ impl Workspace {
         let (Some(token), Some(sv)) =
             (view.read(cx).mcp_token().map(str::to_string), server::get())
         else {
-            window.push_notification(
-                Notification::error("Its terminal has no MCP token.").title("Resume"),
+            window.push_note(
+                Note::error("Its terminal has no MCP token.").title("Resume"),
                 cx,
             );
             return;
@@ -722,8 +722,8 @@ impl Workspace {
                     ),
                     _ => format!("{}'s orchestrator closed before it finished.", i.run.ticket),
                 };
-                window.push_notification(
-                    Notification::info(format!(
+                window.push_note(
+                    Note::info(format!(
                         "{what} Resume it from History or the Pipelines tab, or stop it there."
                     ))
                     .title(i.run.pipeline.name.clone()),
@@ -1064,11 +1064,9 @@ impl Workspace {
                 Ok(true) => crate::action_log::write(format!("removed run worktree {shown}")),
                 Ok(false) => {
                     let _ = cx.update(|window, cx| {
-                        window.push_notification(
-                            Notification::warning(format!(
-                                "{shown} has uncommitted work, so it stays."
-                            ))
-                            .title("Worktree kept"),
+                        window.push_note(
+                            Note::warning(format!("{shown} has uncommitted work, so it stays."))
+                                .title("Worktree kept"),
                             cx,
                         );
                     });
@@ -1107,64 +1105,18 @@ impl Workspace {
         }
         let run_owned = run_id.to_string();
         let ws = cx.entity();
-        let note = Notification::new()
+        let mut message = format!("{}. {}", e.title, e.body);
+        if let Some(r) = &e.reason {
+            message.push_str(&format!(" − {r}"));
+        }
+        let note = Note::warning(message)
+            .title(format!("{} stopped · needs you", e.pipeline))
             .id1::<RunAlert>(SharedString::from(format!("run-{run_id}")))
-            .autohide(false)
-            .w(px(360.))
-            .bg(color(theme::TOAST))
-            .border_color(color(theme::RED_BORDER))
-            .content(move |_, _, cx| {
+            .on_click(move |_, window, cx| {
                 let run = run_owned.clone();
-                let ws = ws.clone();
-                v_flex()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(color(theme::RED))
-                            .child(format!("{} STOPPED · NEEDS YOU", e.pipeline.to_uppercase())),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(color(theme::TEXT))
-                            .child(e.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(color(theme::TEXT_SECONDARY))
-                            .child(e.body.clone()),
-                    )
-                    .children(e.reason.clone().map(|r| {
-                        div()
-                            .text_xs()
-                            .text_color(color(theme::TEXT_SECONDARY))
-                            .child(format!("− {r}"))
-                    }))
-                    .child(
-                        h_flex()
-                            .pt_2()
-                            .gap_2()
-                            .child(
-                                Button::new("open-ticket")
-                                    .label("Open ticket")
-                                    .primary()
-                                    .on_click(cx.listener(move |note, _, window, cx| {
-                                        note.dismiss(window, cx);
-                                        let run = run.clone();
-                                        ws.update(cx, |ws, cx| {
-                                            ws.open_pipeline_run(orch, run, window, cx)
-                                        });
-                                    })),
-                            )
-                            .child(Button::new("later").label("Later").ghost().on_click(
-                                cx.listener(|note, _, window, cx| note.dismiss(window, cx)),
-                            )),
-                    )
-                    .into_any_element()
+                ws.update(cx, |ws, cx| ws.open_pipeline_run(orch, run, window, cx));
             });
-        window.push_notification(note, cx);
+        window.push_note(note, cx);
     }
 
     /// Types each waiting wake-up whose orchestrator can take it now; a closed one's is dropped.
@@ -1216,8 +1168,8 @@ impl Workspace {
                     ));
                     let title = self.toast_title(pane, &run, cx);
                     let ws = cx.entity();
-                    window.push_notification(
-                        Notification::warning(format!(
+                    window.push_note(
+                        Note::warning(format!(
                             "{} has a message from hydraui it can't take: something is in its \
                              input, or Claude Code is asking a question. Open it and clear or \
                              answer it, and hydraui sends the message.",
@@ -1279,8 +1231,8 @@ impl Workspace {
                 crate::action_log::write(format!(
                     "run {run}: {name} didn't take a wake-up after 3 tries"
                 ));
-                window.push_notification(
-                    Notification::warning(format!(
+                window.push_note(
+                    Note::warning(format!(
                         "{name} isn't taking messages from hydraui. Look at its terminal: \
                          Claude Code may be showing a question. Answer it, and hydraui carries \
                          on."

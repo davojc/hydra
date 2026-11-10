@@ -1197,3 +1197,17 @@ A run used to keep the stage list it started with (§2), so a stage added in Pip
 
   A new stage has no earlier session to reopen. Going back to it needs the run to be waiting for you, as Go back always does.
 - **Logged and replayed.** Each joining is logged as `stage added`, with the stage's settings and `after`. A Go back to a new stage then logs the `person` back choice. A restart replays both, so the run comes back with its added stages. History shows `Added stage <title>`, and a new stage reads by its title throughout.
+
+## 57. Notifications behind a bell (added 2026-11-10)
+
+Toasts covered the work, so hydraui no longer shows any. Every notice goes into one list behind a **bell** in the tab strip, right of History.
+
+- **The bell** shows how many notices are unread. It turns amber while any unread one is a warning or an error. Its tooltip reads "Notifications".
+- **The panel.** A click on the bell drops a panel down under the tab strip, over everything; a click outside closes it.
+  - Its header has **Clear**.
+  - Notices are listed newest first. Each has a dot in its kind's colour (grey info, green success, amber warning, red error), its title, when it came (`Today 13:50`), and its message up to four lines.
+  - Opening the panel marks everything read. What was unread is shaded while it stays open.
+  - A notice that opens something (a terminal, a run's Pipeline tab) does so on a click, and the panel closes.
+- **The run alert** (§5.3) is a notice now, no longer a card that stays: `<Pipeline> stopped · needs you`, with the run's title, body and reason. A click opens the run. The window still flashes and the orchestrator's terminal is still badged.
+- **Keys and limits.** A notice with the same key as an earlier one replaces it; the toast's `id1` becomes the key. The list keeps the newest 200, in memory only, so a restart empties it. Each notice is also written to `hydraui.log` as `notice: <title>: <message>`.
+- **In code.** `crate::inbox::Note` has the toast's builder calls (`info`, `success`, `warning`, `error`, `title`, `id1`, `on_click`; `autohide` is kept but does nothing). `window.push_note(note, cx)` sends one. No code calls gpui-component's `push_notification` any more.

@@ -2,13 +2,12 @@
 //! Automatic/Manual switch, the checks it makes, and the writes back when a run starts or ends. The decisions
 //! are `linear_watch`'s; the calls are `linear::Http`'s, made off the UI thread.
 
+use crate::inbox::{Note, PushNote};
 use std::time::{Duration, SystemTime};
 
 use gpui::prelude::*;
 use gpui::{Animation, AnimationExt, AnyElement, Context, SharedString, Window, div, px, relative};
-use gpui_component::WindowExt;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::notification::Notification;
 use gpui_component::switch::Switch;
 use gpui_component::{Sizable, h_flex, v_flex};
 
@@ -338,8 +337,8 @@ impl Workspace {
             others.iter().map(|(id, t)| (id, t.as_str())),
         );
         if other.is_some() {
-            window.push_notification(
-                Notification::warning(format!(
+            window.push_note(
+                Note::warning(format!(
                     "Another orchestrator already {label}: only one may, or they'd race \
                      for its work."
                 ))
@@ -366,8 +365,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some(slot) = self.slot_for_work(orch, window, cx) else {
-            window.push_notification(
-                Notification::info("Every run is busy: the next is picked when one ends.")
+            window.push_note(
+                Note::info("Every run is busy: the next is picked when one ends.")
                     .title(self.toast_title(orch, "Check Linear", cx)),
                 cx,
             );
@@ -590,11 +589,11 @@ impl Workspace {
         if let (true, Some(settings)) = (std::mem::take(&mut w.by_hand), &pipeline.linear) {
             let (ok, text) = linear_watch::pick_result(settings, &found);
             let note = if ok {
-                Notification::info(text)
+                Note::info(text)
             } else {
-                Notification::error(text)
+                Note::error(text)
             };
-            window.push_notification(note.title(pipeline.name.clone()), cx);
+            window.push_note(note.title(pipeline.name.clone()), cx);
         }
         let skipped = |check: &linear_watch::Check| {
             if check.skipped.is_empty() {
@@ -645,8 +644,8 @@ impl Workspace {
                         w.on = false;
                         w.status = None;
                         w.stopped = Some(reason.clone());
-                        window.push_notification(
-                            Notification::error(format!("Stopped watching Linear: {reason}"))
+                        window.push_note(
+                            Note::error(format!("Stopped watching Linear: {reason}"))
                                 .title(pipeline.name.clone()),
                             cx,
                         );

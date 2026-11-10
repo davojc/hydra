@@ -1,5 +1,6 @@
 //! The file tree's right-click operations: new file or folder, rename and delete (to the
 //! Recycle Bin), with open file tabs kept in step.
+use crate::inbox::{Note, PushNote};
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 
@@ -7,7 +8,6 @@ use gpui::prelude::*;
 use gpui::{Context, Window, div};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
-use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, Disableable, WindowExt, h_flex, v_flex};
 
 use super::Workspace;
@@ -46,8 +46,8 @@ impl Workspace {
             NameFor::Rename => "Rename",
         };
         if what == NameFor::Rename && self.unsaved_under(&at, cx) {
-            window.push_notification(
-                Notification::warning(format!(
+            window.push_note(
+                Note::warning(format!(
                     "{} has unsaved edits. Save them first.",
                     file_name(&at)
                 ))
@@ -149,7 +149,7 @@ impl Workspace {
         let path = match done {
             Ok(path) => path,
             Err(e) => {
-                window.push_notification(Notification::error(e), cx);
+                window.push_note(Note::error(e), cx);
                 return;
             }
         };
@@ -179,8 +179,8 @@ impl Workspace {
     ) {
         let name = file_name(&path);
         if self.unsaved_under(&path, cx) {
-            window.push_notification(
-                Notification::warning(format!("{name} has unsaved edits. Save them first."))
+            window.push_note(
+                Note::warning(format!("{name} has unsaved edits. Save them first."))
                     .title("Delete"),
                 cx,
             );
@@ -219,7 +219,7 @@ impl Workspace {
 
     fn delete_now(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(e) = file_ops::to_recycle_bin(&path) {
-            window.push_notification(Notification::error(e).title("Delete"), cx);
+            window.push_note(Note::error(e).title("Delete"), cx);
             return;
         }
         for f in self.files.values().cloned().collect::<Vec<_>>() {

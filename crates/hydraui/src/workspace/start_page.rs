@@ -1,12 +1,12 @@
 //! The start page (spec §7.12): recent layouts with a filter, New window, Open layout file….
+use crate::inbox::{Note, PushNote};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Entity, Focusable, KeyDownEvent, Subscription, Window, div, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::notification::Notification;
-use gpui_component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
+use gpui_component::{ActiveTheme, Sizable, h_flex, v_flex};
 
 use super::Workspace;
 use crate::start_page::{Row, rows};
@@ -87,8 +87,8 @@ impl Workspace {
     fn open_start_row(&mut self, row: Row, window: &mut Window, cx: &mut Context<Self>) {
         if !row.path.exists() {
             let _ = hydraui_sets::forget_recent(&self.hydra.paths, &row.path);
-            window.push_notification(
-                Notification::warning(format!("{} no longer exists", row.path.display()))
+            window.push_note(
+                Note::warning(format!("{} no longer exists", row.path.display()))
                     .title("Recent layouts"),
                 cx,
             );

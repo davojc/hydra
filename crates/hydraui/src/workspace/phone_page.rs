@@ -1,11 +1,11 @@
 //! Settings › Phone: turn the phone link on, pair a phone with a QR code, unpair it.
+use crate::inbox::{Note, PushNote};
 use std::time::Duration;
 
 use futures::channel::oneshot;
 use gpui::prelude::*;
 use gpui::{AnyElement, ClipboardItem, Context, Hsla, Task, Window, div, px, rgb};
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::notification::Notification;
 use gpui_component::switch::Switch;
 use gpui_component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
 use hydra_link::pairing::PairingOffer;
@@ -331,8 +331,8 @@ impl Workspace {
 /// Logs and shows that saving `what` failed with `e`.
 fn phone_unsaved(what: &str, e: &str, window: &mut Window, cx: &mut gpui::App) {
     action_log::write(format!("phone: couldn't save {what}: {e}"));
-    window.push_notification(
-        Notification::warning(format!("Couldn't save {what}: {e}")).title("Phone"),
+    window.push_note(
+        Note::warning(format!("Couldn't save {what}: {e}")).title("Phone"),
         cx,
     );
 }

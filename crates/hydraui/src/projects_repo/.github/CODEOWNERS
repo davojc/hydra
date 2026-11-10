@@ -1,0 +1,4 @@
+# Who must review changes outside the project folders. Project folders have no owner here:
+# the projects-gate check decides those from each project's lead.
+/.github/ {admins}
+/README.md {admins}

@@ -1,0 +1,28 @@
+# The projects repo's merge gate (hydraui Projects): who may merge a change to a project.
+# Make the "projects-gate" check required on the default branch; see README.md.
+name: projects-gate
+
+on:
+  # Runs this workflow as the base branch has it, never as a pull request rewrites it.
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  # Again when someone approves, so the lead's approval lets a member's change through.
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  projects-gate:
+    runs-on: ubuntu-latest
+    steps:
+      # The base branch's script: the change being checked can't rewrite its own check.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          sparse-checkout: .github/scripts
+      - run: python3 .github/scripts/projects_gate.py
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

@@ -1,0 +1,402 @@
+//! The projects repo's files (spec §2), as types.
+
+use serde::{Deserialize, Serialize};
+use toml::value::Datetime;
+
+/// `project.toml`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectFile {
+    pub name: String,
+    /// The ticket prefix, e.g. `PG`.
+    pub key: String,
+    /// The lead's GitHub login.
+    pub lead: String,
+    #[serde(default)]
+    pub members: Vec<String>,
+    #[serde(default)]
+    pub status: ProjectStatus,
+    /// Code repos, `owner/name`, that the lead confirmed the project changes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<String>,
+    /// Repos the planning session expects the project to change, not confirmed yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggested_repos: Vec<SuggestedRepo>,
+    /// Suggestions the lead dismissed, so they aren't suggested again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dismissed_repos: Vec<String>,
+    #[serde(default)]
+    pub sync: Sync,
+    /// A new spec Claude proposes from new requirements, in `description` (spec §14.6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec_change: Option<Change>,
+    /// Where the requirements also live in Linear: project or issue links (spec §14.7).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linear: Vec<String>,
+    /// Why the lead turned down the last spec change, so it isn't proposed again.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub spec_note: String,
+    /// Keys hydra doesn't know, kept on a rewrite.
+    #[serde(flatten)]
+    pub extra: toml::Table,
+}
+
+/// A repo the planning session expects the project to change, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuggestedRepo {
+    pub repo: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub why: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectStatus {
+    #[default]
+    Active,
+    Paused,
+    Done,
+}
+
+/// `[sync]` in `project.toml`: when the repo sync runs (spec §7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sync {
+    /// Local times, `HH:MM`, once or twice a day.
+    pub times: Vec<String>,
+}
+
+pub const DEFAULT_SYNC_TIMES: [&str; 2] = ["12:30", "17:30"];
+
+impl Default for Sync {
+    fn default() -> Self {
+        Sync {
+            times: DEFAULT_SYNC_TIMES.iter().map(|t| t.to_string()).collect(),
+        }
+    }
+}
+
+impl ProjectFile {
+    /// Whether `login` is the lead or a member.
+    pub fn is_on(&self, login: &str) -> bool {
+        self.lead.eq_ignore_ascii_case(login)
+            || self.members.iter().any(|m| m.eq_ignore_ascii_case(login))
+    }
+}
+
+/// `milestones.toml`: `[[milestone]]` entries, in order.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MilestonesFile {
+    #[serde(default, rename = "milestone")]
+    pub milestones: Vec<Milestone>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Milestone {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<Datetime>,
+    #[serde(default)]
+    pub status: MilestoneStatus,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default)]
+    pub review: Review,
+    /// The update note or the rejection reason (spec §14).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub review_note: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reviewed_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_at: Option<Datetime>,
+    /// A change Claude proposes to it, waiting for the lead (spec §14.6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<Change>,
+}
+
+/// A change Claude proposes to an approved milestone or ticket, or to the spec, after new
+/// requirements (spec §14.6). The approved version stays in force until the lead accepts it.
+/// Only the fields given change.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Change {
+    /// Why, in a line or two: what in the new requirements asks for it.
+    pub why: String,
+    /// The requirements it comes from: a resource's file name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub from: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// A milestone's points, a ticket's description, or the new spec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<Datetime>,
+    /// A ticket's new milestone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub milestone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    /// Drop it: the requirements no longer need it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub drop: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MilestoneStatus {
+    #[default]
+    Planned,
+    Active,
+    Done,
+}
+
+/// A ticket's front matter. Its id is its file name (`tickets/PG-12.md`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TicketMeta {
+    pub title: String,
+    #[serde(default)]
+    pub kind: TicketKind,
+    #[serde(default)]
+    pub status: TicketStatus,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub milestone: String,
+    /// The code repo the work lands in, `owner/name`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub repo: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub assignee: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub created_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<Datetime>,
+    #[serde(default)]
+    pub review: Review,
+    /// The update note or the rejection reason (spec §14).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub review_note: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reviewed_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_at: Option<Datetime>,
+    /// The work branch, once work started (spec §14).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub branch: String,
+    /// The pull requests the work session reported.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prs: Vec<String>,
+    /// What the testing skill found on those pull requests: `passed` or `failed` (spec §14.5).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub check: String,
+    /// The testing session's summary.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub check_note: String,
+    /// How many times testing has failed: each failure goes back to a work session to fix,
+    /// until the run stops for a person (spec §14.5).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub check_failures: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub started_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<Datetime>,
+    /// A task for a person, not Claude (creating a flag, setting a secret, asking another
+    /// team): a milestone run never works it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub person: bool,
+    /// When its work session reported it finished (spec §14.5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<Datetime>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub skill: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub effort: String,
+    /// A change Claude proposes to it, waiting for the lead (spec §14.6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<Change>,
+    #[serde(flatten)]
+    pub extra: toml::Table,
+}
+
+/// Where a proposed milestone or ticket stands (spec §14). Missing means approved, so
+/// hand-written files count as decided.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Review {
+    /// Claude proposed it; nobody has looked yet.
+    Proposed,
+    /// The lead wrote a note; Claude is to revise it.
+    Changes,
+    #[default]
+    Approved,
+    /// Kept, with the reason, so it isn't proposed again.
+    Rejected,
+}
+
+impl Review {
+    /// Waiting for the lead: proposed, or revised and proposed again.
+    pub fn waiting(self) -> bool {
+        self == Review::Proposed
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Review::Proposed => "to review",
+            Review::Changes => "changes asked",
+            Review::Approved => "approved",
+            Review::Rejected => "rejected",
+        }
+    }
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TicketKind {
+    #[default]
+    Feature,
+    Bug,
+    Chore,
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub enum TicketStatus {
+    #[default]
+    #[serde(rename = "todo")]
+    Todo,
+    #[serde(rename = "in progress")]
+    InProgress,
+    /// Pull requests open, being tested before anyone reviews them (spec §14.5).
+    #[serde(rename = "testing")]
+    Testing,
+    #[serde(rename = "in review")]
+    InReview,
+    #[serde(rename = "done")]
+    Done,
+    #[serde(rename = "dropped")]
+    Dropped,
+}
+
+impl TicketStatus {
+    /// The board's columns, in order. Dropped tickets aren't on the board.
+    pub const BOARD: [TicketStatus; 5] = [
+        TicketStatus::Todo,
+        TicketStatus::InProgress,
+        TicketStatus::Testing,
+        TicketStatus::InReview,
+        TicketStatus::Done,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TicketStatus::Todo => "Todo",
+            TicketStatus::InProgress => "In progress",
+            TicketStatus::Testing => "Testing",
+            TicketStatus::InReview => "In review",
+            TicketStatus::Done => "Done",
+            TicketStatus::Dropped => "Dropped",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ticket {
+    /// `PG-12`.
+    pub id: String,
+    pub meta: TicketMeta,
+    pub body: String,
+}
+
+/// A decision file's front matter: an open question, or a decision made once `answer` is set.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DecisionMeta {
+    pub question: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub asked_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked_at: Option<Datetime>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub assigned_to: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ticket: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub milestone: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub answer: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub decided_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<Datetime>,
+    /// The decision this one reverses, e.g. `D-7`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub replaces: String,
+    #[serde(flatten)]
+    pub extra: toml::Table,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Decision {
+    /// `D-7`.
+    pub id: String,
+    pub meta: DecisionMeta,
+    pub body: String,
+}
+
+impl Decision {
+    pub fn is_open(&self) -> bool {
+        self.meta.answer.trim().is_empty()
+    }
+}
+
+/// A meeting note: `meetings/<date>-<slug>.md`, front matter optional.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Meeting {
+    /// The file name without `.md`.
+    pub name: String,
+    pub body: String,
+}
+
+/// `resources/links.toml`: `[[link]]` entries.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LinksFile {
+    #[serde(default, rename = "link")]
+    pub links: Vec<Link>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Link {
+    pub title: String,
+    pub url: String,
+}
+
+/// One engineer's write-up for a day: `progress/<login>/<date>.md`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Progress {
+    pub login: String,
+    /// `YYYY-MM-DD`.
+    pub date: String,
+    pub body: String,
+}
+
+/// One project folder, read whole.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Project {
+    /// The folder name.
+    pub slug: String,
+    pub file: ProjectFile,
+    pub spec: String,
+    pub milestones: Vec<Milestone>,
+    pub tickets: Vec<Ticket>,
+    pub decisions: Vec<Decision>,
+    pub meetings: Vec<Meeting>,
+    /// File names under `resources/`, other than `links.toml`.
+    pub files: Vec<String>,
+    pub links: Vec<Link>,
+    pub progress: Vec<Progress>,
+}

@@ -2,6 +2,7 @@
 //! orchestrator's name, the default bar, the stages (reorder, name, skill, bar, remove, add),
 //! the limits, and a save bar. Saving rewrites the pipeline file (`pipeline::save`) and open
 //! runs take the new bars at once; stage changes apply from the next ticket.
+use crate::inbox::{Note, PushNote};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -12,7 +13,6 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandItem, CommandState};
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_component::notification::Notification;
 use gpui_component::select::{Select, SelectEvent, SelectState};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::{Disableable, Sizable, WindowExt, h_flex, v_flex};
@@ -67,13 +67,33 @@ pub(super) struct SettingsDraft {
     next_key: u64,
     linear: LinearDraft,
     slack: SlackDraft,
-    /// The Trigger dropdown: None, Linear or Slack.
+    schedule: ScheduleDraft,
+    /// The Trigger dropdown: None, Linear, Slack or Schedule.
     trigger: Entity<SelectState<Vec<&'static str>>>,
     _subs: Vec<Subscription>,
 }
 
 /// The Trigger dropdown's choices, in order.
-const TRIGGERS: [&str; 3] = ["None", "Linear", "Slack"];
+const TRIGGERS: [&str; 4] = ["None", "Linear", "Slack", "Schedule"];
+
+/// The Schedule section (core spec §58): off saves the pipeline without a `[schedule]` table.
+struct ScheduleDraft {
+    on: bool,
+    /// Days and a time, e.g. `mon 18:00`.
+    every: Entity<InputState>,
+    /// The orchestrator's environment; empty: `[autostart]`'s, else the default.
+    env: Entity<InputState>,
+}
+
+impl ScheduleDraft {
+    fn edit(&self, cx: &App) -> Option<pipeline::ScheduleSettings> {
+        let text = |i: &Entity<InputState>| i.read(cx).value().trim().to_string();
+        self.on.then(|| pipeline::ScheduleSettings {
+            every: text(&self.every),
+            env: Some(text(&self.env)).filter(|e| !e.is_empty()),
+        })
+    }
+}
 
 /// The Slack section: off saves the pipeline without a `[slack]` table. Linear and Slack can't
 /// both be on.
@@ -173,6 +193,7 @@ impl SettingsDraft {
             branch: Some(self.branch.read(cx).value().trim().to_string()).filter(|b| !b.is_empty()),
             linear: self.linear.edit(cx),
             slack: self.slack.edit(cx),
+            schedule: self.schedule.edit(cx),
             autostart: self.saved.autostart.clone(),
             product_channel: Some(self.product.read(cx).value().trim().to_string())
                 .filter(|c| !c.is_empty()),
@@ -207,8 +228,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some((file, env, cwd)) = self.settings_target(orch, cx) else {
-            window.push_notification(
-                Notification::info("Start a run first: settings edit its pipeline.")
+            window.push_note(
+                Note::info("Start a run first: settings edit its pipeline.")
                     .title("Pipeline settings"),
                 cx,
             );
@@ -218,7 +239,7 @@ impl Workspace {
         let saved = match pipeline::load(&root, &file) {
             Ok(p) => Edit::from(&p),
             Err(e) => {
-                window.push_notification(Notification::error(e).title("Pipeline settings"), cx);
+                window.push_note(Note::error(e).title("Pipeline settings"), cx);
                 return;
             }
         };
@@ -379,7 +400,21 @@ impl Workspace {
                 "white_check_mark (✅); empty for none",
             ),
         };
-        let chosen = if saved.slack.is_some() {
+        let sc = saved.schedule.clone();
+        let schedule = ScheduleDraft {
+            on: sc.is_some(),
+            every: input(
+                sc.as_ref().map_or(String::new(), |s| s.every.clone()),
+                "mon 18:00 · weekdays 09:00 · daily 08:30",
+            ),
+            env: input(
+                sc.as_ref().and_then(|s| s.env.clone()).unwrap_or_default(),
+                "Environment; empty: the default",
+            ),
+        };
+        let chosen = if saved.schedule.is_some() {
+            3
+        } else if saved.slack.is_some() {
             2
         } else if saved.linear.is_some() {
             1
@@ -406,6 +441,7 @@ impl Workspace {
                 ws.with_draft(orch, cx, |d| {
                     d.linear.on = choice == "Linear";
                     d.slack.on = choice == "Slack";
+                    d.schedule.on = choice == "Schedule";
                 })
             },
         ));
@@ -426,6 +462,7 @@ impl Workspace {
             next_key: 0,
             linear,
             slack,
+            schedule,
             trigger,
             _subs: Vec::new(),
         };
@@ -618,6 +655,57 @@ impl Workspace {
         body
     }
 
+    /// The Schedule trigger's options (core spec §58): when, where, and how that reads.
+    fn render_schedule_settings(
+        &self,
+        draft: &SettingsDraft,
+        cx: &App,
+    ) -> impl IntoElement + use<> {
+        let sc = &draft.schedule;
+        let mut body = v_flex().gap_2();
+        if sc.on {
+            let row = |label: &str, input: &Entity<InputState>| {
+                h_flex()
+                    .gap_3()
+                    .child(
+                        text(12.5, theme::TEXT_SECONDARY)
+                            .w(px(170.))
+                            .flex_none()
+                            .child(label.to_string()),
+                    )
+                    .child(div().w(px(300.)).child(Input::new(input).small()))
+            };
+            let every = sc.every.read(cx).value().to_string();
+            let reads = match crate::schedule::parse(&every) {
+                Ok(w) => (
+                    format!(
+                        "{}, while hydraui is open; once when it next opens that day if it \
+                         wasn't. Each run is named like {}.",
+                        w.text(),
+                        crate::schedule::ticket(&draft.file, "2026-11-16")
+                    ),
+                    theme::TEXT_SECONDARY,
+                ),
+                Err(_) if every.trim().is_empty() => (
+                    "Days and a time: mon 18:00, weekdays 09:00, daily 08:30, mon,thu 17:00"
+                        .to_string(),
+                    theme::TEXT_MUTED,
+                ),
+                Err(e) => (e.replace("[schedule] ", ""), theme::AMBER),
+            };
+            body = body
+                .child(row("Runs", &sc.every))
+                .child(row("In environment", &sc.env))
+                .child(
+                    text(12., reads.1)
+                        .pl(px(182.))
+                        .whitespace_normal()
+                        .child(reads.0),
+                );
+        }
+        body
+    }
+
     fn with_draft(
         &mut self,
         orch: PaneId,
@@ -678,6 +766,7 @@ impl Workspace {
         };
         let mut choices: Vec<Option<String>> = vec![None];
         choices.extend(skills.into_iter().map(Some));
+        let router_on = self.router_state(orch, cx).is_some_and(|(_, _, ok)| ok);
         let state = cx.new(|cx| CommandState::new(window, cx));
         let workspace = cx.entity();
         let first = Cell::new(true);
@@ -690,7 +779,8 @@ impl Workspace {
             dialog.title("Skill").child(
                 Command::new(&state)
                     .items(choices.iter().map(|c| {
-                        CommandItem::new().label(c.clone().unwrap_or_else(|| "No skill".into()))
+                        CommandItem::new()
+                            .label(crate::setup::stage_skill_label(c.as_deref(), router_on))
                     }))
                     .placeholder("Skill")
                     .on_confirm(move |ix, window, cx| {
@@ -748,7 +838,7 @@ impl Workspace {
         };
         let edit = draft.edit(cx);
         if let Err(why) = validate(&edit) {
-            window.push_notification(Notification::warning(why).title("Pipeline settings"), cx);
+            window.push_note(Note::warning(why).title("Pipeline settings"), cx);
             return;
         }
         let (file, skills) = (draft.file.clone(), draft.skills.clone());
@@ -759,25 +849,75 @@ impl Workspace {
         match saved {
             Ok(p) => {
                 // Open runs take the new bars at once (spec §2, §5.1).
+                // A stage added after where a run is joins it (core spec §56).
                 if let Some(sv) = server::get() {
-                    server::lock(sv.registry())
+                    let added = server::lock(sv.registry())
                         .runs
                         .refresh_from_file(&file, &p);
+                    crate::run_log::record_added(&root, &added);
                 }
                 crate::action_log::write(format!("pipeline {file}: settings saved"));
                 let fresh = self.new_draft(orch, file, Edit::from(&p), skills, window, cx);
                 self.pipeline_settings.insert(orch, fresh);
-                window.push_notification(
-                    Notification::success("A stage's settings apply when it next starts.")
+                window.push_note(
+                    Note::success("A stage's settings apply when it next starts.")
                         .title("Pipeline saved"),
                     cx,
                 );
             }
-            Err(e) => {
-                window.push_notification(Notification::error(e).title("Pipeline settings"), cx)
-            }
+            Err(e) => window.push_note(Note::error(e).title("Pipeline settings"), cx),
         }
         cx.notify();
+    }
+
+    /// The team skills router (core spec §55) in orchestrator `orch`'s environment: its label,
+    /// its state, and whether it's on; none when config lists no router.
+    fn router_state(
+        &self,
+        orch: PaneId,
+        cx: &Context<Self>,
+    ) -> Option<(String, crate::setup::PluginState, bool)> {
+        let env = self.panes.get(&orch)?.read(cx).env().to_string();
+        let i = self
+            .ui
+            .setup_plugins
+            .iter()
+            .position(crate::setup::is_router)?;
+        let (_, label, state) = self
+            .plugin_states(&env)
+            .into_iter()
+            .find(|(n, ..)| *n == i)?;
+        Some((label, state, state == crate::setup::PluginState::On))
+    }
+
+    /// Above the steps: whether the team skills router guides them, in words (core spec §55).
+    fn render_router_note(&self, orch: PaneId, cx: &Context<Self>) -> Option<AnyElement> {
+        let (label, state, _) = self.router_state(orch, cx)?;
+        let env = self.panes.get(&orch)?.read(cx).env().to_string();
+        let (note, ok) = crate::setup::router_note(&label, state, &env);
+        let tone = if ok { theme::TEAL } else { theme::AMBER };
+        Some(
+            h_flex()
+                .gap_2()
+                .items_start()
+                .px(px(12.))
+                .py(px(8.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(color(tone).opacity(0.5))
+                .child(
+                    text(12., tone)
+                        .flex_none()
+                        .child(if ok { "●" } else { "○" }),
+                )
+                .child(
+                    text(12.5, theme::TEXT_SECONDARY)
+                        .flex_1()
+                        .whitespace_normal()
+                        .child(note),
+                )
+                .into_any_element(),
+        )
     }
 
     /// The Settings view for orchestrator `orch`.
@@ -797,6 +937,11 @@ impl Workspace {
             server::lock(sv.registry()).min_week_left
         });
         let count = draft.stages.len();
+        let router_on = self.router_state(orch, cx).is_some_and(|(_, _, ok)| ok);
+        // Product questions sit under Advanced: most pipelines never ask product.
+        let product = draft
+            .advanced
+            .then(|| self.render_product_settings(orch, draft, cx));
         let section = |title: &str| text(11., theme::TEXT_MUTED).child(title.to_uppercase());
         let mut stages = v_flex().gap_2();
         for (i, s) in draft.stages.iter().enumerate() {
@@ -863,7 +1008,16 @@ impl Workspace {
                             )
                             .child(
                                 Button::new(SharedString::from(format!("skill-{key}")))
-                                    .label(s.skill.clone().unwrap_or_else(|| "No skill".into()))
+                                    .label(crate::setup::stage_skill_label(
+                                        s.skill.as_deref(),
+                                        router_on,
+                                    ))
+                                    .tooltip(if router_on {
+                                        "The skill this step must use before it reports. The \
+                                         team skills router adds the skills its changes need."
+                                    } else {
+                                        "The skill this step must use before it reports"
+                                    })
                                     .dropdown_caret(true)
                                     .outline()
                                     .small()
@@ -1060,7 +1214,8 @@ impl Workspace {
                                     .child(section_tip(
                                         "Where work comes from",
                                         "Linear: picks tickets from a team. Slack: takes pull \
-                                         requests posted in a channel. None: you give it work.",
+                                         requests posted in a channel. Schedule: starts a run \
+                                         on set days at a set time. None: you give it work.",
                                     ))
                                     // A row like the options under it: label, then the choice.
                                     .child(
@@ -1081,7 +1236,8 @@ impl Workspace {
                                             ),
                                     )
                                     .child(self.render_linear_settings(orch, draft, cx))
-                                    .child(self.render_slack_settings(draft)),
+                                    .child(self.render_slack_settings(draft))
+                                    .child(self.render_schedule_settings(draft, cx)),
                             )
                             // 3. What it does, step by step.
                             .child(
@@ -1094,6 +1250,7 @@ impl Workspace {
                                          {ticket} is the ticket, {pr} the pull request link, \
                                          {handoff} what the step before handed over.",
                                     ))
+                                    .children(self.render_router_note(orch, cx))
                                     .child(stages)
                                     .child(
                                         div()
@@ -1116,9 +1273,7 @@ impl Workspace {
                                             })),
                                     ),
                             )
-                            // 4. How it asks product.
-                            .child(self.render_product_settings(orch, draft, cx))
-                            // 5. Everything else, folded away.
+                            // 4. Everything else, folded away: how it asks product first.
                             .child(
                                 div()
                                     .id(SharedString::from(format!("settings-advanced-{orch}")))
@@ -1142,6 +1297,7 @@ impl Workspace {
                                         .pl(px(14.))
                                         .border_l_2()
                                         .border_color(color(theme::BORDER_SUBTLE))
+                                        .children(product)
                                         .child(
                                             v_flex()
                                                 .gap_2()

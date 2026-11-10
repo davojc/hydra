@@ -194,7 +194,11 @@ fn run_call(
         let out = Outcome::err(format!("Not recorded: {why}"));
         return Some((ok(id, tool_result(&out)), None));
     }
-    let (out, event) = super::run_tools::call(&mut lock(registry), token, name, args)?;
+    let mut reg = lock(registry);
+    let (out, event) = match super::run_tools::call(&mut reg, token, name, args) {
+        Some(answer) => answer,
+        None => (super::project_tools::call(&reg, token, name, args)?, None),
+    };
     Some((ok(id, tool_result(&out)), event))
 }
 
@@ -1166,7 +1170,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 13);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 30);
         let bad: Value = serde_json::from_str(&rpc(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"tasks_delete","arguments":{}}}"#).body.unwrap()).unwrap();
         assert_eq!(bad["error"]["code"], -32602);
         let junk: Value = serde_json::from_str(&rpc("{not json").body.unwrap()).unwrap();

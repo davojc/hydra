@@ -3,6 +3,7 @@
 //!
 //! Everything the phone is sent goes through one background worker, in order, so a session's
 //! states never arrive swapped and no file is read on the UI thread.
+use crate::inbox::{Note, PushNote};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -11,8 +12,6 @@ use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, Task, Window};
-use gpui_component::WindowExt;
-use gpui_component::notification::Notification;
 use hydra_core::paths::HydraPaths;
 use hydra_link::host::{Host, HostConfig, HostEvent, Replier};
 use hydra_link::pairing::PairingOffer;
@@ -405,7 +404,7 @@ impl Workspace {
             }
             Opened::Failed(why) => {
                 action_log::write(format!("phone: {why}"));
-                window.push_notification(Notification::warning(why).title("Phone"), cx);
+                window.push_note(Note::warning(why).title("Phone"), cx);
             }
             Opened::Elsewhere | Opened::Off => {}
         }
@@ -471,8 +470,8 @@ impl Workspace {
             if let Err(e) = saved.await {
                 action_log::write(format!("phone: couldn't save the paired phone: {e}"));
                 let _ = cx.update(|window, cx| {
-                    window.push_notification(
-                        Notification::warning(format!("Couldn't save the paired phone: {e}"))
+                    window.push_note(
+                        Note::warning(format!("Couldn't save the paired phone: {e}"))
                             .title("Phone"),
                         cx,
                     )

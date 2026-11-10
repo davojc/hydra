@@ -13,6 +13,7 @@ hydra-platform = { path = "crates/hydra-platform" }
 hydra-providers = { path = "crates/hydra-providers" }
 hydraui-term = { path = "crates/hydraui-term" }
 hydraui-sets = { path = "crates/hydraui-sets" }
+hydraui-projects = { path = "crates/hydraui-projects" }
 hydra-update = { path = "crates/hydra-update" }
 hydra-link = { path = "crates/hydra-link" }
 hydra-swarms = { path = "crates/hydra-swarms" }

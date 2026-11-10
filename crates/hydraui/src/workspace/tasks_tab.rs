@@ -1,12 +1,12 @@
 //! A terminal's Tasks tab (spec: docs/superpowers/specs/2026-10-19-hydraui-task-board-design.md
 //! §3-§4): its project's board beside the terminal, a small strip to switch between the two,
 //! one board per project shared by every tab on it, and the commit/private question.
+use crate::inbox::{Note, PushNote};
 use std::path::{Path, PathBuf};
 
 use gpui::prelude::*;
 use gpui::{Context, Entity, Focusable, Hsla, SharedString, Subscription, Window, div, px};
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::notification::Notification;
 use gpui_component::{WindowExt, h_flex};
 
 use super::Workspace;
@@ -302,8 +302,8 @@ impl Workspace {
                     self.show_tasks(id, false, window, cx);
                 }
             }
-            None => window.push_notification(
-                Notification::info(format!("No terminal named {name} is open in this window"))
+            None => window.push_note(
+                Note::info(format!("No terminal named {name} is open in this window"))
                     .title("Tasks"),
                 cx,
             ),
@@ -331,7 +331,7 @@ impl Workspace {
                     ws.ask_git(project, window, cx)
                 }
                 TaskBoardEvent::Problem(text) => {
-                    window.push_notification(Notification::warning(text.clone()).title("Tasks"), cx)
+                    window.push_note(Note::warning(text.clone()).title("Tasks"), cx)
                 }
                 TaskBoardEvent::MovedToDone(text) => {
                     let project = board.read(cx).project().to_path_buf();
@@ -413,10 +413,7 @@ impl Workspace {
                                     window.close_dialog(cx);
                                     if let Err(e) = crate::tasks_project::keep_private(&project) {
                                         let text = crate::task_board::privacy_problem(&project, &e);
-                                        window.push_notification(
-                                            Notification::warning(text).title("Tasks"),
-                                            cx,
-                                        );
+                                        window.push_note(Note::warning(text).title("Tasks"), cx);
                                     }
                                 }),
                         ),

@@ -1,20 +1,22 @@
 //! The launcher (spec §7.4): Ctrl+Shift+P opens a palette over environments, sign-in,
 //! secrets and config, and Enter runs the entry's action.
+use crate::inbox::{Note, PushNote};
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{Context, Hsla, Window, div, px, rgb};
+use gpui::{Context, Hsla, SharedString, Window, div, px, rgb};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::command::{Command, CommandItem, CommandState};
 use gpui_component::input::{Input, InputState};
-use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, Disableable, Theme, ThemeMode, WindowExt, h_flex, v_flex};
+use hydra_core::envedit::ToolValues;
 
 use super::{Workspace, env_item};
+use crate::accounts::SIGN_IN_TOOLS;
 use crate::config::{self, ThemeChoice};
 use crate::hydra::Hydra;
 use crate::jev::JevKey;
@@ -22,6 +24,7 @@ use crate::keys::Launcher;
 use crate::launcher::{Action, entries};
 use crate::palette::Palette;
 use crate::pane_view::TermStyle;
+use crate::setup::{ESSENTIALS, label as tool_label};
 
 impl Workspace {
     pub(super) fn open_launcher(
@@ -81,10 +84,9 @@ impl Workspace {
             Action::OpenEnv(env) => self.add_env(&env, window, cx),
             Action::EditEnv(env) => match hydra_core::name::EnvName::parse(&env) {
                 Ok(name) => self.show_file(self.hydra.paths.env_file(&name), window, cx),
-                Err(e) => window.push_notification(
-                    Notification::error(e.to_string()).title("Edit environment"),
-                    cx,
-                ),
+                Err(e) => {
+                    window.push_note(Note::error(e.to_string()).title("Edit environment"), cx)
+                }
             },
             Action::SignIn { env, tool } => self.sign_in(&env, &tool, window, cx),
             Action::SetSecret(path) => self.secret_dialog(Some(path), window, cx),
@@ -153,8 +155,8 @@ impl Workspace {
                         let _ = std::fs::create_dir_all(dir);
                     }
                     if let Err(e) = std::fs::write(&path, crate::jev::DEFAULT_SETTINGS_TEXT) {
-                        window.push_notification(
-                            Notification::error(format!("Can't write jev.toml: {e}")).title("Jev"),
+                        window.push_note(
+                            Note::error(format!("Can't write jev.toml: {e}")).title("Jev"),
                             cx,
                         );
                         return;
@@ -179,7 +181,7 @@ impl Workspace {
             Ok(request) => {
                 self.open_terminal(env, request, window, cx);
             }
-            Err(e) => window.push_notification(Notification::error(e).title("Sign in"), cx),
+            Err(e) => window.push_note(Note::error(e).title("Sign in"), cx),
         }
     }
 
@@ -231,19 +233,15 @@ impl Workspace {
                                 match ws.read(cx).hydra.set_secret(&path, &secret) {
                                     Ok(()) => {
                                         window.close_dialog(cx);
-                                        window.push_notification(
-                                            Notification::success(format!(
-                                                "stored {}",
-                                                path.trim()
-                                            ))
-                                            .title("Set secret"),
+                                        window.push_note(
+                                            Note::success(format!("stored {}", path.trim()))
+                                                .title("Set secret"),
                                             cx,
                                         );
                                     }
-                                    Err(e) => window.push_notification(
-                                        Notification::error(e).title("Set secret"),
-                                        cx,
-                                    ),
+                                    Err(e) => {
+                                        window.push_note(Note::error(e).title("Set secret"), cx)
+                                    }
                                 }
                             },
                         )),
@@ -282,16 +280,14 @@ impl Workspace {
                                 match JevKey::app().set(&value) {
                                     Ok(()) => {
                                         window.close_dialog(cx);
-                                        window.push_notification(
-                                            Notification::success("Jev API key saved")
-                                                .title("Jev API key"),
+                                        window.push_note(
+                                            Note::success("Jev API key saved").title("Jev API key"),
                                             cx,
                                         );
                                     }
-                                    Err(e) => window.push_notification(
-                                        Notification::error(e).title("Jev API key"),
-                                        cx,
-                                    ),
+                                    Err(e) => {
+                                        window.push_note(Note::error(e).title("Jev API key"), cx)
+                                    }
                                 }
                             },
                         )),
@@ -318,16 +314,12 @@ impl Workspace {
                             |_, window, cx| match JevKey::app().remove() {
                                 Ok(_) => {
                                     window.close_dialog(cx);
-                                    window.push_notification(
-                                        Notification::success("Jev API key removed")
-                                            .title("Jev API key"),
+                                    window.push_note(
+                                        Note::success("Jev API key removed").title("Jev API key"),
                                         cx,
                                     );
                                 }
-                                Err(e) => window.push_notification(
-                                    Notification::error(e).title("Jev API key"),
-                                    cx,
-                                ),
+                                Err(e) => window.push_note(Note::error(e).title("Jev API key"), cx),
                             },
                         )),
                 )
@@ -356,8 +348,8 @@ impl Workspace {
         then: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) + 'static,
     ) {
         if envs.is_empty() {
-            window.push_notification(
-                Notification::info("There are no environments yet.").title("Environments"),
+            window.push_note(
+                Note::info("There are no environments yet.").title("Environments"),
                 cx,
             );
             return;
@@ -400,8 +392,8 @@ impl Workspace {
             .filter(|e| self.hydra.sign_ins(e).iter().any(|t| t == "claude"))
             .collect();
         if envs.is_empty() {
-            window.push_notification(
-                Notification::info(
+            window.push_note(
+                Note::info(
                     "No environment has Claude set up in hydra. Run `hydra add claude <env>`, \
                      then Reload config and sign in from a new terminal.",
                 )
@@ -544,7 +536,7 @@ impl Workspace {
         let text = match crate::pipeline::export(&root, &name) {
             Ok(t) => t,
             Err(e) => {
-                window.push_notification(Notification::error(e).title("Export pipeline"), cx);
+                window.push_note(Note::error(e).title("Export pipeline"), cx);
                 return;
             }
         };
@@ -566,21 +558,19 @@ impl Workspace {
                                 "exported pipeline {name} to {}",
                                 path.display()
                             ));
-                            Notification::success(format!(
+                            Note::success(format!(
                                 "Saved to {}. Send it on; they add it with Import pipeline…",
                                 path.display()
                             ))
                         }
-                        Err(e) => {
-                            Notification::error(format!("can't save {}: {e}", path.display()))
-                        }
+                        Err(e) => Note::error(format!("can't save {}: {e}", path.display())),
                     }
                 }
-                Ok(Err(e)) => Notification::error(e.to_string()),
+                Ok(Err(e)) => Note::error(e.to_string()),
                 _ => return,
             };
             let _ = this.update_in(cx, |_, window, cx| {
-                window.push_notification(note.title("Export pipeline"), cx)
+                window.push_note(note.title("Export pipeline"), cx)
             });
         })
         .detach();
@@ -606,8 +596,8 @@ impl Workspace {
                         "imported pipeline {name} from {}",
                         path.display()
                     ));
-                    window.push_notification(
-                        Notification::success(
+                    window.push_note(
+                        Note::success(
                             "Added. Check its folders and skills, then turn its trigger on.",
                         )
                         .title(format!("Imported {name}")),
@@ -615,9 +605,7 @@ impl Workspace {
                     );
                     ws.start_new_pipeline(name, env, window, cx);
                 }
-                Err(e) => {
-                    window.push_notification(Notification::warning(e).title("Import pipeline"), cx)
-                }
+                Err(e) => window.push_note(Note::warning(e).title("Import pipeline"), cx),
             }
         });
     }
@@ -661,8 +649,7 @@ impl Workspace {
                             let env = env.clone();
                             ws.update(cx, |ws, cx| ws.start_new_pipeline(name, env, window, cx));
                         }
-                        Err(e) => window
-                            .push_notification(Notification::warning(e).title("New pipeline"), cx),
+                        Err(e) => window.push_note(Note::warning(e).title("New pipeline"), cx),
                     }
                 }
             };
@@ -965,7 +952,7 @@ impl Workspace {
             .count();
         if open > 0 {
             if let Err(e) = self.hydra.delete_env(&env, open, false) {
-                window.push_notification(Notification::error(e).title("Delete environment"), cx);
+                window.push_note(Note::error(e).title("Delete environment"), cx);
             }
             return;
         }
@@ -1053,15 +1040,12 @@ impl Workspace {
                         report.bindings.join(", ")
                     ));
                 }
-                window
-                    .push_notification(Notification::success(text).title("Delete environment"), cx);
+                window.push_note(Note::success(text).title("Delete environment"), cx);
                 // An environment with no terminals can still have a tab: close it.
                 self.close_env_now(env, window, cx);
                 self.reload_config(window, cx);
             }
-            Err(e) => {
-                window.push_notification(Notification::error(e).title("Delete environment"), cx)
-            }
+            Err(e) => window.push_note(Note::error(e).title("Delete environment"), cx),
         }
     }
 
@@ -1075,8 +1059,8 @@ impl Workspace {
         self.open_dialog_path(true, window, cx, move |ws, dir, window, cx| {
             match ws.hydra.set_env_home(&env, &dir) {
                 Ok(()) => {
-                    window.push_notification(
-                        Notification::success(format!(
+                    window.push_note(
+                        Note::success(format!(
                             "New {env} terminals open in {}, and the folder is bound to {env}",
                             dir.display()
                         ))
@@ -1085,8 +1069,7 @@ impl Workspace {
                     );
                     ws.reload_config(window, cx);
                 }
-                Err(e) => window
-                    .push_notification(Notification::error(e).title("Set environment home"), cx),
+                Err(e) => window.push_note(Note::error(e).title("Set environment home"), cx),
             }
         });
     }
@@ -1095,6 +1078,11 @@ impl Workspace {
     /// is typed; Create stays off until it is free and valid.
     pub(super) fn new_env_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, like work"));
+        // The tools to add with it, all ticked: most people need each (spec §48).
+        let picks: Vec<(&'static str, Rc<Cell<bool>>)> = ESSENTIALS
+            .iter()
+            .map(|t| (*t, Rc::new(Cell::new(true))))
+            .collect();
         let workspace = cx.entity();
         let first = Cell::new(true);
         window.open_dialog(cx, move |dialog, window, cx| {
@@ -1113,9 +1101,40 @@ impl Workspace {
                     .child("Lowercase letters, digits and '-'."),
             };
             let ws = workspace.clone();
+            let mut tools = v_flex()
+                .gap_1()
+                .pt_1()
+                .child(div().text_sm().child("Add these tools to it"));
+            for (tool, on) in &picks {
+                let flag = on.clone();
+                tools = tools.child(
+                    Checkbox::new(SharedString::from(format!("new-env-{tool}")))
+                        .label(tool_label(tool))
+                        .checked(on.get())
+                        .on_click(move |v, window, _| {
+                            flag.set(*v);
+                            window.refresh();
+                        }),
+                );
+            }
+            tools = tools.child(div().text_xs().text_color(muted).whitespace_normal().child(
+                "Each environment has its own logins, so you sign in to each tool here \
+                 even if you already have elsewhere. Pipelines need Claude.",
+            ));
+            let chosen: Vec<&'static str> = picks
+                .iter()
+                .filter(|(_, on)| on.get())
+                .map(|(t, _)| *t)
+                .collect();
             dialog
                 .title("New environment")
-                .child(v_flex().gap_2().child(Input::new(&name)).child(hint))
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(Input::new(&name))
+                        .child(hint)
+                        .child(tools),
+                )
                 .footer(
                     h_flex()
                         .gap_2()
@@ -1132,27 +1151,61 @@ impl Workspace {
                                 .disabled(problem.is_some())
                                 .on_click(move |_, window, cx| {
                                     let env = typed.trim().to_string();
-                                    ws.update(cx, |ws, cx| ws.create_env(env, window, cx));
+                                    let chosen = chosen.clone();
+                                    ws.update(cx, |ws, cx| ws.create_env(env, chosen, window, cx));
                                 }),
                         ),
                 )
         });
     }
 
-    fn create_env(&mut self, env: String, window: &mut Window, cx: &mut Context<Self>) {
+    /// Creates `env` with `tools` turned on, then opens Claude's sign-in and Git's form when
+    /// they were chosen; the sidebar's checklist has the rest (spec §48).
+    fn create_env(
+        &mut self,
+        env: String,
+        tools: Vec<&'static str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Err(e) = self.hydra.create_env(&env) {
-            window.push_notification(Notification::error(e).title("New environment"), cx);
+            window.push_note(Note::error(e).title("New environment"), cx);
             return;
         }
         window.close_dialog(cx);
-        window.push_notification(
-            Notification::success(format!(
-                "Created {env}. Click its name in the status bar to add accounts."
-            ))
-            .title("New environment"),
-            cx,
-        );
+        let mut problems = Vec::new();
+        for tool in tools.iter().filter(|t| SIGN_IN_TOOLS.contains(t)) {
+            if let Err(e) = self.hydra.add_tool(&env, tool, &ToolValues::default()) {
+                problems.push(format!("{tool}: {e}"));
+            }
+        }
         self.add_env(&env, window, cx);
+        if problems.is_empty() {
+            window.push_note(
+                Note::success(format!(
+                    "Created {env}. The sidebar lists what's left to set up."
+                ))
+                .title("New environment"),
+                cx,
+            );
+        } else {
+            window.push_note(
+                Note::error(format!(
+                    "Created {env}, but couldn't add {}",
+                    problems.join("; ")
+                ))
+                .title("New environment"),
+                cx,
+            );
+        }
+        if tools.contains(&"claude") && self.hydra.tools(&env).iter().any(|t| t == "claude") {
+            self.sign_in(&env, "claude", window, cx);
+        }
+        // Git asks for a name and email, so it's added through its form, not ticked on silently.
+        if tools.contains(&"git") {
+            self.set_up_tool(env.clone(), "git".into(), window, cx);
+        }
+        self.recheck_accounts(&env, cx);
     }
 
     /// Reads hydraui's and hydra's config.toml again: font, colours, theme, default
@@ -1189,6 +1242,7 @@ impl Workspace {
             ThemeChoice::Light => ThemeMode::Light,
         };
         Theme::change(mode, None, cx);
+        crate::place_toasts(cx);
         self.style = Arc::new(TermStyle {
             font: crate::config::terminal_font(&ui.font, &cx.text_system().all_font_names()).into(),
             font_size: px(ui.font_size),
@@ -1208,17 +1262,17 @@ impl Workspace {
         }
         self.ui = ui;
         if announce {
-            window.push_notification(Notification::info("Settings reloaded").title("hydraui"), cx);
+            window.push_note(Note::info("Settings reloaded").title("hydraui"), cx);
         }
         for p in problems {
-            window.push_notification(Notification::warning(p).title("hydraui settings"), cx);
+            window.push_note(Note::warning(p).title("hydraui settings"), cx);
         }
         cx.notify();
     }
 }
 
 /// Each pipeline file by its name and, when it differs, the name the views show.
-fn pipeline_labels(root: &std::path::Path, names: &[String]) -> Vec<String> {
+pub(super) fn pipeline_labels(root: &std::path::Path, names: &[String]) -> Vec<String> {
     names
         .iter()
         .map(|n| match crate::pipeline::load(root, n) {

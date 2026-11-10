@@ -127,6 +127,7 @@ pub fn list() -> Value {
     .iter()
     .cloned()
     .chain(super::run_tools::schemas())
+    .chain(super::project_tools::schemas())
     .collect()
 }
 
@@ -485,7 +486,24 @@ mod tests {
                 "stage_brief",
                 "stage_report",
                 "stage_ask",
-                "stage_answer"
+                "stage_answer",
+                "plan_show",
+                "plan_set_spec",
+                "plan_propose_milestone",
+                "plan_propose_ticket",
+                "plan_suggest_repo",
+                "plan_revise",
+                "plan_propose_change",
+                "plan_propose_spec",
+                "plan_withdraw",
+                "plan_add_question",
+                "plan_add_link",
+                "plan_read_resource",
+                "plan_done",
+                "ticket_show",
+                "ticket_ask",
+                "ticket_report",
+                "ticket_checked"
             ]
         );
         assert_eq!(names, hydra_providers::claude_files::HYDRAUI_TOOLS);

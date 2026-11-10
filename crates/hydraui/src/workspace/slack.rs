@@ -3,13 +3,12 @@
 //! one when no run is open. It shares the card's Automatic switch and `linear::Watch` with the
 //! Linear trigger: a pipeline has one or the other. The decisions are `slack_watch`'s.
 
+use crate::inbox::{Note, PushNote};
 use std::collections::VecDeque;
 use std::time::SystemTime;
 
 use gpui::prelude::*;
 use gpui::{Context, Window};
-use gpui_component::WindowExt;
-use gpui_component::notification::Notification;
 
 use super::Workspace;
 use super::linear::START_WITHIN;
@@ -94,8 +93,8 @@ impl Workspace {
                 "slack: {}: the orchestrator didn't start {ticket}; skipped",
                 pipeline.file
             ));
-            window.push_notification(
-                Notification::warning(format!(
+            window.push_note(
+                Note::warning(format!(
                     "The orchestrator didn't start {ticket} within 5 minutes, so it was skipped. \
                      Give it to the orchestrator yourself if it still needs a review."
                 ))
@@ -282,8 +281,8 @@ impl Workspace {
                     settings.label
                 ));
                 if by_hand {
-                    window.push_notification(
-                        Notification::info(format!(
+                    window.push_note(
+                        Note::info(format!(
                             "Took {} from {}. The orchestrator is starting the first.",
                             names.join(", "),
                             settings.label
@@ -303,8 +302,8 @@ impl Workspace {
                 w.status = Some("Nothing new".to_string());
                 crate::action_log::write(format!("slack: {}: nothing new", pipeline.file));
                 if by_hand {
-                    window.push_notification(
-                        Notification::info(format!(
+                    window.push_note(
+                        Note::info(format!(
                             "No new pull request in {}: every message with one has a :{}: \
                              already.",
                             settings.label, settings.reaction
@@ -316,8 +315,8 @@ impl Workspace {
             }
             Err(e) if !w.on || by_hand => {
                 crate::action_log::write(format!("slack: {e}"));
-                window.push_notification(
-                    Notification::error(format!("Couldn't look in {}: {e}", settings.label))
+                window.push_note(
+                    Note::error(format!("Couldn't look in {}: {e}", settings.label))
                         .title(pipeline.name.clone()),
                     cx,
                 );
@@ -329,12 +328,9 @@ impl Workspace {
                         w.on = false;
                         w.status = None;
                         w.stopped = Some(reason.clone());
-                        window.push_notification(
-                            Notification::error(format!(
-                                "Stopped watching {}: {reason}",
-                                settings.label
-                            ))
-                            .title(pipeline.name.clone()),
+                        window.push_note(
+                            Note::error(format!("Stopped watching {}: {reason}", settings.label))
+                                .title(pipeline.name.clone()),
                             cx,
                         );
                     }
@@ -357,8 +353,8 @@ impl Workspace {
         let title = "Connect Slack";
         let (ui, _) = crate::config::load(&self.hydra.paths);
         let Some(canopy) = ui.slack_connect_url else {
-            window.push_notification(
-                Notification::warning(
+            window.push_note(
+                Note::warning(
                     "Set slack_connect_url in hydraui's config.toml to your team's Canopy (e.g. \
                      https://canopy.dev.iov42.net): it finishes the Slack sign-in.",
                 )
@@ -380,14 +376,14 @@ impl Workspace {
         let (server, port, state) = match started {
             Ok(s) => s,
             Err(e) => {
-                window.push_notification(Notification::error(e).title(title), cx);
+                window.push_note(Note::error(e).title(title), cx);
                 return;
             }
         };
         crate::action_log::write(format!("slack: connecting {env} through {canopy}"));
         cx.open_url(&crate::slack_connect::start_url(&canopy, port, &state));
-        window.push_notification(
-            Notification::info(
+        window.push_note(
+            Note::info(
                 "Finish in your browser: sign in to Canopy if asked, then Allow on Slack's page.",
             )
             .title(title),
@@ -426,8 +422,8 @@ impl Workspace {
                                 w.failures.clear();
                             }
                         }
-                        window.push_notification(
-                            Notification::success(format!(
+                        window.push_note(
+                            Note::success(format!(
                                 "Slack is connected for {env}{}.{}",
                                 if c.team.is_empty() {
                                     String::new()
@@ -447,7 +443,7 @@ impl Workspace {
                     }
                     Err(e) => {
                         crate::action_log::write(format!("slack: connect failed: {e}"));
-                        window.push_notification(Notification::error(e).title(title), cx);
+                        window.push_note(Note::error(e).title(title), cx);
                     }
                 }
             });

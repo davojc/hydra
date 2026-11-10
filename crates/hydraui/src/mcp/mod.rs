@@ -1,5 +1,6 @@
 //! hydraui's MCP server (spec: docs/superpowers/specs/2026-10-20-hydraui-mcp-server-design.md):
 //! the token registry and the task-board tools.
+pub mod project_tools;
 pub mod registry;
 pub mod run_tools;
 pub mod server;

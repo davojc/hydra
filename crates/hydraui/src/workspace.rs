@@ -6,6 +6,8 @@ mod all_tasks;
 mod asking;
 mod busy;
 mod finder;
+mod history_tab;
+mod inbox_panel;
 mod launcher;
 mod layout_file;
 mod linear;
@@ -17,6 +19,8 @@ mod pickup;
 mod pipeline_history;
 mod pipeline_settings;
 mod pipeline_tab;
+mod projects_tab;
+mod scheduled;
 mod settings_tab;
 mod shortcuts;
 mod slack;
@@ -25,11 +29,13 @@ mod swarms;
 mod swarms_page;
 mod tasks_tab;
 mod terminal_list;
+mod tickets_tab;
 mod title_bar;
 mod tree_ops;
 mod usage;
 mod worktree;
 
+use crate::inbox::{Note, PushNote};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -46,7 +52,6 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandItem, CommandState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, IconName, Selectable, Sizable, WindowExt, h_flex, v_flex};
 use hydraui_sets::layout::Layout;
 
@@ -146,6 +151,9 @@ pub struct Workspace {
     status: StatusCache,
     /// Each environment's borrowed logins and possible lenders, read with its accounts.
     borrowing: HashMap<String, Borrowing>,
+    /// How each of config.toml's `setup_plugins` stands in an environment, read with its
+    /// accounts (spec §48).
+    plugins_on: HashMap<String, Vec<crate::setup::PluginState>>,
     refreshing: HashSet<String>,
     /// The focused pane's repository summary, for the folder it was read in; `None` text when
     /// that folder isn't in a repository.
@@ -207,6 +215,16 @@ pub struct Workspace {
     start: Option<start_page::StartPage>,
     /// The Settings tab, shown in the middle in place of a terminal.
     settings: Option<settings_tab::SettingsTab>,
+    /// The Projects tab, shown in place of everything below the tab strip (Projects spec §8).
+    projects: Option<projects_tab::ProjectsTab>,
+    /// History (core spec §50), when shown.
+    history: Option<history_tab::HistoryTab>,
+    /// The notifications panel under the bell, while open (core spec §57).
+    inbox: Option<inbox_panel::InboxPanel>,
+    /// Tickets (core spec §53), when shown.
+    tickets: Option<tickets_tab::TicketsTab>,
+    /// Every environment's projects, as last read.
+    projects_data: projects_tab::ProjectsData,
     /// Terminals with a Tasks tab, and whether it's the one shown (`true`) or the terminal
     /// (task-board design §4).
     tasks_tabs: HashMap<PaneId, bool>,
@@ -274,6 +292,10 @@ pub struct Workspace {
     /// so nothing is handed to them until it has.
     /// (When it opened: after 90 seconds it counts as ready anyway.)
     starting_up: HashMap<PaneId, std::time::Instant>,
+    /// When idle orchestrators were last looked for (core spec §54).
+    park_checked: Option<std::time::Instant>,
+    /// When scheduled pipelines were last looked at (core spec §58).
+    schedule_checked: Option<std::time::Instant>,
     /// Runs' tickets as Linear last said, by identifier: the card's SLA and link (phase 2 §5).
     linear_tickets: HashMap<String, crate::linear::Ticket>,
     /// Cards being offered or just sent, so one card never goes to two sessions.
@@ -375,10 +397,16 @@ impl Workspace {
                         ws.send_wakes(window, cx);
                         // A Linear watcher whose check is due looks (phase 2 §3).
                         ws.linear_tick(window, cx);
+                        // Projects: the checkouts when due, and the draft on show.
+                        ws.projects_tick(window, cx);
                         // A stage waiting on product looks in its Slack thread.
                         ws.asking_tick(window, cx);
                         // A wake-up that didn't take is sent again.
                         ws.recheck_wakes(window, cx);
+                        // Orchestrators idle for hours are parked to resume later.
+                        ws.park_tick(window, cx);
+                        // Scheduled pipelines start their runs when due.
+                        ws.schedule_tick(window, cx);
                         // The Pipeline tab's session times tick.
                         if ws
                             .envs
@@ -474,6 +502,7 @@ impl Workspace {
             next_pane: 0,
             status: StatusCache::default(),
             borrowing: HashMap::new(),
+            plugins_on: HashMap::new(),
             refreshing: HashSet::new(),
             git: None,
             git_busy: false,
@@ -509,6 +538,11 @@ impl Workspace {
             opening: false,
             start: None,
             settings: None,
+            projects: None,
+            history: None,
+            inbox: None,
+            tickets: None,
+            projects_data: Default::default(),
             tasks_tabs: HashMap::new(),
             pipeline_tabs: HashMap::new(),
             pipeline_settings: HashMap::new(),
@@ -537,6 +571,8 @@ impl Workspace {
             slack_mine: std::collections::HashSet::new(),
             slack_inflight: HashMap::new(),
             starting_up: HashMap::new(),
+            park_checked: None,
+            schedule_checked: None,
             linear_tickets: HashMap::new(),
             in_flight: Default::default(),
             _mcp_pump: mcp_pump,
@@ -571,12 +607,12 @@ impl Workspace {
     ) {
         self.start_update_checks(cx);
         for p in problems {
-            window.push_notification(Notification::warning(p).title("hydraui settings"), cx);
+            window.push_note(Note::warning(p).title("hydraui settings"), cx);
         }
         // A ticket left mid-run waits on its environment's card (orchestrator §13).
         for i in &self.interrupted {
-            window.push_notification(
-                Notification::info(format!(
+            window.push_note(
+                Note::info(format!(
                     "{} was running when hydraui closed. Open {} to resume it.",
                     i.run.ticket, i.env
                 ))
@@ -797,7 +833,8 @@ impl Workspace {
             .envs
             .env_of(id)
             .is_some_and(|env| self.all_tasks.remove(env))
-            | self.settings.take().is_some();
+            | self.settings.take().is_some()
+            | self.projects.take().is_some();
         let left = left | self.reveal_in_list(id, cx);
         if self.envs.show(id) || left {
             self.shown_changed(window, cx);
@@ -1102,10 +1139,7 @@ impl Workspace {
                                         }
                                     }
                                     match failed {
-                                        Some(e) => w.push_notification(
-                                            Notification::error(e).title("Save"),
-                                            cx,
-                                        ),
+                                        Some(e) => w.push_note(Note::error(e).title("Save"), cx),
                                         None => save_then(ws, w, cx),
                                     }
                                 });
@@ -1404,14 +1438,22 @@ impl Workspace {
             return;
         }
         let hydra = self.hydra.clone();
+        let plugins = self.ui.setup_plugins.clone();
         cx.spawn(async move |this, cx| {
             let e = env.clone();
-            let (reports, borrowing) = cx
-                .background_spawn(async move { (hydra.whoami(&e), hydra.borrowing(&e)) })
+            let (reports, borrowing, plugins_on) = cx
+                .background_spawn(async move {
+                    (
+                        hydra.whoami(&e),
+                        hydra.borrowing(&e),
+                        hydra.plugin_states(&e, &plugins),
+                    )
+                })
                 .await;
             let _ = this.update(cx, |ws, cx| {
                 ws.refreshing.remove(&env);
                 ws.borrowing.insert(env.clone(), borrowing);
+                ws.plugins_on.insert(env.clone(), plugins_on);
                 ws.status.store(env, reports, Instant::now());
                 cx.notify();
             });
@@ -1494,7 +1536,7 @@ impl Workspace {
             TreeEvent::Delete(path) => return self.delete_dialog(path.clone(), window, cx),
             TreeEvent::Reveal(path) => {
                 if let Err(e) = crate::file_ops::reveal_in_explorer(path) {
-                    window.push_notification(Notification::error(e), cx);
+                    window.push_note(Note::error(e), cx);
                 }
                 return;
             }
@@ -1627,8 +1669,8 @@ impl Workspace {
             std::env::var_os("PATHEXT").as_deref(),
         );
         if let Err(e) = cmd.spawn() {
-            window.push_notification(
-                Notification::error(format!("can't start {editor}: {e}")).title("Open file"),
+            window.push_note(
+                Note::error(format!("can't start {editor}: {e}")).title("Open file"),
                 cx,
             );
         }
@@ -1858,7 +1900,7 @@ impl Workspace {
     ) -> impl IntoElement + use<> {
         let active = self.envs.active().map(|t| t.env.clone());
         let mut strip = h_flex()
-            .h(px(34.))
+            .h(px(crate::ENV_STRIP_HEIGHT))
             .px_1()
             .gap_1()
             .bg(bg)
@@ -1973,6 +2015,10 @@ impl Workspace {
                     .on_click(cx.listener(|ws, _, window, cx| ws.pick_env(window, cx))),
             )
             .child(div().flex_1())
+            .child(self.projects_button(cx))
+            .child(self.tickets_button(cx))
+            .child(self.history_button(cx))
+            .child(self.inbox_button(cx))
             .child(
                 Button::new("open-settings")
                     .icon(IconName::Settings)
@@ -2083,6 +2129,9 @@ impl Render for Workspace {
         let body = match self.envs.active() {
             // Settings opened from the start page shows over it; closing it goes back.
             _ if self.settings.is_some() => self.render_settings(cx),
+            _ if self.tickets.is_some() => self.render_tickets_page(cx),
+            _ if self.history.is_some() => self.render_history_page(cx),
+            _ if self.projects.is_some() => self.render_projects(cx),
             _ if self.start.is_some() => self.render_start_page(cx),
             Some(tab) => self.render_env(tab, border, muted, cx),
             None => div()
@@ -2100,6 +2149,8 @@ impl Render for Workspace {
             .text_color(fg)
             .track_focus(&self.focus)
             .key_context("Workspace")
+            .relative()
+            .children(self.render_inbox_panel(cx))
             .on_action(cx.listener(Self::new_terminal_action))
             .on_action(cx.listener(Self::close_pane))
             .on_action(cx.listener(Self::next_tab))

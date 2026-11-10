@@ -1,14 +1,13 @@
 //! Auto-pickup (spec: docs/superpowers/specs/2026-10-20-hydraui-auto-pickup-design.md §5-§8): a
 //! card moved into Pickup, or sent from its menu, is typed into a free Claude session of its
 //! project. The rules are in `crate::pickup`; this is the wiring.
+use crate::inbox::{Note, PushNote};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use gpui::prelude::*;
 use gpui::{App, Context, SharedString, Window};
-use gpui_component::WindowExt;
-use gpui_component::notification::Notification;
 
 use super::Workspace;
 use crate::action_log;
@@ -121,8 +120,8 @@ impl Workspace {
         let path = crate::jev::settings_file(self.hydra.paths.root());
         let (settings, problem) = crate::jev::load_settings(&path);
         let from = if let Some(problem) = &problem {
-            window.push_notification(
-                Notification::warning(format!("jev.toml: {problem}. Using the default question."))
+            window.push_note(
+                Note::warning(format!("jev.toml: {problem}. Using the default question."))
                     .title("Jev"),
                 cx,
             );
@@ -211,8 +210,8 @@ impl Workspace {
         if !self.in_flight.try_start(&project, &text, now) {
             action_log::write("pickup: already on its way (being offered, or sent < 30 s ago)");
             if by_hand {
-                window.push_notification(
-                    Notification::info("This card is already on its way").title("Tasks"),
+                window.push_note(
+                    Note::info("This card is already on its way").title("Tasks"),
                     cx,
                 );
             }
@@ -502,13 +501,13 @@ impl Workspace {
         self.reserved.insert(pane, Instant::now());
         let place = self.sent_text(pane, cx);
         let ws = cx.entity();
-        let note = Notification::info(place)
+        let note = Note::info(place)
             .title("Tasks")
             .id1::<SentCard>(SharedString::from(format!("sent-{pane}")))
             .on_click(move |_, window, cx| {
                 ws.update(cx, |ws, cx| ws.show_terminal(pane, window, cx));
             });
-        window.push_notification(note, cx);
+        window.push_note(note, cx);
         true
     }
 
@@ -530,10 +529,7 @@ impl Workspace {
             Some(name) if projects.len() > 1 => name.to_string_lossy().into_owned(),
             _ => "Tasks".to_string(),
         };
-        window.push_notification(
-            Notification::warning(no_free_text(jev_failure)).title(title),
-            cx,
-        );
+        window.push_note(Note::warning(no_free_text(jev_failure)).title(title), cx);
     }
 }
 

@@ -25,6 +25,33 @@ pub struct Interrupted {
     pub stages: HashMap<String, (Option<PathBuf>, Option<String>)>,
     /// Its Linear ticket as logged when it started (phase 2 §5): the card's link and SLA.
     pub ticket: Option<crate::linear::Ticket>,
+    /// Why it waits to be resumed.
+    pub why: Why,
+}
+
+/// Why an interrupted run waits to be resumed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Why {
+    /// hydraui closed under it.
+    HydrauiClosed,
+    /// Its orchestrator's terminal closed while hydraui ran (core spec §52).
+    OrchestratorClosed,
+    /// Parked after `hours` with nothing changing (core spec §54).
+    Parked { hours: u32 },
+}
+
+impl Why {
+    /// What History and the card say about it.
+    pub fn text(&self) -> String {
+        match self {
+            Why::HydrauiClosed => "hydraui closed while it ran".into(),
+            Why::OrchestratorClosed => "its orchestrator closed".into(),
+            Why::Parked { hours } => format!(
+                "parked: nothing changed for {}",
+                crate::run_park::hours_text(*hours)
+            ),
+        }
+    }
 }
 
 /// Every run under `<hydra_root>/hydraui/runs` that never ended, whose hydraui is no longer
@@ -92,11 +119,28 @@ fn read(hydra_root: &Path, file: &Path, alive: &impl Fn(u32) -> bool) -> Option<
         return None;
     }
     // The latest: a resumed run logs its new orchestrator again.
-    let orch = events.iter().rev().find(|e| event(e) == "orchestrator")?;
-    let pid = u32::try_from(orch.get("pid")?.as_u64()?).ok()?;
-    if alive(pid) {
+    let at = events.iter().rposition(|e| event(e) == "orchestrator")?;
+    let pid = u32::try_from(events[at].get("pid")?.as_u64()?).ok()?;
+    // Its orchestrator closed under a hydraui still running (core spec §52), or its hydraui
+    // is gone.
+    let set_aside = events[at..]
+        .iter()
+        .any(|e| event(e) == "orchestrator closed");
+    if alive(pid) && !set_aside {
         return None;
     }
+    let why = match events[at..].iter().rfind(|e| event(e) == "parked") {
+        Some(p) => Why::Parked {
+            hours: p
+                .get("idle_hours")
+                .and_then(Value::as_u64)
+                .and_then(|h| u32::try_from(h).ok())
+                .unwrap_or_default(),
+        },
+        None if set_aside => Why::OrchestratorClosed,
+        None => Why::HydrauiClosed,
+    };
+    let orch = &events[at];
     let claude = events
         .iter()
         .rev()
@@ -147,6 +191,7 @@ fn read(hydra_root: &Path, file: &Path, alive: &impl Fn(u32) -> bool) -> Option<
             labels: Vec::new(),
         });
     Some(Interrupted {
+        why,
         ticket,
         run,
         env: text(orch, "env").to_string(),
@@ -242,6 +287,11 @@ fn replay(id: &str, pipeline: Pipeline, events: &[Value]) -> Option<Run> {
             }
             "paused" => {
                 runs.pause(id, true).ok()?;
+            }
+            // A stage added to the file since it started joined it (core spec §56).
+            "stage added" => {
+                let (spec, after) = crate::run_log::read_stage_added(e)?;
+                runs.add_stage(id, spec, after.as_deref()).ok()?;
             }
             // A person marked a reason against Must address, and sent the stage back for it.
             "marked" => {
@@ -438,6 +488,77 @@ mod tests {
             .filter(|l| !l.contains("orch-c"))
             .collect();
         assert!(interrupted(home_with(&old).path(), |_| false).is_empty());
+    }
+
+    #[test]
+    fn a_run_whose_orchestrator_closed_comes_back_while_its_hydraui_runs() {
+        let mut log = mid_run();
+        log.push(line("orchestrator closed", ""));
+        let found = interrupted(home_with(&log).path(), |pid| pid == 4242);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].run.stages[1].status, StageStatus::Running);
+        // Resumed since: its new orchestrator holds it.
+        log.push(line(
+            "orchestrator",
+            r#","env":"iov42","folder":"/w/orch","pid":4242"#,
+        ));
+        assert!(interrupted(home_with(&log).path(), |pid| pid == 4242).is_empty());
+    }
+
+    #[test]
+    fn a_stage_added_since_the_start_comes_back_with_it() {
+        let mut log = mid_run();
+        let spec = crate::pipeline::Stage {
+            id: "c".into(),
+            title: "Lint".into(),
+            bar: Some(80),
+            skill: Some("qa".into()),
+            folder: None,
+            worktree: true,
+            prompt: "Lint {ticket}.".into(),
+        };
+        log.push(line(
+            "stage added",
+            &format!(
+                ",{}",
+                crate::run_log::stage_added_fields(&spec, Some("b"))
+                    .to_string()
+                    .trim_start_matches('{')
+                    .trim_end_matches('}')
+            ),
+        ));
+        let r = &interrupted(home_with(&log).path(), |_| false)[0].run;
+        assert_eq!(r.pipeline.stages.len(), 3);
+        assert_eq!(r.pipeline.stages[2], spec);
+        assert_eq!(r.stages[2].status, StageStatus::Waiting);
+    }
+
+    #[test]
+    fn it_says_why_it_waits() {
+        let why = |log: &[String]| {
+            interrupted(home_with(log).path(), |pid| pid == 4242)[0]
+                .why
+                .clone()
+        };
+        let mut log = mid_run();
+        assert_eq!(
+            interrupted(home_with(&log).path(), |_| false)[0].why,
+            Why::HydrauiClosed
+        );
+        log.push(line("orchestrator closed", ""));
+        assert_eq!(why(&log), Why::OrchestratorClosed);
+        let mut parked = mid_run();
+        parked.push(line("parked", r#","idle_hours":4"#));
+        parked.push(line("orchestrator closed", ""));
+        assert_eq!(why(&parked), Why::Parked { hours: 4 });
+        assert_eq!(why(&parked).text(), "parked: nothing changed for 4 hours");
+        // Parked before an earlier resume: closed since for another reason.
+        parked.push(line(
+            "orchestrator",
+            r#","env":"iov42","folder":"/w/orch","pid":4242"#,
+        ));
+        parked.push(line("orchestrator closed", ""));
+        assert_eq!(why(&parked), Why::OrchestratorClosed);
     }
 
     #[test]

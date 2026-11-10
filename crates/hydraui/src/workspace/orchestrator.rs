@@ -1,5 +1,6 @@
 //! Stage terminals (orchestrator spec §3.2): the gate let a stage start, so hydraui opens its
 //! terminal beside the user, in the run's worktree or the orchestrator's folder, and links it.
+use crate::inbox::{Note, PushNote};
 use std::path::PathBuf;
 
 use gpui::prelude::*;
@@ -7,7 +8,6 @@ use gpui::{AnimationExt, AnyElement, Context, SharedString, Window, div, px, rel
 use gpui_component::WindowExt;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_component::notification::Notification;
 use gpui_component::{Sizable, h_flex, v_flex};
 
 use super::Workspace;
@@ -29,8 +29,8 @@ pub(super) type Lane = (Run, Card, Vec<PaneId>);
 /// its orchestrator waits for one rather than asking.
 pub fn orchestrator_prompt(pipeline: &str, from_linear: bool) -> String {
     let ticket = if from_linear {
-        "Tickets reach you from hydraui, which picks them (from Linear, or pull requests posted \
-         in Slack) and sends you one, or from me. Don't ask me for one: say you're ready and \
+        "Tickets reach you from hydraui, which picks them (from Linear, pull requests posted in \
+         Slack, or the pipeline's schedule) and sends you one, or from me. Don't ask me for one: say you're ready and \
          wait."
     } else {
         "Ask me which ticket to run."
@@ -471,8 +471,8 @@ impl Workspace {
         let (Some(token), Some(sv)) =
             (view.read(cx).mcp_token().map(str::to_string), server::get())
         else {
-            window.push_notification(
-                Notification::error("Its terminal has no MCP token.").title("Resume"),
+            window.push_note(
+                Note::error("Its terminal has no MCP token.").title("Resume"),
                 cx,
             );
             return;
@@ -628,17 +628,137 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Parks every orchestrator whose open runs have all sat with nothing changing for
+    /// `park_idle_hours` (core spec §54): each run logs why, then the orchestrator's terminal
+    /// closes, which sets its runs aside to resume (§52). Looks once a minute.
+    pub(super) fn park_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let hours = self.ui.park_idle_hours;
+        if hours == 0
+            || self
+                .park_checked
+                .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(60))
+        {
+            return;
+        }
+        self.park_checked = Some(std::time::Instant::now());
+        let Some(sv) = server::get() else {
+            return;
+        };
+        let orchestrators: Vec<(PaneId, String)> = self
+            .orchestrators
+            .keys()
+            .filter(|id| !self.starting_up.contains_key(id))
+            .filter_map(|id| Some((*id, self.panes.get(id)?.read(cx).mcp_token()?.to_string())))
+            .collect();
+        let root = self.hydra.paths.root().to_path_buf();
+        let now = crate::action_log::now();
+        let parked: Vec<(PaneId, Vec<String>)> = {
+            let reg = server::lock(sv.registry());
+            orchestrators
+                .into_iter()
+                .filter_map(|(id, token)| {
+                    let runs: Vec<&crate::runs::Run> = reg
+                        .runs
+                        .all()
+                        .filter(|r| r.orchestrator == token && r.state.open())
+                        .collect();
+                    let idle = !runs.is_empty()
+                        && runs.iter().all(|r| {
+                            std::fs::read_to_string(crate::run_log::file_for(&root, &r.id))
+                                .ok()
+                                .and_then(|log| crate::run_park::last_at(&log))
+                                .is_some_and(|last| crate::run_park::idle(r, &last, &now, hours))
+                        });
+                    idle.then(|| (id, runs.iter().map(|r| r.id.clone()).collect()))
+                })
+                .collect()
+        };
+        for (id, runs) in parked {
+            for run in &runs {
+                note_run(run, "parked", serde_json::json!({"idle_hours": hours}));
+                crate::action_log::write(format!(
+                    "run {run}: parked after {} with nothing changing",
+                    crate::run_park::hours_text(hours)
+                ));
+            }
+            self.close_terminal_now(id, window, cx);
+        }
+    }
+
+    /// Runs `runs` lost their orchestrator while hydraui runs (core spec §52): their stage
+    /// sessions close (a Resume reopens the one at work in its own conversation), and each gets
+    /// the Resume card a restart would give it.
+    fn set_runs_aside(&mut self, runs: &[String], window: &mut Window, cx: &mut Context<Self>) {
+        let tokens: Vec<String> = server::get()
+            .map(|sv| {
+                let reg = server::lock(sv.registry());
+                runs.iter()
+                    .filter_map(|id| reg.runs.run(id))
+                    .flat_map(|r| r.stages.iter().filter_map(|s| s.latest()?.session.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let panes: Vec<PaneId> = self
+            .panes
+            .iter()
+            .filter(|(_, v)| {
+                v.read(cx)
+                    .mcp_token()
+                    .is_some_and(|t| tokens.iter().any(|x| x == t))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for p in panes {
+            self.close_terminal_now(p, window, cx);
+        }
+        let root = self.hydra.paths.root().to_path_buf();
+        for i in crate::run_resume::interrupted(&root, crate::claim::alive) {
+            if runs.contains(&i.run.id) && !self.interrupted.iter().any(|x| x.run.id == i.run.id) {
+                let what = match &i.why {
+                    crate::run_resume::Why::Parked { hours } => format!(
+                        "{} was parked: nothing changed for {}, so its sessions closed.",
+                        i.run.ticket,
+                        crate::run_park::hours_text(*hours)
+                    ),
+                    _ => format!("{}'s orchestrator closed before it finished.", i.run.ticket),
+                };
+                window.push_note(
+                    Note::info(format!(
+                        "{what} Resume it from History or the Pipelines tab, or stop it there."
+                    ))
+                    .title(i.run.pipeline.name.clone()),
+                    cx,
+                );
+                crate::action_log::write(format!("run {}: set aside to resume", i.run.id));
+                self.interrupted.push(i);
+            }
+        }
+        cx.notify();
+    }
+
     /// **Stop ticket** on interrupted run `idx` (§13): its log ends, and its card goes.
     pub(super) fn stop_interrupted(&mut self, idx: usize, cx: &mut Context<Self>) {
         if idx >= self.interrupted.len() {
             return;
         }
         let i = self.interrupted.remove(idx);
-        note_run(
-            &i.run.id,
-            "run ended",
-            serde_json::json!({"outcome": "stopped", "reason": "hydraui closed while it ran"}),
-        );
+        // Set aside while hydraui ran (core spec §52): it is still open here, so it ends as any
+        // stopped ticket does, logged once.
+        let live = server::get().map(|sv| {
+            let mut reg = server::lock(sv.registry());
+            let open = reg.runs.run(&i.run.id).is_some_and(|r| r.state.open());
+            open.then(|| reg.runs.person(&i.run.id, crate::runs::Choice::Stop).ok())
+                .flatten()
+        });
+        match live.flatten() {
+            Some(changes) => tell(changes),
+            None => note_run(
+                &i.run.id,
+                "run ended",
+                serde_json::json!({"outcome": "stopped",
+                                   "reason": "stopped by you after it was interrupted"}),
+            ),
+        }
         crate::action_log::write(format!("run {}: stopped after a restart", i.run.id));
         cx.notify();
     }
@@ -806,6 +926,15 @@ impl Workspace {
     ) {
         // Linear hears of runs that started or ended (phase 2 §4).
         self.linear_runs_changed(&changes, cx);
+        // An orchestrator closed under its runs: they wait on a Resume card (core spec §52).
+        let aside: Vec<String> = changes
+            .iter()
+            .filter(|c| c.what == Decided::SetAside)
+            .map(|c| c.run.clone())
+            .collect();
+        if !aside.is_empty() {
+            self.set_runs_aside(&aside, window, cx);
+        }
         // A person sent a run back to an earlier stage: its own session reopens.
         for c in changes.iter().filter(|c| c.what == Decided::Reopened) {
             if let Some(stage) = c.stage {
@@ -935,11 +1064,9 @@ impl Workspace {
                 Ok(true) => crate::action_log::write(format!("removed run worktree {shown}")),
                 Ok(false) => {
                     let _ = cx.update(|window, cx| {
-                        window.push_notification(
-                            Notification::warning(format!(
-                                "{shown} has uncommitted work, so it stays."
-                            ))
-                            .title("Worktree kept"),
+                        window.push_note(
+                            Note::warning(format!("{shown} has uncommitted work, so it stays."))
+                                .title("Worktree kept"),
                             cx,
                         );
                     });
@@ -978,64 +1105,18 @@ impl Workspace {
         }
         let run_owned = run_id.to_string();
         let ws = cx.entity();
-        let note = Notification::new()
+        let mut message = format!("{}. {}", e.title, e.body);
+        if let Some(r) = &e.reason {
+            message.push_str(&format!(" − {r}"));
+        }
+        let note = Note::warning(message)
+            .title(format!("{} stopped · needs you", e.pipeline))
             .id1::<RunAlert>(SharedString::from(format!("run-{run_id}")))
-            .autohide(false)
-            .w(px(360.))
-            .bg(color(theme::TOAST))
-            .border_color(color(theme::RED_BORDER))
-            .content(move |_, _, cx| {
+            .on_click(move |_, window, cx| {
                 let run = run_owned.clone();
-                let ws = ws.clone();
-                v_flex()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(color(theme::RED))
-                            .child(format!("{} STOPPED · NEEDS YOU", e.pipeline.to_uppercase())),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(color(theme::TEXT))
-                            .child(e.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(color(theme::TEXT_SECONDARY))
-                            .child(e.body.clone()),
-                    )
-                    .children(e.reason.clone().map(|r| {
-                        div()
-                            .text_xs()
-                            .text_color(color(theme::TEXT_SECONDARY))
-                            .child(format!("− {r}"))
-                    }))
-                    .child(
-                        h_flex()
-                            .pt_2()
-                            .gap_2()
-                            .child(
-                                Button::new("open-ticket")
-                                    .label("Open ticket")
-                                    .primary()
-                                    .on_click(cx.listener(move |note, _, window, cx| {
-                                        note.dismiss(window, cx);
-                                        let run = run.clone();
-                                        ws.update(cx, |ws, cx| {
-                                            ws.open_pipeline_run(orch, run, window, cx)
-                                        });
-                                    })),
-                            )
-                            .child(Button::new("later").label("Later").ghost().on_click(
-                                cx.listener(|note, _, window, cx| note.dismiss(window, cx)),
-                            )),
-                    )
-                    .into_any_element()
+                ws.update(cx, |ws, cx| ws.open_pipeline_run(orch, run, window, cx));
             });
-        window.push_notification(note, cx);
+        window.push_note(note, cx);
     }
 
     /// Types each waiting wake-up whose orchestrator can take it now; a closed one's is dropped.
@@ -1087,8 +1168,8 @@ impl Workspace {
                     ));
                     let title = self.toast_title(pane, &run, cx);
                     let ws = cx.entity();
-                    window.push_notification(
-                        Notification::warning(format!(
+                    window.push_note(
+                        Note::warning(format!(
                             "{} has a message from hydraui it can't take: something is in its \
                              input, or Claude Code is asking a question. Open it and clear or \
                              answer it, and hydraui sends the message.",
@@ -1150,8 +1231,8 @@ impl Workspace {
                 crate::action_log::write(format!(
                     "run {run}: {name} didn't take a wake-up after 3 tries"
                 ));
-                window.push_notification(
-                    Notification::warning(format!(
+                window.push_note(
+                    Note::warning(format!(
                         "{name} isn't taking messages from hydraui. Look at its terminal: \
                          Claude Code may be showing a question. Answer it, and hydraui carries \
                          on."
@@ -1229,6 +1310,88 @@ impl Workspace {
                         ),
                 )
         });
+    }
+
+    /// Asks before stopping one ticket of orchestrator `orch` (its run `run`, shown as `title`).
+    pub(super) fn stop_ticket_dialog(
+        &mut self,
+        orch: PaneId,
+        run: String,
+        title: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sessions = self
+            .open_lanes(orch, cx)
+            .into_iter()
+            .find(|(r, _, _)| r.id == run)
+            .map_or(0, |(_, _, panes)| panes.len());
+        let body = format!(
+            "It is recorded as stopped by you{}. The pipeline and its other tickets keep going.",
+            match sessions {
+                0 => String::new(),
+                1 => ", and its session closes".to_string(),
+                n => format!(", and its {n} sessions close"),
+            }
+        );
+        let ws = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (ws, run) = (ws.clone(), run.clone());
+            dialog
+                .title(format!("Stop {title}?"))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(color(theme::TEXT))
+                        .child(body.clone()),
+                )
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("stop-ticket-cancel")
+                                .label("Cancel")
+                                .ghost()
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("stop-ticket-go")
+                                .label("Stop ticket")
+                                .danger()
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    ws.update(cx, |ws, cx| ws.stop_ticket(orch, &run, window, cx));
+                                }),
+                        ),
+                )
+        });
+    }
+
+    /// Stops one ticket of orchestrator `orch` (as **Stop this ticket**) and closes the sessions
+    /// it started, leaving the orchestrator and its other tickets running (core spec §51).
+    pub(super) fn stop_ticket(
+        &mut self,
+        orch: PaneId,
+        run: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let panes = self
+            .open_lanes(orch, cx)
+            .into_iter()
+            .find(|(r, _, _)| r.id == run)
+            .map(|(_, _, panes)| panes)
+            .unwrap_or_default();
+        self.person_choice(orch, run, crate::runs::Choice::Stop, window, cx);
+        for p in panes.iter().filter(|p| **p != orch) {
+            self.close_terminal_now(*p, window, cx);
+        }
+        crate::action_log::write(format!(
+            "stopped run {run}: closed {} of its sessions",
+            panes.len()
+        ));
+        cx.notify();
     }
 
     /// Ends the pipeline orchestrator `orch` runs: each of its orchestrators' open ticket
@@ -1599,10 +1762,36 @@ impl Workspace {
             .on_click(
                 cx.listener(move |ws, _, window, cx| ws.open_pipeline(orchestrator, window, cx)),
             )
-            // Right-click: end it (also **End pipeline** on its Pipeline tab).
+            // Right-click: stop one ticket, or end it all (also **End pipeline** on its Pipeline
+            // tab).
             .context_menu({
                 let ws = cx.entity();
+                let tickets: Vec<(String, String)> = self
+                    .open_lanes(orchestrator, cx)
+                    .into_iter()
+                    .map(|(r, _, _)| {
+                        let t = crate::pipeline_card::ticket_title(&r.ticket, r.link.as_deref());
+                        (r.id, t)
+                    })
+                    .collect();
                 move |menu, _, _| {
+                    let mut menu = menu;
+                    for (run, title) in &tickets {
+                        let (ws, run, label) = (ws.clone(), run.clone(), title.clone());
+                        menu = menu.item(PopupMenuItem::new(format!("Stop {title}…")).on_click(
+                            move |_, window, cx| {
+                                ws.update(cx, |ws, cx| {
+                                    ws.stop_ticket_dialog(
+                                        orchestrator,
+                                        run.clone(),
+                                        label.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                });
+                            },
+                        ));
+                    }
                     let ws = ws.clone();
                     menu.item(
                         PopupMenuItem::new("End pipeline…").on_click(move |_, window, cx| {
@@ -1641,17 +1830,19 @@ impl Workspace {
                             .text_color(color(theme::TEXT_SECONDARY))
                             .child(c.line.clone()),
                     )
-                    .child(
-                        div()
-                            .flex_none()
-                            .px(px(6.))
-                            .py(px(2.))
-                            .rounded(px(4.))
-                            .text_xs()
-                            .bg(pill_bg)
-                            .text_color(pill_fg)
-                            .child(c.state.word()),
-                    ),
+                    .when(c.state.has_pill(), |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .px(px(6.))
+                                .py(px(2.))
+                                .rounded(px(4.))
+                                .text_xs()
+                                .bg(pill_bg)
+                                .text_color(pill_fg)
+                                .child(c.state.word()),
+                        )
+                    }),
             )
             .when(!c.segments.is_empty(), |d| {
                 d.child(h_flex().gap(px(3.)).children(segments))
@@ -1687,6 +1878,7 @@ impl Workspace {
         };
         let id = run.id.clone();
         let title = crate::pipeline_card::ticket_title(&run.ticket, run.link.as_deref());
+        let stop_title = title.clone();
         let prs = crate::linear_watch::pr_links(run);
         // A pull request's own link is its title; a Linear ticket's link and PRs show below.
         let link = (!run.link.as_deref().is_some_and(|l| l.contains("/pull/")))
@@ -1723,17 +1915,42 @@ impl Workspace {
                             .text_color(color(theme::TEXT))
                             .child(title),
                     )
-                    .child(
-                        div()
-                            .flex_none()
-                            .px(px(6.))
-                            .py(px(1.))
-                            .rounded(px(4.))
-                            .text_xs()
-                            .bg(bg)
-                            .text_color(fg)
-                            .child(c.state.word()),
-                    ),
+                    .when(c.state.has_pill(), |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .px(px(6.))
+                                .py(px(1.))
+                                .rounded(px(4.))
+                                .text_xs()
+                                .bg(bg)
+                                .text_color(fg)
+                                .child(c.state.word()),
+                        )
+                    })
+                    .child({
+                        let (run_id, label) = (run.id.clone(), stop_title);
+                        Button::new(SharedString::from(format!(
+                            "lane-stop-{orchestrator}-{}",
+                            run.id
+                        )))
+                        .label("×")
+                        .ghost()
+                        .xsmall()
+                        .tooltip("Stop this ticket and close its sessions")
+                        .on_click(cx.listener(
+                            move |ws, _, window, cx| {
+                                cx.stop_propagation();
+                                ws.stop_ticket_dialog(
+                                    orchestrator,
+                                    run_id.clone(),
+                                    label.clone(),
+                                    window,
+                                    cx,
+                                )
+                            },
+                        ))
+                    }),
             )
             .children(self.render_question(orchestrator, Some(&run.id), cx))
             .children(link)

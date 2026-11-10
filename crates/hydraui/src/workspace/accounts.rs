@@ -1,6 +1,7 @@
 //! An environment's accounts, on its Settings page (the status bar's name opens it): what each provider is signed
 //! in as, checked again on demand; and adding one, by signing in or borrowing another
 //! environment's login.
+use crate::inbox::{Note, PushNote};
 use std::cell::Cell;
 
 use gpui::prelude::*;
@@ -8,14 +9,14 @@ use gpui::{App, Context, Hsla, SharedString, Window, div, px, rgb};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandItem, CommandState};
 use gpui_component::input::{Input, InputState};
-use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, Disableable, Sizable, WindowExt, h_flex, v_flex};
 use hydra_core::envedit::ToolValues;
 use hydra_core::provider::Status;
 
 use super::Workspace;
 use super::settings_tab::Section;
-use crate::accounts::{AddChoice, FormResult, form_fields, form_values, rows};
+use crate::accounts::{AddChoice, FormResult, SIGN_IN_TOOLS, form_fields, form_values, rows};
+use crate::setup::{ToolState, tool_state};
 
 impl Workspace {
     /// The status bar's environment name, opening its page in the Settings tab.
@@ -44,12 +45,57 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The next step for `tool` in `env`, as the set-up checklist and the Pipelines tab offer
+    /// it: add it (asking its values first when it needs some), or sign in to it. A tool added
+    /// but failing with no sign-in of its own opens the environment's Settings page.
+    pub(super) fn set_up_tool(
+        &mut self,
+        env: String,
+        tool: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tools = self.hydra.tools(&env);
+        match tool_state(&tool, &tools, self.status.get(&env)) {
+            ToolState::NotAdded if SIGN_IN_TOOLS.contains(&tool.as_str()) => {
+                self.add_account(env, AddChoice::SignIn(tool), window, cx)
+            }
+            ToolState::NotAdded => self.set_up_form(env, tool, window, cx),
+            _ if self.hydra.sign_ins(&env).contains(&tool) => {
+                self.sign_in(&env, &tool, window, cx);
+                self.recheck_accounts(&env, cx);
+            }
+            _ => self.open_settings(Section::Env(env), window, cx),
+        }
+    }
+
+    /// Installs config.toml's `setup_plugins[index]` in a terminal of `env` (spec §48). It goes
+    /// into the shared Claude config, so every environment has it; the checklist sees it at the
+    /// next check of `env`'s accounts.
+    pub(super) fn install_plugin(
+        &mut self,
+        env: &str,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(plugin) = self.ui.setup_plugins.get(index).cloned() else {
+            return;
+        };
+        let cwd = self.env_cwd(env, cx);
+        let request = self
+            .hydra
+            .plugin_install_request(env, &plugin, cwd, self.shell());
+        self.open_terminal(env, request, window, cx);
+        self.recheck_accounts(env, cx);
+    }
+
     /// Picks an account to add to `env`: a sign-in, or another environment's login.
     fn pick_account(&mut self, env: String, window: &mut Window, cx: &mut Context<Self>) {
         let choices = self.hydra.account_choices(&env);
         if choices.is_empty() {
-            window.push_notification(
-                Notification::info(format!(
+            window.push_note(
+                Note::info(format!(
                     "{env} has every account hydraui can add; others: hydra add <tool> {env}"
                 ))
                 .title("Add account"),
@@ -105,14 +151,14 @@ impl Workspace {
             }
         };
         if let Err(e) = self.hydra.add_tool(&env, tool, &values) {
-            window.push_notification(Notification::error(e).title("Add account"), cx);
+            window.push_note(Note::error(e).title("Add account"), cx);
             return;
         }
         match choice {
             AddChoice::SignIn(tool) => self.added(&env, &tool, window, cx),
             AddChoice::Borrow { tool, from } => {
-                window.push_notification(
-                    Notification::success(format!(
+                window.push_note(
+                    Note::success(format!(
                         "{tool} in {env} now uses {from}'s login. {}",
                         reopen(&env)
                     ))
@@ -181,9 +227,8 @@ impl Workspace {
         if self.hydra.sign_ins(env).iter().any(|t| t == tool) {
             self.sign_in(env, tool, window, cx);
         }
-        window.push_notification(
-            Notification::info(format!("{tool} is on in {env}. {}", reopen(env)))
-                .title("Add account"),
+        window.push_note(
+            Note::info(format!("{tool} is on in {env}. {}", reopen(env))).title("Add account"),
             cx,
         );
         self.recheck_accounts(env, cx);

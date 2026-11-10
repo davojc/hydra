@@ -6,6 +6,7 @@ mod all_tasks;
 mod asking;
 mod busy;
 mod finder;
+mod history_tab;
 mod launcher;
 mod layout_file;
 mod linear;
@@ -213,6 +214,8 @@ pub struct Workspace {
     settings: Option<settings_tab::SettingsTab>,
     /// The Projects tab, shown in place of everything below the tab strip (Projects spec §8).
     projects: Option<projects_tab::ProjectsTab>,
+    /// History (core spec §50), when shown.
+    history: Option<history_tab::HistoryTab>,
     /// Every environment's projects, as last read.
     projects_data: projects_tab::ProjectsData,
     /// Terminals with a Tasks tab, and whether it's the one shown (`true`) or the terminal
@@ -521,6 +524,7 @@ impl Workspace {
             start: None,
             settings: None,
             projects: None,
+            history: None,
             projects_data: Default::default(),
             tasks_tabs: HashMap::new(),
             pipeline_tabs: HashMap::new(),
@@ -1975,6 +1979,7 @@ impl Workspace {
             )
             .child(div().flex_1())
             .child(self.projects_button(cx))
+            .child(self.history_button(cx))
             .child(
                 Button::new("open-settings")
                     .icon(IconName::Settings)
@@ -2085,6 +2090,7 @@ impl Render for Workspace {
         let body = match self.envs.active() {
             // Settings opened from the start page shows over it; closing it goes back.
             _ if self.settings.is_some() => self.render_settings(cx),
+            _ if self.history.is_some() => self.render_history_page(cx),
             _ if self.projects.is_some() => self.render_projects(cx),
             _ if self.start.is_some() => self.render_start_page(cx),
             Some(tab) => self.render_env(tab, border, muted, cx),

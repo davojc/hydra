@@ -50,6 +50,7 @@ pub mod projects;
 pub mod quick_open;
 pub mod rating;
 pub mod readiness;
+pub mod run_feed;
 pub mod run_history;
 pub mod run_log;
 pub mod run_resume;

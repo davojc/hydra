@@ -60,6 +60,7 @@ impl Workspace {
         let you = (section == Section::You).then(|| self.identity_fields(window, cx));
         self.settings = Some(SettingsTab { section, you });
         self.projects = None;
+        self.history = None;
         window.focus(&self.focus, cx);
         cx.notify();
     }

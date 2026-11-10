@@ -84,6 +84,8 @@ pub struct UiConfig {
     pub setup_plugins: Vec<SetupPlugin>,
     /// The Pipelines tab shows only what's running, one line per ticket (spec §49).
     pub pipelines_condensed: bool,
+    /// When History was last opened, as a run-log time (core spec §50).
+    pub history_seen: Option<String>,
 }
 
 /// A Claude plugin the set-up checklist asks for, e.g. the team's skill router.
@@ -119,6 +121,7 @@ impl Default for UiConfig {
             setup_hidden: Vec::new(),
             setup_plugins: Vec::new(),
             pipelines_condensed: false,
+            history_seen: None,
         }
     }
 }
@@ -191,6 +194,7 @@ pub fn parse(text: &str) -> (UiConfig, Vec<String>) {
             }),
             "setup_hidden" => get(value).map(|e| cfg.setup_hidden = e),
             "pipelines_condensed" => get(value).map(|c| cfg.pipelines_condensed = c),
+            "history_seen" => get(value).map(|h| cfg.history_seen = Some(h)),
             "setup_plugins" => get::<Vec<SetupPlugin>>(value).and_then(|p| {
                 match p.iter().find(|p| !p.plugin.contains('@')) {
                     Some(bad) => Err(format!(
@@ -420,6 +424,7 @@ min_week_left = 25
 slack_connect_url = "https://canopy.dev.iov42.net/"
 setup_hidden = ["work"]
 pipelines_condensed = true
+history_seen = "2026-11-10 09:00:00.000"
 setup_plugins = [{ plugin = "skill-router@iov42", marketplace = "iov42/iov42-marketplace", label = "Team skills" }]
 
 [colors]
@@ -438,6 +443,7 @@ new_terminal = "ctrl-alt-d"
         assert_eq!(cfg.editor.as_deref(), Some("code"));
         assert_eq!(cfg.setup_hidden, vec!["work".to_string()]);
         assert!(cfg.pipelines_condensed);
+        assert_eq!(cfg.history_seen.as_deref(), Some("2026-11-10 09:00:00.000"));
         assert_eq!(
             cfg.setup_plugins,
             vec![SetupPlugin {

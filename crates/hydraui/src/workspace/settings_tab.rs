@@ -61,6 +61,7 @@ impl Workspace {
         self.settings = Some(SettingsTab { section, you });
         self.projects = None;
         self.history = None;
+        self.tickets = None;
         window.focus(&self.focus, cx);
         cx.notify();
     }

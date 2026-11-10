@@ -1292,7 +1292,7 @@ impl Workspace {
 }
 
 /// Each pipeline file by its name and, when it differs, the name the views show.
-fn pipeline_labels(root: &std::path::Path, names: &[String]) -> Vec<String> {
+pub(super) fn pipeline_labels(root: &std::path::Path, names: &[String]) -> Vec<String> {
     names
         .iter()
         .map(|n| match crate::pipeline::load(root, n) {

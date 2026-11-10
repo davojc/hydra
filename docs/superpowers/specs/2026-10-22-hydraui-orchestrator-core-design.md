@@ -1110,3 +1110,17 @@ Before this, an orchestrator's terminal closing while hydraui kept running ended
 - **Resume** works as after a restart. It reopens the orchestrator's own conversation (`claude --resume`) and the stage that was at work in its own conversation, so a half-done PR review goes on with its history.
 - **Stop ticket** ends the run as any stopped ticket does: "stopped by you at <stage>", logged once. A run interrupted by a restart, which isn't in memory, logs "stopped by you after it was interrupted".
 - **History** (§50) shows `Interrupted: its orchestrator closed. Resume it from the Pipelines tab` in amber, and `Resumed`.
+
+## 53. Tickets (added 2026-11-10)
+
+For handing a Linear ticket to a pipeline by hand. A **Tickets** button between **Projects** and **History** opens a page in the middle. Like them, it replaces the others there, and they replace it.
+
+- **Whose Linear.** The environment shown, when it has a Linear key; else the first environment that has one. The summary line names it.
+- **The filter.** One chip per workflow state Linear has, across the teams the key sees (`workflowStates`). Each name appears once, in Linear's order: triage, backlog, unstarted, started, completed, canceled. The chosen states are kept in hydraui's config.toml as `tickets_states`, a new optional key that defaults to `["Todo"]`. Toggling a chip reads the list again.
+- **The list.** Up to 100 tickets in the chosen states, most recently updated first. Each row shows the key (a click opens it in Linear), the title, labels and state, and either **Run pipeline** or, while a run of that ticket is in progress (from the run logs), **Running**.
+- **Run pipeline** opens the pipeline picker (as Start pipeline does) titled `Run <ticket> through`. Choosing a pipeline hands the ticket to it in that environment:
+  - to the pipeline's first orchestrator when it has room for another ticket (`runs_at_once`);
+  - else to a new orchestrator, which gets it once Claude has finished its first turn.
+
+  The hand-off is the same start prompt a Linear pick sends (`linear_watch::start_prompt`). So a pipeline with `[linear]` claims the ticket as it does a hand-started run, and its card shows on the Pipelines tab. A notice says where it went.
+- **Refresh** reads the states and tickets again. Reads run in the background, and an error (no key, rejected) shows in the summary line in red.

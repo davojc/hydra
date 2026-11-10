@@ -101,6 +101,7 @@ impl Workspace {
     pub(super) fn open_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings = None;
         self.projects = None;
+        self.tickets = None;
         let now = crate::action_log::now();
         let last_look = self.ui.history_seen.clone();
         self.history = Some(HistoryTab {

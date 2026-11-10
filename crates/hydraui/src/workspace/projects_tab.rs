@@ -345,6 +345,7 @@ impl Workspace {
     pub(super) fn open_projects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings = None;
         self.history = None;
+        self.tickets = None;
         if self.projects.is_none() {
             self.projects = Some(ProjectsTab {
                 page: Page::Home,

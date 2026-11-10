@@ -27,6 +27,7 @@ mod swarms;
 mod swarms_page;
 mod tasks_tab;
 mod terminal_list;
+mod tickets_tab;
 mod title_bar;
 mod tree_ops;
 mod usage;
@@ -216,6 +217,8 @@ pub struct Workspace {
     projects: Option<projects_tab::ProjectsTab>,
     /// History (core spec §50), when shown.
     history: Option<history_tab::HistoryTab>,
+    /// Tickets (core spec §53), when shown.
+    tickets: Option<tickets_tab::TicketsTab>,
     /// Every environment's projects, as last read.
     projects_data: projects_tab::ProjectsData,
     /// Terminals with a Tasks tab, and whether it's the one shown (`true`) or the terminal
@@ -525,6 +528,7 @@ impl Workspace {
             settings: None,
             projects: None,
             history: None,
+            tickets: None,
             projects_data: Default::default(),
             tasks_tabs: HashMap::new(),
             pipeline_tabs: HashMap::new(),
@@ -1979,6 +1983,7 @@ impl Workspace {
             )
             .child(div().flex_1())
             .child(self.projects_button(cx))
+            .child(self.tickets_button(cx))
             .child(self.history_button(cx))
             .child(
                 Button::new("open-settings")
@@ -2090,6 +2095,7 @@ impl Render for Workspace {
         let body = match self.envs.active() {
             // Settings opened from the start page shows over it; closing it goes back.
             _ if self.settings.is_some() => self.render_settings(cx),
+            _ if self.tickets.is_some() => self.render_tickets_page(cx),
             _ if self.history.is_some() => self.render_history_page(cx),
             _ if self.projects.is_some() => self.render_projects(cx),
             _ if self.start.is_some() => self.render_start_page(cx),

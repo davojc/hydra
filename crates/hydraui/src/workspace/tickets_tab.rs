@@ -24,6 +24,8 @@ pub struct TicketsTab {
     pub states: Vec<linear::StateInfo>,
     /// The labels shown on a row when a ticket has them; the others aren't shown.
     pub pick_labels: Vec<String>,
+    /// Every label the chosen teams can use, from Linear; empty when it couldn't be read.
+    pub labels: Vec<String>,
     /// The filter being chosen; **Save filter** keeps it in config.toml.
     pub pick_teams: Vec<String>,
     pub pick_states: Vec<String>,
@@ -112,6 +114,7 @@ impl Workspace {
             pick_teams: self.ui.tickets_teams.clone(),
             pick_states: self.ui.tickets_states.clone(),
             pick_labels: self.ui.tickets_labels.clone(),
+            labels: Vec::new(),
             pick_who: who_from_config(&self.ui.tickets_assignee, &self.ui.tickets_people),
             people: Vec::new(),
             tickets: Vec::new(),
@@ -160,6 +163,14 @@ impl Workspace {
                             &http.post(&linear::team_members_request(&teams))?,
                         )?
                     };
+                    // The labels to offer; without them, those on the tickets listed will do.
+                    let labels = if teams.is_empty() {
+                        Vec::new()
+                    } else {
+                        http.post(&linear::team_labels_request(&teams))
+                            .and_then(|r| linear::read_label_names(&r))
+                            .unwrap_or_default()
+                    };
                     // Only states the chosen teams have.
                     let states: Vec<String> = states
                         .into_iter()
@@ -178,14 +189,17 @@ impl Workspace {
                         .filter(|e| e.outcome == crate::run_history::Outcome::InProgress)
                         .map(|e| e.ticket.to_ascii_uppercase())
                         .collect();
-                    Ok::<_, LinearError>((all_teams, names, states, people, tickets, running))
+                    Ok::<_, LinearError>((
+                        all_teams, names, states, people, labels, tickets, running,
+                    ))
                 })
                 .await;
             let _ = this.update(cx, |ws, cx| {
                 if let Some(t) = &mut ws.tickets {
                     t.loading = false;
                     match read {
-                        Ok((teams, names, states, people, tickets, running)) => {
+                        Ok((teams, names, states, people, labels, tickets, running)) => {
+                            t.labels = labels;
                             t.teams = teams;
                             t.people = people;
                             t.states = names;
@@ -415,14 +429,16 @@ impl Workspace {
                 )
                 .on_click(cx.listener(move |ws, _, _, cx| ws.toggle_ticket_state(n.clone(), cx)))
             }));
-        // Labels to show on rows: those on the tickets listed, plus any already chosen.
+        // Labels to show on rows: every label the teams can use, plus any on the tickets listed
+        // or already chosen.
         let mut all_labels: Vec<String> = t
-            .tickets
+            .labels
             .iter()
-            .flat_map(|k| k.labels.iter().cloned())
+            .cloned()
+            .chain(t.tickets.iter().flat_map(|k| k.labels.iter().cloned()))
             .chain(t.pick_labels.iter().cloned())
             .collect();
-        all_labels.sort_by_key(|l| l.to_lowercase());
+        all_labels.sort_by_key(|l| (l.to_lowercase(), l.clone()));
         all_labels.dedup();
         let label_chips =
             h_flex()

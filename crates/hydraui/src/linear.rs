@@ -326,6 +326,31 @@ pub fn read_team_state_names(reply: &Value) -> Result<Vec<String>, LinearError> 
         .collect())
 }
 
+/// The labels the teams keyed `teams` can use: their own and the workspace's.
+pub fn team_labels_request(teams: &[String]) -> Value {
+    json!({
+        "query": "query($keys: [String!]) { issueLabels(first: 250, filter: { or: [ \
+                  { team: { key: { in: $keys } } }, { team: { null: true } } ] }) \
+                  { nodes { name isGroup } } }",
+        "variables": {"keys": teams},
+    })
+}
+
+/// Their names, each once, by name ignoring case; a group's own name is left out (its
+/// labels are what tickets carry).
+pub fn read_label_names(reply: &Value) -> Result<Vec<String>, LinearError> {
+    let mut names: Vec<String> = data(reply)?["issueLabels"]["nodes"]
+        .as_array()
+        .ok_or_else(|| unexpected("issueLabels"))?
+        .iter()
+        .filter(|l| l["isGroup"].as_bool() != Some(true))
+        .filter_map(|l| l["name"].as_str().map(str::to_string))
+        .collect();
+    names.sort_by_key(|n| (n.to_lowercase(), n.clone()));
+    names.dedup();
+    Ok(names)
+}
+
 /// Whose tickets the Tickets page lists (core spec §53).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Assignee {
@@ -484,6 +509,24 @@ impl LinearApi for Http {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn labels_come_once_each_by_name_without_their_groups() {
+        let reply = json!({"data": {"issueLabels": {"nodes": [
+            {"name": "hydra-claimed", "isGroup": false},
+            {"name": "Bug", "isGroup": false},
+            {"name": "Type", "isGroup": true},
+            {"name": "bug", "isGroup": false},
+            {"name": "Bug", "isGroup": false},
+            {"name": "Customer"}
+        ]}}});
+        assert_eq!(
+            read_label_names(&reply).unwrap(),
+            vec!["Bug", "bug", "Customer", "hydra-claimed"]
+        );
+        let req = team_labels_request(&["PRE".into()]);
+        assert_eq!(req["variables"]["keys"], json!(["PRE"]));
+    }
+
+    #[test]
     fn teams_come_by_key() {
         let reply = json!({"data": {"teams": {"nodes": [
             {"key": "PRE", "name": "Product & Engineering"},
@@ -622,6 +665,7 @@ mod tests {
             teams_request(),
             team_states_request(&teams),
             team_members_request(&teams),
+            team_labels_request(&teams),
             tickets_in_states_request(&teams, &states, &Assignee::Anyone),
         ] {
             let q = req["query"].as_str().unwrap();

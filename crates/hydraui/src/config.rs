@@ -89,6 +89,10 @@ pub struct UiConfig {
     /// The Linear teams and states the Tickets page opens on (core spec §53).
     pub tickets_teams: Vec<String>,
     pub tickets_states: Vec<String>,
+    /// `anyone`, `unassigned` or `assigned`; with `assigned`, `tickets_people` are the Linear
+    /// user ids to narrow to (none: anyone assigned).
+    pub tickets_assignee: String,
+    pub tickets_people: Vec<String>,
 }
 
 /// A Claude plugin the set-up checklist asks for, e.g. the team's skill router.
@@ -127,6 +131,8 @@ impl Default for UiConfig {
             history_seen: None,
             tickets_teams: Vec::new(),
             tickets_states: Vec::new(),
+            tickets_assignee: "anyone".to_string(),
+            tickets_people: Vec::new(),
         }
     }
 }
@@ -202,6 +208,14 @@ pub fn parse(text: &str) -> (UiConfig, Vec<String>) {
             "history_seen" => get(value).map(|h| cfg.history_seen = Some(h)),
             "tickets_teams" => get(value).map(|t| cfg.tickets_teams = t),
             "tickets_states" => get(value).map(|s| cfg.tickets_states = s),
+            "tickets_assignee" => get::<String>(value).and_then(|a| match a.as_str() {
+                "anyone" | "unassigned" | "assigned" => {
+                    cfg.tickets_assignee = a;
+                    Ok(())
+                }
+                _ => Err(format!("{a:?} isn't anyone, unassigned or assigned")),
+            }),
+            "tickets_people" => get(value).map(|p| cfg.tickets_people = p),
             "setup_plugins" => get::<Vec<SetupPlugin>>(value).and_then(|p| {
                 match p.iter().find(|p| !p.plugin.contains('@')) {
                     Some(bad) => Err(format!(
@@ -434,6 +448,8 @@ pipelines_condensed = true
 history_seen = "2026-11-10 09:00:00.000"
 tickets_teams = ["PRE", "INTH"]
 tickets_states = ["Todo", "In Review"]
+tickets_assignee = "assigned"
+tickets_people = ["u2"]
 setup_plugins = [{ plugin = "skill-router@iov42", marketplace = "iov42/iov42-marketplace", label = "Team skills" }]
 
 [colors]
@@ -455,6 +471,8 @@ new_terminal = "ctrl-alt-d"
         assert_eq!(cfg.history_seen.as_deref(), Some("2026-11-10 09:00:00.000"));
         assert_eq!(cfg.tickets_teams, vec!["PRE", "INTH"]);
         assert_eq!(cfg.tickets_states, vec!["Todo", "In Review"]);
+        assert_eq!(cfg.tickets_assignee, "assigned");
+        assert_eq!(cfg.tickets_people, vec!["u2"]);
         assert_eq!(
             cfg.setup_plugins,
             vec![SetupPlugin {

@@ -25,6 +25,10 @@ pub struct TicketsTab {
     /// The filter being chosen; **Save filter** keeps it in config.toml.
     pub pick_teams: Vec<String>,
     pub pick_states: Vec<String>,
+    /// Whose tickets: anyone's, unassigned ones, or ones assigned (to the people chosen).
+    pub pick_who: linear::Assignee,
+    /// The chosen teams' members, as (id, name), for Assigned.
+    pub people: Vec<(String, String)>,
     pub tickets: Vec<Ticket>,
     /// Tickets with a run still in progress, upper-case.
     pub running: Vec<String>,
@@ -105,6 +109,8 @@ impl Workspace {
             states: Vec::new(),
             pick_teams: self.ui.tickets_teams.clone(),
             pick_states: self.ui.tickets_states.clone(),
+            pick_who: who_from_config(&self.ui.tickets_assignee, &self.ui.tickets_people),
+            people: Vec::new(),
             tickets: Vec::new(),
             running: Vec::new(),
             loading: true,
@@ -130,6 +136,7 @@ impl Workspace {
         };
         t.loading = true;
         let (env, teams, states) = (t.env.clone(), t.pick_teams.clone(), t.pick_states.clone());
+        let who = t.pick_who.clone();
         let hydra = self.hydra.clone();
         cx.spawn(async move |this, cx| {
             let read = cx
@@ -145,6 +152,13 @@ impl Workspace {
                             &http.post(&linear::team_states_request(&teams))?,
                         )?
                     };
+                    let people = if teams.is_empty() {
+                        Vec::new()
+                    } else {
+                        linear::read_team_members(
+                            &http.post(&linear::team_members_request(&teams))?,
+                        )?
+                    };
                     // Only states the chosen teams have.
                     let states: Vec<String> =
                         states.into_iter().filter(|s| names.contains(s)).collect();
@@ -152,7 +166,8 @@ impl Workspace {
                         Vec::new()
                     } else {
                         linear::read_pickable(
-                            &http.post(&linear::tickets_in_states_request(&teams, &states))?,
+                            &http
+                                .post(&linear::tickets_in_states_request(&teams, &states, &who))?,
                         )?
                     };
                     let running: Vec<String> = crate::run_history::read(hydra.paths.root(), &[])
@@ -160,15 +175,16 @@ impl Workspace {
                         .filter(|e| e.outcome == crate::run_history::Outcome::InProgress)
                         .map(|e| e.ticket.to_ascii_uppercase())
                         .collect();
-                    Ok::<_, LinearError>((all_teams, names, states, tickets, running))
+                    Ok::<_, LinearError>((all_teams, names, states, people, tickets, running))
                 })
                 .await;
             let _ = this.update(cx, |ws, cx| {
                 if let Some(t) = &mut ws.tickets {
                     t.loading = false;
                     match read {
-                        Ok((teams, names, states, tickets, running)) => {
+                        Ok((teams, names, states, people, tickets, running)) => {
                             t.teams = teams;
+                            t.people = people;
                             t.states = names;
                             t.pick_states = states;
                             t.tickets = tickets;
@@ -201,14 +217,46 @@ impl Workspace {
         self.reload_tickets(cx);
     }
 
-    /// **Save filter**: the chosen teams and states, kept in config.toml as `tickets_teams` and
-    /// `tickets_states`, so the page opens on them next time.
+    /// Whose tickets to list.
+    fn set_ticket_who(&mut self, who: linear::Assignee, cx: &mut Context<Self>) {
+        if let Some(t) = &mut self.tickets {
+            t.pick_who = who;
+        }
+        self.reload_tickets(cx);
+    }
+
+    /// Adds or removes person `id` from Assigned's people.
+    fn toggle_ticket_person(&mut self, id: String, cx: &mut Context<Self>) {
+        if let Some(t) = &mut self.tickets
+            && let linear::Assignee::Assigned(ids) = &mut t.pick_who
+        {
+            toggle(ids, id);
+        }
+        self.reload_tickets(cx);
+    }
+
+    /// **Save filter**: the chosen teams, states and assignees, kept in config.toml as
+    /// `tickets_teams`, `tickets_states`, `tickets_assignee` and `tickets_people`, so the page
+    /// opens on them next time.
     fn save_ticket_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(t) = &self.tickets else {
             return;
         };
         let (teams, states) = (t.pick_teams.clone(), t.pick_states.clone());
-        for (key, list) in [("tickets_teams", &teams), ("tickets_states", &states)] {
+        let (mode, people) = who_to_config(&t.pick_who);
+        if let Err(e) = crate::config::set(
+            &self.hydra.paths,
+            "tickets_assignee",
+            Some(mode.clone().into()),
+        ) {
+            window.push_notification(Notification::error(e).title("Tickets"), cx);
+            return;
+        }
+        for (key, list) in [
+            ("tickets_teams", &teams),
+            ("tickets_states", &states),
+            ("tickets_people", &people),
+        ] {
             let value: toml_edit::Array = list.iter().map(String::as_str).collect();
             if let Err(e) = crate::config::set(&self.hydra.paths, key, Some(value.into())) {
                 window.push_notification(Notification::error(e).title("Tickets"), cx);
@@ -217,6 +265,8 @@ impl Workspace {
         }
         self.ui.tickets_teams = teams;
         self.ui.tickets_states = states;
+        self.ui.tickets_assignee = mode;
+        self.ui.tickets_people = people;
         // Saved: out of the way, so the tickets have the page.
         if let Some(t) = &mut self.tickets
             && !t.pick_teams.is_empty()
@@ -359,8 +409,49 @@ impl Workspace {
                 )
                 .on_click(cx.listener(move |ws, _, _, cx| ws.toggle_ticket_state(n.clone(), cx)))
             }));
-        let saved =
-            t.pick_teams == self.ui.tickets_teams && t.pick_states == self.ui.tickets_states;
+        let saved = t.pick_teams == self.ui.tickets_teams
+            && t.pick_states == self.ui.tickets_states
+            && t.pick_who == who_from_config(&self.ui.tickets_assignee, &self.ui.tickets_people);
+        // Whose tickets: Anyone, Unassigned, Assigned; with Assigned, the people to narrow to.
+        let who_chips = h_flex().gap_1p5().flex_wrap().children(
+            [
+                ("Anyone", linear::Assignee::Anyone),
+                ("Unassigned", linear::Assignee::Unassigned),
+                ("Assigned", linear::Assignee::Assigned(Vec::new())),
+            ]
+            .into_iter()
+            .map(|(name, who)| {
+                let on = std::mem::discriminant(&who) == std::mem::discriminant(&t.pick_who);
+                chip(format!("tickets-who-{name}"), name.to_string(), on).on_click(cx.listener(
+                    move |ws, _, _, cx| {
+                        // Assigned again keeps the people already chosen.
+                        if !on {
+                            ws.set_ticket_who(who.clone(), cx)
+                        }
+                    },
+                ))
+            }),
+        );
+        let chosen_people: Vec<String> = match &t.pick_who {
+            linear::Assignee::Assigned(ids) => ids.clone(),
+            _ => Vec::new(),
+        };
+        let people_chips =
+            h_flex()
+                .gap_1p5()
+                .flex_wrap()
+                .children(t.people.iter().map(|(id, name)| {
+                    let i = id.clone();
+                    chip(
+                        format!("tickets-person-{id}"),
+                        name.clone(),
+                        chosen_people.contains(id),
+                    )
+                    .on_click(
+                        cx.listener(move |ws, _, _, cx| ws.toggle_ticket_person(i.clone(), cx)),
+                    )
+                }));
+        let assigned = matches!(t.pick_who, linear::Assignee::Assigned(_));
         let summary = if let Some(e) = &t.error {
             format!("Couldn't read Linear for {}: {e}", t.env)
         } else if t.loading {
@@ -475,7 +566,12 @@ impl Workspace {
         } else if t.pick_states.is_empty() {
             format!("{} · no statuses chosen", t.pick_teams.join(", "))
         } else {
-            format!("{} · {}", t.pick_teams.join(", "), t.pick_states.join(", "))
+            format!(
+                "{} · {}{}",
+                t.pick_teams.join(", "),
+                t.pick_states.join(", "),
+                who_text(&t.pick_who, &t.people)
+            )
         };
         let filter_bar = h_flex()
             .gap_2()
@@ -528,11 +624,19 @@ impl Workspace {
                     .child(header)
                     .child(filter_bar)
                     .when(t.filter_open, |d| {
-                        d.child(label("Teams"))
-                            .child(team_chips)
-                            .when(!t.pick_teams.is_empty(), |d| {
-                                d.child(label("Statuses")).child(state_chips)
-                            })
+                        d.child(label("Teams")).child(team_chips).when(
+                            !t.pick_teams.is_empty(),
+                            |d| {
+                                d.child(label("Statuses"))
+                                    .child(state_chips)
+                                    .child(label("Assignee"))
+                                    .child(who_chips)
+                                    .when(assigned, |d| {
+                                        d.child(label("Assigned to (none chosen: anyone assigned)"))
+                                            .child(people_chips)
+                                    })
+                            },
+                        )
                     })
                     .child(sections),
             )
@@ -611,6 +715,45 @@ impl Workspace {
     }
 }
 
+/// The saved assignee filter: `tickets_assignee` is `anyone`, `unassigned` or `assigned`, with
+/// `tickets_people` the user ids for `assigned`.
+fn who_from_config(mode: &str, people: &[String]) -> linear::Assignee {
+    match mode {
+        "unassigned" => linear::Assignee::Unassigned,
+        "assigned" => linear::Assignee::Assigned(people.to_vec()),
+        _ => linear::Assignee::Anyone,
+    }
+}
+
+fn who_to_config(who: &linear::Assignee) -> (String, Vec<String>) {
+    match who {
+        linear::Assignee::Anyone => ("anyone".into(), Vec::new()),
+        linear::Assignee::Unassigned => ("unassigned".into(), Vec::new()),
+        linear::Assignee::Assigned(ids) => ("assigned".into(), ids.clone()),
+    }
+}
+
+/// The folded filter's words for `who`, naming the people from `people` (id, name).
+fn who_text(who: &linear::Assignee, people: &[(String, String)]) -> String {
+    match who {
+        linear::Assignee::Anyone => String::new(),
+        linear::Assignee::Unassigned => " · unassigned".into(),
+        linear::Assignee::Assigned(ids) if ids.is_empty() => " · assigned".into(),
+        linear::Assignee::Assigned(ids) => {
+            let names: Vec<&str> = ids
+                .iter()
+                .map(|id| {
+                    people
+                        .iter()
+                        .find(|(i, _)| i == id)
+                        .map_or("someone", |(_, n)| n.as_str())
+                })
+                .collect();
+            format!(" · assigned to {}", names.join(", "))
+        }
+    }
+}
+
 /// Adds `item` to `list`, or takes it out when it is there.
 fn toggle(list: &mut Vec<String>, item: String) {
     match list.iter().position(|x| *x == item) {
@@ -623,6 +766,32 @@ fn toggle(list: &mut Vec<String>, item: String) {
 
 #[cfg(test)]
 mod tests {
+    use crate::linear::Assignee;
+
+    #[test]
+    fn the_assignee_filter_saves_and_reads_back_and_names_its_people() {
+        for who in [
+            Assignee::Anyone,
+            Assignee::Unassigned,
+            Assignee::Assigned(vec![]),
+            Assignee::Assigned(vec!["u2".into()]),
+        ] {
+            let (mode, people) = super::who_to_config(&who);
+            assert_eq!(super::who_from_config(&mode, &people), who);
+        }
+        assert_eq!(super::who_from_config("nonsense", &[]), Assignee::Anyone);
+        let people = vec![("u2".to_string(), "Jordan Miller".to_string())];
+        assert_eq!(
+            super::who_text(&Assignee::Assigned(vec!["u2".into()]), &people),
+            " · assigned to Jordan Miller"
+        );
+        assert_eq!(
+            super::who_text(&Assignee::Unassigned, &people),
+            " · unassigned"
+        );
+        assert_eq!(super::who_text(&Assignee::Anyone, &people), "");
+    }
+
     #[test]
     fn a_chip_toggles_its_item_in_and_out() {
         let mut list = vec!["PRE".to_string()];

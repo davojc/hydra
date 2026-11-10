@@ -303,18 +303,74 @@ pub fn read_team_state_names(reply: &Value) -> Result<Vec<String>, LinearError> 
     Ok(out)
 }
 
-/// The tickets of teams `teams` in any of the states named `states`, most recently updated
-/// first, up to 250.
-pub fn tickets_in_states_request(teams: &[String], states: &[String]) -> Value {
+/// Whose tickets the Tickets page lists (core spec §53).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Assignee {
+    /// Assigned or not.
+    #[default]
+    Anyone,
+    Unassigned,
+    /// Assigned to one of these users (by id); to anyone when empty.
+    Assigned(Vec<String>),
+}
+
+/// The members of the teams keyed `teams`, for the Assigned filter.
+pub fn team_members_request(teams: &[String]) -> Value {
+    json!({
+        "query": "query($keys: [String!]) { teams(filter: { key: { in: $keys } }) \
+                  { nodes { members(first: 250) { nodes { id name displayName active } } } } }",
+        "variables": {"keys": teams},
+    })
+}
+
+/// Each active member once, as (id, name), by name.
+pub fn read_team_members(reply: &Value) -> Result<Vec<(String, String)>, LinearError> {
+    let teams = data(reply)?["teams"]["nodes"]
+        .as_array()
+        .ok_or_else(|| unexpected("teams"))?;
+    let mut people: Vec<(String, String)> = Vec::new();
+    for m in teams.iter().flat_map(|t| {
+        t["members"]["nodes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }) {
+        if m["active"].as_bool() == Some(false) {
+            continue;
+        }
+        let (Some(id), Some(name)) = (
+            m["id"].as_str(),
+            m["name"].as_str().or_else(|| m["displayName"].as_str()),
+        ) else {
+            continue;
+        };
+        if !people.iter().any(|(i, _)| i == id) {
+            people.push((id.to_string(), name.to_string()));
+        }
+    }
+    people.sort_by_key(|p| p.1.to_lowercase());
+    Ok(people)
+}
+
+/// The tickets of teams `teams` in any of the states named `states`, assigned as `who` says,
+/// most recently updated first, up to 250.
+pub fn tickets_in_states_request(teams: &[String], states: &[String], who: &Assignee) -> Value {
+    let mut filter = json!({
+        "team": {"key": {"in": teams}},
+        "state": {"name": {"in": states}},
+    });
+    match who {
+        Assignee::Anyone => {}
+        Assignee::Unassigned => filter["assignee"] = json!({"null": true}),
+        Assignee::Assigned(ids) if ids.is_empty() => filter["assignee"] = json!({"null": false}),
+        Assignee::Assigned(ids) => filter["assignee"] = json!({"id": {"in": ids}}),
+    }
     json!({
         "query": format!(
             "query($filter: IssueFilter!) {{ issues(filter: $filter, first: 250, \
              orderBy: updatedAt) {{ nodes {{ {TICKET_FIELDS} }} }} }}"
         ),
-        "variables": {"filter": {
-            "team": {"key": {"in": teams}},
-            "state": {"name": {"in": states}},
-        }},
+        "variables": {"filter": filter},
     })
 }
 
@@ -436,7 +492,11 @@ mod tests {
 
     #[test]
     fn tickets_are_asked_for_by_team_and_state_newest_first() {
-        let req = tickets_in_states_request(&["PRE".into()], &["Todo".into(), "In Review".into()]);
+        let req = tickets_in_states_request(
+            &["PRE".into()],
+            &["Todo".into(), "In Review".into()],
+            &Assignee::Anyone,
+        );
         assert_eq!(
             req["variables"]["filter"],
             json!({"team": {"key": {"in": ["PRE"]}},
@@ -447,6 +507,47 @@ mod tests {
             q.contains("orderBy: updatedAt") && q.contains("identifier"),
             "{q}"
         );
+    }
+
+    #[test]
+    fn tickets_can_be_unassigned_assigned_or_assigned_to_someone() {
+        let who = |w: &Assignee| {
+            tickets_in_states_request(&["PRE".into()], &["Todo".into()], w)["variables"]["filter"]
+                ["assignee"]
+                .clone()
+        };
+        assert_eq!(who(&Assignee::Anyone), Value::Null);
+        assert_eq!(who(&Assignee::Unassigned), json!({"null": true}));
+        assert_eq!(who(&Assignee::Assigned(vec![])), json!({"null": false}));
+        assert_eq!(
+            who(&Assignee::Assigned(vec!["u1".into(), "u2".into()])),
+            json!({"id": {"in": ["u1", "u2"]}})
+        );
+    }
+
+    #[test]
+    fn team_members_come_once_each_by_name_leaving_out_deactivated_ones() {
+        let reply = json!({"data": {"teams": {"nodes": [
+            {"members": {"nodes": [
+                {"id": "u2", "name": "Jordan Miller", "active": true},
+                {"id": "u1", "name": "aadam Z", "active": true}
+            ]}},
+            {"members": {"nodes": [
+                {"id": "u2", "name": "Jordan Miller", "active": true},
+                {"id": "u3", "name": "Gone Person", "active": false},
+                {"id": "u4", "displayName": "kris", "active": true}
+            ]}}
+        ]}}});
+        assert_eq!(
+            read_team_members(&reply).unwrap(),
+            vec![
+                ("u1".to_string(), "aadam Z".to_string()),
+                ("u2".to_string(), "Jordan Miller".to_string()),
+                ("u4".to_string(), "kris".to_string()),
+            ]
+        );
+        let req = team_members_request(&["PRE".into()]);
+        assert_eq!(req["variables"]["keys"], json!(["PRE"]));
     }
 
     use super::*;

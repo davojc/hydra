@@ -29,8 +29,8 @@ pub(super) type Lane = (Run, Card, Vec<PaneId>);
 /// its orchestrator waits for one rather than asking.
 pub fn orchestrator_prompt(pipeline: &str, from_linear: bool) -> String {
     let ticket = if from_linear {
-        "Tickets reach you from hydraui, which picks them (from Linear, or pull requests posted \
-         in Slack) and sends you one, or from me. Don't ask me for one: say you're ready and \
+        "Tickets reach you from hydraui, which picks them (from Linear, pull requests posted in \
+         Slack, or the pipeline's schedule) and sends you one, or from me. Don't ask me for one: say you're ready and \
          wait."
     } else {
         "Ask me which ticket to run."

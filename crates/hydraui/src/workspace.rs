@@ -20,6 +20,7 @@ mod pipeline_history;
 mod pipeline_settings;
 mod pipeline_tab;
 mod projects_tab;
+mod scheduled;
 mod settings_tab;
 mod shortcuts;
 mod slack;
@@ -293,6 +294,8 @@ pub struct Workspace {
     starting_up: HashMap<PaneId, std::time::Instant>,
     /// When idle orchestrators were last looked for (core spec §54).
     park_checked: Option<std::time::Instant>,
+    /// When scheduled pipelines were last looked at (core spec §58).
+    schedule_checked: Option<std::time::Instant>,
     /// Runs' tickets as Linear last said, by identifier: the card's SLA and link (phase 2 §5).
     linear_tickets: HashMap<String, crate::linear::Ticket>,
     /// Cards being offered or just sent, so one card never goes to two sessions.
@@ -402,6 +405,8 @@ impl Workspace {
                         ws.recheck_wakes(window, cx);
                         // Orchestrators idle for hours are parked to resume later.
                         ws.park_tick(window, cx);
+                        // Scheduled pipelines start their runs when due.
+                        ws.schedule_tick(window, cx);
                         // The Pipeline tab's session times tick.
                         if ws
                             .envs
@@ -567,6 +572,7 @@ impl Workspace {
             slack_inflight: HashMap::new(),
             starting_up: HashMap::new(),
             park_checked: None,
+            schedule_checked: None,
             linear_tickets: HashMap::new(),
             in_flight: Default::default(),
             _mcp_pump: mcp_pump,

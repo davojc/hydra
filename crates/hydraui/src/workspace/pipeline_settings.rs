@@ -67,13 +67,33 @@ pub(super) struct SettingsDraft {
     next_key: u64,
     linear: LinearDraft,
     slack: SlackDraft,
-    /// The Trigger dropdown: None, Linear or Slack.
+    schedule: ScheduleDraft,
+    /// The Trigger dropdown: None, Linear, Slack or Schedule.
     trigger: Entity<SelectState<Vec<&'static str>>>,
     _subs: Vec<Subscription>,
 }
 
 /// The Trigger dropdown's choices, in order.
-const TRIGGERS: [&str; 3] = ["None", "Linear", "Slack"];
+const TRIGGERS: [&str; 4] = ["None", "Linear", "Slack", "Schedule"];
+
+/// The Schedule section (core spec §58): off saves the pipeline without a `[schedule]` table.
+struct ScheduleDraft {
+    on: bool,
+    /// Days and a time, e.g. `mon 18:00`.
+    every: Entity<InputState>,
+    /// The orchestrator's environment; empty: `[autostart]`'s, else the default.
+    env: Entity<InputState>,
+}
+
+impl ScheduleDraft {
+    fn edit(&self, cx: &App) -> Option<pipeline::ScheduleSettings> {
+        let text = |i: &Entity<InputState>| i.read(cx).value().trim().to_string();
+        self.on.then(|| pipeline::ScheduleSettings {
+            every: text(&self.every),
+            env: Some(text(&self.env)).filter(|e| !e.is_empty()),
+        })
+    }
+}
 
 /// The Slack section: off saves the pipeline without a `[slack]` table. Linear and Slack can't
 /// both be on.
@@ -173,6 +193,7 @@ impl SettingsDraft {
             branch: Some(self.branch.read(cx).value().trim().to_string()).filter(|b| !b.is_empty()),
             linear: self.linear.edit(cx),
             slack: self.slack.edit(cx),
+            schedule: self.schedule.edit(cx),
             autostart: self.saved.autostart.clone(),
             product_channel: Some(self.product.read(cx).value().trim().to_string())
                 .filter(|c| !c.is_empty()),
@@ -379,7 +400,21 @@ impl Workspace {
                 "white_check_mark (✅); empty for none",
             ),
         };
-        let chosen = if saved.slack.is_some() {
+        let sc = saved.schedule.clone();
+        let schedule = ScheduleDraft {
+            on: sc.is_some(),
+            every: input(
+                sc.as_ref().map_or(String::new(), |s| s.every.clone()),
+                "mon 18:00 · weekdays 09:00 · daily 08:30",
+            ),
+            env: input(
+                sc.as_ref().and_then(|s| s.env.clone()).unwrap_or_default(),
+                "Environment; empty: the default",
+            ),
+        };
+        let chosen = if saved.schedule.is_some() {
+            3
+        } else if saved.slack.is_some() {
             2
         } else if saved.linear.is_some() {
             1
@@ -406,6 +441,7 @@ impl Workspace {
                 ws.with_draft(orch, cx, |d| {
                     d.linear.on = choice == "Linear";
                     d.slack.on = choice == "Slack";
+                    d.schedule.on = choice == "Schedule";
                 })
             },
         ));
@@ -426,6 +462,7 @@ impl Workspace {
             next_key: 0,
             linear,
             slack,
+            schedule,
             trigger,
             _subs: Vec::new(),
         };
@@ -614,6 +651,57 @@ impl Workspace {
                 .child(row("Mark done with", &sl.done_reaction))
                 .child(row("Check every (minutes)", &sl.every))
                 .child(row("Look back (hours)", &sl.lookback));
+        }
+        body
+    }
+
+    /// The Schedule trigger's options (core spec §58): when, where, and how that reads.
+    fn render_schedule_settings(
+        &self,
+        draft: &SettingsDraft,
+        cx: &App,
+    ) -> impl IntoElement + use<> {
+        let sc = &draft.schedule;
+        let mut body = v_flex().gap_2();
+        if sc.on {
+            let row = |label: &str, input: &Entity<InputState>| {
+                h_flex()
+                    .gap_3()
+                    .child(
+                        text(12.5, theme::TEXT_SECONDARY)
+                            .w(px(170.))
+                            .flex_none()
+                            .child(label.to_string()),
+                    )
+                    .child(div().w(px(300.)).child(Input::new(input).small()))
+            };
+            let every = sc.every.read(cx).value().to_string();
+            let reads = match crate::schedule::parse(&every) {
+                Ok(w) => (
+                    format!(
+                        "{}, while hydraui is open; once when it next opens that day if it \
+                         wasn't. Each run is named like {}.",
+                        w.text(),
+                        crate::schedule::ticket(&draft.file, "2026-11-16")
+                    ),
+                    theme::TEXT_SECONDARY,
+                ),
+                Err(_) if every.trim().is_empty() => (
+                    "Days and a time: mon 18:00, weekdays 09:00, daily 08:30, mon,thu 17:00"
+                        .to_string(),
+                    theme::TEXT_MUTED,
+                ),
+                Err(e) => (e.replace("[schedule] ", ""), theme::AMBER),
+            };
+            body = body
+                .child(row("Runs", &sc.every))
+                .child(row("In environment", &sc.env))
+                .child(
+                    text(12., reads.1)
+                        .pl(px(182.))
+                        .whitespace_normal()
+                        .child(reads.0),
+                );
         }
         body
     }
@@ -1126,7 +1214,8 @@ impl Workspace {
                                     .child(section_tip(
                                         "Where work comes from",
                                         "Linear: picks tickets from a team. Slack: takes pull \
-                                         requests posted in a channel. None: you give it work.",
+                                         requests posted in a channel. Schedule: starts a run \
+                                         on set days at a set time. None: you give it work.",
                                     ))
                                     // A row like the options under it: label, then the choice.
                                     .child(
@@ -1147,7 +1236,8 @@ impl Workspace {
                                             ),
                                     )
                                     .child(self.render_linear_settings(orch, draft, cx))
-                                    .child(self.render_slack_settings(draft)),
+                                    .child(self.render_slack_settings(draft))
+                                    .child(self.render_schedule_settings(draft, cx)),
                             )
                             // 3. What it does, step by step.
                             .child(

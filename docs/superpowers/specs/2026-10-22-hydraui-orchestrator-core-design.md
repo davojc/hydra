@@ -1213,3 +1213,25 @@ Toasts covered the work, so hydraui no longer shows any. Every notice goes into 
 - **In code.** `crate::inbox::Note` has the toast's builder calls (`info`, `success`, `warning`, `error`, `title`, `id1`, `on_click`; `autohide` is kept but does nothing). `window.push_note(note, cx)` sends one. No code calls gpui-component's `push_notification` any more.
 
 **Product questions under Advanced** (revises Pipeline settings, 2026-11-10). The **Product questions** section, which sets where a step asks product and how it writes the question, is now the first thing under **▸ Advanced**. It's no longer its own numbered section after the steps. Most pipelines never ask product. Its settings save as before whether Advanced is open or not.
+
+## 58. Scheduled pipelines (added 2026-11-10)
+
+For work no ticket kicks off, such as a weekly CS–Product sync summary. A pipeline can run on a timetable as its one trigger, instead of `[linear]` or `[slack]`.
+
+```toml
+[schedule]
+every = "mon 18:00"   # days, then a 24-hour local time
+env = "iov42"         # optional
+```
+
+- **Days.** `daily`, `weekdays`, `weekends`, or day names joined by commas: `mon,thu`, or full names like `monday`. The time is `HH:MM`. A mistake is named when the file is read.
+- **When it runs.** hydraui looks every 30 seconds. A run is due on one of its days once the time has passed, if none has started that day. So hydraui closed at 18:00 runs it once when it next opens that day, and a day it never opens is skipped. Each pipeline's last run date is kept in `<HYDRA_HOME>/hydraui/schedule.json`. It's written before the hand-off, so a run that can't start isn't retried every 30 seconds.
+- **The run.**
+  - **Its name:** the ticket is the pipeline's file name in capitals plus the date, e.g. `CS-SYNC-2026-11-16`. It has plain characters only, so a restart finds its log.
+  - **Its environment:** `[schedule] env`, else `[autostart]`'s, else one where the pipeline already has an orchestrator, else the default environment, else the first. The first of these that exists is used.
+  - **Who gets it:** the pipeline's free orchestrator in that environment, else a new one, as a Tickets pick does. It's told it's the scheduled run and to call `run_start` with that ticket and the summary `<name> <date>`.
+  - **Notices:** "<name> started its scheduled run (Mondays at 18:00) as CS-SYNC-2026-11-16 in iov42".
+- **Pipeline settings.** **Source** offers Schedule beside None, Linear and Slack. It has **Runs** (`mon 18:00`) and **In environment** fields. Under them, a line reads the schedule back ("Mondays at 18:00, while hydraui is open…") with an example run name, or says what's wrong.
+- **The orchestrator's first prompt.** It says work can come from the schedule, so it waits rather than asking for a ticket.
+- **Copies and exports.** These drop `[schedule]`, as they drop `[autostart]`, so a copy never runs beside the original.
+- **Not yet:** the card shows nothing of the schedule. It doesn't run while hydraui is closed.

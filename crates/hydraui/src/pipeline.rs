@@ -47,6 +47,23 @@ pub struct Pipeline {
     /// Where its work comes from in Slack instead (`[slack]`): pull requests posted in a
     /// channel. A pipeline has one trigger, this or `linear`.
     pub slack: Option<SlackSettings>,
+    /// Runs on a timetable instead (`[schedule]`, core spec §58).
+    pub schedule: Option<ScheduleSettings>,
+}
+
+/// A pipeline's `[schedule]` table (core spec §58): when it starts a run by itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleSettings {
+    /// As written, e.g. `mon 18:00`; read by `crate::schedule::parse`.
+    pub every: String,
+    /// The environment its orchestrator runs in; `None`: `[autostart]`'s, else the default.
+    pub env: Option<String>,
+}
+
+impl ScheduleSettings {
+    pub fn when(&self) -> Option<crate::schedule::When> {
+        crate::schedule::parse(&self.every).ok()
+    }
 }
 
 /// A pipeline's `[slack]` table: each message in `channel` with a GitHub pull request link and
@@ -157,9 +174,9 @@ impl Pipeline {
             || self.slack.as_ref().is_some_and(|s| s.watch)
     }
 
-    /// Whether work reaches it by itself, from Linear or Slack.
+    /// Whether work reaches it by itself, from Linear, Slack or its schedule.
     pub fn has_trigger(&self) -> bool {
-        self.linear.is_some() || self.slack.is_some()
+        self.linear.is_some() || self.slack.is_some() || self.schedule.is_some()
     }
 
     /// How a stage's Claude starts, before its own arguments: with [`PRODUCT_TOOLS`] allowed
@@ -217,8 +234,29 @@ struct File {
     autostart: Option<FileAutostart>,
     product: Option<FileProduct>,
     slack: Option<FileSlack>,
+    schedule: Option<FileSchedule>,
     color: Option<String>,
     runs_at_once: Option<u8>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileSchedule {
+    every: String,
+    env: Option<String>,
+}
+
+/// The `[schedule]` table, checked (core spec §58).
+fn schedule_settings(f: FileSchedule) -> Result<ScheduleSettings, String> {
+    let every = f.every.split_whitespace().collect::<Vec<_>>().join(" ");
+    crate::schedule::parse(&every)?;
+    Ok(ScheduleSettings {
+        every,
+        env: f
+            .env
+            .map(|e| e.trim().to_string())
+            .filter(|e| !e.is_empty()),
+    })
 }
 
 /// The most tickets one pipeline runs at once: each is a Claude orchestrator plus its stage's
@@ -435,8 +473,17 @@ fn check_bar(bar: Option<u8>, what: &str) -> Result<(), String> {
 pub fn parse(text: &str) -> Result<Pipeline, String> {
     let file: File = toml::from_str(text).map_err(|e| e.message().to_string())?;
     check_bar(file.bar, "the pipeline")?;
-    if file.linear.is_some() && file.slack.is_some() {
-        return Err("a pipeline has one trigger: [linear] or [slack], not both".into());
+    if [
+        file.linear.is_some(),
+        file.slack.is_some(),
+        file.schedule.is_some(),
+    ]
+    .iter()
+    .filter(|on| **on)
+    .count()
+        > 1
+    {
+        return Err("a pipeline has one trigger: [linear], [slack] or [schedule]".into());
     }
     if file.stages.is_empty() {
         return Err("the pipeline has no stages: add a [[stage]]".into());
@@ -511,6 +558,7 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
             .filter(|s| !s.is_empty())
             .map(str::to_string),
         slack: file.slack.map(slack_settings).transpose()?,
+        schedule: file.schedule.map(schedule_settings).transpose()?,
         color: file.color.as_deref().map(parse_color).transpose()?,
         runs_at_once: match file.runs_at_once.unwrap_or(1) {
             n @ 1..=MAX_RUNS_AT_ONCE => n,
@@ -543,6 +591,7 @@ pub struct Edit {
     pub product_asks: bool,
     pub color: Option<u32>,
     pub slack: Option<SlackSettings>,
+    pub schedule: Option<ScheduleSettings>,
     pub runs_at_once: u8,
 }
 
@@ -586,6 +635,7 @@ impl From<&Pipeline> for Edit {
             product_asks: p.product_asks,
             color: p.color,
             slack: p.slack.clone(),
+            schedule: p.schedule.clone(),
             runs_at_once: p.runs_at_once,
         }
     }
@@ -638,6 +688,14 @@ pub fn validate(edit: &Edit) -> Result<(), &'static str> {
         let done = sl.done_reaction.trim().trim_matches(':');
         if done.eq_ignore_ascii_case(sl.reaction.trim().trim_matches(':')) {
             return Err("The done reaction must differ from the one that marks a message taken");
+        }
+    }
+    if let Some(sc) = &edit.schedule {
+        if edit.linear.is_some() || edit.slack.is_some() {
+            return Err("Take work from one source: Linear, Slack or a schedule");
+        }
+        if crate::schedule::parse(&sc.every).is_err() {
+            return Err("Write the schedule as days and a time, e.g. mon 18:00");
         }
     }
     Ok(())
@@ -819,6 +877,26 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
         }
         None => {
             doc.remove("slack");
+        }
+    }
+    match &edit.schedule {
+        Some(sc) => {
+            if !doc.get("schedule").is_some_and(Item::is_table) {
+                doc["schedule"] = Item::Table(Table::new());
+            }
+            let t = &mut doc["schedule"];
+            t["every"] = value(sc.every.split_whitespace().collect::<Vec<_>>().join(" "));
+            match sc.env.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+                Some(env) => t["env"] = value(env),
+                None => {
+                    if let Some(t) = t.as_table_mut() {
+                        t.remove("env");
+                    }
+                }
+            }
+        }
+        None => {
+            doc.remove("schedule");
         }
     }
     if edit.runs_at_once > 1 {
@@ -1004,6 +1082,8 @@ pub fn create(hydra_root: &Path, title: &str, from: Option<&str>) -> Result<Stri
 fn takes_nothing(doc: &mut toml_edit::DocumentMut) {
     use toml_edit::{Item, value};
     doc.remove("autostart");
+    // A copy on its own timetable would run beside the original (core spec §58).
+    doc.remove("schedule");
     for trigger in ["linear", "slack"] {
         if let Some(t) = doc.get_mut(trigger).and_then(Item::as_table_mut) {
             t["watch"] = value(false);
@@ -1164,6 +1244,47 @@ mod tests {
         assert!(!text.contains("runs_at_once"), "{text}");
         edit.runs_at_once = 9;
         assert!(validate(&edit).is_err());
+    }
+
+    #[test]
+    fn a_schedule_is_read_saved_and_one_trigger_only() {
+        let base = "name = \"CS sync\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n";
+        let p = parse(&format!("{base}[schedule]\nevery = \" mon   18:00 \"\n")).unwrap();
+        let sc = p.schedule.clone().unwrap();
+        assert_eq!((sc.every.as_str(), sc.env.as_deref()), ("mon 18:00", None));
+        assert_eq!(sc.when().unwrap().text(), "Mondays at 18:00");
+        assert!(p.has_trigger());
+        let bad = parse(&format!("{base}[schedule]\nevery = \"mon 6pm\"\n")).unwrap_err();
+        assert!(bad.contains("HH:MM"), "{bad}");
+        let two = parse(&format!(
+            "{base}[schedule]\nevery = \"mon 18:00\"\n[slack]\nchannel = \"C0C217CER6G\"\n"
+        ))
+        .unwrap_err();
+        assert!(two.contains("one trigger"), "{two}");
+
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(folder(d.path()).join("cs-sync.toml"), base).unwrap();
+        let mut edit = Edit::from(&load(d.path(), "cs-sync").unwrap());
+        edit.schedule = Some(ScheduleSettings {
+            every: "funday 18:00".into(),
+            env: None,
+        });
+        assert!(validate(&edit).is_err());
+        edit.schedule = Some(ScheduleSettings {
+            every: "weekdays 09:00".into(),
+            env: Some("iov42".into()),
+        });
+        assert_eq!(validate(&edit), Ok(()));
+        save(d.path(), "cs-sync", &edit).unwrap();
+        let back = load(d.path(), "cs-sync").unwrap().schedule.unwrap();
+        assert_eq!(
+            (back.every.as_str(), back.env.as_deref()),
+            ("weekdays 09:00", Some("iov42"))
+        );
+        edit.schedule = None;
+        save(d.path(), "cs-sync", &edit).unwrap();
+        assert_eq!(load(d.path(), "cs-sync").unwrap().schedule, None);
     }
 
     #[test]

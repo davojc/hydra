@@ -47,6 +47,19 @@ pub struct HistoryTab {
     /// The log time the items were read at.
     pub read_at: String,
     pub loading: bool,
+    /// Lines whose details were opened or closed by hand (`detail_key`); the rest show theirs
+    /// open when they need a person (amber or red), closed otherwise.
+    pub toggled: std::collections::HashSet<String>,
+}
+
+fn detail_key(item: &Item) -> String {
+    format!("{}|{}|{}", item.run, item.at, item.text)
+}
+
+/// Whether `item`'s details show.
+fn details_open(item: &Item, toggled: &std::collections::HashSet<String>) -> bool {
+    let by_default = matches!(item.tone, Tone::Attention | Tone::Bad);
+    by_default != toggled.contains(&detail_key(item))
 }
 
 impl Workspace {
@@ -113,6 +126,7 @@ impl Workspace {
             items: Vec::new(),
             read_at: now.clone(),
             loading: true,
+            toggled: Default::default(),
         });
         self.ui.history_seen = Some(now.clone());
         let _ = crate::config::set(&self.hydra.paths, "history_seen", Some(now.into()));
@@ -279,6 +293,18 @@ impl Workspace {
 
     /// One line: the time, a dot in its tone, the ticket and what happened, its pipeline. A click
     /// opens the ticket or pull request.
+    fn toggle_history_details(&mut self, key: String, cx: &mut Context<Self>) {
+        if let Some(h) = &mut self.history
+            && !h.toggled.remove(&key)
+        {
+            h.toggled.insert(key);
+        }
+        cx.notify();
+    }
+
+    /// One line: the time, a dot in its tone, the ticket (a click opens it), what happened, its
+    /// pipeline; and, under it, its details (the report's summary and concerns) when open. A
+    /// click on the line opens or closes them.
     fn history_row(&self, n: usize, item: &Item, cx: &mut Context<Self>) -> AnyElement {
         let tone = match item.tone {
             Tone::Good => theme::GREEN,
@@ -289,7 +315,33 @@ impl Workspace {
         let ticket = crate::pipeline_card::ticket_title(&item.ticket, item.link.as_deref());
         let title = item.title.clone();
         let link = item.link.clone();
-        h_flex()
+        let has_details = !item.details.is_empty();
+        let open = has_details
+            && self
+                .history
+                .as_ref()
+                .is_some_and(|h| details_open(item, &h.toggled));
+        let key = detail_key(item);
+        let toggle_hint = has_details.then(|| {
+            let n = item.details.len();
+            let what = if item.tone == Tone::Good {
+                if n == 1 { "concern" } else { "concerns" }
+            } else if n == 1 {
+                "detail"
+            } else {
+                "details"
+            };
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(color(if item.tone == Tone::Good {
+                    theme::AMBER
+                } else {
+                    theme::TEXT_MUTED
+                }))
+                .child(format!("{} {n} {what}", if open { "▾" } else { "▸" }))
+        });
+        let line = h_flex()
             .id(SharedString::from(format!("history-row-{n}")))
             .gap_3()
             .px_2()
@@ -297,12 +349,7 @@ impl Workspace {
             .items_center()
             .rounded_md()
             .hover(|d| d.bg(color(theme::RAISED)))
-            .when(link.is_some(), |d| d.cursor_pointer())
-            .when(!title.is_empty(), |d| {
-                d.tooltip(move |window, cx| {
-                    gpui_component::tooltip::Tooltip::new(title.clone()).build(window, cx)
-                })
-            })
+            .when(has_details || link.is_some(), |d| d.cursor_pointer())
             .child(
                 div()
                     .w(px(44.))
@@ -318,15 +365,28 @@ impl Workspace {
                     .text_color(color(tone))
                     .child("●"),
             )
-            .child(
+            .child({
+                let (link, title) = (link.clone(), title.clone());
                 div()
+                    .id(SharedString::from(format!("history-ticket-{n}")))
                     .w(px(170.))
                     .flex_none()
                     .truncate()
                     .text_sm()
                     .text_color(color(theme::TEXT))
-                    .child(ticket),
-            )
+                    .when(!title.is_empty(), |d| {
+                        d.tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(title.clone()).build(window, cx)
+                        })
+                    })
+                    .child(ticket)
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        if let Some(url) = &link {
+                            cx.open_url(url);
+                        }
+                    })
+            })
             .child(
                 div()
                     .flex_1()
@@ -340,6 +400,7 @@ impl Workspace {
                     }))
                     .child(item.text.clone()),
             )
+            .children(toggle_hint)
             .child(
                 div()
                     .flex_none()
@@ -349,11 +410,30 @@ impl Workspace {
                     .text_color(color(theme::TEXT_MUTED))
                     .child(item.pipeline.clone()),
             )
-            .on_click(cx.listener(move |_, _, _, cx| {
-                if let Some(url) = &link {
+            .on_click(cx.listener(move |ws, _, _, cx| {
+                if has_details {
+                    ws.toggle_history_details(key.clone(), cx);
+                } else if let Some(url) = &link {
                     cx.open_url(url);
                 }
-            }))
-            .into_any_element()
+            }));
+        let details = open.then(|| {
+            v_flex()
+                .ml(px(76.))
+                .mr_2()
+                .mb_1()
+                .pl_3()
+                .gap_1()
+                .border_l_2()
+                .border_color(color(tone).opacity(0.5))
+                .children(item.details.iter().map(|d| {
+                    div()
+                        .text_sm()
+                        .whitespace_normal()
+                        .text_color(color(theme::TEXT_SECONDARY))
+                        .child(d.clone())
+                }))
+        });
+        v_flex().child(line).children(details).into_any_element()
     }
 }

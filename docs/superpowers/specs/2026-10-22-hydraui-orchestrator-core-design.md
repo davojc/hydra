@@ -1086,6 +1086,11 @@ For catching up after time away. A **History** button right of **Projects** in t
   - Amber: `Needs you: …` and `Asked product: …`.
   - Muted: `<Stage> started`, `Waiting on the author: …`, `The author replied: …`, `Product answered: …`, `You chose <choice>: <note>` and `Went back to <Stage>`.
   - Lines written in the same millisecond read latest first, so `Done` comes above the last stage's pass.
+- **Details** (added 2026-11-10). A stage's report travels with its lines, so what a person needs to know is visible without opening the pull request.
+  - A **Needs you** line reads in plain words: `Needs you: Review PR scored 70, under its bar of 95`, `… is blocked`, or `… needs a person to check`. Under it, open, come the reason in full and the report's reasons against, such as "RED zone … approval needs a human code owner".
+  - A passed stage's reasons against show behind an amber `▸ N concerns`.
+  - Failures and stops show theirs open too.
+  - A click on a line opens or closes its details; a click on its ticket opens the ticket.
 - **Days** are headed Today, Yesterday, or the date.
 - **Spans**:
   - **Since you last looked** comes first whenever History has been opened before, and is what it opens at. Opening it records the time in hydraui's config.toml as `history_seen`, a new optional key.

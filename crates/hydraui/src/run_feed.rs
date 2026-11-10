@@ -36,6 +36,9 @@ pub struct Item {
     pub link: Option<String>,
     pub text: String,
     pub tone: Tone,
+    /// What a person needs to read beside it: for a stage, its report's summary and its
+    /// reasons against (such as a change left for a human to approve).
+    pub details: Vec<String>,
 }
 
 /// The first line of `s`, cut to `max` characters with `…`.
@@ -56,7 +59,10 @@ pub fn items(run: &str, text: &str) -> Vec<Item> {
         (String::new(), String::new(), String::new(), None::<String>);
     let mut titles: HashMap<String, String> = HashMap::new();
     let mut scores: HashMap<String, u64> = HashMap::new();
-    let mut out: Vec<(String, String, Tone)> = Vec::new();
+    let mut out: Vec<(String, String, Tone, Vec<String>)> = Vec::new();
+    // Each stage's latest report: its summary and its reasons against.
+    let mut reports: HashMap<String, (String, Vec<String>)> = HashMap::new();
+    let mut last_reported = String::new();
     // Who the last question went to: product, or a pull request's author.
     let mut asked_author = false;
     for line in text.lines() {
@@ -73,7 +79,8 @@ pub fn items(run: &str, text: &str) -> Vec<Item> {
                 .cloned()
                 .unwrap_or_else(|| sentence(id))
         };
-        let mut push = |text: String, tone| out.push((at.clone(), text, tone));
+        let mut details: Option<Vec<String>> = None;
+        let mut push = |text: String, tone| out.push((at.clone(), text, tone, Vec::new()));
         match v.get("event").and_then(Value::as_str) {
             Some("run started") => {
                 ticket = s("ticket");
@@ -99,13 +106,30 @@ pub fn items(run: &str, text: &str) -> Vec<Item> {
             }
             Some("stage started") => push(format!("{} started", stage(&s("stage"))), Tone::Neutral),
             Some("report") => {
-                if let Some(score) = v
-                    .get("rating")
-                    .and_then(|r| r.get("score"))
-                    .and_then(Value::as_u64)
-                {
+                let rating = v.get("rating");
+                if let Some(score) = rating.and_then(|r| r.get("score")).and_then(Value::as_u64) {
                     scores.insert(s("stage"), score.min(100));
                 }
+                let summary = rating
+                    .and_then(|r| r.get("summary"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                let against: Vec<String> = rating
+                    .and_then(|r| r.get("reasons"))
+                    .and_then(Value::as_array)
+                    .map(|rs| {
+                        rs.iter()
+                            .filter(|r| r.get("side").and_then(Value::as_str) == Some("against"))
+                            .filter_map(|r| r.get("text").and_then(Value::as_str))
+                            .map(|t| t.trim().to_string())
+                            .filter(|t| !t.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                last_reported = s("stage");
+                reports.insert(last_reported.clone(), (summary, against));
             }
             Some("stage passed") => {
                 let id = s("stage");
@@ -114,6 +138,7 @@ pub fn items(run: &str, text: &str) -> Vec<Item> {
                     None => format!("{} passed", stage(&id)),
                 };
                 push(text, Tone::Good);
+                details = reports.get(&id).map(|(_, against)| against.clone());
             }
             Some("stage failed") => push(
                 format!(
@@ -123,10 +148,57 @@ pub fn items(run: &str, text: &str) -> Vec<Item> {
                 ),
                 Tone::Bad,
             ),
-            Some("needs you") => push(
-                format!("Needs you: {}", short(&s("reason"), 120)),
-                Tone::Attention,
-            ),
+            Some("needs you") => {
+                let reason = s("reason");
+                let (id, headline, rest) = match needs_you_parts(&reason) {
+                    Some(Parts::Scored {
+                        stage: id,
+                        score,
+                        bar,
+                        rest,
+                    }) => (
+                        id.to_string(),
+                        format!(
+                            "Needs you: {} scored {score}, under its bar of {bar}",
+                            stage(id)
+                        ),
+                        rest,
+                    ),
+                    Some(Parts::Blocked { stage: id, rest }) => (
+                        id.to_string(),
+                        format!("Needs you: {} is blocked", stage(id)),
+                        rest,
+                    ),
+                    Some(Parts::Check { stage: id, rest }) => (
+                        id.to_string(),
+                        format!("Needs you: {} needs a person to check", stage(id)),
+                        rest,
+                    ),
+                    None => (
+                        last_reported.clone(),
+                        format!("Needs you: {}", short(&reason, 120)),
+                        "",
+                    ),
+                };
+                push(headline, Tone::Attention);
+                let mut d: Vec<String> = Vec::new();
+                let report = reports.get(&id);
+                let rest = rest.trim();
+                if !rest.is_empty() {
+                    d.push(rest.to_string());
+                } else if let Some((summary, _)) = report.filter(|(s, _)| !s.is_empty()) {
+                    d.push(summary.clone());
+                }
+                if let Some((_, against)) = report {
+                    d.extend(
+                        against
+                            .iter()
+                            .filter(|a| !rest.contains(a.as_str()))
+                            .cloned(),
+                    );
+                }
+                details = Some(d);
+            }
             // A review waiting on a pull request's author needs nothing from the user.
             Some("asked") if s("who") == "author" => {
                 asked_author = true;
@@ -179,9 +251,12 @@ pub fn items(run: &str, text: &str) -> Vec<Item> {
             Some("run ended") => push(format!("Stopped: {}", short(&s("reason"), 120)), Tone::Bad),
             _ => {}
         }
+        if let (Some(d), Some(last)) = (details, out.last_mut()) {
+            last.3 = d;
+        }
     }
     out.into_iter()
-        .map(|(at, text, tone)| Item {
+        .map(|(at, text, tone, details)| Item {
             at,
             run: run.to_string(),
             pipeline: pipeline.clone(),
@@ -190,8 +265,45 @@ pub fn items(run: &str, text: &str) -> Vec<Item> {
             link: link.clone(),
             text,
             tone,
+            details,
         })
         .collect()
+}
+
+/// A run's "needs you" reason, as the gate writes it.
+#[derive(Debug, PartialEq, Eq)]
+enum Parts<'a> {
+    /// `stage <id>: <score>, bar <bar>. <rest>`
+    Scored {
+        stage: &'a str,
+        score: &'a str,
+        bar: &'a str,
+        rest: &'a str,
+    },
+    /// `stage <id> is blocked: <rest>`
+    Blocked { stage: &'a str, rest: &'a str },
+    /// `stage <id> needs a person to check: <rest>`
+    Check { stage: &'a str, rest: &'a str },
+}
+
+fn needs_you_parts(reason: &str) -> Option<Parts<'_>> {
+    let r = reason.strip_prefix("stage ")?;
+    if let Some((id, rest)) = r.split_once(" is blocked: ") {
+        return Some(Parts::Blocked { stage: id, rest });
+    }
+    if let Some((id, rest)) = r.split_once(" needs a person to check: ") {
+        return Some(Parts::Check { stage: id, rest });
+    }
+    let (id, r) = r.split_once(": ")?;
+    let (score, r) = r.split_once(", bar ")?;
+    let (bar, rest) = r.split_once('.').unwrap_or((r, ""));
+    (score.chars().all(|c| c.is_ascii_digit()) && bar.chars().all(|c| c.is_ascii_digit()))
+        .then_some(Parts::Scored {
+            stage: id,
+            score,
+            bar,
+            rest: rest.trim_start(),
+        })
 }
 
 /// Everything every pipeline did at or after `since` (a log time), newest first, from the logs
@@ -480,5 +592,73 @@ mod tests {
     fn long_text_is_cut_to_its_first_line() {
         assert_eq!(short("abc def\nmore", 100), "abc def");
         assert_eq!(short("abcdefgh", 5), "abcde…");
+    }
+
+    #[test]
+    fn needs_you_says_why_with_the_reports_concerns_in_full() {
+        let text = log(&[
+            started("2026-11-10 08:00:00.000"),
+            json!({"at": "2026-11-10 08:01:00.000", "event": "stage started", "stage": "verify"}),
+            json!({"at": "2026-11-10 08:20:00.000", "event": "report", "stage": "verify",
+            "rating": {"score": 92, "summary": "Reviewed #1908, no code issues.",
+                "reasons": [
+                    {"side": "for", "text": "contract consistent"},
+                    {"side": "against", "text": "This is a RED-zone auth change, left for a human to approve."}
+                ]}}),
+            json!({"at": "2026-11-10 08:20:00.001", "event": "needs you",
+                "reason": "stage verify: 92, bar 95. Reviewed #1908, no code issues."}),
+        ]);
+        let all = items("r", &text);
+        let last = all.last().unwrap();
+        assert_eq!(
+            last.text,
+            "Needs you: Verify scored 92, under its bar of 95"
+        );
+        assert_eq!(
+            last.details,
+            vec![
+                "Reviewed #1908, no code issues.",
+                "This is a RED-zone auth change, left for a human to approve.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_blocked_stage_and_a_passed_one_carry_their_concerns() {
+        let text = log(&[
+            started("2026-11-10 08:00:00.000"),
+            json!({"at": "2026-11-10 08:10:00.000", "event": "report", "stage": "replicate",
+                "rating": {"score": 95, "summary": "ok",
+                    "reasons": [{"side": "against", "text": "Not run against live Dapr."}]}}),
+            json!({"at": "2026-11-10 08:10:00.001", "event": "stage passed", "stage": "replicate"}),
+            json!({"at": "2026-11-10 08:30:00.000", "event": "needs you",
+                "reason": "stage verify is blocked: posting was refused"}),
+        ]);
+        let all = items("r", &text);
+        assert_eq!(all[0].details, vec!["Not run against live Dapr."]);
+        assert_eq!(all[1].text, "Needs you: Verify is blocked");
+        assert_eq!(all[1].details, vec!["posting was refused"]);
+    }
+
+    #[test]
+    fn a_reason_in_another_shape_still_reads() {
+        assert_eq!(needs_you_parts("usage is low"), None);
+        assert_eq!(
+            needs_you_parts("stage first needs a person to check: review the auth keys"),
+            Some(Parts::Check {
+                stage: "first",
+                rest: "review the auth keys"
+            })
+        );
+        assert_eq!(needs_you_parts("stage a: high, bar 9. x"), None);
+        assert_eq!(
+            needs_you_parts("stage a: 40, bar 80"),
+            Some(Parts::Scored {
+                stage: "a",
+                score: "40",
+                bar: "80",
+                rest: ""
+            })
+        );
     }
 }

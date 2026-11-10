@@ -3776,6 +3776,7 @@ name = "hydraui"
 version = "0.6.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "cc",
  "dirs 6.0.0",
  "futures",

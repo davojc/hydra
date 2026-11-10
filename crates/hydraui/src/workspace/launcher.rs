@@ -119,6 +119,18 @@ impl Workspace {
                     ws.connect_slack(env, w, cx)
                 });
             }
+            Action::ConnectGmail => {
+                let envs = self.hydra.env_names();
+                self.choose_env_from(envs, "Connect Gmail for", window, cx, |ws, env, w, cx| {
+                    ws.connect_gmail(env, w, cx)
+                });
+            }
+            Action::CheckGmail => {
+                let envs = self.hydra.env_names();
+                self.choose_env_from(envs, "Check Gmail in", window, cx, |ws, env, w, cx| {
+                    ws.check_gmail(env, w, cx)
+                });
+            }
             Action::EditPipelines => {
                 let root = self.hydra.paths.root().to_path_buf();
                 if let Err(e) = crate::pipeline::ensure_example(&root) {

@@ -77,6 +77,11 @@ pub struct UiConfig {
     /// The team's Canopy, which finishes **Connect Slack**'s sign-in (it holds the Slack app's
     /// secret) and hands each person's own token back, e.g. `https://canopy.dev.iov42.net`.
     pub slack_connect_url: Option<String>,
+    /// The team's Desktop-type Google OAuth client, for **Connect Gmail** (email triage spec
+    /// §3). A desktop client's secret isn't secret by Google's own account of it, so it sits
+    /// here; PKCE protects the sign-in.
+    pub gmail_client_id: Option<String>,
+    pub gmail_client_secret: Option<String>,
     /// Environments whose set-up checklist was hidden from the sidebar (spec §48).
     pub setup_hidden: Vec<String>,
     /// Claude plugins the team expects in every environment, listed on the set-up checklist
@@ -113,6 +118,16 @@ pub struct SetupPlugin {
     pub label: Option<String>,
 }
 
+impl UiConfig {
+    /// The Google OAuth client for **Connect Gmail**, once both its id and secret are set.
+    pub fn gmail_client(&self) -> Option<crate::gmail::Client> {
+        Some(crate::gmail::Client {
+            id: self.gmail_client_id.clone()?,
+            secret: self.gmail_client_secret.clone().filter(|s| !s.is_empty())?,
+        })
+    }
+}
+
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
@@ -130,6 +145,8 @@ impl Default for UiConfig {
             machine_name: None,
             min_week_left: crate::runs::MIN_WEEK_LEFT,
             slack_connect_url: None,
+            gmail_client_id: None,
+            gmail_client_secret: None,
             setup_hidden: Vec::new(),
             setup_plugins: Vec::new(),
             pipelines_condensed: false,
@@ -210,6 +227,19 @@ pub fn parse(text: &str) -> (UiConfig, Vec<String>) {
                 cfg.slack_connect_url = Some(u);
                 Ok(())
             }),
+            "gmail_client_id" => get::<String>(value).and_then(|id| {
+                let id = id.trim().to_string();
+                if !id.ends_with(".apps.googleusercontent.com") {
+                    return Err(format!(
+                        "{id:?} must be a Google client id ending .apps.googleusercontent.com"
+                    ));
+                }
+                cfg.gmail_client_id = Some(id);
+                Ok(())
+            }),
+            "gmail_client_secret" => {
+                get::<String>(value).map(|s| cfg.gmail_client_secret = Some(s.trim().to_string()))
+            }
             "setup_hidden" => get(value).map(|e| cfg.setup_hidden = e),
             "pipelines_condensed" => get(value).map(|c| cfg.pipelines_condensed = c),
             "history_seen" => get(value).map(|h| cfg.history_seen = Some(h)),
@@ -458,6 +488,8 @@ default_shell = "bash"
 editor = "code"
 min_week_left = 25
 slack_connect_url = "https://canopy.dev.iov42.net/"
+gmail_client_id = "123-abc.apps.googleusercontent.com"
+gmail_client_secret = "GOCSPX-test"
 setup_hidden = ["work"]
 pipelines_condensed = true
 history_seen = "2026-11-10 09:00:00.000"
@@ -505,6 +537,13 @@ new_terminal = "ctrl-alt-d"
             cfg.slack_connect_url.as_deref(),
             Some("https://canopy.dev.iov42.net")
         );
+        assert_eq!(
+            cfg.gmail_client(),
+            Some(crate::gmail::Client {
+                id: "123-abc.apps.googleusercontent.com".into(),
+                secret: "GOCSPX-test".into(),
+            })
+        );
         assert_eq!(cfg.colors.background.as_deref(), Some("#101010"));
         assert_eq!(cfg.colors.palette.as_ref().map(Vec::len), Some(2));
         assert_eq!(cfg.keys["new_terminal"], "ctrl-alt-d");
@@ -515,6 +554,18 @@ new_terminal = "ctrl-alt-d"
         let (cfg, problems) = parse("slack_connect_url = \"http://canopy\"\n");
         assert_eq!(cfg.slack_connect_url, None);
         assert!(problems[0].contains("https"), "{problems:?}");
+    }
+
+    #[test]
+    fn a_gmail_client_needs_a_google_id_and_its_secret() {
+        let (cfg, problems) = parse("gmail_client_id = \"not-google\"\n");
+        assert_eq!(cfg.gmail_client_id, None);
+        assert!(
+            problems[0].contains("apps.googleusercontent.com"),
+            "{problems:?}"
+        );
+        let cfg = clean("gmail_client_id = \"1.apps.googleusercontent.com\"\n");
+        assert_eq!(cfg.gmail_client(), None);
     }
 
     #[test]

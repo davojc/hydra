@@ -77,6 +77,40 @@ pub struct UiConfig {
     /// The team's Canopy, which finishes **Connect Slack**'s sign-in (it holds the Slack app's
     /// secret) and hands each person's own token back, e.g. `https://canopy.dev.iov42.net`.
     pub slack_connect_url: Option<String>,
+    /// Environments whose set-up checklist was hidden from the sidebar (spec §48).
+    pub setup_hidden: Vec<String>,
+    /// Claude plugins the team expects in every environment, listed on the set-up checklist
+    /// (spec §48).
+    pub setup_plugins: Vec<SetupPlugin>,
+    /// The Pipelines tab shows only what's running, one line per ticket (spec §49).
+    pub pipelines_condensed: bool,
+    /// When History was last opened, as a run-log time (core spec §50).
+    pub history_seen: Option<String>,
+    /// The Linear teams and states the Tickets page opens on (core spec §53).
+    pub tickets_teams: Vec<String>,
+    pub tickets_states: Vec<String>,
+    /// `anyone`, `unassigned` or `assigned`; with `assigned`, `tickets_people` are the Linear
+    /// user ids to narrow to (none: anyone assigned).
+    pub tickets_assignee: String,
+    pub tickets_people: Vec<String>,
+    /// Labels the Tickets page shows on a row when the ticket has them.
+    pub tickets_labels: Vec<String>,
+    /// Hours an orchestrator's runs may sit with nothing changing before it is parked to resume
+    /// later (core spec §54); 0 never parks.
+    pub park_idle_hours: u32,
+}
+
+/// A Claude plugin the set-up checklist asks for, e.g. the team's skill router.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetupPlugin {
+    /// `name@marketplace`, as `claude plugin install` takes it.
+    pub plugin: String,
+    /// The marketplace's source for `claude plugin marketplace add`, such as `owner/repo`;
+    /// left out when the marketplace is one everyone already has.
+    pub marketplace: Option<String>,
+    /// What the checklist calls it; the plugin's name when left out.
+    pub label: Option<String>,
 }
 
 impl Default for UiConfig {
@@ -96,6 +130,16 @@ impl Default for UiConfig {
             machine_name: None,
             min_week_left: crate::runs::MIN_WEEK_LEFT,
             slack_connect_url: None,
+            setup_hidden: Vec::new(),
+            setup_plugins: Vec::new(),
+            pipelines_condensed: false,
+            history_seen: None,
+            tickets_teams: Vec::new(),
+            tickets_states: Vec::new(),
+            tickets_assignee: "anyone".to_string(),
+            tickets_people: Vec::new(),
+            tickets_labels: Vec::new(),
+            park_idle_hours: crate::run_park::DEFAULT_HOURS,
         }
     }
 }
@@ -165,6 +209,39 @@ pub fn parse(text: &str) -> (UiConfig, Vec<String>) {
                 }
                 cfg.slack_connect_url = Some(u);
                 Ok(())
+            }),
+            "setup_hidden" => get(value).map(|e| cfg.setup_hidden = e),
+            "pipelines_condensed" => get(value).map(|c| cfg.pipelines_condensed = c),
+            "history_seen" => get(value).map(|h| cfg.history_seen = Some(h)),
+            "tickets_teams" => get(value).map(|t| cfg.tickets_teams = t),
+            "tickets_states" => get(value).map(|s| cfg.tickets_states = s),
+            "tickets_assignee" => get::<String>(value).and_then(|a| match a.as_str() {
+                "anyone" | "unassigned" | "assigned" => {
+                    cfg.tickets_assignee = a;
+                    Ok(())
+                }
+                _ => Err(format!("{a:?} isn't anyone, unassigned or assigned")),
+            }),
+            "tickets_people" => get(value).map(|p| cfg.tickets_people = p),
+            "tickets_labels" => get(value).map(|l| cfg.tickets_labels = l),
+            "park_idle_hours" => get::<i64>(value).and_then(|n| {
+                cfg.park_idle_hours = u32::try_from(n)
+                    .ok()
+                    .filter(|n| *n <= 168)
+                    .ok_or(format!("{n} must be between 0 and 168 hours"))?;
+                Ok(())
+            }),
+            "setup_plugins" => get::<Vec<SetupPlugin>>(value).and_then(|p| {
+                match p.iter().find(|p| !p.plugin.contains('@')) {
+                    Some(bad) => Err(format!(
+                        "{:?} isn't name@marketplace, as claude plugin install takes it",
+                        bad.plugin
+                    )),
+                    None => {
+                        cfg.setup_plugins = p;
+                        Ok(())
+                    }
+                }
             }),
             "colors" => match value {
                 toml::Value::Table(colors) => {
@@ -381,6 +458,16 @@ default_shell = "bash"
 editor = "code"
 min_week_left = 25
 slack_connect_url = "https://canopy.dev.iov42.net/"
+setup_hidden = ["work"]
+pipelines_condensed = true
+history_seen = "2026-11-10 09:00:00.000"
+tickets_teams = ["PRE", "INTH"]
+tickets_states = ["Todo", "In Review"]
+tickets_assignee = "assigned"
+tickets_people = ["u2"]
+tickets_labels = ["Bug"]
+park_idle_hours = 6
+setup_plugins = [{ plugin = "skill-router@iov42", marketplace = "iov42/iov42-marketplace", label = "Team skills" }]
 
 [colors]
 background = "#101010"
@@ -396,6 +483,23 @@ new_terminal = "ctrl-alt-d"
         assert_eq!(cfg.default_env.as_deref(), Some("work"));
         assert_eq!(cfg.default_shell.as_deref(), Some("bash"));
         assert_eq!(cfg.editor.as_deref(), Some("code"));
+        assert_eq!(cfg.setup_hidden, vec!["work".to_string()]);
+        assert!(cfg.pipelines_condensed);
+        assert_eq!(cfg.history_seen.as_deref(), Some("2026-11-10 09:00:00.000"));
+        assert_eq!(cfg.tickets_teams, vec!["PRE", "INTH"]);
+        assert_eq!(cfg.tickets_states, vec!["Todo", "In Review"]);
+        assert_eq!(cfg.tickets_assignee, "assigned");
+        assert_eq!(cfg.tickets_people, vec!["u2"]);
+        assert_eq!(cfg.tickets_labels, vec!["Bug"]);
+        assert_eq!(cfg.park_idle_hours, 6);
+        assert_eq!(
+            cfg.setup_plugins,
+            vec![SetupPlugin {
+                plugin: "skill-router@iov42".into(),
+                marketplace: Some("iov42/iov42-marketplace".into()),
+                label: Some("Team skills".into()),
+            }]
+        );
         assert_eq!(cfg.min_week_left, 25);
         assert_eq!(
             cfg.slack_connect_url.as_deref(),
@@ -411,6 +515,13 @@ new_terminal = "ctrl-alt-d"
         let (cfg, problems) = parse("slack_connect_url = \"http://canopy\"\n");
         assert_eq!(cfg.slack_connect_url, None);
         assert!(problems[0].contains("https"), "{problems:?}");
+    }
+
+    #[test]
+    fn a_setup_plugin_without_its_marketplace_is_reported() {
+        let (cfg, problems) = parse("setup_plugins = [{ plugin = \"skill-router\" }]\n");
+        assert!(cfg.setup_plugins.is_empty());
+        assert!(problems[0].contains("name@marketplace"), "{problems:?}");
     }
 
     #[test]

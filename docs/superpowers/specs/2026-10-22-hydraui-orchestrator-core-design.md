@@ -1037,3 +1037,201 @@ A pipeline running tickets in several orchestrators boxes each orchestrator's ti
 Turning Automatic on was refused when another orchestrator already watched the same Linear team. That kept hydra-triage off: it picks unassigned PRE tickets in Next up, while PRE tickets picks `hydra-xs`/`hydra-s` tickets in the same state, whoever they're assigned to. Since labels and assignee rules exist, one team can feed several pipelines.
 
 The one-watcher rule now compares `linear_watch::pick_key`: team, pick state, assignee rule, `sla_only` and labels, ignoring case and order. Only an identical key is refused ("Another orchestrator already picks PRE tickets in Next up the same way"). A Slack trigger still compares its channel. Where two pipelines' picks overlap (an unassigned `hydra-xs` ticket), a ticket with a run open or waiting to resume in any pipeline is passed over, so it is never run twice at once.
+
+## 48. Setting up an environment (added 2026-11-03)
+
+A new person could sign in to Claude and still be told "Pipelines need Claude signed in to this environment". Two things were wrong. The check behind that line asked whether `[claude]` was in env.toml, not whether anyone was signed in. And on macOS, Claude Code keeps each config dir's token in the Keychain (`Claude Code-credentials-<first 8 hex of sha256(config dir)>`) and never writes `.credentials.json`, so hydra reported every Mac environment as not signed in.
+
+- **Signed in** now means `.credentials.json` is there *or* `.claude.json` names an `oauthAccount`. hydra still doesn't read the Keychain item, which would prompt for it.
+- **A tool's state** (`setup::tool_state`) is one of: not added (not in env.toml); not signed in (its check says `Missing`); or ready (anything else, or not checked yet, so nothing flashes up as missing while the check runs).
+- **The Pipelines tab** says what Claude is missing, with **Add Claude** or **Sign in to Claude**. Start pipeline shows only once Claude is ready.
+- **New environment** has Claude, GitHub and Git ticked. Create adds Claude and GitHub, opens Claude's sign-in, and opens Git's form, since Git needs a name and email.
+- **The sidebar checklist** ("Set up <env>") lists Claude, GitHub and Git while any of them isn't ready. Each row shows its state and an **Add** or **Sign in** button. It goes once all three are ready. **Hide** drops it for that environment and records it in hydraui's config.toml as `setup_hidden = ["<env>"]`, a new optional key.
+- **Team plugins** (added 2026-11-05). A team can list the Claude plugins it expects in hydraui's config.toml, for example the skill router that makes Claude load the team's skills before editing code:
+
+  ```toml
+  setup_plugins = [{ plugin = "skill-router@iov42", marketplace = "iov42/iov42-marketplace", label = "Team skills" }]
+  ```
+
+  `plugin` is `name@marketplace` (anything else is reported and the key ignored). `marketplace` is where `claude plugin marketplace add` finds the marketplace, and is needed only when people won't have it yet. `label` is what the checklist shows; the plugin's name when left out. The key is optional and empty by default, so hydra assumes no team.
+
+  Every environment links the shared `~/.claude/plugins` (or `claude_base`'s), and its settings.json is rebuilt at launch from the shared one plus the environment's own. So a plugin is **on** for an environment when the shared settings.json turns it on in `enabledPlugins` and the environment's own settings.json doesn't turn it off. This is read with the environment's accounts and is counted as on until it has been read.
+
+  A plugin is **on** only when it is turned on *and* its files are there: `plugins/installed_plugins.json` records it at an `installPath` that is still a folder. Turned on with the files gone is **turned on, but its files are missing**, with **Reinstall**, since Claude would skip it.
+
+  So that people can always see whether the router is working, each listed plugin also has a line that stays after the checklist goes (or is hidden): on the Pipelines tab under Start pipeline, and in a **Team plugins** group on the environment's Settings page. Each line shows ✓ and "on", or ! with the state and Install or Reinstall. Its tooltip names the plugin.
+
+  Each listed plugin is a checklist row after the tools: **ready**, or **not installed** with an **Install** button. Install opens a terminal in the environment that runs `claude plugin marketplace add <marketplace>` (skipped when `plugins/known_marketplaces.json` already names it), then `claude plugin install <plugin>`. It runs with the environment's `CLAUDE_CONFIG_DIR` dropped, or pointed at `claude_base` when that is set, so the plugin is installed once for every environment, not into one that is rebuilt at the next launch. The row turns ready at the next check after the install finishes. A plugin is installed or not; it has no sign-in.
+
+## 49. Condensed Pipelines view (added 2026-11-09)
+
+For seeing at a glance what is running. On the Pipelines tab, a **≡** button beside the tabs switches between the full pipeline cards and a condensed list. The choice is kept in hydraui's config.toml as `pipelines_condensed = true`, a new optional key.
+
+The condensed list has one line per open ticket (`open_lanes`) of every orchestrator in the environment, in card order. Orchestrators waiting for a ticket, Start pipeline, the team-plugin lines and closed runs are left out. Each line shows:
+- a dot in its pipeline's colour (hover for the pipeline's name);
+- the ticket, named as in its box (`ticket_title`);
+- its current stage as `n/m Title`: the stage running, else the first not yet passed (`pipeline_card::glance`);
+- its state word when it isn't simply Working, in the warning colour for Needs you, Check it and Asked product.
+
+A click shows the current stage's latest session, or the orchestrator when that stage has no session yet. The line is highlighted while one of its sessions is shown. With nothing open, it says "Nothing running right now."
+
+## 50. History (added 2026-11-10)
+
+For catching up after time away. A **History** button right of **Projects** in the tab strip opens one timeline of what every pipeline did, newest first, across every environment. Ticket history (§7.5) has one line per run; History has one line per thing that happened. It opens in the middle, like Projects, and replaces Projects or Settings there (and they replace it). Clicking History again closes it.
+
+- **Read from the run logs** (§8) by `run_feed`. Session bookkeeping (folders, Claude session ids, restarts, Linear syncing) is left out, and so is `run started`, because its first stage's start says it began. Stage ids read as their titles from the pipeline in `run started`; an attempt's id (`verify-2`) reads as its stage's title.
+- **Each line**: the time, a dot, the ticket (named as in its box), what happened, and the pipeline. Hover shows the ticket's title, and a click opens the ticket or pull request.
+  - Green: `<Stage> passed, <score>` and `Done`.
+  - Red: `<Stage> failed: <reason>` and `Stopped: <reason>`.
+  - Amber: `Needs you: …` and `Asked product: …`.
+  - Muted: `<Stage> started`, `Waiting on the author: …`, `The author replied: …`, `Product answered: …`, `You chose <choice>: <note>` and `Went back to <Stage>`.
+  - Lines written in the same millisecond read latest first, so `Done` comes above the last stage's pass.
+- **Details** (added 2026-11-10). A stage's report travels with its lines, so what a person needs to know is visible without opening the pull request.
+  - A **Needs you** line reads in plain words: `Needs you: Review PR scored 70, under its bar of 95`, `… is blocked`, or `… needs a person to check`. Under it, open, come the reason in full and the report's reasons against, such as "RED zone … approval needs a human code owner".
+  - A passed stage's reasons against show behind an amber `▸ N concerns`.
+  - Failures and stops show theirs open too.
+  - A click on a line opens or closes its details; a click on its ticket opens the ticket.
+- **Days** are headed Today, Yesterday, or the date.
+- **Spans**:
+  - **Since you last looked** comes first whenever History has been opened before, and is what it opens at. Opening it records the time in hydraui's config.toml as `history_seen`, a new optional key.
+  - **Last 2 hours** (what it opens at the first time), **Last 8 hours**, **Today** and **Last 48 hours** are always offered.
+- **Reading** happens in the background: on opening it, on choosing a span, and on **Refresh**. A log last written before the span starts isn't read.
+- **Header**: a summary of the span, for example `Since Today 09:00: 3 tickets active · 1 finished · 0 failed or stopped · 1 asked for a person`.
+
+## 51. Stopping one ticket (added 2026-11-10)
+
+**End pipeline** stops every ticket and closes the orchestrator. To stop one bad run while the pipeline's others keep going:
+- **Where**: each ticket's box in the sidebar (shown when an orchestrator has two or more tickets) has a **×**. The pipeline card's right-click menu lists **Stop <ticket>…** for each open ticket, above **End pipeline…**, which covers a pipeline with only one ticket.
+- **The dialog** names the ticket and how many sessions close: "It is recorded as stopped by you, and its 2 sessions close. The pipeline and its other tickets keep going."
+- **Stop ticket** does what **Stop this ticket** on the Pipeline tab does: it records the run as stopped by you and tells the orchestrator. Then it closes the run's stage sessions. The orchestrator stays open.
+
+## 52. Recovering a run whose orchestrator closed (added 2026-11-10)
+
+Before this, an orchestrator's terminal closing while hydraui kept running ended its open runs as "stopped: the orchestrator's terminal closed", and nothing offered them back. 16 runs were lost that way by 2026-11-10. A restart (§13) already kept runs open. This does the same without one.
+
+- **Setting aside.** When an orchestrator's terminal closes (or its shell exits) and you didn't stop its runs, each open run is set aside (`Decided::SetAside`), not ended. It stays open in memory, owned by `run_resume::REPLAYED`, and its log gets `orchestrator closed`. **End pipeline** and **Stop ticket** end the runs first, so nothing of theirs is set aside.
+- **Its sessions.** hydraui closes the run's stage sessions. A set-aside run's stage closing isn't that stage failing.
+- **Its card.** It gets the §13 card with **Resume** and **Stop ticket**, straight away, with a notice naming the ticket. `run_resume::interrupted` offers a run whose log has `orchestrator closed` after its latest `orchestrator` line, even while that hydraui still runs.
+- **Resume** works as after a restart. It reopens the orchestrator's own conversation (`claude --resume`) and the stage that was at work in its own conversation, so a half-done PR review goes on with its history.
+- **Stop ticket** ends the run as any stopped ticket does: "stopped by you at <stage>", logged once. A run interrupted by a restart, which isn't in memory, logs "stopped by you after it was interrupted".
+- **History** (§50) shows `Interrupted: its orchestrator closed. Resume it from the Pipelines tab` in amber, and `Resumed`.
+
+## 53. Tickets (added 2026-11-10)
+
+For handing a Linear ticket to a pipeline by hand. A **Tickets** button between **Projects** and **History** opens a page in the middle. Like them, it replaces the others there, and they replace it.
+
+- **Whose Linear.** The environment shown, when it has a Linear key; else the first environment that has one. The summary line names it.
+- **Nothing until teams are chosen** (revised 2026-11-10). First come chips for every team (board) the key sees, as `KEY · Name`. Once one or more are chosen, a second row shows those teams' statuses, each name once, in Linear's order: triage, backlog, unstarted, started, completed, canceled. Tickets list once at least one status is chosen. A status the chosen teams don't have drops out of the filter.
+- **Assignee** (added 2026-11-10). Once teams are chosen, an Assignee row offers **Anyone**, **Unassigned** and **Assigned**. Assigned opens an "Assigned to" row of the chosen teams' active members, by name (`members` of those teams). Choosing people narrows to their tickets; choosing nobody lists every assigned ticket. It's sent as Linear's `assignee` filter (`null: true`, `null: false`, or `id in`). **Save filter** keeps it as `tickets_assignee` (`anyone`, `unassigned` or `assigned`) and `tickets_people` (the user ids). The folded line ends `· unassigned` or `· assigned to Jordan Miller`.
+- **Status icons** (added 2026-11-10). Each status is drawn as Linear does, by its type and in its own colour (`states { type color }`): ◇ triage, ◌ backlog, ○ to do, ◐ in progress, ● done, ⊘ canceled. The icon is on each status chip, each section heading and each row; hover on a row's icon shows the status name.
+- **Labels on rows** (added 2026-11-10). "Show these labels on rows" is one searchable multi-select dropdown (gpui-component `Combobox`, `multiple` and `searchable`), not a row of buttons. Type to narrow it, tick labels, × clears it. It offers every label the chosen teams can use: their own and the workspace's, from `issueLabels`, leaving out group names. It also offers any label on the tickets listed and any already chosen; when the labels can't be read, those are all it offers. A ticket that has a chosen label shows it as an amber pill; other labels aren't shown. **Save filter** keeps the choice as `tickets_labels`. Choosing labels doesn't read Linear again.
+- **Linear's complexity limit.** Linear refuses a query estimated over 10,000 points ("query too complex"). A nested list multiplies its contents by its `first`, which is 50 when left out. So every list the page asks for is capped: 100 tickets with 10 labels each, 20 teams with 50 states or 100 members each. A test estimates each query's cost and fails over 5,000.
+- **Every filter is a dropdown** (revised 2026-11-10; this replaces the chips described above). Each filter is a gpui-component `Combobox` of the same size, named above it, side by side:
+  - **Teams**, shown as `KEY · Name`.
+  - **Statuses**, each with its icon in its colour.
+  - **Assignee**, a pick of one: Anyone, Unassigned or Assigned.
+  - **Assigned to**, shown only with Assigned.
+  - **Labels to show on rows**.
+
+  All but Assignee pick several and have a search, and × clears one. A change to any of them but labels reads Linear again. Each read is numbered, so a reply to an older one is dropped. A dropdown's options are replaced only when what was read changed, so a search being typed in it isn't cleared.
+- **Hiding the filter.** **▾ Hide filter** folds the team and status chips away, leaving one line that names the filter (`PRE, INTH · Todo, In Review`) and **▸ Edit filter** to unfold them. The page opens folded when a saved filter has teams and statuses, and saving one folds it.
+- **Save filter** keeps the chosen teams and statuses in hydraui's config.toml as `tickets_teams` and `tickets_states`, new optional keys that are empty by default. The page opens on them next time. The button reads **Filter saved** while what's chosen is what's saved.
+- **The list.** Up to 100 tickets (with up to 10 labels each) of the chosen teams in the chosen statuses, most recently updated first. They're grouped under one heading per chosen status, in Linear's order, each with its count; an empty status says None. Each row shows the key (a click opens it in Linear), the title, labels, and either **Run pipeline** or, while a run of that ticket is in progress (from the run logs), **Running**.
+- **Run pipeline** opens the pipeline picker (as Start pipeline does) titled `Run <ticket> through`. Choosing a pipeline hands the ticket to it in that environment:
+  - to the pipeline's first orchestrator when it has room for another ticket (`runs_at_once`);
+  - else to a new orchestrator, which gets it once Claude has finished its first turn.
+
+  The hand-off is the same start prompt a Linear pick sends (`linear_watch::start_prompt`). So a pipeline with `[linear]` claims the ticket as it does a hand-started run, and its card shows on the Pipelines tab. A notice says where it went.
+- **Refresh** reads the states and tickets again. Reads run in the background, and an error (no key, rejected) shows in the summary line in red.
+
+## 54. Parking idle runs (added 2026-11-10)
+
+A stage polling CI or a review can keep its sessions open for hours with nothing changing. Parking closes them and keeps the run to resume later.
+
+- **The setting.** `park_idle_hours` in config.toml: how long an orchestrator's runs may sit with nothing changing before it's parked. The default is 4; 0 never parks; at most 168. History sets it from **Park runs idle for**: Never, 1 h, 2 h, 4 h, 8 h, 12 h.
+- **What counts as nothing changing.** No line written to the run's log (§8) for that long. Terminal output doesn't count, so a session that polls still parks.
+- **Which runs park.** Only an orchestrator whose open runs are all at work parks, once every one of them has sat idle. A run waiting on a person (needs you), on an answer to a question (§15, §42), or paused by a person waits on purpose. Parking it would drop what it waits for, so it never parks, and it keeps its orchestrator open. An orchestrator still on its first turn isn't looked at.
+- **Parking.** hydraui looks once a minute. Each run logs `parked` with `idle_hours`, and then the orchestrator's terminal closes. From there it's the same as the orchestrator closing (§52): stage sessions close, and each run is set aside with a Resume card and a notice. The notice reads `<ticket> was parked: nothing changed for 4 hours, so its sessions closed.`
+- **Why it waits.** A set-aside run reads back with its reason:
+  - parked, with the hours;
+  - its orchestrator closed;
+  - hydraui closed while it ran.
+
+  Only a `parked` after the run's latest `orchestrator` line counts.
+- **History.** A **To resume** section with its count heads the page, above the timeline. One row per set-aside run shows:
+  - the ticket (a click opens it);
+  - its pipeline, the stage it was at, and why it waits;
+  - **Resume**, which is the card's Resume (§13);
+  - **Stop**.
+
+  With none it says "Nothing to resume". The timeline shows `Parked: nothing changed for 4 hours, so its sessions closed. Resume it from History` in amber. The orchestrator-closed line that follows is folded into it. An orchestrator closing for another reason now reads `… Resume it from History`.
+
+**History details folded, with a summary** (revises §50, 2026-11-10). Every line's details start folded, including the amber and red ones; a click unfolds them.
+
+- **The summary.** A line that needs you shows a short summary under it, up to three lines. It's the stage's own report summary, or else the first sentence of the reason.
+- **What unfolding shows.** The full reason (such as the reviewer's step-by-step list) and the reasons against, without repeating the summary.
+- **The hint.** It reads `▸ more` / `▾ less`. A passed stage keeps `▸ N concerns`.
+
+## 55. The skills router in Pipeline settings (added 2026-11-10)
+
+Pipeline settings now says whether the team skills router guides the steps, so a stage's skill and the router don't look like rivals.
+
+- **Which plugin is the router.** The router is the `setup_plugins` entry named `skill-router@…` (§48).
+- **The note.** Above **Steps**, one line about the orchestrator's environment:
+  - teal when the router is on there: every stage loads the team skills its changes need, whatever skill is set. A stage's own skill adds how to do that stage.
+  - amber when it's off, or on but its files are missing: stages use only their set skill. The line says to install or reinstall from the Pipelines tab.
+  - No line when config lists no router.
+- **A stage with no skill.** It reads **Router only** while the router is on, and **No skill** otherwise, on its button and in the picker. Its tooltip says the skill is the one the step must use before it reports.
+- **What doesn't change.** A set skill is still required before a stage reports (§4). The router's own `skill-router:start-ticket` can be picked as a stage's skill like any other.
+
+## 56. Stages added while a run is open (added 2026-11-10)
+
+A run used to keep the stage list it started with (§2), so a stage added in Pipeline settings couldn't be reached by a ticket already under way. Now a stage added to the file can join an open run. Removing and reordering stages still wait for the next ticket.
+
+- **Where a new stage goes.** Each stage in the file that the run lacks goes after the nearest stage before it that the run has, or first if there's none. If the run and the file share stages in a different order, nothing joins.
+- **After where the run has got to: joins on Save.** If a new stage comes after the last stage with any attempt, it joins the run when Pipeline settings saves, and again whenever a report re-reads the file. It waits and runs in its turn.
+- **Earlier: through Go back.** A new stage placed among the stages that passed, or just before the waiting one, is offered in **Go back** as `+ Title (new)`, in run order. Picking it with a note:
+  - it joins the run;
+  - it waits with the note, signalled as a re-run, so the orchestrator starts it with `stage_start` and its session gets the note;
+  - the stages after it wait again, with fresh tries.
+
+  A new stage has no earlier session to reopen. Going back to it needs the run to be waiting for you, as Go back always does.
+- **Logged and replayed.** Each joining is logged as `stage added`, with the stage's settings and `after`. A Go back to a new stage then logs the `person` back choice. A restart replays both, so the run comes back with its added stages. History shows `Added stage <title>`, and a new stage reads by its title throughout.
+
+## 57. Notifications behind a bell (added 2026-11-10)
+
+Toasts covered the work, so hydraui no longer shows any. Every notice goes into one list behind a **bell** in the tab strip, right of History.
+
+- **The bell** shows how many notices are unread. It turns amber while any unread one is a warning or an error. Its tooltip reads "Notifications".
+- **The panel.** A click on the bell drops a panel down under the tab strip, over everything; a click outside closes it.
+  - Its header has **Clear**.
+  - Notices are listed newest first. Each has a dot in its kind's colour (grey info, green success, amber warning, red error), its title, when it came (`Today 13:50`), and its message up to four lines.
+  - Opening the panel marks everything read. What was unread is shaded while it stays open.
+  - A notice that opens something (a terminal, a run's Pipeline tab) does so on a click, and the panel closes.
+- **The run alert** (§5.3) is a notice now, no longer a card that stays: `<Pipeline> stopped · needs you`, with the run's title, body and reason. A click opens the run. The window still flashes and the orchestrator's terminal is still badged.
+- **Keys and limits.** A notice with the same key as an earlier one replaces it; the toast's `id1` becomes the key. The list keeps the newest 200, in memory only, so a restart empties it. Each notice is also written to `hydraui.log` as `notice: <title>: <message>`.
+- **In code.** `crate::inbox::Note` has the toast's builder calls (`info`, `success`, `warning`, `error`, `title`, `id1`, `on_click`; `autohide` is kept but does nothing). `window.push_note(note, cx)` sends one. No code calls gpui-component's `push_notification` any more.
+
+**Product questions under Advanced** (revises Pipeline settings, 2026-11-10). The **Product questions** section, which sets where a step asks product and how it writes the question, is now the first thing under **▸ Advanced**. It's no longer its own numbered section after the steps. Most pipelines never ask product. Its settings save as before whether Advanced is open or not.
+
+## 58. Scheduled pipelines (added 2026-11-10)
+
+For work no ticket kicks off, such as a weekly CS–Product sync summary. A pipeline can run on a timetable as its one trigger, instead of `[linear]` or `[slack]`.
+
+```toml
+[schedule]
+every = "mon 18:00"   # days, then a 24-hour local time
+env = "iov42"         # optional
+```
+
+- **Days.** `daily`, `weekdays`, `weekends`, or day names joined by commas: `mon,thu`, or full names like `monday`. The time is `HH:MM`. A mistake is named when the file is read.
+- **When it runs.** hydraui looks every 30 seconds. A run is due on one of its days once the time has passed, if none has started that day. So hydraui closed at 18:00 runs it once when it next opens that day, and a day it never opens is skipped. Each pipeline's last run date is kept in `<HYDRA_HOME>/hydraui/schedule.json`. It's written before the hand-off, so a run that can't start isn't retried every 30 seconds.
+- **The run.**
+  - **Its name:** the ticket is the pipeline's file name in capitals plus the date, e.g. `CS-SYNC-2026-11-16`. It has plain characters only, so a restart finds its log.
+  - **Its environment:** `[schedule] env`, else `[autostart]`'s, else one where the pipeline already has an orchestrator, else the default environment, else the first. The first of these that exists is used.
+  - **Who gets it:** the pipeline's free orchestrator in that environment, else a new one, as a Tickets pick does. It's told it's the scheduled run and to call `run_start` with that ticket and the summary `<name> <date>`.
+  - **Notices:** "<name> started its scheduled run (Mondays at 18:00) as CS-SYNC-2026-11-16 in iov42".
+- **Pipeline settings.** **Source** offers Schedule beside None, Linear and Slack. It has **Runs** (`mon 18:00`) and **In environment** fields. Under them, a line reads the schedule back ("Mondays at 18:00, while hydraui is open…") with an example run name, or says what's wrong.
+- **The orchestrator's first prompt.** It says work can come from the schedule, so it waits rather than asking for a ticket.
+- **Copies and exports.** These drop `[schedule]`, as they drop `[autostart]`, so a copy never runs beside the original.
+- **Not yet:** the card shows nothing of the schedule. It doesn't run while hydraui is closed.

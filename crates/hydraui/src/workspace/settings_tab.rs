@@ -1,13 +1,13 @@
 //! The Settings tab: hydraui's own settings, each environment's page and the credentials,
 //! shown in the middle in place of a terminal until a terminal is picked or it is closed. An
 //! environment's name in the status bar opens its page.
+use crate::inbox::{Note, PushNote};
 use std::cell::Cell;
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Hsla, SharedString, Window, div, px, rgb};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
-use gpui_component::notification::Notification;
 use gpui_component::switch::Switch;
 use gpui_component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
 
@@ -59,6 +59,9 @@ impl Workspace {
         }
         let you = (section == Section::You).then(|| self.identity_fields(window, cx));
         self.settings = Some(SettingsTab { section, you });
+        self.projects = None;
+        self.history = None;
+        self.tickets = None;
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -79,7 +82,7 @@ impl Workspace {
     ) {
         match config::set(&self.hydra.paths, key, value) {
             Ok(()) => self.apply_config(false, window, cx),
-            Err(e) => window.push_notification(Notification::error(e).title("Settings"), cx),
+            Err(e) => window.push_note(Note::error(e).title("Settings"), cx),
         }
     }
 
@@ -97,7 +100,7 @@ impl Workspace {
                 self.tints.insert(env.to_string(), tint);
                 self.recheck_accounts(env, cx);
             }
-            Err(e) => window.push_notification(Notification::error(e).title(env.to_string()), cx),
+            Err(e) => window.push_note(Note::error(e).title(env.to_string()), cx),
         }
         cx.notify();
     }
@@ -783,6 +786,38 @@ impl Workspace {
                 let e = e.clone();
                 move |ws, w, cx| ws.set_env_home(e.clone(), w, cx)
             }));
+        let projects_repo = self.hydra.projects_repo(env);
+        let projects_row = {
+            let (e, shown) = (e.clone(), projects_repo.clone().unwrap_or_default());
+            h_flex()
+                .gap_2()
+                .child(match &projects_repo {
+                    Some(r) => div().font_family("monospace").text_sm().child(r.clone()),
+                    None => div().text_color(muted).child("none: no Projects tab"),
+                })
+                .child(
+                    Button::new("env-projects")
+                        .label("Change…")
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            let e = e.clone();
+                            ws.text_dialog(
+                                format!("Projects repo for {e}"),
+                                shown.clone(),
+                                "owner/name on GitHub, or a local path; empty for none",
+                                move |ws, v, _window, cx| {
+                                    let value = (!v.is_empty()).then_some(v.as_str());
+                                    ws.hydra.set_projects_repo(&e, value)?;
+                                    ws.projects_config_changed(cx);
+                                    Ok(())
+                                },
+                                window,
+                                cx,
+                            )
+                        })),
+                )
+        };
         let remote_row = {
             let e = e.clone();
             Switch::new(SharedString::from(format!("env-remote-control-{env}")))
@@ -870,6 +905,7 @@ impl Workspace {
                     setting("Label", label_row.into_any_element(), cx),
                     setting("Colour", swatches.into_any_element(), cx),
                     setting("Home", home_row.into_any_element(), cx),
+                    setting("Projects", projects_row.into_any_element(), cx),
                     setting("Remote Control", remote_row.into_any_element(), cx),
                 ],
                 cx,
@@ -880,6 +916,23 @@ impl Workspace {
                 vec![super::accounts::accounts_list(self, &ws, env, cx).into_any_element()],
                 cx,
             ))
+            .when(!self.ui.setup_plugins.is_empty(), |page| {
+                let lines = self.plugin_lines(env, "env-plugin", cx);
+                page.child(group(
+                    "Team plugins",
+                    Some(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child(
+                                "Installed once in your own Claude, so every environment has them.",
+                            )
+                            .into_any_element(),
+                    ),
+                    lines,
+                    cx,
+                ))
+            })
             .child(group(
                 "Variables",
                 Some(action_button(

@@ -331,7 +331,7 @@ pub fn render_claude_md(env: &str, base: Option<&str>, over: Option<&str>) -> Op
 pub const HYDRAUI_SERVER: &str = "hydraui";
 
 /// The tools that server offers.
-pub const HYDRAUI_TOOLS: [&str; 17] = [
+pub const HYDRAUI_TOOLS: [&str; 34] = [
     "tasks_read",
     "tasks_add",
     "tasks_take",
@@ -345,6 +345,23 @@ pub const HYDRAUI_TOOLS: [&str; 17] = [
     "stage_report",
     "stage_ask",
     "stage_answer",
+    "plan_show",
+    "plan_set_spec",
+    "plan_propose_milestone",
+    "plan_propose_ticket",
+    "plan_suggest_repo",
+    "plan_revise",
+    "plan_propose_change",
+    "plan_propose_spec",
+    "plan_withdraw",
+    "plan_add_question",
+    "plan_add_link",
+    "plan_read_resource",
+    "plan_done",
+    "ticket_show",
+    "ticket_ask",
+    "ticket_report",
+    "ticket_checked",
     "claims_take",
     "claims_release",
     "claims_done",
@@ -353,7 +370,7 @@ pub const HYDRAUI_TOOLS: [&str; 17] = [
 
 /// The tools of that server that Claude Code may call without asking. The claims tools are left
 /// to the session's permission mode: nothing undoes a done, which holds the key for everyone.
-pub const HYDRAUI_ALLOWED: [&str; 13] = [
+pub const HYDRAUI_ALLOWED: [&str; 30] = [
     "tasks_read",
     "tasks_add",
     "tasks_take",
@@ -367,6 +384,23 @@ pub const HYDRAUI_ALLOWED: [&str; 13] = [
     "stage_report",
     "stage_ask",
     "stage_answer",
+    "plan_show",
+    "plan_set_spec",
+    "plan_propose_milestone",
+    "plan_propose_ticket",
+    "plan_suggest_repo",
+    "plan_revise",
+    "plan_propose_change",
+    "plan_propose_spec",
+    "plan_withdraw",
+    "plan_add_question",
+    "plan_add_link",
+    "plan_read_resource",
+    "plan_done",
+    "ticket_show",
+    "ticket_ask",
+    "ticket_report",
+    "ticket_checked",
 ];
 
 /// Appends each missing `mcp__hydraui__<tool>` of [`HYDRAUI_ALLOWED`] to `permissions.allow` in the settings JSON
@@ -489,7 +523,24 @@ mod tests {
                 "mcp__hydraui__stage_brief",
                 "mcp__hydraui__stage_report",
                 "mcp__hydraui__stage_ask",
-                "mcp__hydraui__stage_answer"
+                "mcp__hydraui__stage_answer",
+                "mcp__hydraui__plan_show",
+                "mcp__hydraui__plan_set_spec",
+                "mcp__hydraui__plan_propose_milestone",
+                "mcp__hydraui__plan_propose_ticket",
+                "mcp__hydraui__plan_suggest_repo",
+                "mcp__hydraui__plan_revise",
+                "mcp__hydraui__plan_propose_change",
+                "mcp__hydraui__plan_propose_spec",
+                "mcp__hydraui__plan_withdraw",
+                "mcp__hydraui__plan_add_question",
+                "mcp__hydraui__plan_add_link",
+                "mcp__hydraui__plan_read_resource",
+                "mcp__hydraui__plan_done",
+                "mcp__hydraui__ticket_show",
+                "mcp__hydraui__ticket_ask",
+                "mcp__hydraui__ticket_report",
+                "mcp__hydraui__ticket_checked"
             ])
         );
         // Claims follow the session's permission mode: nothing undoes a done.

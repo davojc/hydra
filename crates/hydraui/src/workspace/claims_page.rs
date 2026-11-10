@@ -4,14 +4,14 @@ use futures::channel::oneshot;
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, SharedString, Window, div};
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::notification::Notification;
-use gpui_component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
+use gpui_component::{ActiveTheme, Sizable, h_flex, v_flex};
 use hydra_swarms::claims::{ContextSettings, Holder, HolderKind, valid_context_name};
 use hydra_swarms::{ClaimView, Command, ContextView, Role, SwarmView};
 use jiff::tz::TimeZone;
 
 use super::Workspace;
 use super::swarms_page::{section_label, when};
+use crate::inbox::{Note, PushNote};
 
 /// The least `keep_done` the service accepts, in seconds.
 const LEAST_KEEP_DONE: u64 = 60;
@@ -433,7 +433,7 @@ impl Workspace {
                 Err(_) => "The swarms stopped before the reopen was made.".to_string(),
             };
             let _ = this.update_in(cx, |_, window, cx| {
-                window.push_notification(Notification::error(problem).title("Claims"), cx)
+                window.push_note(Note::error(problem).title("Claims"), cx)
             });
         })
         .detach();
@@ -463,7 +463,7 @@ impl Workspace {
                 Err(_) => "The swarms stopped before the release was made.".to_string(),
             };
             let _ = this.update_in(cx, |_, window, cx| {
-                window.push_notification(Notification::error(problem).title("Claims"), cx)
+                window.push_note(Note::error(problem).title("Claims"), cx)
             });
         })
         .detach();

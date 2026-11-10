@@ -1,5 +1,6 @@
 //! The file pane (spec §7.8): file tabs, Raw (an editor; Ctrl+S saves) and Rendered (Markdown, HTML),
 //! Open in editor, the unsaved-edits prompt, and changes on disk.
+use crate::inbox::{Note, PushNote};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -14,7 +15,6 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::diff::{Diff, DiffFile, DiffMode, DiffState};
 use gpui_component::input::{Editor, EditorState, InputEvent, Position};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
@@ -513,7 +513,7 @@ impl FilePane {
 
     fn save_active(&mut self, _: &SaveFile, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(e) = self.save_tab(self.active, cx) {
-            window.push_notification(Notification::error(e).title("Save"), cx);
+            window.push_note(Note::error(e).title("Save"), cx);
         }
     }
 
@@ -552,9 +552,7 @@ impl FilePane {
                             w.close_dialog(cx);
                             save.update(cx, |p, cx| match p.save_tab(i, cx) {
                                 Ok(()) => p.remove_tab(i, cx),
-                                Err(e) => {
-                                    w.push_notification(Notification::error(e).title("Save"), cx)
-                                }
+                                Err(e) => w.push_note(Note::error(e).title("Save"), cx),
                             });
                         },
                     )),
@@ -607,7 +605,7 @@ impl FilePane {
                             save.update(cx, |p, cx| {
                                 // Nothing closes unless every edit is saved.
                                 if let Err(e) = dirty.iter().try_for_each(|&i| p.save_tab(i, cx)) {
-                                    w.push_notification(Notification::error(e).title("Save"), cx);
+                                    w.push_note(Note::error(e).title("Save"), cx);
                                     return;
                                 }
                                 p.remove_tabs(&save_closing, cx);
@@ -741,9 +739,8 @@ impl FilePane {
                 }
                 replace_keeping_place(editor, text, window, cx);
             }
-            Err(e) => window.push_notification(
-                Notification::error(format!("can't reload {}: {e}", file_name(&t.path)))
-                    .title("Reload"),
+            Err(e) => window.push_note(
+                Note::error(format!("can't reload {}: {e}", file_name(&t.path))).title("Reload"),
                 cx,
             ),
         }

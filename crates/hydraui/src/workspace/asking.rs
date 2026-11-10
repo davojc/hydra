@@ -2,6 +2,7 @@
 //! question, its Slack thread and **Answer…**; a notification when a stage asks; and every 5
 //! minutes, the waiting session is told to look in its thread (`crate::asking`).
 
+use crate::inbox::{Note, PushNote};
 use std::time::SystemTime;
 
 use gpui::prelude::*;
@@ -9,7 +10,6 @@ use gpui::{AnyElement, App, Context, SharedString, Window, div, px};
 use gpui_component::WindowExt;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
-use gpui_component::notification::Notification;
 use gpui_component::{h_flex, v_flex};
 
 use super::Workspace;
@@ -63,7 +63,7 @@ impl Workspace {
             };
         for (title, text) in notes {
             crate::action_log::write(format!("asked: {text}"));
-            window.push_notification(Notification::warning(text).title(title), cx);
+            window.push_note(Note::warning(text).title(title), cx);
         }
     }
 
@@ -204,7 +204,7 @@ impl Workspace {
                 }
                 tell(changes);
             }
-            Err(e) => window.push_notification(Notification::error(e).title("Answer"), cx),
+            Err(e) => window.push_note(Note::error(e).title("Answer"), cx),
         }
     }
 

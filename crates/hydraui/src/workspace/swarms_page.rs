@@ -2,6 +2,7 @@
 //! machine, each swarm's page, and making, joining and inviting. Everything is sent to the swarms
 //! through `swarms_command` and `swarms_create_or_join`, which send nothing while another window
 //! runs them.
+use crate::inbox::{Note, PushNote};
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -15,7 +16,6 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, Disableable, Sizable, WindowExt, h_flex, v_flex};
 use hydra_swarms::invites::InviteCode;
 use hydra_swarms::{Attention, Command, Invite, MemberView, Resolution, Role, SwarmView};
@@ -196,9 +196,8 @@ impl Workspace {
                 }
                 Err(e) => {
                     action_log::write(format!("swarms: couldn't save your name: {e}"));
-                    window.push_notification(
-                        Notification::error(format!("Couldn't save your name: {e}"))
-                            .title("Swarms"),
+                    window.push_note(
+                        Note::error(format!("Couldn't save your name: {e}")).title("Swarms"),
                         cx,
                     );
                 }
@@ -215,7 +214,7 @@ impl Workspace {
         let (name, machine) = match fields.read(cx) {
             Ok(names) => names,
             Err(e) => {
-                window.push_notification(Notification::warning(e).title("Swarms"), cx);
+                window.push_note(Note::warning(e).title("Swarms"), cx);
                 return;
             }
         };
@@ -235,7 +234,7 @@ impl Workspace {
                 } else {
                     "Saved."
                 };
-                window.push_notification(Notification::success(saved).title("Swarms"), cx);
+                window.push_note(Note::success(saved).title("Swarms"), cx);
             },
             window,
             cx,
@@ -674,7 +673,7 @@ impl Workspace {
                     if let Err(e) =
                         crate::file_ops::reveal_in_explorer(&in_folder(&swarm.folder, p.as_str()))
                     {
-                        window.push_notification(Notification::error(e).title("Swarms"), cx);
+                        window.push_note(Note::error(e).title("Swarms"), cx);
                         break;
                     }
                 }
@@ -855,8 +854,7 @@ impl Workspace {
                     .child(Button::new("swarm-open").label("Open").small().on_click(
                         move |_, window, cx| {
                             if let Err(e) = crate::file_ops::reveal_in_explorer(&folder) {
-                                window
-                                    .push_notification(Notification::error(e).title("Swarms"), cx);
+                                window.push_note(Note::error(e).title("Swarms"), cx);
                             }
                         },
                     ))

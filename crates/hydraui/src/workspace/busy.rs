@@ -1,5 +1,6 @@
 //! The tab strip's busy indicators: each terminal's activity (working, waiting, idle), checked
 //! every second, for any program.
+use crate::inbox::{Note, PushNote};
 use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
@@ -7,8 +8,7 @@ use gpui::{
     Animation, AnimationExt, AnyElement, Context, ElementId, Hsla, SharedString, Window, div,
     pulsating_between, px,
 };
-use gpui_component::notification::Notification;
-use gpui_component::{ActiveTheme, WindowExt};
+use gpui_component::ActiveTheme;
 
 use super::Workspace;
 use crate::activity::{Activity, busiest};
@@ -220,19 +220,17 @@ impl Workspace {
         );
         let ws = cx.entity();
         let note = match alert {
-            Alert::NeedsYou => Notification::warning(place)
+            Alert::NeedsYou => Note::warning(place)
                 .title(self.toast_title(id, "Claude needs you", cx))
                 .autohide(false),
-            Alert::Finished => {
-                Notification::info(place).title(self.toast_title(id, "Claude finished", cx))
-            }
+            Alert::Finished => Note::info(place).title(self.toast_title(id, "Claude finished", cx)),
         };
         let note = note
             .id1::<ClaudeAlert>(SharedString::from(format!("claude-{id}")))
             .on_click(move |_, window, cx| {
                 ws.update(cx, |ws, cx| ws.show_terminal(id, window, cx));
             });
-        window.push_notification(note, cx);
+        window.push_note(note, cx);
         cx.notify();
     }
 

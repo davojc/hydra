@@ -10,7 +10,6 @@ serde.workspace = true
 serde_json.workspace = true
 iroh.workspace = true
 getrandom.workspace = true
-keyring.workspace = true
 jiff.workspace = true
 iroh-blobs.workspace = true
 iroh-docs.workspace = true
@@ -32,5 +31,10 @@ junction.workspace = true
 [target.'cfg(windows)'.dependencies]
 keyring = { workspace = true, features = ["windows-native"] }
 
+# macOS goes through /usr/bin/security (hydra-platform's macos_keychain), so "Always Allow"
+# lasts across rebuilds; the Security framework would ask again after every build.
 [target.'cfg(target_os = "macos")'.dependencies]
-keyring = { workspace = true, features = ["apple-native"] }
+hydra-platform.workspace = true
+
+[target.'cfg(not(any(windows, target_os = "macos")))'.dependencies]
+keyring.workspace = true

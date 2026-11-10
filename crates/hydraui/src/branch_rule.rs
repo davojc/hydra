@@ -85,7 +85,7 @@ const LOOKUP_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// `cmd`'s output, or why there is none: it couldn't start, or it ran past `limit` and was
 /// stopped. Its stdin is closed, so it can't wait on a prompt.
-fn output_within(
+pub(crate) fn output_within(
     mut cmd: std::process::Command,
     limit: std::time::Duration,
 ) -> Result<std::process::Output, String> {

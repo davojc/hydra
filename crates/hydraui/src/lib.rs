@@ -21,11 +21,13 @@ pub mod git_status;
 pub mod git_watch;
 pub mod grammars;
 pub mod hydra;
+pub mod inbox;
 pub mod input;
 pub mod jev;
 pub mod keys;
 pub mod launcher;
 pub mod linear;
+pub mod linear_project;
 pub mod linear_watch;
 pub mod link;
 pub mod mcp;
@@ -42,16 +44,24 @@ pub mod pickup;
 pub mod pipeline;
 pub mod pipeline_card;
 pub mod pipeline_view;
+pub mod project_check;
+pub mod project_run;
+pub mod project_send;
+pub mod projects;
 pub mod quick_open;
 pub mod rating;
 pub mod readiness;
+pub mod run_feed;
 pub mod run_history;
 pub mod run_log;
+pub mod run_park;
 pub mod run_resume;
 pub mod runs;
 pub mod save_dialog;
+pub mod schedule;
 pub mod search;
 pub mod settings;
+pub mod setup;
 pub mod skills_list;
 pub mod slack;
 pub mod slack_connect;
@@ -68,3 +78,29 @@ pub mod version;
 pub mod window_layout;
 pub mod workspace;
 pub mod worktrees;
+
+/// The environment strip's height, under hydraui's own title bar.
+pub const ENV_STRIP_HEIGHT: f32 = 34.;
+
+/// Where toasts start: below the title bar and the environment strip, so they never cover
+/// the strip's Projects and Settings buttons.
+pub fn toast_top() -> gpui::Pixels {
+    gpui_component::TITLE_BAR_HEIGHT + gpui::px(ENV_STRIP_HEIGHT + 12.)
+}
+
+/// Puts toasts below the strip; again after each theme change, which may reset them.
+pub fn place_toasts(cx: &mut gpui::App) {
+    gpui_component::Theme::global_mut(cx)
+        .notification
+        .margins
+        .top = toast_top();
+}
+
+#[cfg(test)]
+mod toast_tests {
+    #[test]
+    fn toasts_start_below_the_title_bar_and_the_environment_strip() {
+        let covered = gpui_component::TITLE_BAR_HEIGHT + gpui::px(super::ENV_STRIP_HEIGHT);
+        assert!(super::toast_top() > covered);
+    }
+}

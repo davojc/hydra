@@ -46,6 +46,51 @@ pub fn append(file: &Path, event: &str, fields: Value) -> std::io::Result<()> {
     writeln!(out, "{}", Value::Object(line))
 }
 
+/// The `stage added` line for stage `spec`, joining after `after` (core spec §56): enough to
+/// add it again when the run is read back.
+pub fn stage_added_fields(spec: &crate::pipeline::Stage, after: Option<&str>) -> Value {
+    json!({
+        "stage": spec.id,
+        "title": spec.title,
+        "bar": spec.bar,
+        "skill": spec.skill,
+        "folder": spec.folder,
+        "worktree": spec.worktree,
+        "prompt": spec.prompt,
+        "after": after,
+    })
+}
+
+/// Stage and `after` back from a `stage added` line.
+pub fn read_stage_added(e: &Value) -> Option<(crate::pipeline::Stage, Option<String>)> {
+    let text = |k: &str| e.get(k).and_then(Value::as_str).map(str::to_string);
+    Some((
+        crate::pipeline::Stage {
+            id: text("stage")?,
+            title: text("title")?,
+            bar: e
+                .get("bar")
+                .and_then(Value::as_u64)
+                .and_then(|b| u8::try_from(b).ok()),
+            skill: text("skill"),
+            folder: text("folder"),
+            worktree: e.get("worktree").and_then(Value::as_bool).unwrap_or(false),
+            prompt: text("prompt")?,
+        },
+        text("after"),
+    ))
+}
+
+/// Logs each stage that joined an open run on Save (core spec §56).
+pub fn record_added(hydra_root: &Path, added: &[crate::runs::Added]) {
+    for a in added {
+        let fields = stage_added_fields(&a.spec, a.after.as_deref());
+        if let Err(e) = append(&file_for(hydra_root, &a.run), "stage added", fields) {
+            crate::action_log::write(format!("run log {}: {e}", a.run));
+        }
+    }
+}
+
 /// Appends what `changes` did to each run's log (§8), noting a failed write in hydraui's log.
 /// `run started` and `report` are written where they happen, with their details.
 pub fn record(hydra_root: &Path, runs: &Runs, changes: &[Change]) {
@@ -64,6 +109,7 @@ pub fn record(hydra_root: &Path, runs: &Runs, changes: &[Change]) {
         };
         let (event, fields) = match &c.what {
             Decided::RunStarted | Decided::RunResumed => continue,
+            Decided::SetAside => ("orchestrator closed", json!({})),
             Decided::Passed => ("stage passed", json!({"stage": stage})),
             Decided::Stopped(why) => ("stage stopped", json!({"stage": stage, "reason": why})),
             Decided::Failed(why) => ("stage failed", json!({"stage": stage, "reason": why})),

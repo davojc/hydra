@@ -1,5 +1,6 @@
 //! hydraui's own title bar (spec §7.11): the layout's name and its menu, the Shortcuts (help
 //! icon) and Update buttons, and the window controls gpui-component draws.
+use crate::inbox::{Note, PushNote};
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -8,8 +9,7 @@ use gpui::prelude::*;
 use gpui::{Context, Image, ImageFormat, Window, div, img, px};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_component::notification::Notification;
-use gpui_component::{ActiveTheme, Disableable, Sizable, TitleBar, WindowExt, h_flex};
+use gpui_component::{ActiveTheme, Disableable, Sizable, TitleBar, h_flex};
 use gpui_kit_assets::IconName;
 
 use super::Workspace;
@@ -63,11 +63,11 @@ impl Workspace {
                         if let Some(version) = found {
                             ws.update.found(version);
                         }
-                        Notification::info(ws.update.note(crate::version::VERSION))
+                        Note::info(ws.update.note(crate::version::VERSION))
                     }
-                    Err(e) => Notification::error(format!("can't reach GitHub: {e:#}")),
+                    Err(e) => Note::error(format!("can't reach GitHub: {e:#}")),
                 };
-                window.push_notification(note.title("Check for updates"), cx);
+                window.push_note(note.title("Check for updates"), cx);
                 cx.notify();
             });
         })
@@ -111,17 +111,11 @@ impl Workspace {
                         if !done.hydra_updated {
                             text.push_str(" (hydraui only: no hydra.exe found)");
                         }
-                        window.push_notification(
-                            Notification::success(text).title("Update hydra"),
-                            cx,
-                        );
+                        window.push_note(Note::success(text).title("Update hydra"), cx);
                         ws.update = UpdateState::Ready(done.version);
                     }
                     Err(e) => {
-                        window.push_notification(
-                            Notification::error(format!("{e:#}")).title("Update hydra"),
-                            cx,
-                        );
+                        window.push_note(Note::error(format!("{e:#}")).title("Update hydra"), cx);
                         ws.update = UpdateState::Offered(version);
                     }
                 }
@@ -159,9 +153,8 @@ impl Workspace {
         self.claim = None;
         match crate::window_layout::spawn_hydraui(file) {
             Ok(()) => window.remove_window(),
-            Err(e) => window.push_notification(
-                Notification::error(format!("can't start the new hydraui: {e}"))
-                    .title("Update hydra"),
+            Err(e) => window.push_note(
+                Note::error(format!("can't start the new hydraui: {e}")).title("Update hydra"),
                 cx,
             ),
         }

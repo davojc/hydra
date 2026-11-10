@@ -146,7 +146,7 @@ pub fn reply_error(reply: &Value) -> Option<LinearError> {
 }
 
 /// `reply`'s data, or the error it carries instead.
-fn data(reply: &Value) -> Result<&Value, LinearError> {
+pub(crate) fn data(reply: &Value) -> Result<&Value, LinearError> {
     if let Some(e) = reply_error(reply) {
         return Err(e);
     }
@@ -236,6 +236,201 @@ pub fn read_success(reply: &Value, field: &str) -> Result<(), LinearError> {
     }
 }
 
+/// The teams the key sees, for the Tickets page's first choice (core spec §53).
+pub fn teams_request() -> Value {
+    json!({"query": "query { teams(first: 100) { nodes { key name } } }"})
+}
+
+/// Each team as (key, name), by key.
+pub fn read_teams(reply: &Value) -> Result<Vec<(String, String)>, LinearError> {
+    let mut teams: Vec<(String, String)> = data(reply)?["teams"]["nodes"]
+        .as_array()
+        .ok_or_else(|| unexpected("teams"))?
+        .iter()
+        .filter_map(|t| {
+            Some((
+                t["key"].as_str()?.to_string(),
+                t["name"].as_str().unwrap_or_default().to_string(),
+            ))
+        })
+        .collect();
+    teams.sort();
+    Ok(teams)
+}
+
+/// The workflow states of the teams keyed `teams`.
+pub fn team_states_request(teams: &[String]) -> Value {
+    json!({
+        "query": "query($keys: [String!]) { teams(first: 20, filter: { key: { in: $keys } }) \
+                  { nodes { key states(first: 50) { nodes { name type position color } } } } }",
+        "variables": {"keys": teams},
+    })
+}
+
+/// A workflow state as the Tickets page draws it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateInfo {
+    pub name: String,
+    /// Linear's type: `triage`, `backlog`, `unstarted`, `started`, `completed`, `canceled`.
+    pub kind: String,
+    /// Its colour, `#rrggbb`.
+    pub color: String,
+}
+
+/// Their states, each name once (its first team's type and colour), in Linear's order:
+/// triage, backlog, unstarted, started, completed, canceled, then by position.
+pub fn read_team_states(reply: &Value) -> Result<Vec<StateInfo>, LinearError> {
+    let teams = data(reply)?["teams"]["nodes"]
+        .as_array()
+        .ok_or_else(|| unexpected("teams"))?;
+    let rank = |t: &str| match t {
+        "triage" => 0,
+        "backlog" => 1,
+        "unstarted" => 2,
+        "started" => 3,
+        "completed" => 4,
+        "canceled" => 5,
+        _ => 6,
+    };
+    let mut states: Vec<(usize, f64, StateInfo)> = teams
+        .iter()
+        .flat_map(|t| t["states"]["nodes"].as_array().cloned().unwrap_or_default())
+        .filter_map(|n| {
+            let kind = n["type"].as_str().unwrap_or("").to_string();
+            Some((
+                rank(&kind),
+                n["position"].as_f64().unwrap_or(0.0),
+                StateInfo {
+                    name: n["name"].as_str()?.to_string(),
+                    kind,
+                    color: n["color"].as_str().unwrap_or("").to_string(),
+                },
+            ))
+        })
+        .collect();
+    states.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    let mut out: Vec<StateInfo> = Vec::new();
+    for (_, _, s) in states {
+        if !out.iter().any(|o| o.name == s.name) {
+            out.push(s);
+        }
+    }
+    Ok(out)
+}
+
+/// The states' names, in the same order.
+pub fn read_team_state_names(reply: &Value) -> Result<Vec<String>, LinearError> {
+    Ok(read_team_states(reply)?
+        .into_iter()
+        .map(|s| s.name)
+        .collect())
+}
+
+/// The labels the teams keyed `teams` can use: their own and the workspace's.
+pub fn team_labels_request(teams: &[String]) -> Value {
+    json!({
+        "query": "query($keys: [String!]) { issueLabels(first: 250, filter: { or: [ \
+                  { team: { key: { in: $keys } } }, { team: { null: true } } ] }) \
+                  { nodes { name isGroup } } }",
+        "variables": {"keys": teams},
+    })
+}
+
+/// Their names, each once, by name ignoring case; a group's own name is left out (its
+/// labels are what tickets carry).
+pub fn read_label_names(reply: &Value) -> Result<Vec<String>, LinearError> {
+    let mut names: Vec<String> = data(reply)?["issueLabels"]["nodes"]
+        .as_array()
+        .ok_or_else(|| unexpected("issueLabels"))?
+        .iter()
+        .filter(|l| l["isGroup"].as_bool() != Some(true))
+        .filter_map(|l| l["name"].as_str().map(str::to_string))
+        .collect();
+    names.sort_by_key(|n| (n.to_lowercase(), n.clone()));
+    names.dedup();
+    Ok(names)
+}
+
+/// Whose tickets the Tickets page lists (core spec §53).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Assignee {
+    /// Assigned or not.
+    #[default]
+    Anyone,
+    Unassigned,
+    /// Assigned to one of these users (by id); to anyone when empty.
+    Assigned(Vec<String>),
+}
+
+/// The members of the teams keyed `teams`, for the Assigned filter.
+pub fn team_members_request(teams: &[String]) -> Value {
+    json!({
+        "query": "query($keys: [String!]) { teams(first: 20, filter: { key: { in: $keys } }) \
+                  { nodes { members(first: 100) { nodes { id name displayName active } } } } }",
+        "variables": {"keys": teams},
+    })
+}
+
+/// Each active member once, as (id, name), by name.
+pub fn read_team_members(reply: &Value) -> Result<Vec<(String, String)>, LinearError> {
+    let teams = data(reply)?["teams"]["nodes"]
+        .as_array()
+        .ok_or_else(|| unexpected("teams"))?;
+    let mut people: Vec<(String, String)> = Vec::new();
+    for m in teams.iter().flat_map(|t| {
+        t["members"]["nodes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }) {
+        if m["active"].as_bool() == Some(false) {
+            continue;
+        }
+        let (Some(id), Some(name)) = (
+            m["id"].as_str(),
+            m["name"].as_str().or_else(|| m["displayName"].as_str()),
+        ) else {
+            continue;
+        };
+        if !people.iter().any(|(i, _)| i == id) {
+            people.push((id.to_string(), name.to_string()));
+        }
+    }
+    people.sort_by_key(|p| p.1.to_lowercase());
+    Ok(people)
+}
+
+/// What the Tickets page reads of each ticket: `TICKET_FIELDS` with its labels capped, so a
+/// page of them stays under Linear's complexity limit (10,000 points a query; a nested list
+/// multiplies by its `first`, 50 when left out).
+const LISTED_TICKET_FIELDS: &str = "id identifier title url slaBreachesAt slaHighRiskAt priority createdAt assignee { id } \
+     state { name } labels(first: 10) { nodes { name } }";
+
+/// How many tickets the Tickets page lists at most.
+pub const LISTED_TICKETS: usize = 100;
+
+/// The tickets of teams `teams` in any of the states named `states`, assigned as `who` says,
+/// most recently updated first, up to `LISTED_TICKETS`.
+pub fn tickets_in_states_request(teams: &[String], states: &[String], who: &Assignee) -> Value {
+    let mut filter = json!({
+        "team": {"key": {"in": teams}},
+        "state": {"name": {"in": states}},
+    });
+    match who {
+        Assignee::Anyone => {}
+        Assignee::Unassigned => filter["assignee"] = json!({"null": true}),
+        Assignee::Assigned(ids) if ids.is_empty() => filter["assignee"] = json!({"null": false}),
+        Assignee::Assigned(ids) => filter["assignee"] = json!({"id": {"in": ids}}),
+    }
+    json!({
+        "query": format!(
+            "query($filter: IssueFilter!) {{ issues(filter: $filter, first: {LISTED_TICKETS}, \
+             orderBy: updatedAt) {{ nodes {{ {LISTED_TICKET_FIELDS} }} }} }}"
+        ),
+        "variables": {"filter": filter},
+    })
+}
+
 /// How long one call may take.
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
@@ -247,7 +442,7 @@ pub struct Http {
 impl Http {
     /// Sends `body`; the reply as JSON, or why there is none. Linear answers errors with a
     /// JSON body too, so a 4xx is read for them.
-    fn post(&self, body: &Value) -> Result<Value, LinearError> {
+    pub(crate) fn post(&self, body: &Value) -> Result<Value, LinearError> {
         if self.key.trim().is_empty() {
             return Err(LinearError::Rejected("no Linear API key".into()));
         }
@@ -313,6 +508,217 @@ impl LinearApi for Http {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn labels_come_once_each_by_name_without_their_groups() {
+        let reply = json!({"data": {"issueLabels": {"nodes": [
+            {"name": "hydra-claimed", "isGroup": false},
+            {"name": "Bug", "isGroup": false},
+            {"name": "Type", "isGroup": true},
+            {"name": "bug", "isGroup": false},
+            {"name": "Bug", "isGroup": false},
+            {"name": "Customer"}
+        ]}}});
+        assert_eq!(
+            read_label_names(&reply).unwrap(),
+            vec!["Bug", "bug", "Customer", "hydra-claimed"]
+        );
+        let req = team_labels_request(&["PRE".into()]);
+        assert_eq!(req["variables"]["keys"], json!(["PRE"]));
+    }
+
+    #[test]
+    fn teams_come_by_key() {
+        let reply = json!({"data": {"teams": {"nodes": [
+            {"key": "PRE", "name": "Product & Engineering"},
+            {"key": "INTH", "name": "Interu Help"}
+        ]}}});
+        assert_eq!(
+            read_teams(&reply).unwrap(),
+            vec![
+                ("INTH".to_string(), "Interu Help".to_string()),
+                ("PRE".to_string(), "Product & Engineering".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn the_chosen_teams_states_come_once_each_in_workflow_order() {
+        let reply = json!({"data": {"teams": {"nodes": [
+            {"key": "PRE", "states": {"nodes": [
+                {"name": "Done", "type": "completed", "position": 3.0, "color": "#5e6ad2"},
+                {"name": "In Progress", "type": "started", "position": 2.0},
+                {"name": "Todo", "type": "unstarted", "position": 1.0}
+            ]}},
+            {"key": "INTH", "states": {"nodes": [
+                {"name": "In Review", "type": "started", "position": 2.5},
+                {"name": "Todo", "type": "unstarted", "position": 1.0},
+                {"name": "Backlog", "type": "backlog", "position": 0.0}
+            ]}}
+        ]}}});
+        assert_eq!(
+            read_team_state_names(&reply).unwrap(),
+            vec!["Backlog", "Todo", "In Progress", "In Review", "Done"]
+        );
+        let done = read_team_states(&reply).unwrap().pop().unwrap();
+        assert_eq!(
+            done,
+            StateInfo {
+                name: "Done".into(),
+                kind: "completed".into(),
+                color: "#5e6ad2".into()
+            }
+        );
+        let req = team_states_request(&["PRE".into(), "INTH".into()]);
+        assert_eq!(req["variables"]["keys"], json!(["PRE", "INTH"]));
+        let bad = json!({"errors": [{"message": "nope"}]});
+        assert!(read_team_state_names(&bad).is_err());
+    }
+
+    #[test]
+    fn tickets_are_asked_for_by_team_and_state_newest_first() {
+        let req = tickets_in_states_request(
+            &["PRE".into()],
+            &["Todo".into(), "In Review".into()],
+            &Assignee::Anyone,
+        );
+        assert_eq!(
+            req["variables"]["filter"],
+            json!({"team": {"key": {"in": ["PRE"]}},
+                   "state": {"name": {"in": ["Todo", "In Review"]}}})
+        );
+        let q = req["query"].as_str().unwrap();
+        assert!(
+            q.contains("orderBy: updatedAt") && q.contains("identifier"),
+            "{q}"
+        );
+    }
+
+    /// Linear's estimate of a query's cost, roughly: every `{` opens an object worth 1, every
+    /// field 0.1, and a list multiplies what is inside by its `first` (50 when left out).
+    fn complexity(query: &str) -> f64 {
+        fn block(chars: &mut std::iter::Peekable<std::str::Chars>) -> f64 {
+            let mut total = 0.0;
+            let mut word = String::new();
+            let mut first: Option<f64> = None;
+            let mut is_list = false;
+            while let Some(c) = chars.next() {
+                match c {
+                    '(' => {
+                        let mut args = String::new();
+                        for a in chars.by_ref() {
+                            if a == ')' {
+                                break;
+                            }
+                            args.push(a);
+                        }
+                        if let Some(n) = args
+                            .split("first:")
+                            .nth(1)
+                            .and_then(|r| r.trim().split(|c: char| !c.is_ascii_digit()).next())
+                            .and_then(|n| n.parse().ok())
+                        {
+                            first = Some(n);
+                        }
+                        is_list = true;
+                    }
+                    '{' => {
+                        let inner = 1.0 + block(chars);
+                        let plural = word.ends_with('s') || word == "nodes";
+                        total += if word == "nodes" {
+                            inner
+                        } else if is_list || plural {
+                            inner * first.unwrap_or(50.0)
+                        } else {
+                            inner
+                        };
+                        word.clear();
+                        first = None;
+                        is_list = false;
+                    }
+                    '}' => {
+                        if !word.is_empty() {
+                            total += 0.1;
+                        }
+                        return total;
+                    }
+                    c if c.is_whitespace() => {
+                        if !word.is_empty() && chars.peek().is_some_and(|n| *n != '{' && *n != '(')
+                        {
+                            total += 0.1;
+                            word.clear();
+                        }
+                    }
+                    c => word.push(c),
+                }
+            }
+            total
+        }
+        let q = query.split_once('{').map_or(query, |(_, r)| r);
+        block(&mut q.chars().peekable())
+    }
+
+    #[test]
+    fn the_tickets_pages_queries_stay_under_linears_complexity_limit() {
+        let teams = vec!["PRE".to_string(), "INTH".to_string()];
+        let states = vec!["Todo".to_string()];
+        for req in [
+            teams_request(),
+            team_states_request(&teams),
+            team_members_request(&teams),
+            team_labels_request(&teams),
+            tickets_in_states_request(&teams, &states, &Assignee::Anyone),
+        ] {
+            let q = req["query"].as_str().unwrap();
+            let c = complexity(q);
+            assert!(c < 5_000.0, "{c} points: {q}");
+        }
+        // The estimate does catch a query that is too big: what was sent before.
+        let old = "query { teams(filter: { key: { in: $keys } }) { nodes { members(first: 250) \
+                   { nodes { id name displayName active } } } } }";
+        assert!(complexity(old) > 10_000.0, "{}", complexity(old));
+    }
+
+    #[test]
+    fn tickets_can_be_unassigned_assigned_or_assigned_to_someone() {
+        let who = |w: &Assignee| {
+            tickets_in_states_request(&["PRE".into()], &["Todo".into()], w)["variables"]["filter"]
+                ["assignee"]
+                .clone()
+        };
+        assert_eq!(who(&Assignee::Anyone), Value::Null);
+        assert_eq!(who(&Assignee::Unassigned), json!({"null": true}));
+        assert_eq!(who(&Assignee::Assigned(vec![])), json!({"null": false}));
+        assert_eq!(
+            who(&Assignee::Assigned(vec!["u1".into(), "u2".into()])),
+            json!({"id": {"in": ["u1", "u2"]}})
+        );
+    }
+
+    #[test]
+    fn team_members_come_once_each_by_name_leaving_out_deactivated_ones() {
+        let reply = json!({"data": {"teams": {"nodes": [
+            {"members": {"nodes": [
+                {"id": "u2", "name": "Jordan Miller", "active": true},
+                {"id": "u1", "name": "aadam Z", "active": true}
+            ]}},
+            {"members": {"nodes": [
+                {"id": "u2", "name": "Jordan Miller", "active": true},
+                {"id": "u3", "name": "Gone Person", "active": false},
+                {"id": "u4", "displayName": "kris", "active": true}
+            ]}}
+        ]}}});
+        assert_eq!(
+            read_team_members(&reply).unwrap(),
+            vec![
+                ("u1".to_string(), "aadam Z".to_string()),
+                ("u2".to_string(), "Jordan Miller".to_string()),
+                ("u4".to_string(), "kris".to_string()),
+            ]
+        );
+        let req = team_members_request(&["PRE".into()]);
+        assert_eq!(req["variables"]["keys"], json!(["PRE"]));
+    }
+
     use super::*;
 
     fn ticket_json(identifier: &str, sla: Option<&str>, assignee: Option<&str>) -> Value {

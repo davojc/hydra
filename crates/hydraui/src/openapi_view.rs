@@ -1,5 +1,6 @@
 //! OpenAPI specs as API docs (spec §7.8): a read-only view of an `Api` in the file pane's
 //! Rendered mode. What is open is kept here; schema trees are built only when opened.
+use crate::inbox::{Note, PushNote};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -12,8 +13,7 @@ use gpui::{
 };
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::notification::Notification;
-use gpui_component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
+use gpui_component::{ActiveTheme, Sizable, h_flex, v_flex};
 use serde_json::Value;
 
 use crate::openapi::example::{curl, example, operation_line, rules};
@@ -683,10 +683,7 @@ impl ApiView {
                     .xsmall()
                     .on_click(move |_, window, cx| {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(command.clone()));
-                        window.push_notification(
-                            Notification::success("The curl command is on the clipboard"),
-                            cx,
-                        );
+                        window.push_note(Note::success("The curl command is on the clipboard"), cx);
                     }),
             )
             .when_some(line, |d, l| {

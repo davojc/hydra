@@ -1,12 +1,12 @@
 //! A worktree per task card (task board spec §8): "Take in new worktree" on a Pickup card makes
 //! the card's branch and worktree, opens a Claude terminal in it and takes the card for that
 //! terminal; moving the card to Done offers to merge the branch back and remove the worktree.
+use crate::inbox::{Note, PushNote};
 use std::path::PathBuf;
 
 use gpui::prelude::*;
 use gpui::{Context, Window, div};
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::notification::Notification;
 use gpui_component::{WindowExt, h_flex, v_flex};
 
 use super::Workspace;
@@ -54,8 +54,8 @@ impl Workspace {
                 .await;
             let _ = this.update_in(cx, |ws, window, cx| match made {
                 Ok(wt) => ws.open_worktree(&env, project, card, wt, window, cx),
-                Err(e) => window.push_notification(
-                    Notification::error(format!("Couldn't make a worktree: {e}"))
+                Err(e) => window.push_note(
+                    Note::error(format!("Couldn't make a worktree: {e}"))
                         .title("Take in new worktree"),
                     cx,
                 ),
@@ -87,8 +87,8 @@ impl Workspace {
             .and_then(|v| v.read(cx).taker_name())
             .unwrap_or_else(|| crate::pane_view::label_for(None, &wt.path));
         if let Err(e) = worktrees::remember(&self.worktree_records(), &wt) {
-            window.push_notification(
-                Notification::warning(format!(
+            window.push_note(
+                Note::warning(format!(
                     "Couldn't record the worktree, so Done won't offer to merge it: {e}"
                 ))
                 .title("Take in new worktree"),
@@ -178,11 +178,11 @@ impl Workspace {
                 let note = match merged {
                     Ok(done) => {
                         let _ = worktrees::forget(&records, &wt);
-                        Notification::success(done)
+                        Note::success(done)
                     }
-                    Err(e) => Notification::error(e),
+                    Err(e) => Note::error(e),
                 };
-                window.push_notification(note.title(format!("Merge {}", wt.branch)), cx);
+                window.push_note(note.title(format!("Merge {}", wt.branch)), cx);
             });
         })
         .detach();

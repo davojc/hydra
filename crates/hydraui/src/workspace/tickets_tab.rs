@@ -5,13 +5,13 @@
 use std::cell::Cell;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, SharedString, Window, div, px};
+use gpui::{AnyElement, App, Context, Entity, SharedString, Subscription, Window, div, px};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_component::command::{Command, CommandItem, CommandState};
 use gpui_component::notification::Notification;
-use gpui_component::searchable_list::SearchableVec;
-use gpui_component::{Selectable, Sizable, WindowExt, h_flex, v_flex};
+use gpui_component::searchable_list::{SearchableListItem, SearchableVec};
+use gpui_component::{Sizable, WindowExt, h_flex, v_flex};
 
 use super::Workspace;
 use crate::linear::{self, Http, LinearError, Ticket};
@@ -28,9 +28,10 @@ pub struct TicketsTab {
     pub pick_labels: Vec<String>,
     /// Every label the chosen teams can use, from Linear; empty when it couldn't be read.
     pub labels: Vec<String>,
-    /// The searchable multi-select of labels to show on rows.
-    pub label_box: Option<gpui::Entity<ComboboxState<SearchableVec<String>>>>,
-    _label_sub: Option<gpui::Subscription>,
+    /// The filter's dropdowns, once made.
+    filters: Option<Filters>,
+    /// Counts reads of Linear: a reply to an older read than the latest is dropped.
+    reading: u64,
     /// The filter being chosen; **Save filter** keeps it in config.toml.
     pub pick_teams: Vec<String>,
     pub pick_states: Vec<String>,
@@ -120,8 +121,8 @@ impl Workspace {
             pick_states: self.ui.tickets_states.clone(),
             pick_labels: self.ui.tickets_labels.clone(),
             labels: Vec::new(),
-            label_box: None,
-            _label_sub: None,
+            filters: None,
+            reading: 0,
             pick_who: who_from_config(&self.ui.tickets_assignee, &self.ui.tickets_people),
             people: Vec::new(),
             tickets: Vec::new(),
@@ -130,30 +131,9 @@ impl Workspace {
             error: None,
             filter_open: self.ui.tickets_teams.is_empty() || self.ui.tickets_states.is_empty(),
         });
-        // The labels to show: a searchable multi-select, filled in once Linear is read.
-        let chosen = self.ui.tickets_labels.clone();
-        let label_box = cx.new(|cx| {
-            ComboboxState::new(SearchableVec::new(chosen), Vec::new(), window, cx)
-                .multiple(true)
-                .searchable(true)
-        });
-        let sub = cx.subscribe_in(
-            &label_box,
-            window,
-            |ws, _, e: &ComboboxEvent<SearchableVec<String>>, _, cx| {
-                let (ComboboxEvent::Change(values) | ComboboxEvent::Confirm(values)) = e;
-                if let Some(t) = &mut ws.tickets {
-                    t.pick_labels = values.clone();
-                }
-                cx.notify();
-            },
-        );
+        let filters = self.make_filters(window, cx);
         if let Some(t) = &mut self.tickets {
-            label_box.update(cx, |b, cx| {
-                b.set_selected_values(&t.pick_labels, window, cx)
-            });
-            t.label_box = Some(label_box);
-            t._label_sub = Some(sub);
+            t.filters = Some(filters);
         }
         self.reload_tickets(window, cx);
         window.focus(&self.focus, cx);
@@ -173,6 +153,8 @@ impl Workspace {
             return;
         };
         t.loading = true;
+        t.reading += 1;
+        let reading = t.reading;
         let (env, teams, states) = (t.env.clone(), t.pick_teams.clone(), t.pick_states.clone());
         let who = t.pick_who.clone();
         let hydra = self.hydra.clone();
@@ -228,6 +210,10 @@ impl Workspace {
                 .await;
             let _ = this.update_in(cx, |ws, window, cx| {
                 if let Some(t) = &mut ws.tickets {
+                    // A newer read is on its way: this one is out of date.
+                    if t.reading != reading {
+                        return;
+                    }
                     t.loading = false;
                     match read {
                         Ok((teams, names, states, people, labels, tickets, running)) => {
@@ -242,16 +228,7 @@ impl Workspace {
                         }
                         Err(e) => t.error = Some(e.to_string()),
                     }
-                    // The label list: every label the teams can use, plus any on the tickets
-                    // listed or already chosen.
-                    let choices = label_choices(&t.labels, &t.tickets, &t.pick_labels);
-                    let chosen = t.pick_labels.clone();
-                    if let Some(b) = &t.label_box {
-                        b.update(cx, |b, cx| {
-                            b.set_items(SearchableVec::new(choices), window, cx);
-                            b.set_selected_values(&chosen, window, cx);
-                        });
-                    }
+                    sync_filters(t, window, cx);
                 }
                 cx.notify();
             });
@@ -260,43 +237,95 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Adds or removes team `key` from the filter being chosen.
-    fn toggle_ticket_team(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(t) = &mut self.tickets {
-            toggle(&mut t.pick_teams, key);
+    /// The filter's dropdowns: teams, statuses, people and labels to pick several of, with a
+    /// search; whose tickets to pick one of. A change to any but labels reads Linear again.
+    fn make_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Filters {
+        let multi = |window: &mut Window, cx: &mut Context<Self>| {
+            cx.new(|cx| {
+                ComboboxState::new(
+                    SearchableVec::new(Vec::<Opt>::new()),
+                    Vec::new(),
+                    window,
+                    cx,
+                )
+                .multiple(true)
+                .searchable(true)
+            })
+        };
+        let (teams, states, people, labels) = (
+            multi(window, cx),
+            multi(window, cx),
+            multi(window, cx),
+            multi(window, cx),
+        );
+        let who_opts = vec![
+            Opt::plain("anyone", "Anyone"),
+            Opt::plain("unassigned", "Unassigned"),
+            Opt::plain("assigned", "Assigned"),
+        ];
+        let mode = self
+            .tickets
+            .as_ref()
+            .map_or("anyone".to_string(), |t| who_to_config(&t.pick_who).0);
+        let who = cx.new(|cx| {
+            ComboboxState::new(SearchableVec::new(who_opts), Vec::new(), window, cx)
+                .multiple(false)
+                .searchable(false)
+        });
+        who.update(cx, |b, cx| b.set_selected_values(&[mode], window, cx));
+        type Ev = ComboboxEvent<SearchableVec<Opt>>;
+        let changed = |e: &Ev| match e {
+            ComboboxEvent::Change(v) => Some(v.clone()),
+            ComboboxEvent::Confirm(_) => None,
+        };
+        let subs = vec![
+            cx.subscribe_in(&teams, window, move |ws, _, e: &Ev, window, cx| {
+                if let (Some(v), Some(t)) = (changed(e), &mut ws.tickets) {
+                    t.pick_teams = v;
+                    ws.reload_tickets(window, cx);
+                }
+            }),
+            cx.subscribe_in(&states, window, move |ws, _, e: &Ev, window, cx| {
+                if let (Some(v), Some(t)) = (changed(e), &mut ws.tickets) {
+                    t.pick_states = v;
+                    ws.reload_tickets(window, cx);
+                }
+            }),
+            cx.subscribe_in(&who, window, move |ws, _, e: &Ev, window, cx| {
+                if let (Some(v), Some(t)) = (changed(e), &mut ws.tickets) {
+                    let people = match &t.pick_who {
+                        linear::Assignee::Assigned(ids) => ids.clone(),
+                        _ => Vec::new(),
+                    };
+                    let mode = v.first().map_or("anyone", String::as_str);
+                    t.pick_who = who_from_config(mode, &people);
+                    ws.reload_tickets(window, cx);
+                }
+            }),
+            cx.subscribe_in(&people, window, move |ws, _, e: &Ev, window, cx| {
+                if let (Some(v), Some(t)) = (changed(e), &mut ws.tickets)
+                    && let linear::Assignee::Assigned(ids) = &mut t.pick_who
+                {
+                    *ids = v;
+                    ws.reload_tickets(window, cx);
+                }
+            }),
+            cx.subscribe_in(&labels, window, move |ws, _, e: &Ev, _, cx| {
+                if let (Some(v), Some(t)) = (changed(e), &mut ws.tickets) {
+                    t.pick_labels = v;
+                    cx.notify();
+                }
+            }),
+        ];
+        Filters {
+            teams,
+            states,
+            who,
+            people,
+            labels,
+            offered: Default::default(),
+            _subs: subs,
         }
-        self.reload_tickets(window, cx);
-    }
-
-    /// Adds or removes state `name` from the filter being chosen.
-    fn toggle_ticket_state(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(t) = &mut self.tickets {
-            toggle(&mut t.pick_states, name);
-        }
-        self.reload_tickets(window, cx);
-    }
-
-    /// Whose tickets to list.
-    fn set_ticket_who(
-        &mut self,
-        who: linear::Assignee,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(t) = &mut self.tickets {
-            t.pick_who = who;
-        }
-        self.reload_tickets(window, cx);
-    }
-
-    /// Adds or removes person `id` from Assigned's people.
-    fn toggle_ticket_person(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(t) = &mut self.tickets
-            && let linear::Assignee::Assigned(ids) = &mut t.pick_who
-        {
-            toggle(ids, id);
-        }
-        self.reload_tickets(window, cx);
     }
 
     /// **Save filter**: the chosen teams, states and assignees, kept in config.toml as
@@ -444,96 +473,59 @@ impl Workspace {
         let Some(t) = &self.tickets else {
             return div().into_any_element();
         };
-        let chip = |id: String, label: String, on: bool| {
-            Button::new(SharedString::from(id))
-                .label(label)
-                .small()
-                .outline()
-                .selected(on)
-        };
-        let team_chips =
-            h_flex()
-                .gap_1p5()
-                .flex_wrap()
-                .children(t.teams.iter().map(|(key, name)| {
-                    let k = key.clone();
-                    chip(
-                        format!("tickets-team-{key}"),
-                        format!("{key} · {name}"),
-                        t.pick_teams.contains(key),
-                    )
-                    .on_click(cx.listener(move |ws, _, window, cx| {
-                        ws.toggle_ticket_team(k.clone(), window, cx)
-                    }))
-                }));
-        let state_chips = h_flex()
-            .gap_1p5()
-            .flex_wrap()
-            .children(t.states.iter().enumerate().map(|(i, st)| {
-                let n = st.name.clone();
-                chip(
-                    format!("tickets-state-{i}"),
-                    format!("{} {}", status_glyph(&st.kind), st.name),
-                    t.pick_states.contains(&st.name),
+        // Each filter is the same kind of dropdown, with its name above it.
+        let field = |name: &'static str, body: AnyElement| {
+            v_flex()
+                .w(px(300.))
+                .gap_1()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(color(theme::TEXT_MUTED))
+                        .child(name),
                 )
-                .on_click(cx.listener(move |ws, _, window, cx| {
-                    ws.toggle_ticket_state(n.clone(), window, cx)
-                }))
-            }));
-        // Labels to show on rows: one searchable multi-select.
-        let label_picker = t.label_box.as_ref().map(|b| {
-            div().max_w(px(520.)).child(
-                Combobox::new(b)
-                    .placeholder("Labels to show on rows")
-                    .search_placeholder("Search labels")
-                    .cleanable(true)
-                    .menu_max_h(px(340.)),
-            )
+                .child(body)
+        };
+        let dropdown = |b: &Entity<ComboboxState<SearchableVec<Opt>>>,
+                        placeholder: &'static str| {
+            Combobox::new(b)
+                .placeholder(placeholder)
+                .search_placeholder("Search")
+                .cleanable(true)
+                .menu_max_h(px(340.))
+                .into_any_element()
+        };
+        let assigned = matches!(t.pick_who, linear::Assignee::Assigned(_));
+        let fields = t.filters.as_ref().map(|f| {
+            h_flex()
+                .gap_4()
+                .flex_wrap()
+                .items_start()
+                .child(field("Teams", dropdown(&f.teams, "Choose teams")))
+                .when(!t.pick_teams.is_empty(), |d| {
+                    d.child(field("Statuses", dropdown(&f.states, "Choose statuses")))
+                        .child(field(
+                            "Assignee",
+                            Combobox::new(&f.who)
+                                .placeholder("Anyone")
+                                .into_any_element(),
+                        ))
+                        .when(assigned, |d| {
+                            d.child(field(
+                                "Assigned to (none: anyone assigned)",
+                                dropdown(&f.people, "Anyone assigned"),
+                            ))
+                        })
+                        .child(field(
+                            "Labels to show on rows",
+                            dropdown(&f.labels, "Choose labels"),
+                        ))
+                })
         });
         let saved = t.pick_teams == self.ui.tickets_teams
             && t.pick_labels == self.ui.tickets_labels
             && t.pick_states == self.ui.tickets_states
             && t.pick_who == who_from_config(&self.ui.tickets_assignee, &self.ui.tickets_people);
-        // Whose tickets: Anyone, Unassigned, Assigned; with Assigned, the people to narrow to.
-        let who_chips = h_flex().gap_1p5().flex_wrap().children(
-            [
-                ("Anyone", linear::Assignee::Anyone),
-                ("Unassigned", linear::Assignee::Unassigned),
-                ("Assigned", linear::Assignee::Assigned(Vec::new())),
-            ]
-            .into_iter()
-            .map(|(name, who)| {
-                let on = std::mem::discriminant(&who) == std::mem::discriminant(&t.pick_who);
-                chip(format!("tickets-who-{name}"), name.to_string(), on).on_click(cx.listener(
-                    move |ws, _, window, cx| {
-                        // Assigned again keeps the people already chosen.
-                        if !on {
-                            ws.set_ticket_who(who.clone(), window, cx)
-                        }
-                    },
-                ))
-            }),
-        );
-        let chosen_people: Vec<String> = match &t.pick_who {
-            linear::Assignee::Assigned(ids) => ids.clone(),
-            _ => Vec::new(),
-        };
-        let people_chips =
-            h_flex()
-                .gap_1p5()
-                .flex_wrap()
-                .children(t.people.iter().map(|(id, name)| {
-                    let i = id.clone();
-                    chip(
-                        format!("tickets-person-{id}"),
-                        name.clone(),
-                        chosen_people.contains(id),
-                    )
-                    .on_click(cx.listener(move |ws, _, window, cx| {
-                        ws.toggle_ticket_person(i.clone(), window, cx)
-                    }))
-                }));
-        let assigned = matches!(t.pick_who, linear::Assignee::Assigned(_));
         let summary = if let Some(e) = &t.error {
             format!("Couldn't read Linear for {}: {e}", t.env)
         } else if t.loading {
@@ -693,13 +685,6 @@ impl Workspace {
                         .child(filter_line),
                 )
             });
-        let label = |text: &'static str| {
-            div()
-                .pt_1()
-                .text_xs()
-                .text_color(color(theme::TEXT_MUTED))
-                .child(text)
-        };
         div()
             .id("tickets-page")
             .flex_1()
@@ -714,23 +699,7 @@ impl Workspace {
                     .gap_2()
                     .child(header)
                     .child(filter_bar)
-                    .when(t.filter_open, |d| {
-                        d.child(label("Teams")).child(team_chips).when(
-                            !t.pick_teams.is_empty(),
-                            |d| {
-                                d.child(label("Statuses"))
-                                    .child(state_chips)
-                                    .child(label("Assignee"))
-                                    .child(who_chips)
-                                    .child(label("Show these labels on rows"))
-                                    .children(label_picker)
-                                    .when(assigned, |d| {
-                                        d.child(label("Assigned to (none chosen: anyone assigned)"))
-                                            .child(people_chips)
-                                    })
-                            },
-                        )
-                    })
+                    .when(t.filter_open, |d| d.children(fields))
                     .child(sections),
             )
             .into_any_element()
@@ -904,13 +873,112 @@ fn label_choices(labels: &[String], tickets: &[Ticket], chosen: &[String]) -> Ve
     all
 }
 
-/// Adds `item` to `list`, or takes it out when it is there.
-fn toggle(list: &mut Vec<String>, item: String) {
-    match list.iter().position(|x| *x == item) {
-        Some(i) => {
-            list.remove(i);
+/// One option in a filter dropdown: the value kept, what it shows, and (for a status) its icon.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Opt {
+    value: String,
+    title: String,
+    icon: Option<(&'static str, u32)>,
+}
+
+impl Opt {
+    fn plain(value: &str, title: &str) -> Self {
+        Self {
+            value: value.to_string(),
+            title: title.to_string(),
+            icon: None,
         }
-        None => list.push(item),
+    }
+}
+
+impl SearchableListItem for Opt {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.title.clone().into()
+    }
+
+    fn value(&self) -> &String {
+        &self.value
+    }
+
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        h_flex()
+            .gap_2()
+            .children(
+                self.icon
+                    .map(|(glyph, c)| div().w(px(14.)).text_color(color(c)).child(glyph)),
+            )
+            .child(self.title.clone())
+    }
+}
+
+/// The filter's dropdowns, and the options each was last given.
+pub struct Filters {
+    teams: Entity<ComboboxState<SearchableVec<Opt>>>,
+    states: Entity<ComboboxState<SearchableVec<Opt>>>,
+    who: Entity<ComboboxState<SearchableVec<Opt>>>,
+    people: Entity<ComboboxState<SearchableVec<Opt>>>,
+    labels: Entity<ComboboxState<SearchableVec<Opt>>>,
+    offered: [Vec<Opt>; 4],
+    _subs: Vec<Subscription>,
+}
+
+/// Each dropdown's options from what was read: teams as `KEY · Name`, statuses with their
+/// icon, people by name, labels (the teams', the tickets', the chosen ones).
+fn filter_options(t: &TicketsTab) -> [Vec<Opt>; 4] {
+    [
+        t.teams
+            .iter()
+            .map(|(k, n)| Opt::plain(k, &format!("{k} · {n}")))
+            .collect(),
+        t.states
+            .iter()
+            .map(|st| Opt {
+                value: st.name.clone(),
+                title: st.name.clone(),
+                icon: Some((
+                    status_glyph(&st.kind),
+                    hex_color(&st.color).unwrap_or(theme::TEXT_MUTED),
+                )),
+            })
+            .collect(),
+        t.people.iter().map(|(id, n)| Opt::plain(id, n)).collect(),
+        label_choices(&t.labels, &t.tickets, &t.pick_labels)
+            .iter()
+            .map(|l| Opt::plain(l, l))
+            .collect(),
+    ]
+}
+
+/// Gives each dropdown its options when they changed, keeping what is chosen. One whose
+/// options didn't change is left alone, so a search being typed in it isn't cleared.
+fn sync_filters(t: &mut TicketsTab, window: &mut Window, cx: &mut Context<Workspace>) {
+    let options = filter_options(t);
+    let people = match &t.pick_who {
+        linear::Assignee::Assigned(ids) => ids.clone(),
+        _ => Vec::new(),
+    };
+    let chosen = [
+        t.pick_teams.clone(),
+        t.pick_states.clone(),
+        people,
+        t.pick_labels.clone(),
+    ];
+    let Some(f) = &mut t.filters else {
+        return;
+    };
+    let boxes = [&f.teams, &f.states, &f.people, &f.labels];
+    for (i, (b, opts)) in boxes.into_iter().zip(options).enumerate() {
+        if f.offered[i] == opts {
+            continue;
+        }
+        let pick = chosen[i].clone();
+        b.update(cx, |b, cx| {
+            b.set_items(SearchableVec::new(opts.clone()), window, cx);
+            b.set_selected_values(&pick, window, cx);
+        });
+        f.offered[i] = opts;
     }
 }
 
@@ -943,6 +1011,42 @@ mod tests {
     }
 
     #[test]
+    fn each_dropdown_offers_what_was_read_teams_named_and_statuses_with_their_icon() {
+        let t = super::TicketsTab {
+            env: "iov42".into(),
+            teams: vec![("PRE".into(), "Product & Engineering".into())],
+            states: vec![crate::linear::StateInfo {
+                name: "In Progress".into(),
+                kind: "started".into(),
+                color: "#f2c94c".into(),
+            }],
+            pick_labels: vec!["Old".into()],
+            labels: vec!["Bug".into()],
+            filters: None,
+            reading: 0,
+            pick_teams: vec![],
+            pick_states: vec![],
+            pick_who: Assignee::Anyone,
+            people: vec![("u2".into(), "Jordan Miller".into())],
+            tickets: vec![],
+            running: vec![],
+            loading: false,
+            error: None,
+            filter_open: true,
+        };
+        let [teams, states, people, labels] = super::filter_options(&t);
+        assert_eq!(
+            teams,
+            vec![super::Opt::plain("PRE", "PRE · Product & Engineering")]
+        );
+        assert_eq!(states[0].value, "In Progress");
+        assert_eq!(states[0].icon, Some(("◐", 0xf2c94c)));
+        assert_eq!(people, vec![super::Opt::plain("u2", "Jordan Miller")]);
+        let names: Vec<&str> = labels.iter().map(|o| o.value.as_str()).collect();
+        assert_eq!(names, vec!["Bug", "Old"]);
+    }
+
+    #[test]
     fn labels_offered_are_the_teams_the_tickets_and_the_chosen_ones_once_each() {
         let ticket = crate::linear::Ticket {
             id: "1".into(),
@@ -971,14 +1075,5 @@ mod tests {
         assert_eq!(super::hex_color("#5e6ad2"), Some(0x5e6ad2));
         assert_eq!(super::hex_color("5e6ad2"), None);
         assert_eq!(super::hex_color("#5e6"), None);
-    }
-
-    #[test]
-    fn a_chip_toggles_its_item_in_and_out() {
-        let mut list = vec!["PRE".to_string()];
-        super::toggle(&mut list, "INTH".into());
-        assert_eq!(list, vec!["PRE", "INTH"]);
-        super::toggle(&mut list, "PRE".into());
-        assert_eq!(list, vec!["INTH"]);
     }
 }

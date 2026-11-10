@@ -628,17 +628,74 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Runs `runs` lost their orchestrator while hydraui runs (core spec §52): their stage
+    /// sessions close (a Resume reopens the one at work in its own conversation), and each gets
+    /// the Resume card a restart would give it.
+    fn set_runs_aside(&mut self, runs: &[String], window: &mut Window, cx: &mut Context<Self>) {
+        let tokens: Vec<String> = server::get()
+            .map(|sv| {
+                let reg = server::lock(sv.registry());
+                runs.iter()
+                    .filter_map(|id| reg.runs.run(id))
+                    .flat_map(|r| r.stages.iter().filter_map(|s| s.latest()?.session.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let panes: Vec<PaneId> = self
+            .panes
+            .iter()
+            .filter(|(_, v)| {
+                v.read(cx)
+                    .mcp_token()
+                    .is_some_and(|t| tokens.iter().any(|x| x == t))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for p in panes {
+            self.close_terminal_now(p, window, cx);
+        }
+        let root = self.hydra.paths.root().to_path_buf();
+        for i in crate::run_resume::interrupted(&root, crate::claim::alive) {
+            if runs.contains(&i.run.id) && !self.interrupted.iter().any(|x| x.run.id == i.run.id) {
+                window.push_notification(
+                    Notification::info(format!(
+                        "{}'s orchestrator closed before it finished. Resume it from the \
+                         Pipelines tab, or stop it there.",
+                        i.run.ticket
+                    ))
+                    .title(i.run.pipeline.name.clone()),
+                    cx,
+                );
+                crate::action_log::write(format!("run {}: set aside to resume", i.run.id));
+                self.interrupted.push(i);
+            }
+        }
+        cx.notify();
+    }
+
     /// **Stop ticket** on interrupted run `idx` (§13): its log ends, and its card goes.
     pub(super) fn stop_interrupted(&mut self, idx: usize, cx: &mut Context<Self>) {
         if idx >= self.interrupted.len() {
             return;
         }
         let i = self.interrupted.remove(idx);
-        note_run(
-            &i.run.id,
-            "run ended",
-            serde_json::json!({"outcome": "stopped", "reason": "hydraui closed while it ran"}),
-        );
+        // Set aside while hydraui ran (core spec §52): it is still open here, so it ends as any
+        // stopped ticket does, logged once.
+        let live = server::get().map(|sv| {
+            let mut reg = server::lock(sv.registry());
+            let open = reg.runs.run(&i.run.id).is_some_and(|r| r.state.open());
+            open.then(|| reg.runs.person(&i.run.id, crate::runs::Choice::Stop).ok())
+                .flatten()
+        });
+        match live.flatten() {
+            Some(changes) => tell(changes),
+            None => note_run(
+                &i.run.id,
+                "run ended",
+                serde_json::json!({"outcome": "stopped",
+                                   "reason": "stopped by you after it was interrupted"}),
+            ),
+        }
         crate::action_log::write(format!("run {}: stopped after a restart", i.run.id));
         cx.notify();
     }
@@ -806,6 +863,15 @@ impl Workspace {
     ) {
         // Linear hears of runs that started or ended (phase 2 §4).
         self.linear_runs_changed(&changes, cx);
+        // An orchestrator closed under its runs: they wait on a Resume card (core spec §52).
+        let aside: Vec<String> = changes
+            .iter()
+            .filter(|c| c.what == Decided::SetAside)
+            .map(|c| c.run.clone())
+            .collect();
+        if !aside.is_empty() {
+            self.set_runs_aside(&aside, window, cx);
+        }
         // A person sent a run back to an earlier stage: its own session reopens.
         for c in changes.iter().filter(|c| c.what == Decided::Reopened) {
             if let Some(stage) = c.stage {

@@ -92,11 +92,17 @@ fn read(hydra_root: &Path, file: &Path, alive: &impl Fn(u32) -> bool) -> Option<
         return None;
     }
     // The latest: a resumed run logs its new orchestrator again.
-    let orch = events.iter().rev().find(|e| event(e) == "orchestrator")?;
-    let pid = u32::try_from(orch.get("pid")?.as_u64()?).ok()?;
-    if alive(pid) {
+    let at = events.iter().rposition(|e| event(e) == "orchestrator")?;
+    let pid = u32::try_from(events[at].get("pid")?.as_u64()?).ok()?;
+    // Its orchestrator closed under a hydraui still running (core spec §52), or its hydraui
+    // is gone.
+    let set_aside = events[at..]
+        .iter()
+        .any(|e| event(e) == "orchestrator closed");
+    if alive(pid) && !set_aside {
         return None;
     }
+    let orch = &events[at];
     let claude = events
         .iter()
         .rev()
@@ -438,6 +444,21 @@ mod tests {
             .filter(|l| !l.contains("orch-c"))
             .collect();
         assert!(interrupted(home_with(&old).path(), |_| false).is_empty());
+    }
+
+    #[test]
+    fn a_run_whose_orchestrator_closed_comes_back_while_its_hydraui_runs() {
+        let mut log = mid_run();
+        log.push(line("orchestrator closed", ""));
+        let found = interrupted(home_with(&log).path(), |pid| pid == 4242);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].run.stages[1].status, StageStatus::Running);
+        // Resumed since: its new orchestrator holds it.
+        log.push(line(
+            "orchestrator",
+            r#","env":"iov42","folder":"/w/orch","pid":4242"#,
+        ));
+        assert!(interrupted(home_with(&log).path(), |pid| pid == 4242).is_empty());
     }
 
     #[test]

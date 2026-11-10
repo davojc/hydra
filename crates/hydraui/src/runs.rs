@@ -257,6 +257,9 @@ pub enum Decided {
     RunSettled(String),
     RunNeedsYou(String),
     RunStopped(String),
+    /// Its orchestrator's terminal closed while it ran: it stays open, set aside for a person to
+    /// resume or stop (core spec §52).
+    SetAside,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -872,10 +875,12 @@ impl Runs {
     }
 
     /// The terminal holding `token` closed, its shell exited or its Claude session ended: a
-    /// stage it was running fails, a run it orchestrated stops for good.
+    /// stage it was running fails; a run it orchestrated is set aside, still open, to be
+    /// resumed or stopped (core spec §52). A set-aside run's stages closing change nothing.
     pub fn session_gone(&mut self, token: &str) -> Vec<Change> {
         let mut changes = Vec::new();
         if let Some((ri, si)) = self.stage_of(token)
+            && self.runs[ri].orchestrator != crate::run_resume::REPLAYED
             && self.runs[ri].stages[si].status.busy()
         {
             changes.extend(self.fail_stage(ri, si, "its session ended without reporting"));
@@ -884,7 +889,12 @@ impl Runs {
             .filter(|&ri| self.runs[ri].orchestrator == token && self.runs[ri].state.open())
             .collect();
         for ri in orchestrated {
-            changes.extend(self.end(ri, "the orchestrator's terminal closed".into()));
+            self.runs[ri].orchestrator = crate::run_resume::REPLAYED.to_string();
+            changes.push(Change {
+                run: self.runs[ri].id.clone(),
+                stage: None,
+                what: Decided::SetAside,
+            });
         }
         changes
     }
@@ -2731,17 +2741,36 @@ mod tests {
     }
 
     #[test]
-    fn a_closed_orchestrator_stops_its_run_for_good() {
+    fn a_closed_orchestrator_sets_its_open_runs_aside_to_be_resumed() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b"]);
+        let s = runs.begin("orch", &id, "a", "", 30).unwrap();
+        runs.link(&id, s.stage, "s1", "s1");
+        let changes = runs.session_gone("orch");
+        assert_eq!(
+            changes,
+            vec![Change {
+                run: id.clone(),
+                stage: None,
+                what: Decided::SetAside
+            }]
+        );
+        let r = runs.run(&id).unwrap();
+        assert_eq!(r.state, RunState::Running);
+        assert_eq!(r.orchestrator, crate::run_resume::REPLAYED);
+        assert!(runs.current("orch").is_none());
+        // Its stage's session closing as it is set aside isn't the stage failing.
+        assert!(runs.session_gone("s1").is_empty());
+        assert!(runs.run(&id).unwrap().stages[0].status.busy());
+    }
+
+    #[test]
+    fn a_closed_orchestrator_leaves_its_ended_runs_ended() {
         let mut runs = Runs::default();
         let id = run(&mut runs, &["a"]);
-        let changes = runs.session_gone("orch");
-        assert!(
-            changes
-                .iter()
-                .any(|c| matches!(c.what, Decided::RunStopped(_)))
-        );
+        runs.person(&id, Choice::Stop).unwrap();
+        assert!(runs.session_gone("orch").is_empty());
         assert!(matches!(runs.run(&id).unwrap().state, RunState::Stopped(_)));
-        assert!(runs.person(&id, retry("again")).is_err());
     }
 
     #[test]

@@ -166,6 +166,11 @@ pub fn items(run: &str, text: &str) -> Vec<Item> {
                     Tone::Neutral,
                 )
             }
+            Some("orchestrator closed") => push(
+                "Interrupted: its orchestrator closed. Resume it from the Pipelines tab".into(),
+                Tone::Attention,
+            ),
+            Some("resumed after restart") => push("Resumed".into(), Tone::Neutral),
             Some("went back") => push(
                 format!("Went back to {}", stage(&s("stage"))),
                 Tone::Neutral,

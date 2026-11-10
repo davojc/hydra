@@ -1099,3 +1099,14 @@ For catching up after time away. A **History** button right of **Projects** in t
 - **Where**: each ticket's box in the sidebar (shown when an orchestrator has two or more tickets) has a **×**. The pipeline card's right-click menu lists **Stop <ticket>…** for each open ticket, above **End pipeline…**, which covers a pipeline with only one ticket.
 - **The dialog** names the ticket and how many sessions close: "It is recorded as stopped by you, and its 2 sessions close. The pipeline and its other tickets keep going."
 - **Stop ticket** does what **Stop this ticket** on the Pipeline tab does: it records the run as stopped by you and tells the orchestrator. Then it closes the run's stage sessions. The orchestrator stays open.
+
+## 52. Recovering a run whose orchestrator closed (added 2026-11-10)
+
+Before this, an orchestrator's terminal closing while hydraui kept running ended its open runs as "stopped: the orchestrator's terminal closed", and nothing offered them back. 16 runs were lost that way by 2026-11-10. A restart (§13) already kept runs open. This does the same without one.
+
+- **Setting aside.** When an orchestrator's terminal closes (or its shell exits) and you didn't stop its runs, each open run is set aside (`Decided::SetAside`), not ended. It stays open in memory, owned by `run_resume::REPLAYED`, and its log gets `orchestrator closed`. **End pipeline** and **Stop ticket** end the runs first, so nothing of theirs is set aside.
+- **Its sessions.** hydraui closes the run's stage sessions. A set-aside run's stage closing isn't that stage failing.
+- **Its card.** It gets the §13 card with **Resume** and **Stop ticket**, straight away, with a notice naming the ticket. `run_resume::interrupted` offers a run whose log has `orchestrator closed` after its latest `orchestrator` line, even while that hydraui still runs.
+- **Resume** works as after a restart. It reopens the orchestrator's own conversation (`claude --resume`) and the stage that was at work in its own conversation, so a half-done PR review goes on with its history.
+- **Stop ticket** ends the run as any stopped ticket does: "stopped by you at <stage>", logged once. A run interrupted by a restart, which isn't in memory, logs "stopped by you after it was interrupted".
+- **History** (§50) shows `Interrupted: its orchestrator closed. Resume it from the Pipelines tab` in amber, and `Resumed`.

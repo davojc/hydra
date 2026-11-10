@@ -64,6 +64,7 @@ pub fn record(hydra_root: &Path, runs: &Runs, changes: &[Change]) {
         };
         let (event, fields) = match &c.what {
             Decided::RunStarted | Decided::RunResumed => continue,
+            Decided::SetAside => ("orchestrator closed", json!({})),
             Decided::Passed => ("stage passed", json!({"stage": stage})),
             Decided::Stopped(why) => ("stage stopped", json!({"stage": stage, "reason": why})),
             Decided::Failed(why) => ("stage failed", json!({"stage": stage, "reason": why})),

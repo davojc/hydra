@@ -1074,3 +1074,28 @@ The condensed list has one line per open ticket (`open_lanes`) of every orchestr
 - its state word when it isn't simply Working, in the warning colour for Needs you, Check it and Asked product.
 
 A click shows the current stage's latest session, or the orchestrator when that stage has no session yet. The line is highlighted while one of its sessions is shown. With nothing open, it says "Nothing running right now."
+
+## 50. History (added 2026-11-10)
+
+For catching up after time away. A **History** button right of **Projects** in the tab strip opens one timeline of what every pipeline did, newest first, across every environment. Ticket history (§7.5) has one line per run; History has one line per thing that happened. It opens in the middle, like Projects, and replaces Projects or Settings there (and they replace it). Clicking History again closes it.
+
+- **Read from the run logs** (§8) by `run_feed`. Session bookkeeping (folders, Claude session ids, restarts, Linear syncing) is left out, and so is `run started`, because its first stage's start says it began. Stage ids read as their titles from the pipeline in `run started`; an attempt's id (`verify-2`) reads as its stage's title.
+- **Each line**: the time, a dot, the ticket (named as in its box), what happened, and the pipeline. Hover shows the ticket's title, and a click opens the ticket or pull request.
+  - Green: `<Stage> passed, <score>` and `Done`.
+  - Red: `<Stage> failed: <reason>` and `Stopped: <reason>`.
+  - Amber: `Needs you: …` and `Asked product: …`.
+  - Muted: `<Stage> started`, `Waiting on the author: …`, `The author replied: …`, `Product answered: …`, `You chose <choice>: <note>` and `Went back to <Stage>`.
+  - Lines written in the same millisecond read latest first, so `Done` comes above the last stage's pass.
+- **Days** are headed Today, Yesterday, or the date.
+- **Spans**:
+  - **Since you last looked** comes first whenever History has been opened before, and is what it opens at. Opening it records the time in hydraui's config.toml as `history_seen`, a new optional key.
+  - **Last 2 hours** (what it opens at the first time), **Last 8 hours**, **Today** and **Last 48 hours** are always offered.
+- **Reading** happens in the background: on opening it, on choosing a span, and on **Refresh**. A log last written before the span starts isn't read.
+- **Header**: a summary of the span, for example `Since Today 09:00: 3 tickets active · 1 finished · 0 failed or stopped · 1 asked for a person`.
+
+## 51. Stopping one ticket (added 2026-11-10)
+
+**End pipeline** stops every ticket and closes the orchestrator. To stop one bad run while the pipeline's others keep going:
+- **Where**: each ticket's box in the sidebar (shown when an orchestrator has two or more tickets) has a **×**. The pipeline card's right-click menu lists **Stop <ticket>…** for each open ticket, above **End pipeline…**, which covers a pipeline with only one ticket.
+- **The dialog** names the ticket and how many sessions close: "It is recorded as stopped by you, and its 2 sessions close. The pipeline and its other tickets keep going."
+- **Stop ticket** does what **Stop this ticket** on the Pipeline tab does: it records the run as stopped by you and tells the orchestrator. Then it closes the run's stage sessions. The orchestrator stays open.

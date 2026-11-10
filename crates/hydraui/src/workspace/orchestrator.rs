@@ -1231,6 +1231,88 @@ impl Workspace {
         });
     }
 
+    /// Asks before stopping one ticket of orchestrator `orch` (its run `run`, shown as `title`).
+    pub(super) fn stop_ticket_dialog(
+        &mut self,
+        orch: PaneId,
+        run: String,
+        title: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sessions = self
+            .open_lanes(orch, cx)
+            .into_iter()
+            .find(|(r, _, _)| r.id == run)
+            .map_or(0, |(_, _, panes)| panes.len());
+        let body = format!(
+            "It is recorded as stopped by you{}. The pipeline and its other tickets keep going.",
+            match sessions {
+                0 => String::new(),
+                1 => ", and its session closes".to_string(),
+                n => format!(", and its {n} sessions close"),
+            }
+        );
+        let ws = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (ws, run) = (ws.clone(), run.clone());
+            dialog
+                .title(format!("Stop {title}?"))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(color(theme::TEXT))
+                        .child(body.clone()),
+                )
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("stop-ticket-cancel")
+                                .label("Cancel")
+                                .ghost()
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("stop-ticket-go")
+                                .label("Stop ticket")
+                                .danger()
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    ws.update(cx, |ws, cx| ws.stop_ticket(orch, &run, window, cx));
+                                }),
+                        ),
+                )
+        });
+    }
+
+    /// Stops one ticket of orchestrator `orch` (as **Stop this ticket**) and closes the sessions
+    /// it started, leaving the orchestrator and its other tickets running (core spec §51).
+    pub(super) fn stop_ticket(
+        &mut self,
+        orch: PaneId,
+        run: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let panes = self
+            .open_lanes(orch, cx)
+            .into_iter()
+            .find(|(r, _, _)| r.id == run)
+            .map(|(_, _, panes)| panes)
+            .unwrap_or_default();
+        self.person_choice(orch, run, crate::runs::Choice::Stop, window, cx);
+        for p in panes.iter().filter(|p| **p != orch) {
+            self.close_terminal_now(*p, window, cx);
+        }
+        crate::action_log::write(format!(
+            "stopped run {run}: closed {} of its sessions",
+            panes.len()
+        ));
+        cx.notify();
+    }
+
     /// Ends the pipeline orchestrator `orch` runs: each of its orchestrators' open ticket
     /// stops (as **Stop this ticket**), then they and every session under them close.
     fn end_pipeline(&mut self, orch: PaneId, window: &mut Window, cx: &mut Context<Self>) {
@@ -1599,10 +1681,36 @@ impl Workspace {
             .on_click(
                 cx.listener(move |ws, _, window, cx| ws.open_pipeline(orchestrator, window, cx)),
             )
-            // Right-click: end it (also **End pipeline** on its Pipeline tab).
+            // Right-click: stop one ticket, or end it all (also **End pipeline** on its Pipeline
+            // tab).
             .context_menu({
                 let ws = cx.entity();
+                let tickets: Vec<(String, String)> = self
+                    .open_lanes(orchestrator, cx)
+                    .into_iter()
+                    .map(|(r, _, _)| {
+                        let t = crate::pipeline_card::ticket_title(&r.ticket, r.link.as_deref());
+                        (r.id, t)
+                    })
+                    .collect();
                 move |menu, _, _| {
+                    let mut menu = menu;
+                    for (run, title) in &tickets {
+                        let (ws, run, label) = (ws.clone(), run.clone(), title.clone());
+                        menu = menu.item(PopupMenuItem::new(format!("Stop {title}…")).on_click(
+                            move |_, window, cx| {
+                                ws.update(cx, |ws, cx| {
+                                    ws.stop_ticket_dialog(
+                                        orchestrator,
+                                        run.clone(),
+                                        label.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                });
+                            },
+                        ));
+                    }
                     let ws = ws.clone();
                     menu.item(
                         PopupMenuItem::new("End pipeline…").on_click(move |_, window, cx| {
@@ -1689,6 +1797,7 @@ impl Workspace {
         };
         let id = run.id.clone();
         let title = crate::pipeline_card::ticket_title(&run.ticket, run.link.as_deref());
+        let stop_title = title.clone();
         let prs = crate::linear_watch::pr_links(run);
         // A pull request's own link is its title; a Linear ticket's link and PRs show below.
         let link = (!run.link.as_deref().is_some_and(|l| l.contains("/pull/")))
@@ -1737,6 +1846,29 @@ impl Workspace {
                                 .text_color(fg)
                                 .child(c.state.word()),
                         )
+                    })
+                    .child({
+                        let (run_id, label) = (run.id.clone(), stop_title);
+                        Button::new(SharedString::from(format!(
+                            "lane-stop-{orchestrator}-{}",
+                            run.id
+                        )))
+                        .label("×")
+                        .ghost()
+                        .xsmall()
+                        .tooltip("Stop this ticket and close its sessions")
+                        .on_click(cx.listener(
+                            move |ws, _, window, cx| {
+                                cx.stop_propagation();
+                                ws.stop_ticket_dialog(
+                                    orchestrator,
+                                    run_id.clone(),
+                                    label.clone(),
+                                    window,
+                                    cx,
+                                )
+                            },
+                        ))
                     }),
             )
             .children(self.render_question(orchestrator, Some(&run.id), cx))

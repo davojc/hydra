@@ -261,8 +261,8 @@ pub fn read_teams(reply: &Value) -> Result<Vec<(String, String)>, LinearError> {
 /// The workflow states of the teams keyed `teams`.
 pub fn team_states_request(teams: &[String]) -> Value {
     json!({
-        "query": "query($keys: [String!]) { teams(filter: { key: { in: $keys } }) \
-                  { nodes { key states { nodes { name type position } } } } }",
+        "query": "query($keys: [String!]) { teams(first: 20, filter: { key: { in: $keys } }) \
+                  { nodes { key states(first: 50) { nodes { name type position } } } } }",
         "variables": {"keys": teams},
     })
 }
@@ -317,8 +317,8 @@ pub enum Assignee {
 /// The members of the teams keyed `teams`, for the Assigned filter.
 pub fn team_members_request(teams: &[String]) -> Value {
     json!({
-        "query": "query($keys: [String!]) { teams(filter: { key: { in: $keys } }) \
-                  { nodes { members(first: 250) { nodes { id name displayName active } } } } }",
+        "query": "query($keys: [String!]) { teams(first: 20, filter: { key: { in: $keys } }) \
+                  { nodes { members(first: 100) { nodes { id name displayName active } } } } }",
         "variables": {"keys": teams},
     })
 }
@@ -352,8 +352,17 @@ pub fn read_team_members(reply: &Value) -> Result<Vec<(String, String)>, LinearE
     Ok(people)
 }
 
+/// What the Tickets page reads of each ticket: `TICKET_FIELDS` with its labels capped, so a
+/// page of them stays under Linear's complexity limit (10,000 points a query; a nested list
+/// multiplies by its `first`, 50 when left out).
+const LISTED_TICKET_FIELDS: &str = "id identifier title url slaBreachesAt slaHighRiskAt priority createdAt assignee { id } \
+     state { name } labels(first: 10) { nodes { name } }";
+
+/// How many tickets the Tickets page lists at most.
+pub const LISTED_TICKETS: usize = 100;
+
 /// The tickets of teams `teams` in any of the states named `states`, assigned as `who` says,
-/// most recently updated first, up to 250.
+/// most recently updated first, up to `LISTED_TICKETS`.
 pub fn tickets_in_states_request(teams: &[String], states: &[String], who: &Assignee) -> Value {
     let mut filter = json!({
         "team": {"key": {"in": teams}},
@@ -367,8 +376,8 @@ pub fn tickets_in_states_request(teams: &[String], states: &[String], who: &Assi
     }
     json!({
         "query": format!(
-            "query($filter: IssueFilter!) {{ issues(filter: $filter, first: 250, \
-             orderBy: updatedAt) {{ nodes {{ {TICKET_FIELDS} }} }} }}"
+            "query($filter: IssueFilter!) {{ issues(filter: $filter, first: {LISTED_TICKETS}, \
+             orderBy: updatedAt) {{ nodes {{ {LISTED_TICKET_FIELDS} }} }} }}"
         ),
         "variables": {"filter": filter},
     })
@@ -507,6 +516,90 @@ mod tests {
             q.contains("orderBy: updatedAt") && q.contains("identifier"),
             "{q}"
         );
+    }
+
+    /// Linear's estimate of a query's cost, roughly: every `{` opens an object worth 1, every
+    /// field 0.1, and a list multiplies what is inside by its `first` (50 when left out).
+    fn complexity(query: &str) -> f64 {
+        fn block(chars: &mut std::iter::Peekable<std::str::Chars>) -> f64 {
+            let mut total = 0.0;
+            let mut word = String::new();
+            let mut first: Option<f64> = None;
+            let mut is_list = false;
+            while let Some(c) = chars.next() {
+                match c {
+                    '(' => {
+                        let mut args = String::new();
+                        for a in chars.by_ref() {
+                            if a == ')' {
+                                break;
+                            }
+                            args.push(a);
+                        }
+                        if let Some(n) = args
+                            .split("first:")
+                            .nth(1)
+                            .and_then(|r| r.trim().split(|c: char| !c.is_ascii_digit()).next())
+                            .and_then(|n| n.parse().ok())
+                        {
+                            first = Some(n);
+                        }
+                        is_list = true;
+                    }
+                    '{' => {
+                        let inner = 1.0 + block(chars);
+                        let plural = word.ends_with('s') || word == "nodes";
+                        total += if word == "nodes" {
+                            inner
+                        } else if is_list || plural {
+                            inner * first.unwrap_or(50.0)
+                        } else {
+                            inner
+                        };
+                        word.clear();
+                        first = None;
+                        is_list = false;
+                    }
+                    '}' => {
+                        if !word.is_empty() {
+                            total += 0.1;
+                        }
+                        return total;
+                    }
+                    c if c.is_whitespace() => {
+                        if !word.is_empty() && chars.peek().is_some_and(|n| *n != '{' && *n != '(')
+                        {
+                            total += 0.1;
+                            word.clear();
+                        }
+                    }
+                    c => word.push(c),
+                }
+            }
+            total
+        }
+        let q = query.split_once('{').map_or(query, |(_, r)| r);
+        block(&mut q.chars().peekable())
+    }
+
+    #[test]
+    fn the_tickets_pages_queries_stay_under_linears_complexity_limit() {
+        let teams = vec!["PRE".to_string(), "INTH".to_string()];
+        let states = vec!["Todo".to_string()];
+        for req in [
+            teams_request(),
+            team_states_request(&teams),
+            team_members_request(&teams),
+            tickets_in_states_request(&teams, &states, &Assignee::Anyone),
+        ] {
+            let q = req["query"].as_str().unwrap();
+            let c = complexity(q);
+            assert!(c < 5_000.0, "{c} points: {q}");
+        }
+        // The estimate does catch a query that is too big: what was sent before.
+        let old = "query { teams(filter: { key: { in: $keys } }) { nodes { members(first: 250) \
+                   { nodes { id name displayName active } } } } }";
+        assert!(complexity(old) > 10_000.0, "{}", complexity(old));
     }
 
     #[test]

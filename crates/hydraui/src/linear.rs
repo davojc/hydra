@@ -236,18 +236,43 @@ pub fn read_success(reply: &Value, field: &str) -> Result<(), LinearError> {
     }
 }
 
-/// Every workflow state's name across the teams the key sees, for the Tickets page's filter
-/// (core spec §53).
-pub fn state_names_request() -> Value {
-    json!({"query": "query { workflowStates(first: 250) { nodes { name type position } } }"})
+/// The teams the key sees, for the Tickets page's first choice (core spec §53).
+pub fn teams_request() -> Value {
+    json!({"query": "query { teams(first: 100) { nodes { key name } } }"})
 }
 
-/// The state names, each once, in Linear's order: backlog, unstarted, started, completed,
-/// canceled, then by position.
-pub fn read_state_names(reply: &Value) -> Result<Vec<String>, LinearError> {
-    let nodes = data(reply)?["workflowStates"]["nodes"]
+/// Each team as (key, name), by key.
+pub fn read_teams(reply: &Value) -> Result<Vec<(String, String)>, LinearError> {
+    let mut teams: Vec<(String, String)> = data(reply)?["teams"]["nodes"]
         .as_array()
-        .ok_or_else(|| unexpected("workflowStates"))?;
+        .ok_or_else(|| unexpected("teams"))?
+        .iter()
+        .filter_map(|t| {
+            Some((
+                t["key"].as_str()?.to_string(),
+                t["name"].as_str().unwrap_or_default().to_string(),
+            ))
+        })
+        .collect();
+    teams.sort();
+    Ok(teams)
+}
+
+/// The workflow states of the teams keyed `teams`.
+pub fn team_states_request(teams: &[String]) -> Value {
+    json!({
+        "query": "query($keys: [String!]) { teams(filter: { key: { in: $keys } }) \
+                  { nodes { key states { nodes { name type position } } } } }",
+        "variables": {"keys": teams},
+    })
+}
+
+/// Their state names, each once, in Linear's order: triage, backlog, unstarted, started,
+/// completed, canceled, then by position.
+pub fn read_team_state_names(reply: &Value) -> Result<Vec<String>, LinearError> {
+    let teams = data(reply)?["teams"]["nodes"]
+        .as_array()
+        .ok_or_else(|| unexpected("teams"))?;
     let rank = |t: &str| match t {
         "triage" => 0,
         "backlog" => 1,
@@ -257,8 +282,9 @@ pub fn read_state_names(reply: &Value) -> Result<Vec<String>, LinearError> {
         "canceled" => 5,
         _ => 6,
     };
-    let mut states: Vec<(usize, f64, String)> = nodes
+    let mut states: Vec<(usize, f64, String)> = teams
         .iter()
+        .flat_map(|t| t["states"]["nodes"].as_array().cloned().unwrap_or_default())
         .filter_map(|n| {
             Some((
                 rank(n["type"].as_str().unwrap_or("")),
@@ -277,14 +303,18 @@ pub fn read_state_names(reply: &Value) -> Result<Vec<String>, LinearError> {
     Ok(out)
 }
 
-/// The tickets in any of the states named `states`, most recently updated first, up to 100.
-pub fn tickets_in_states_request(states: &[String]) -> Value {
+/// The tickets of teams `teams` in any of the states named `states`, most recently updated
+/// first, up to 250.
+pub fn tickets_in_states_request(teams: &[String], states: &[String]) -> Value {
     json!({
         "query": format!(
-            "query($filter: IssueFilter!) {{ issues(filter: $filter, first: 100, \
+            "query($filter: IssueFilter!) {{ issues(filter: $filter, first: 250, \
              orderBy: updatedAt) {{ nodes {{ {TICKET_FIELDS} }} }} }}"
         ),
-        "variables": {"filter": {"state": {"name": {"in": states}}}},
+        "variables": {"filter": {
+            "team": {"key": {"in": teams}},
+            "state": {"name": {"in": states}},
+        }},
     })
 }
 
@@ -366,29 +396,51 @@ impl LinearApi for Http {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn state_names_come_once_each_in_workflow_order() {
-        let reply = json!({"data": {"workflowStates": {"nodes": [
-            {"name": "Done", "type": "completed", "position": 3.0},
-            {"name": "In Progress", "type": "started", "position": 2.0},
-            {"name": "Todo", "type": "unstarted", "position": 1.0},
-            {"name": "In Review", "type": "started", "position": 2.5},
-            {"name": "Todo", "type": "unstarted", "position": 1.0},
-            {"name": "Backlog", "type": "backlog", "position": 0.0}
+    fn teams_come_by_key() {
+        let reply = json!({"data": {"teams": {"nodes": [
+            {"key": "PRE", "name": "Product & Engineering"},
+            {"key": "INTH", "name": "Interu Help"}
         ]}}});
         assert_eq!(
-            read_state_names(&reply).unwrap(),
-            vec!["Backlog", "Todo", "In Progress", "In Review", "Done"]
+            read_teams(&reply).unwrap(),
+            vec![
+                ("INTH".to_string(), "Interu Help".to_string()),
+                ("PRE".to_string(), "Product & Engineering".to_string())
+            ]
         );
-        let bad = json!({"errors": [{"message": "nope"}]});
-        assert!(read_state_names(&bad).is_err());
     }
 
     #[test]
-    fn tickets_are_asked_for_by_state_name_newest_first() {
-        let req = tickets_in_states_request(&["Todo".into(), "In Review".into()]);
+    fn the_chosen_teams_states_come_once_each_in_workflow_order() {
+        let reply = json!({"data": {"teams": {"nodes": [
+            {"key": "PRE", "states": {"nodes": [
+                {"name": "Done", "type": "completed", "position": 3.0},
+                {"name": "In Progress", "type": "started", "position": 2.0},
+                {"name": "Todo", "type": "unstarted", "position": 1.0}
+            ]}},
+            {"key": "INTH", "states": {"nodes": [
+                {"name": "In Review", "type": "started", "position": 2.5},
+                {"name": "Todo", "type": "unstarted", "position": 1.0},
+                {"name": "Backlog", "type": "backlog", "position": 0.0}
+            ]}}
+        ]}}});
+        assert_eq!(
+            read_team_state_names(&reply).unwrap(),
+            vec!["Backlog", "Todo", "In Progress", "In Review", "Done"]
+        );
+        let req = team_states_request(&["PRE".into(), "INTH".into()]);
+        assert_eq!(req["variables"]["keys"], json!(["PRE", "INTH"]));
+        let bad = json!({"errors": [{"message": "nope"}]});
+        assert!(read_team_state_names(&bad).is_err());
+    }
+
+    #[test]
+    fn tickets_are_asked_for_by_team_and_state_newest_first() {
+        let req = tickets_in_states_request(&["PRE".into()], &["Todo".into(), "In Review".into()]);
         assert_eq!(
             req["variables"]["filter"],
-            json!({"state": {"name": {"in": ["Todo", "In Review"]}}})
+            json!({"team": {"key": {"in": ["PRE"]}},
+                   "state": {"name": {"in": ["Todo", "In Review"]}}})
         );
         let q = req["query"].as_str().unwrap();
         assert!(

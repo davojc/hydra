@@ -18,8 +18,13 @@ use crate::orchestrator_theme::{self as theme, color};
 pub struct TicketsTab {
     /// The environment whose Linear key and pipelines it uses.
     pub env: String,
-    /// Every state name Linear has, for the filter; empty until read.
+    /// Every team the key sees, as (key, name); empty until read.
+    pub teams: Vec<(String, String)>,
+    /// The chosen teams' state names, in Linear's order; empty until read.
     pub states: Vec<String>,
+    /// The filter being chosen; **Save filter** keeps it in config.toml.
+    pub pick_teams: Vec<String>,
+    pub pick_states: Vec<String>,
     pub tickets: Vec<Ticket>,
     /// Tickets with a run still in progress, upper-case.
     pub running: Vec<String>,
@@ -93,13 +98,16 @@ impl Workspace {
             .unwrap_or_default();
         self.tickets = Some(TicketsTab {
             env,
+            teams: Vec::new(),
             states: Vec::new(),
+            pick_teams: self.ui.tickets_teams.clone(),
+            pick_states: self.ui.tickets_states.clone(),
             tickets: Vec::new(),
             running: Vec::new(),
             loading: true,
             error: None,
         });
-        self.reload_tickets(true, cx);
+        self.reload_tickets(cx);
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -110,15 +118,14 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Reads the tickets in the chosen states (and Linear's state names, with `states`) in the
-    /// background, with which tickets have a run in progress.
-    fn reload_tickets(&mut self, states: bool, cx: &mut Context<Self>) {
+    /// Reads, in the background, Linear's teams; the chosen teams' states; and, once both are
+    /// chosen, their tickets in those states, with which tickets have a run in progress.
+    fn reload_tickets(&mut self, cx: &mut Context<Self>) {
         let Some(t) = &mut self.tickets else {
             return;
         };
         t.loading = true;
-        let env = t.env.clone();
-        let chosen = self.ui.tickets_states.clone();
+        let (env, teams, states) = (t.env.clone(), t.pick_teams.clone(), t.pick_states.clone());
         let hydra = self.hydra.clone();
         cx.spawn(async move |this, cx| {
             let read = cx
@@ -126,18 +133,22 @@ impl Workspace {
                     let http = Http {
                         key: hydra.linear_key(&env)?,
                     };
-                    let names = if states {
-                        Some(linear::read_state_names(
-                            &http.post(&linear::state_names_request())?,
-                        )?)
+                    let all_teams = linear::read_teams(&http.post(&linear::teams_request())?)?;
+                    let names = if teams.is_empty() {
+                        Vec::new()
                     } else {
-                        None
+                        linear::read_team_state_names(
+                            &http.post(&linear::team_states_request(&teams))?,
+                        )?
                     };
-                    let tickets = if chosen.is_empty() {
+                    // Only states the chosen teams have.
+                    let states: Vec<String> =
+                        states.into_iter().filter(|s| names.contains(s)).collect();
+                    let tickets = if teams.is_empty() || states.is_empty() {
                         Vec::new()
                     } else {
                         linear::read_pickable(
-                            &http.post(&linear::tickets_in_states_request(&chosen))?,
+                            &http.post(&linear::tickets_in_states_request(&teams, &states))?,
                         )?
                     };
                     let running: Vec<String> = crate::run_history::read(hydra.paths.root(), &[])
@@ -145,17 +156,17 @@ impl Workspace {
                         .filter(|e| e.outcome == crate::run_history::Outcome::InProgress)
                         .map(|e| e.ticket.to_ascii_uppercase())
                         .collect();
-                    Ok::<_, LinearError>((names, tickets, running))
+                    Ok::<_, LinearError>((all_teams, names, states, tickets, running))
                 })
                 .await;
             let _ = this.update(cx, |ws, cx| {
                 if let Some(t) = &mut ws.tickets {
                     t.loading = false;
                     match read {
-                        Ok((names, tickets, running)) => {
-                            if let Some(n) = names {
-                                t.states = n;
-                            }
+                        Ok((teams, names, states, tickets, running)) => {
+                            t.teams = teams;
+                            t.states = names;
+                            t.pick_states = states;
                             t.tickets = tickets;
                             t.running = running;
                             t.error = None;
@@ -170,21 +181,43 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Adds or removes state `name` from the filter, kept in config.toml as `tickets_states`.
-    fn toggle_ticket_state(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        let list = &mut self.ui.tickets_states;
-        match list.iter().position(|s| *s == name) {
-            Some(i) => {
-                list.remove(i);
+    /// Adds or removes team `key` from the filter being chosen.
+    fn toggle_ticket_team(&mut self, key: String, cx: &mut Context<Self>) {
+        if let Some(t) = &mut self.tickets {
+            toggle(&mut t.pick_teams, key);
+        }
+        self.reload_tickets(cx);
+    }
+
+    /// Adds or removes state `name` from the filter being chosen.
+    fn toggle_ticket_state(&mut self, name: String, cx: &mut Context<Self>) {
+        if let Some(t) = &mut self.tickets {
+            toggle(&mut t.pick_states, name);
+        }
+        self.reload_tickets(cx);
+    }
+
+    /// **Save filter**: the chosen teams and states, kept in config.toml as `tickets_teams` and
+    /// `tickets_states`, so the page opens on them next time.
+    fn save_ticket_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(t) = &self.tickets else {
+            return;
+        };
+        let (teams, states) = (t.pick_teams.clone(), t.pick_states.clone());
+        for (key, list) in [("tickets_teams", &teams), ("tickets_states", &states)] {
+            let value: toml_edit::Array = list.iter().map(String::as_str).collect();
+            if let Err(e) = crate::config::set(&self.hydra.paths, key, Some(value.into())) {
+                window.push_notification(Notification::error(e).title("Tickets"), cx);
+                return;
             }
-            None => list.push(name),
         }
-        let value: toml_edit::Array = list.iter().map(String::as_str).collect();
-        if let Err(e) = crate::config::set(&self.hydra.paths, "tickets_states", Some(value.into()))
-        {
-            window.push_notification(Notification::error(e).title("Tickets"), cx);
-        }
-        self.reload_tickets(false, cx);
+        self.ui.tickets_teams = teams;
+        self.ui.tickets_states = states;
+        window.push_notification(
+            Notification::info("Saved. Tickets opens on this filter next time.").title("Tickets"),
+            cx,
+        );
+        cx.notify();
     }
 
     /// **Run pipeline** on `ticket`: picks the pipeline, then hands the ticket over.
@@ -283,46 +316,101 @@ impl Workspace {
         let Some(t) = &self.tickets else {
             return div().into_any_element();
         };
-        let chosen = self.ui.tickets_states.clone();
-        let chips = h_flex()
+        let chip = |id: String, label: String, on: bool| {
+            Button::new(SharedString::from(id))
+                .label(label)
+                .small()
+                .outline()
+                .selected(on)
+        };
+        let team_chips =
+            h_flex()
+                .gap_1p5()
+                .flex_wrap()
+                .children(t.teams.iter().map(|(key, name)| {
+                    let k = key.clone();
+                    chip(
+                        format!("tickets-team-{key}"),
+                        format!("{key} · {name}"),
+                        t.pick_teams.contains(key),
+                    )
+                    .on_click(cx.listener(move |ws, _, _, cx| ws.toggle_ticket_team(k.clone(), cx)))
+                }));
+        let state_chips = h_flex()
             .gap_1p5()
             .flex_wrap()
             .children(t.states.iter().enumerate().map(|(i, name)| {
-                let on = chosen.contains(name);
                 let n = name.clone();
-                Button::new(SharedString::from(format!("tickets-state-{i}")))
-                    .label(name.clone())
-                    .small()
-                    .outline()
-                    .selected(on)
-                    .on_click(cx.listener(move |ws, _, window, cx| {
-                        ws.toggle_ticket_state(n.clone(), window, cx)
-                    }))
+                chip(
+                    format!("tickets-state-{i}"),
+                    name.clone(),
+                    t.pick_states.contains(name),
+                )
+                .on_click(cx.listener(move |ws, _, _, cx| ws.toggle_ticket_state(n.clone(), cx)))
             }));
+        let saved =
+            t.pick_teams == self.ui.tickets_teams && t.pick_states == self.ui.tickets_states;
         let summary = if let Some(e) = &t.error {
             format!("Couldn't read Linear for {}: {e}", t.env)
         } else if t.loading {
             "Reading Linear…".to_string()
-        } else if chosen.is_empty() {
-            "Pick the states to list.".to_string()
+        } else if t.pick_teams.is_empty() {
+            "Choose the teams (boards) to list tickets from.".to_string()
+        } else if t.pick_states.is_empty() {
+            "Choose the statuses to list.".to_string()
         } else {
             format!(
-                "{} ticket{} in {} · Linear key of {}",
+                "{} ticket{} · Linear key of {}",
                 t.tickets.len(),
                 if t.tickets.len() == 1 { "" } else { "s" },
-                chosen.join(", "),
                 t.env
             )
         };
-        let rows: Vec<AnyElement> = t
-            .tickets
-            .iter()
-            .enumerate()
-            .map(|(n, ticket)| {
-                let running = t.running.contains(&ticket.identifier.to_ascii_uppercase());
-                self.ticket_row(n, ticket, running, cx)
-            })
-            .collect();
+        // One section per chosen status, in Linear's order, each headed with its count.
+        let mut sections = v_flex().gap_1();
+        if !t.pick_teams.is_empty() {
+            let mut n = 0;
+            for state in t.states.iter().filter(|s| t.pick_states.contains(s)) {
+                let in_state: Vec<&Ticket> =
+                    t.tickets.iter().filter(|k| &k.state == state).collect();
+                sections = sections.child(
+                    h_flex()
+                        .pt_3()
+                        .pb_1()
+                        .gap_2()
+                        .items_center()
+                        .border_b_1()
+                        .border_color(color(theme::BORDER))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(color(theme::TEXT))
+                                .child(state.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(color(theme::TEXT_MUTED))
+                                .child(in_state.len().to_string()),
+                        ),
+                );
+                if in_state.is_empty() && !t.loading {
+                    sections = sections.child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .text_xs()
+                            .text_color(color(theme::TEXT_MUTED))
+                            .child("None"),
+                    );
+                }
+                for ticket in in_state {
+                    let running = t.running.contains(&ticket.identifier.to_ascii_uppercase());
+                    sections = sections.child(self.ticket_row(n, ticket, running, cx));
+                    n += 1;
+                }
+            }
+        }
         let header = h_flex()
             .justify_between()
             .items_center()
@@ -347,12 +435,35 @@ impl Workspace {
                     ),
             )
             .child(
-                Button::new("tickets-refresh")
-                    .label("Refresh")
-                    .small()
-                    .ghost()
-                    .on_click(cx.listener(|ws, _, _, cx| ws.reload_tickets(true, cx))),
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Button::new("tickets-save")
+                            .label(if saved { "Filter saved" } else { "Save filter" })
+                            .small()
+                            .when(!saved, |b| b.primary())
+                            .when(saved, |b| b.ghost())
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                if !saved {
+                                    ws.save_ticket_filter(window, cx)
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new("tickets-refresh")
+                            .label("Refresh")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(|ws, _, _, cx| ws.reload_tickets(cx))),
+                    ),
             );
+        let label = |text: &'static str| {
+            div()
+                .pt_1()
+                .text_xs()
+                .text_color(color(theme::TEXT_MUTED))
+                .child(text)
+        };
         div()
             .id("tickets-page")
             .flex_1()
@@ -364,15 +475,19 @@ impl Workspace {
             .child(
                 v_flex()
                     .max_w(px(1080.))
-                    .gap_3()
+                    .gap_2()
                     .child(header)
-                    .child(chips)
-                    .child(v_flex().gap_0p5().children(rows)),
+                    .child(label("Teams"))
+                    .child(team_chips)
+                    .when(!t.pick_teams.is_empty(), |d| {
+                        d.child(label("Statuses")).child(state_chips)
+                    })
+                    .child(sections),
             )
             .into_any_element()
     }
 
-    /// One ticket: its key, title, state and labels; **Run pipeline**, or Running while a run
+    /// One ticket under its status heading: its key, title and labels; **Run pipeline**, or Running while a run
     /// of it is in progress. A click on the key opens it in Linear.
     fn ticket_row(
         &self,
@@ -422,15 +537,6 @@ impl Workspace {
                         .child(ticket.labels.join(" · ")),
                 )
             })
-            .child(
-                div()
-                    .w(px(100.))
-                    .flex_none()
-                    .truncate()
-                    .text_xs()
-                    .text_color(color(theme::TEXT_SECONDARY))
-                    .child(ticket.state.clone()),
-            )
             .child(if running {
                 div()
                     .w(px(110.))
@@ -450,5 +556,27 @@ impl Workspace {
                     .into_any_element()
             })
             .into_any_element()
+    }
+}
+
+/// Adds `item` to `list`, or takes it out when it is there.
+fn toggle(list: &mut Vec<String>, item: String) {
+    match list.iter().position(|x| *x == item) {
+        Some(i) => {
+            list.remove(i);
+        }
+        None => list.push(item),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_chip_toggles_its_item_in_and_out() {
+        let mut list = vec!["PRE".to_string()];
+        super::toggle(&mut list, "INTH".into());
+        assert_eq!(list, vec!["PRE", "INTH"]);
+        super::toggle(&mut list, "PRE".into());
+        assert_eq!(list, vec!["INTH"]);
     }
 }

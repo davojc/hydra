@@ -285,10 +285,173 @@ impl Workspace {
                     .max_w(px(980.))
                     .gap_3()
                     .child(header)
+                    .child(self.render_to_resume(cx))
                     .child(chips)
                     .child(list),
             )
             .into_any_element()
+    }
+
+    /// **To resume** (core spec §54): every run set aside, parked or interrupted, with why and
+    /// **Resume** / **Stop**; beside the heading, how long runs may sit idle before parking.
+    fn render_to_resume(&self, cx: &mut Context<Self>) -> AnyElement {
+        let hours = self.ui.park_idle_hours;
+        let choices = h_flex()
+            .id("park-choices")
+            .gap_1()
+            .items_center()
+            .child(
+                div()
+                    .mr_1()
+                    .text_xs()
+                    .text_color(color(theme::TEXT_MUTED))
+                    .child("Park runs idle for"),
+            )
+            .children(crate::run_park::CHOICES.into_iter().map(|h| {
+                Button::new(SharedString::from(format!("park-after-{h}")))
+                    .label(if h == 0 {
+                        "Never".to_string()
+                    } else {
+                        format!("{h} h")
+                    })
+                    .xsmall()
+                    .outline()
+                    .selected(h == hours)
+                    .on_click(cx.listener(move |ws, _, _, cx| ws.set_park_hours(h, cx)))
+            }))
+            .tooltip(|window, cx| {
+                gpui_component::tooltip::Tooltip::new(
+                    "A pipeline whose tickets are all at work with nothing changing for this \
+                     long closes its sessions, to resume here later",
+                )
+                .build(window, cx)
+            });
+        let heading = h_flex()
+            .justify_between()
+            .items_center()
+            .flex_wrap()
+            .gap_2()
+            .pb_1()
+            .border_b_1()
+            .border_color(color(theme::BORDER))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(color(theme::TEXT))
+                            .child("To resume"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(color(theme::TEXT_MUTED))
+                            .child(self.interrupted.len().to_string()),
+                    ),
+            )
+            .child(choices);
+        let rows = self.interrupted.iter().enumerate().map(|(idx, i)| {
+            let link = i
+                .run
+                .link
+                .clone()
+                .or_else(|| i.ticket.as_ref().map(|t| t.url.clone()))
+                .filter(|u| !u.is_empty());
+            let ticket = crate::pipeline_card::ticket_title(&i.run.ticket, link.as_deref());
+            let at = i
+                .run
+                .stages
+                .iter()
+                .zip(&i.run.pipeline.stages)
+                .rfind(|(s, _)| s.latest().is_some())
+                .map(|(_, spec)| format!(" at {}", spec.title))
+                .unwrap_or_default();
+            h_flex()
+                .id(SharedString::from(format!("to-resume-{}", i.run.id)))
+                .gap_3()
+                .px_2()
+                .py_1()
+                .items_center()
+                .rounded_md()
+                .hover(|d| d.bg(color(theme::RAISED)))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(color(theme::AMBER))
+                        .child("●"),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("to-resume-ticket-{}", i.run.id)))
+                        .w(px(170.))
+                        .flex_none()
+                        .truncate()
+                        .text_sm()
+                        .text_color(color(theme::TEXT))
+                        .when(link.is_some(), |d| d.cursor_pointer())
+                        .child(ticket)
+                        .on_click(move |_, _, cx| {
+                            if let Some(url) = &link {
+                                cx.open_url(url);
+                            }
+                        }),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_sm()
+                        .text_color(color(theme::TEXT_SECONDARY))
+                        .child(format!("{}{at}: {}", i.run.pipeline.name, i.why.text())),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("resume-{}", i.run.id)))
+                        .label("Resume")
+                        .small()
+                        .primary()
+                        .on_click(
+                            cx.listener(move |ws, _, window, cx| ws.resume_run(idx, window, cx)),
+                        ),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("stop-parked-{}", i.run.id)))
+                        .label("Stop")
+                        .small()
+                        .ghost()
+                        .on_click(cx.listener(move |ws, _, _, cx| ws.stop_interrupted(idx, cx))),
+                )
+        });
+        let empty = self.interrupted.is_empty().then(|| {
+            div()
+                .px_2()
+                .py_1()
+                .text_sm()
+                .text_color(color(theme::TEXT_MUTED))
+                .child("Nothing to resume")
+        });
+        v_flex()
+            .gap_0p5()
+            .child(heading)
+            .children(rows)
+            .children(empty)
+            .into_any_element()
+    }
+
+    /// How long runs may sit idle before parking, in config.toml as `park_idle_hours`.
+    fn set_park_hours(&mut self, hours: u32, cx: &mut Context<Self>) {
+        self.ui.park_idle_hours = hours;
+        if let Err(e) = crate::config::set(
+            &self.hydra.paths,
+            "park_idle_hours",
+            Some(i64::from(hours).into()),
+        ) {
+            crate::action_log::write(format!("couldn't save park_idle_hours: {e}"));
+        }
+        cx.notify();
     }
 
     /// One line: the time, a dot in its tone, the ticket and what happened, its pipeline. A click

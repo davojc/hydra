@@ -288,6 +288,8 @@ pub struct Workspace {
     /// so nothing is handed to them until it has.
     /// (When it opened: after 90 seconds it counts as ready anyway.)
     starting_up: HashMap<PaneId, std::time::Instant>,
+    /// When idle orchestrators were last looked for (core spec §54).
+    park_checked: Option<std::time::Instant>,
     /// Runs' tickets as Linear last said, by identifier: the card's SLA and link (phase 2 §5).
     linear_tickets: HashMap<String, crate::linear::Ticket>,
     /// Cards being offered or just sent, so one card never goes to two sessions.
@@ -395,6 +397,8 @@ impl Workspace {
                         ws.asking_tick(window, cx);
                         // A wake-up that didn't take is sent again.
                         ws.recheck_wakes(window, cx);
+                        // Orchestrators idle for hours are parked to resume later.
+                        ws.park_tick(window, cx);
                         // The Pipeline tab's session times tick.
                         if ws
                             .envs
@@ -558,6 +562,7 @@ impl Workspace {
             slack_mine: std::collections::HashSet::new(),
             slack_inflight: HashMap::new(),
             starting_up: HashMap::new(),
+            park_checked: None,
             linear_tickets: HashMap::new(),
             in_flight: Default::default(),
             _mcp_pump: mcp_pump,

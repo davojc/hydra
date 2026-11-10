@@ -65,6 +65,8 @@ pub fn items(run: &str, text: &str) -> Vec<Item> {
     let mut last_reported = String::new();
     // Who the last question went to: product, or a pull request's author.
     let mut asked_author = false;
+    // A parked line just went: the orchestrator closing that follows is part of it.
+    let mut parked = false;
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -238,10 +240,24 @@ pub fn items(run: &str, text: &str) -> Vec<Item> {
                     Tone::Neutral,
                 )
             }
+            // Parking closes the orchestrator (core spec §54): the parked line says it all.
+            Some("orchestrator closed") if parked => parked = false,
             Some("orchestrator closed") => push(
-                "Interrupted: its orchestrator closed. Resume it from the Pipelines tab".into(),
+                "Interrupted: its orchestrator closed. Resume it from History".into(),
                 Tone::Attention,
             ),
+            Some("parked") => {
+                parked = true;
+                let hours = v["idle_hours"].as_u64().unwrap_or_default();
+                push(
+                    format!(
+                        "Parked: nothing changed for {}, so its sessions closed. Resume it \
+                         from History",
+                        crate::run_park::hours_text(u32::try_from(hours).unwrap_or_default())
+                    ),
+                    Tone::Attention,
+                )
+            }
             Some("resumed after restart") => push("Resumed".into(), Tone::Neutral),
             Some("went back") => push(
                 format!("Went back to {}", stage(&s("stage"))),
@@ -514,6 +530,27 @@ mod tests {
         assert_eq!(seen, vec![("a", "Done"), ("b", "Verify started")]);
         let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3_600);
         assert!(read(d.path(), "2026-11-10 08:00:00.000", later).is_empty());
+    }
+
+    #[test]
+    fn a_parked_run_reads_as_one_line_and_a_later_close_still_shows() {
+        let text = log(&[
+            started("2026-11-10 08:00:00.000"),
+            json!({"at": "2026-11-10 12:00:00.000", "event": "parked", "idle_hours": 4}),
+            json!({"at": "2026-11-10 12:00:00.001", "event": "orchestrator closed"}),
+            json!({"at": "2026-11-10 13:00:00.000", "event": "resumed after restart"}),
+            json!({"at": "2026-11-10 14:00:00.000", "event": "orchestrator closed"}),
+        ]);
+        let texts: Vec<String> = items("r", &text).into_iter().map(|i| i.text).collect();
+        assert_eq!(
+            texts,
+            [
+                "Parked: nothing changed for 4 hours, so its sessions closed. Resume it from \
+                 History",
+                "Resumed",
+                "Interrupted: its orchestrator closed. Resume it from History",
+            ]
+        );
     }
 
     #[test]

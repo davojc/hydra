@@ -95,6 +95,9 @@ pub struct UiConfig {
     pub tickets_people: Vec<String>,
     /// Labels the Tickets page shows on a row when the ticket has them.
     pub tickets_labels: Vec<String>,
+    /// Hours an orchestrator's runs may sit with nothing changing before it is parked to resume
+    /// later (core spec §54); 0 never parks.
+    pub park_idle_hours: u32,
 }
 
 /// A Claude plugin the set-up checklist asks for, e.g. the team's skill router.
@@ -136,6 +139,7 @@ impl Default for UiConfig {
             tickets_assignee: "anyone".to_string(),
             tickets_people: Vec::new(),
             tickets_labels: Vec::new(),
+            park_idle_hours: crate::run_park::DEFAULT_HOURS,
         }
     }
 }
@@ -220,6 +224,13 @@ pub fn parse(text: &str) -> (UiConfig, Vec<String>) {
             }),
             "tickets_people" => get(value).map(|p| cfg.tickets_people = p),
             "tickets_labels" => get(value).map(|l| cfg.tickets_labels = l),
+            "park_idle_hours" => get::<i64>(value).and_then(|n| {
+                cfg.park_idle_hours = u32::try_from(n)
+                    .ok()
+                    .filter(|n| *n <= 168)
+                    .ok_or(format!("{n} must be between 0 and 168 hours"))?;
+                Ok(())
+            }),
             "setup_plugins" => get::<Vec<SetupPlugin>>(value).and_then(|p| {
                 match p.iter().find(|p| !p.plugin.contains('@')) {
                     Some(bad) => Err(format!(
@@ -455,6 +466,7 @@ tickets_states = ["Todo", "In Review"]
 tickets_assignee = "assigned"
 tickets_people = ["u2"]
 tickets_labels = ["Bug"]
+park_idle_hours = 6
 setup_plugins = [{ plugin = "skill-router@iov42", marketplace = "iov42/iov42-marketplace", label = "Team skills" }]
 
 [colors]
@@ -479,6 +491,7 @@ new_terminal = "ctrl-alt-d"
         assert_eq!(cfg.tickets_assignee, "assigned");
         assert_eq!(cfg.tickets_people, vec!["u2"]);
         assert_eq!(cfg.tickets_labels, vec!["Bug"]);
+        assert_eq!(cfg.park_idle_hours, 6);
         assert_eq!(
             cfg.setup_plugins,
             vec![SetupPlugin {

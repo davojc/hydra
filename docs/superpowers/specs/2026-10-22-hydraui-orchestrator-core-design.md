@@ -1143,3 +1143,25 @@ For handing a Linear ticket to a pipeline by hand. A **Tickets** button between 
 
   The hand-off is the same start prompt a Linear pick sends (`linear_watch::start_prompt`). So a pipeline with `[linear]` claims the ticket as it does a hand-started run, and its card shows on the Pipelines tab. A notice says where it went.
 - **Refresh** reads the states and tickets again. Reads run in the background, and an error (no key, rejected) shows in the summary line in red.
+
+## 54. Parking idle runs (added 2026-11-10)
+
+A stage polling CI or a review can keep its sessions open for hours with nothing changing. Parking closes them and keeps the run to resume later.
+
+- **The setting.** `park_idle_hours` in config.toml: how long an orchestrator's runs may sit with nothing changing before it's parked. The default is 4; 0 never parks; at most 168. History sets it from **Park runs idle for**: Never, 1 h, 2 h, 4 h, 8 h, 12 h.
+- **What counts as nothing changing.** No line written to the run's log (§8) for that long. Terminal output doesn't count, so a session that polls still parks.
+- **Which runs park.** Only an orchestrator whose open runs are all at work parks, once every one of them has sat idle. A run waiting on a person (needs you), on an answer to a question (§15, §42), or paused by a person waits on purpose. Parking it would drop what it waits for, so it never parks, and it keeps its orchestrator open. An orchestrator still on its first turn isn't looked at.
+- **Parking.** hydraui looks once a minute. Each run logs `parked` with `idle_hours`, and then the orchestrator's terminal closes. From there it's the same as the orchestrator closing (§52): stage sessions close, and each run is set aside with a Resume card and a notice. The notice reads `<ticket> was parked: nothing changed for 4 hours, so its sessions closed.`
+- **Why it waits.** A set-aside run reads back with its reason:
+  - parked, with the hours;
+  - its orchestrator closed;
+  - hydraui closed while it ran.
+
+  Only a `parked` after the run's latest `orchestrator` line counts.
+- **History.** A **To resume** section with its count heads the page, above the timeline. One row per set-aside run shows:
+  - the ticket (a click opens it);
+  - its pipeline, the stage it was at, and why it waits;
+  - **Resume**, which is the card's Resume (§13);
+  - **Stop**.
+
+  With none it says "Nothing to resume". The timeline shows `Parked: nothing changed for 4 hours, so its sessions closed. Resume it from History` in amber. The orchestrator-closed line that follows is folded into it. An orchestrator closing for another reason now reads `… Resume it from History`.

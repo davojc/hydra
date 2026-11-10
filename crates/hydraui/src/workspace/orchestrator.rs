@@ -628,6 +628,63 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Parks every orchestrator whose open runs have all sat with nothing changing for
+    /// `park_idle_hours` (core spec §54): each run logs why, then the orchestrator's terminal
+    /// closes, which sets its runs aside to resume (§52). Looks once a minute.
+    pub(super) fn park_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let hours = self.ui.park_idle_hours;
+        if hours == 0
+            || self
+                .park_checked
+                .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(60))
+        {
+            return;
+        }
+        self.park_checked = Some(std::time::Instant::now());
+        let Some(sv) = server::get() else {
+            return;
+        };
+        let orchestrators: Vec<(PaneId, String)> = self
+            .orchestrators
+            .keys()
+            .filter(|id| !self.starting_up.contains_key(id))
+            .filter_map(|id| Some((*id, self.panes.get(id)?.read(cx).mcp_token()?.to_string())))
+            .collect();
+        let root = self.hydra.paths.root().to_path_buf();
+        let now = crate::action_log::now();
+        let parked: Vec<(PaneId, Vec<String>)> = {
+            let reg = server::lock(sv.registry());
+            orchestrators
+                .into_iter()
+                .filter_map(|(id, token)| {
+                    let runs: Vec<&crate::runs::Run> = reg
+                        .runs
+                        .all()
+                        .filter(|r| r.orchestrator == token && r.state.open())
+                        .collect();
+                    let idle = !runs.is_empty()
+                        && runs.iter().all(|r| {
+                            std::fs::read_to_string(crate::run_log::file_for(&root, &r.id))
+                                .ok()
+                                .and_then(|log| crate::run_park::last_at(&log))
+                                .is_some_and(|last| crate::run_park::idle(r, &last, &now, hours))
+                        });
+                    idle.then(|| (id, runs.iter().map(|r| r.id.clone()).collect()))
+                })
+                .collect()
+        };
+        for (id, runs) in parked {
+            for run in &runs {
+                note_run(run, "parked", serde_json::json!({"idle_hours": hours}));
+                crate::action_log::write(format!(
+                    "run {run}: parked after {} with nothing changing",
+                    crate::run_park::hours_text(hours)
+                ));
+            }
+            self.close_terminal_now(id, window, cx);
+        }
+    }
+
     /// Runs `runs` lost their orchestrator while hydraui runs (core spec §52): their stage
     /// sessions close (a Resume reopens the one at work in its own conversation), and each gets
     /// the Resume card a restart would give it.
@@ -657,11 +714,17 @@ impl Workspace {
         let root = self.hydra.paths.root().to_path_buf();
         for i in crate::run_resume::interrupted(&root, crate::claim::alive) {
             if runs.contains(&i.run.id) && !self.interrupted.iter().any(|x| x.run.id == i.run.id) {
+                let what = match &i.why {
+                    crate::run_resume::Why::Parked { hours } => format!(
+                        "{} was parked: nothing changed for {}, so its sessions closed.",
+                        i.run.ticket,
+                        crate::run_park::hours_text(*hours)
+                    ),
+                    _ => format!("{}'s orchestrator closed before it finished.", i.run.ticket),
+                };
                 window.push_notification(
                     Notification::info(format!(
-                        "{}'s orchestrator closed before it finished. Resume it from the \
-                         Pipelines tab, or stop it there.",
-                        i.run.ticket
+                        "{what} Resume it from History or the Pipelines tab, or stop it there."
                     ))
                     .title(i.run.pipeline.name.clone()),
                     cx,

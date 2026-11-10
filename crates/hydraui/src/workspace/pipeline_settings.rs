@@ -678,6 +678,7 @@ impl Workspace {
         };
         let mut choices: Vec<Option<String>> = vec![None];
         choices.extend(skills.into_iter().map(Some));
+        let router_on = self.router_state(orch, cx).is_some_and(|(_, _, ok)| ok);
         let state = cx.new(|cx| CommandState::new(window, cx));
         let workspace = cx.entity();
         let first = Cell::new(true);
@@ -690,7 +691,8 @@ impl Workspace {
             dialog.title("Skill").child(
                 Command::new(&state)
                     .items(choices.iter().map(|c| {
-                        CommandItem::new().label(c.clone().unwrap_or_else(|| "No skill".into()))
+                        CommandItem::new()
+                            .label(crate::setup::stage_skill_label(c.as_deref(), router_on))
                     }))
                     .placeholder("Skill")
                     .on_confirm(move |ix, window, cx| {
@@ -780,6 +782,56 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The team skills router (core spec §55) in orchestrator `orch`'s environment: its label,
+    /// its state, and whether it's on; none when config lists no router.
+    fn router_state(
+        &self,
+        orch: PaneId,
+        cx: &Context<Self>,
+    ) -> Option<(String, crate::setup::PluginState, bool)> {
+        let env = self.panes.get(&orch)?.read(cx).env().to_string();
+        let i = self
+            .ui
+            .setup_plugins
+            .iter()
+            .position(crate::setup::is_router)?;
+        let (_, label, state) = self
+            .plugin_states(&env)
+            .into_iter()
+            .find(|(n, ..)| *n == i)?;
+        Some((label, state, state == crate::setup::PluginState::On))
+    }
+
+    /// Above the steps: whether the team skills router guides them, in words (core spec §55).
+    fn render_router_note(&self, orch: PaneId, cx: &Context<Self>) -> Option<AnyElement> {
+        let (label, state, _) = self.router_state(orch, cx)?;
+        let env = self.panes.get(&orch)?.read(cx).env().to_string();
+        let (note, ok) = crate::setup::router_note(&label, state, &env);
+        let tone = if ok { theme::TEAL } else { theme::AMBER };
+        Some(
+            h_flex()
+                .gap_2()
+                .items_start()
+                .px(px(12.))
+                .py(px(8.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(color(tone).opacity(0.5))
+                .child(
+                    text(12., tone)
+                        .flex_none()
+                        .child(if ok { "●" } else { "○" }),
+                )
+                .child(
+                    text(12.5, theme::TEXT_SECONDARY)
+                        .flex_1()
+                        .whitespace_normal()
+                        .child(note),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// The Settings view for orchestrator `orch`.
     pub(super) fn render_pipeline_settings(
         &self,
@@ -797,6 +849,7 @@ impl Workspace {
             server::lock(sv.registry()).min_week_left
         });
         let count = draft.stages.len();
+        let router_on = self.router_state(orch, cx).is_some_and(|(_, _, ok)| ok);
         let section = |title: &str| text(11., theme::TEXT_MUTED).child(title.to_uppercase());
         let mut stages = v_flex().gap_2();
         for (i, s) in draft.stages.iter().enumerate() {
@@ -863,7 +916,16 @@ impl Workspace {
                             )
                             .child(
                                 Button::new(SharedString::from(format!("skill-{key}")))
-                                    .label(s.skill.clone().unwrap_or_else(|| "No skill".into()))
+                                    .label(crate::setup::stage_skill_label(
+                                        s.skill.as_deref(),
+                                        router_on,
+                                    ))
+                                    .tooltip(if router_on {
+                                        "The skill this step must use before it reports. The \
+                                         team skills router adds the skills its changes need."
+                                    } else {
+                                        "The skill this step must use before it reports"
+                                    })
                                     .dropdown_caret(true)
                                     .outline()
                                     .small()
@@ -1094,6 +1156,7 @@ impl Workspace {
                                          {ticket} is the ticket, {pr} the pull request link, \
                                          {handoff} what the step before handed over.",
                                     ))
+                                    .children(self.render_router_note(orch, cx))
                                     .child(stages)
                                     .child(
                                         div()

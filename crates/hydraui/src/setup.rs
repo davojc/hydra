@@ -229,9 +229,91 @@ pub fn plugin_label(p: &SetupPlugin) -> String {
         .unwrap_or_else(|| p.plugin.split('@').next().unwrap_or(&p.plugin).to_string())
 }
 
+/// Whether `p` is the team's skill router (`skill-router@<marketplace>`).
+pub fn is_router(p: &SetupPlugin) -> bool {
+    p.plugin.split('@').next() == Some("skill-router")
+}
+
+/// What Pipeline settings says about the skill router, called `label`, in `env` (core spec §55),
+/// and whether it's working there.
+pub fn router_note(label: &str, state: PluginState, env: &str) -> (String, bool) {
+    match state {
+        PluginState::On => (
+            format!(
+                "{label} (skill-router) is on in {env}. Every stage loads the team skills its \
+                 changes need before it edits (angular-developer before a .ts change, for \
+                 example), whatever skill is set below. A stage's own skill adds how to do that \
+                 stage; a stage set to Router only is guided by the router alone."
+            ),
+            true,
+        ),
+        PluginState::Off => (
+            format!(
+                "{label} (skill-router) isn't on in {env}, so each stage uses only the skill set \
+                 below. Install it from the Pipelines tab."
+            ),
+            false,
+        ),
+        PluginState::Missing => (
+            format!(
+                "{label} (skill-router) is turned on in {env}, but its files are missing, so \
+                 Claude skips it and each stage uses only the skill set below. Reinstall it from \
+                 the Pipelines tab."
+            ),
+            false,
+        ),
+    }
+}
+
+/// A stage's skill as its button and picker show it: with no skill, "Router only" when the
+/// router is on, else "No skill".
+pub fn stage_skill_label(skill: Option<&str>, router_on: bool) -> String {
+    match skill {
+        Some(s) => s.to_string(),
+        None if router_on => "Router only".into(),
+        None => "No skill".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_router_is_known_by_its_plugin_name() {
+        let p = |plugin: &str| SetupPlugin {
+            plugin: plugin.into(),
+            marketplace: None,
+            label: None,
+        };
+        assert!(is_router(&p("skill-router@iov42")));
+        assert!(!is_router(&p("skill-routers@iov42")));
+        assert!(!is_router(&p("qa-engineer@iov42")));
+    }
+
+    #[test]
+    fn the_router_note_says_whether_stages_get_team_skills() {
+        let (on, ok) = router_note("Team skills", PluginState::On, "iov42");
+        assert!(ok);
+        assert!(
+            on.starts_with("Team skills (skill-router) is on in iov42."),
+            "{on}"
+        );
+        assert!(on.contains("whatever skill is set below"), "{on}");
+        let (off, ok) = router_note("Team skills", PluginState::Off, "iov42");
+        assert!(!ok);
+        assert!(off.contains("only the skill set below"), "{off}");
+        let (gone, ok) = router_note("Team skills", PluginState::Missing, "iov42");
+        assert!(!ok);
+        assert!(gone.contains("Reinstall"), "{gone}");
+    }
+
+    #[test]
+    fn a_stage_without_a_skill_reads_as_router_only_when_the_router_is_on() {
+        assert_eq!(stage_skill_label(None, true), "Router only");
+        assert_eq!(stage_skill_label(None, false), "No skill");
+        assert_eq!(stage_skill_label(Some("qa"), true), "qa");
+    }
 
     fn r(provider: &str, status: Status) -> IdentityReport {
         IdentityReport {

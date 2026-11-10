@@ -1171,3 +1171,15 @@ A stage polling CI or a review can keep its sessions open for hours with nothing
 - **The summary.** A line that needs you shows a short summary under it, up to three lines. It's the stage's own report summary, or else the first sentence of the reason.
 - **What unfolding shows.** The full reason (such as the reviewer's step-by-step list) and the reasons against, without repeating the summary.
 - **The hint.** It reads `▸ more` / `▾ less`. A passed stage keeps `▸ N concerns`.
+
+## 55. The skills router in Pipeline settings (added 2026-11-10)
+
+Pipeline settings now says whether the team skills router guides the steps, so a stage's skill and the router don't look like rivals.
+
+- **Which plugin is the router.** The router is the `setup_plugins` entry named `skill-router@…` (§48).
+- **The note.** Above **Steps**, one line about the orchestrator's environment:
+  - teal when the router is on there: every stage loads the team skills its changes need, whatever skill is set. A stage's own skill adds how to do that stage.
+  - amber when it's off, or on but its files are missing: stages use only their set skill. The line says to install or reinstall from the Pipelines tab.
+  - No line when config lists no router.
+- **A stage with no skill.** It reads **Router only** while the router is on, and **No skill** otherwise, on its button and in the picker. Its tooltip says the skill is the one the step must use before it reports.
+- **What doesn't change.** A set skill is still required before a stage reports (§4). The router's own `skill-router:start-ticket` can be picked as a stage's skill like any other.

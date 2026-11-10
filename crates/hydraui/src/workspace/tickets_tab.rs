@@ -7,8 +7,10 @@ use std::cell::Cell;
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, SharedString, Window, div, px};
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_component::command::{Command, CommandItem, CommandState};
 use gpui_component::notification::Notification;
+use gpui_component::searchable_list::SearchableVec;
 use gpui_component::{Selectable, Sizable, WindowExt, h_flex, v_flex};
 
 use super::Workspace;
@@ -26,6 +28,9 @@ pub struct TicketsTab {
     pub pick_labels: Vec<String>,
     /// Every label the chosen teams can use, from Linear; empty when it couldn't be read.
     pub labels: Vec<String>,
+    /// The searchable multi-select of labels to show on rows.
+    pub label_box: Option<gpui::Entity<ComboboxState<SearchableVec<String>>>>,
+    _label_sub: Option<gpui::Subscription>,
     /// The filter being chosen; **Save filter** keeps it in config.toml.
     pub pick_teams: Vec<String>,
     pub pick_states: Vec<String>,
@@ -115,6 +120,8 @@ impl Workspace {
             pick_states: self.ui.tickets_states.clone(),
             pick_labels: self.ui.tickets_labels.clone(),
             labels: Vec::new(),
+            label_box: None,
+            _label_sub: None,
             pick_who: who_from_config(&self.ui.tickets_assignee, &self.ui.tickets_people),
             people: Vec::new(),
             tickets: Vec::new(),
@@ -123,7 +130,32 @@ impl Workspace {
             error: None,
             filter_open: self.ui.tickets_teams.is_empty() || self.ui.tickets_states.is_empty(),
         });
-        self.reload_tickets(cx);
+        // The labels to show: a searchable multi-select, filled in once Linear is read.
+        let chosen = self.ui.tickets_labels.clone();
+        let label_box = cx.new(|cx| {
+            ComboboxState::new(SearchableVec::new(chosen), Vec::new(), window, cx)
+                .multiple(true)
+                .searchable(true)
+        });
+        let sub = cx.subscribe_in(
+            &label_box,
+            window,
+            |ws, _, e: &ComboboxEvent<SearchableVec<String>>, _, cx| {
+                let (ComboboxEvent::Change(values) | ComboboxEvent::Confirm(values)) = e;
+                if let Some(t) = &mut ws.tickets {
+                    t.pick_labels = values.clone();
+                }
+                cx.notify();
+            },
+        );
+        if let Some(t) = &mut self.tickets {
+            label_box.update(cx, |b, cx| {
+                b.set_selected_values(&t.pick_labels, window, cx)
+            });
+            t.label_box = Some(label_box);
+            t._label_sub = Some(sub);
+        }
+        self.reload_tickets(window, cx);
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -136,7 +168,7 @@ impl Workspace {
 
     /// Reads, in the background, Linear's teams; the chosen teams' states; and, once both are
     /// chosen, their tickets in those states, with which tickets have a run in progress.
-    fn reload_tickets(&mut self, cx: &mut Context<Self>) {
+    fn reload_tickets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(t) = &mut self.tickets else {
             return;
         };
@@ -144,7 +176,7 @@ impl Workspace {
         let (env, teams, states) = (t.env.clone(), t.pick_teams.clone(), t.pick_states.clone());
         let who = t.pick_who.clone();
         let hydra = self.hydra.clone();
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let read = cx
                 .background_spawn(async move {
                     let http = Http {
@@ -194,7 +226,7 @@ impl Workspace {
                     ))
                 })
                 .await;
-            let _ = this.update(cx, |ws, cx| {
+            let _ = this.update_in(cx, |ws, window, cx| {
                 if let Some(t) = &mut ws.tickets {
                     t.loading = false;
                     match read {
@@ -210,6 +242,16 @@ impl Workspace {
                         }
                         Err(e) => t.error = Some(e.to_string()),
                     }
+                    // The label list: every label the teams can use, plus any on the tickets
+                    // listed or already chosen.
+                    let choices = label_choices(&t.labels, &t.tickets, &t.pick_labels);
+                    let chosen = t.pick_labels.clone();
+                    if let Some(b) = &t.label_box {
+                        b.update(cx, |b, cx| {
+                            b.set_items(SearchableVec::new(choices), window, cx);
+                            b.set_selected_values(&chosen, window, cx);
+                        });
+                    }
                 }
                 cx.notify();
             });
@@ -219,37 +261,42 @@ impl Workspace {
     }
 
     /// Adds or removes team `key` from the filter being chosen.
-    fn toggle_ticket_team(&mut self, key: String, cx: &mut Context<Self>) {
+    fn toggle_ticket_team(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(t) = &mut self.tickets {
             toggle(&mut t.pick_teams, key);
         }
-        self.reload_tickets(cx);
+        self.reload_tickets(window, cx);
     }
 
     /// Adds or removes state `name` from the filter being chosen.
-    fn toggle_ticket_state(&mut self, name: String, cx: &mut Context<Self>) {
+    fn toggle_ticket_state(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(t) = &mut self.tickets {
             toggle(&mut t.pick_states, name);
         }
-        self.reload_tickets(cx);
+        self.reload_tickets(window, cx);
     }
 
     /// Whose tickets to list.
-    fn set_ticket_who(&mut self, who: linear::Assignee, cx: &mut Context<Self>) {
+    fn set_ticket_who(
+        &mut self,
+        who: linear::Assignee,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(t) = &mut self.tickets {
             t.pick_who = who;
         }
-        self.reload_tickets(cx);
+        self.reload_tickets(window, cx);
     }
 
     /// Adds or removes person `id` from Assigned's people.
-    fn toggle_ticket_person(&mut self, id: String, cx: &mut Context<Self>) {
+    fn toggle_ticket_person(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(t) = &mut self.tickets
             && let linear::Assignee::Assigned(ids) = &mut t.pick_who
         {
             toggle(ids, id);
         }
-        self.reload_tickets(cx);
+        self.reload_tickets(window, cx);
     }
 
     /// **Save filter**: the chosen teams, states and assignees, kept in config.toml as
@@ -415,7 +462,9 @@ impl Workspace {
                         format!("{key} · {name}"),
                         t.pick_teams.contains(key),
                     )
-                    .on_click(cx.listener(move |ws, _, _, cx| ws.toggle_ticket_team(k.clone(), cx)))
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.toggle_ticket_team(k.clone(), window, cx)
+                    }))
                 }));
         let state_chips = h_flex()
             .gap_1p5()
@@ -427,37 +476,20 @@ impl Workspace {
                     format!("{} {}", status_glyph(&st.kind), st.name),
                     t.pick_states.contains(&st.name),
                 )
-                .on_click(cx.listener(move |ws, _, _, cx| ws.toggle_ticket_state(n.clone(), cx)))
+                .on_click(cx.listener(move |ws, _, window, cx| {
+                    ws.toggle_ticket_state(n.clone(), window, cx)
+                }))
             }));
-        // Labels to show on rows: every label the teams can use, plus any on the tickets listed
-        // or already chosen.
-        let mut all_labels: Vec<String> = t
-            .labels
-            .iter()
-            .cloned()
-            .chain(t.tickets.iter().flat_map(|k| k.labels.iter().cloned()))
-            .chain(t.pick_labels.iter().cloned())
-            .collect();
-        all_labels.sort_by_key(|l| (l.to_lowercase(), l.clone()));
-        all_labels.dedup();
-        let label_chips =
-            h_flex()
-                .gap_1p5()
-                .flex_wrap()
-                .children(all_labels.iter().enumerate().map(|(i, name)| {
-                    let n = name.clone();
-                    chip(
-                        format!("tickets-label-{i}"),
-                        name.clone(),
-                        t.pick_labels.contains(name),
-                    )
-                    .on_click(cx.listener(move |ws, _, _, cx| {
-                        if let Some(t) = &mut ws.tickets {
-                            toggle(&mut t.pick_labels, n.clone());
-                        }
-                        cx.notify();
-                    }))
-                }));
+        // Labels to show on rows: one searchable multi-select.
+        let label_picker = t.label_box.as_ref().map(|b| {
+            div().max_w(px(520.)).child(
+                Combobox::new(b)
+                    .placeholder("Labels to show on rows")
+                    .search_placeholder("Search labels")
+                    .cleanable(true)
+                    .menu_max_h(px(340.)),
+            )
+        });
         let saved = t.pick_teams == self.ui.tickets_teams
             && t.pick_labels == self.ui.tickets_labels
             && t.pick_states == self.ui.tickets_states
@@ -473,10 +505,10 @@ impl Workspace {
             .map(|(name, who)| {
                 let on = std::mem::discriminant(&who) == std::mem::discriminant(&t.pick_who);
                 chip(format!("tickets-who-{name}"), name.to_string(), on).on_click(cx.listener(
-                    move |ws, _, _, cx| {
+                    move |ws, _, window, cx| {
                         // Assigned again keeps the people already chosen.
                         if !on {
-                            ws.set_ticket_who(who.clone(), cx)
+                            ws.set_ticket_who(who.clone(), window, cx)
                         }
                     },
                 ))
@@ -497,9 +529,9 @@ impl Workspace {
                         name.clone(),
                         chosen_people.contains(id),
                     )
-                    .on_click(
-                        cx.listener(move |ws, _, _, cx| ws.toggle_ticket_person(i.clone(), cx)),
-                    )
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.toggle_ticket_person(i.clone(), window, cx)
+                    }))
                 }));
         let assigned = matches!(t.pick_who, linear::Assignee::Assigned(_));
         let summary = if let Some(e) = &t.error {
@@ -613,7 +645,9 @@ impl Workspace {
                             .label("Refresh")
                             .small()
                             .ghost()
-                            .on_click(cx.listener(|ws, _, _, cx| ws.reload_tickets(cx))),
+                            .on_click(
+                                cx.listener(|ws, _, window, cx| ws.reload_tickets(window, cx)),
+                            ),
                     ),
             );
         // The filter in one line, with Hide filter / Edit filter.
@@ -688,10 +722,8 @@ impl Workspace {
                                     .child(state_chips)
                                     .child(label("Assignee"))
                                     .child(who_chips)
-                                    .when(!all_labels.is_empty(), |d| {
-                                        d.child(label("Show these labels on rows"))
-                                            .child(label_chips)
-                                    })
+                                    .child(label("Show these labels on rows"))
+                                    .children(label_picker)
                                     .when(assigned, |d| {
                                         d.child(label("Assigned to (none chosen: anyone assigned)"))
                                             .child(people_chips)
@@ -858,6 +890,20 @@ fn status_icon(state: &linear::StateInfo) -> gpui::Div {
         .child(status_glyph(&state.kind))
 }
 
+/// The labels to offer: `labels` (the teams'), those on `tickets`, and `chosen`, each once,
+/// by name ignoring case.
+fn label_choices(labels: &[String], tickets: &[Ticket], chosen: &[String]) -> Vec<String> {
+    let mut all: Vec<String> = labels
+        .iter()
+        .cloned()
+        .chain(tickets.iter().flat_map(|k| k.labels.iter().cloned()))
+        .chain(chosen.iter().cloned())
+        .collect();
+    all.sort_by_key(|l| (l.to_lowercase(), l.clone()));
+    all.dedup();
+    all
+}
+
 /// Adds `item` to `list`, or takes it out when it is there.
 fn toggle(list: &mut Vec<String>, item: String) {
     match list.iter().position(|x| *x == item) {
@@ -894,6 +940,27 @@ mod tests {
             " · unassigned"
         );
         assert_eq!(super::who_text(&Assignee::Anyone, &people), "");
+    }
+
+    #[test]
+    fn labels_offered_are_the_teams_the_tickets_and_the_chosen_ones_once_each() {
+        let ticket = crate::linear::Ticket {
+            id: "1".into(),
+            identifier: "PRE-1".into(),
+            title: String::new(),
+            url: String::new(),
+            sla_breaches_at: None,
+            sla_high_risk_at: None,
+            assignee: None,
+            state: "Todo".into(),
+            priority: 0,
+            created_at: String::new(),
+            labels: vec!["hydra-claimed".into(), "Bug".into()],
+        };
+        assert_eq!(
+            super::label_choices(&["bug".into(), "Bug".into()], &[ticket], &["Old".into()]),
+            vec!["Bug", "bug", "hydra-claimed", "Old"]
+        );
     }
 
     #[test]

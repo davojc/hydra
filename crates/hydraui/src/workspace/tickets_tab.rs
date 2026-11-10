@@ -30,6 +30,9 @@ pub struct TicketsTab {
     pub running: Vec<String>,
     pub loading: bool,
     pub error: Option<String>,
+    /// The team and status chips show; closed, one line names the filter. Opens closed on a
+    /// saved filter.
+    pub filter_open: bool,
 }
 
 impl Workspace {
@@ -106,6 +109,7 @@ impl Workspace {
             running: Vec::new(),
             loading: true,
             error: None,
+            filter_open: self.ui.tickets_teams.is_empty() || self.ui.tickets_states.is_empty(),
         });
         self.reload_tickets(cx);
         window.focus(&self.focus, cx);
@@ -213,6 +217,13 @@ impl Workspace {
         }
         self.ui.tickets_teams = teams;
         self.ui.tickets_states = states;
+        // Saved: out of the way, so the tickets have the page.
+        if let Some(t) = &mut self.tickets
+            && !t.pick_teams.is_empty()
+            && !t.pick_states.is_empty()
+        {
+            t.filter_open = false;
+        }
         window.push_notification(
             Notification::info("Saved. Tickets opens on this filter next time.").title("Tickets"),
             cx,
@@ -457,6 +468,44 @@ impl Workspace {
                             .on_click(cx.listener(|ws, _, _, cx| ws.reload_tickets(cx))),
                     ),
             );
+        // The filter in one line, with Hide filter / Edit filter.
+        let filter_open = t.filter_open;
+        let filter_line = if t.pick_teams.is_empty() {
+            "No teams chosen".to_string()
+        } else if t.pick_states.is_empty() {
+            format!("{} · no statuses chosen", t.pick_teams.join(", "))
+        } else {
+            format!("{} · {}", t.pick_teams.join(", "), t.pick_states.join(", "))
+        };
+        let filter_bar = h_flex()
+            .gap_2()
+            .items_center()
+            .child(
+                Button::new("tickets-filter-toggle")
+                    .label(if filter_open {
+                        "▾ Hide filter"
+                    } else {
+                        "▸ Edit filter"
+                    })
+                    .xsmall()
+                    .ghost()
+                    .on_click(cx.listener(|ws, _, _, cx| {
+                        if let Some(t) = &mut ws.tickets {
+                            t.filter_open = !t.filter_open;
+                        }
+                        cx.notify();
+                    })),
+            )
+            .when(!filter_open, |d| {
+                d.child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        .text_color(color(theme::TEXT_SECONDARY))
+                        .child(filter_line),
+                )
+            });
         let label = |text: &'static str| {
             div()
                 .pt_1()
@@ -477,10 +526,13 @@ impl Workspace {
                     .max_w(px(1080.))
                     .gap_2()
                     .child(header)
-                    .child(label("Teams"))
-                    .child(team_chips)
-                    .when(!t.pick_teams.is_empty(), |d| {
-                        d.child(label("Statuses")).child(state_chips)
+                    .child(filter_bar)
+                    .when(t.filter_open, |d| {
+                        d.child(label("Teams"))
+                            .child(team_chips)
+                            .when(!t.pick_teams.is_empty(), |d| {
+                                d.child(label("Statuses")).child(state_chips)
+                            })
                     })
                     .child(sections),
             )

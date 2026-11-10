@@ -47,8 +47,7 @@ pub struct HistoryTab {
     /// The log time the items were read at.
     pub read_at: String,
     pub loading: bool,
-    /// Lines whose details were opened or closed by hand (`detail_key`); the rest show theirs
-    /// open when they need a person (amber or red), closed otherwise.
+    /// Lines whose details were opened by hand (`detail_key`); the rest show them folded.
     pub toggled: std::collections::HashSet<String>,
 }
 
@@ -56,10 +55,10 @@ fn detail_key(item: &Item) -> String {
     format!("{}|{}|{}", item.run, item.at, item.text)
 }
 
-/// Whether `item`'s details show.
+/// Whether `item`'s details show: only once opened by hand, so the timeline stays one line per
+/// event (plus its summary).
 fn details_open(item: &Item, toggled: &std::collections::HashSet<String>) -> bool {
-    let by_default = matches!(item.tone, Tone::Attention | Tone::Bad);
-    by_default != toggled.contains(&detail_key(item))
+    toggled.contains(&detail_key(item))
 }
 
 impl Workspace {
@@ -489,10 +488,8 @@ impl Workspace {
             let n = item.details.len();
             let what = if item.tone == Tone::Good {
                 if n == 1 { "concern" } else { "concerns" }
-            } else if n == 1 {
-                "detail"
             } else {
-                "details"
+                "more"
             };
             div()
                 .flex_none()
@@ -502,7 +499,15 @@ impl Workspace {
                 } else {
                     theme::TEXT_MUTED
                 }))
-                .child(format!("{} {n} {what}", if open { "▾" } else { "▸" }))
+                .child(if what == "more" {
+                    format!(
+                        "{} {}",
+                        if open { "▾" } else { "▸" },
+                        if open { "less" } else { "more" }
+                    )
+                } else {
+                    format!("{} {n} {what}", if open { "▾" } else { "▸" })
+                })
         });
         let line = h_flex()
             .id(SharedString::from(format!("history-row-{n}")))
@@ -597,6 +602,22 @@ impl Workspace {
                         .child(d.clone())
                 }))
         });
-        v_flex().child(line).children(details).into_any_element()
+        let summary = item.summary.clone().map(|s| {
+            div()
+                .ml(px(76.))
+                .mr_2()
+                .mb_1()
+                .pl_3()
+                .text_sm()
+                .whitespace_normal()
+                .line_clamp(3)
+                .text_color(color(theme::TEXT_SECONDARY))
+                .child(s)
+        });
+        v_flex()
+            .child(line)
+            .children(summary)
+            .children(details)
+            .into_any_element()
     }
 }

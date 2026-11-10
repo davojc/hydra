@@ -1165,3 +1165,9 @@ A stage polling CI or a review can keep its sessions open for hours with nothing
   - **Stop**.
 
   With none it says "Nothing to resume". The timeline shows `Parked: nothing changed for 4 hours, so its sessions closed. Resume it from History` in amber. The orchestrator-closed line that follows is folded into it. An orchestrator closing for another reason now reads `… Resume it from History`.
+
+**History details folded, with a summary** (revises §50, 2026-11-10). Every line's details start folded, including the amber and red ones; a click unfolds them.
+
+- **The summary.** A line that needs you shows a short summary under it, up to three lines. It's the stage's own report summary, or else the first sentence of the reason.
+- **What unfolding shows.** The full reason (such as the reviewer's step-by-step list) and the reasons against, without repeating the summary.
+- **The hint.** It reads `▸ more` / `▾ less`. A passed stage keeps `▸ N concerns`.

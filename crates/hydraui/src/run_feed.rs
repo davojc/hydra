@@ -39,6 +39,20 @@ pub struct Item {
     /// What a person needs to read beside it: for a stage, its report's summary and its
     /// reasons against (such as a change left for a human to approve).
     pub details: Vec<String>,
+    /// For a person to read at a glance, shown under the line while its details stay folded:
+    /// why a run needs you, from its stage's report summary.
+    pub summary: Option<String>,
+}
+
+/// A line as read: its time, text, tone, details and summary.
+type Line = (String, String, Tone, Vec<String>, Option<String>);
+
+/// The first sentence of `s` (to a `.` followed by a space, or its first line), cut to `max`
+/// characters with `…`.
+fn first_sentence(s: &str, max: usize) -> String {
+    let line = s.lines().next().unwrap_or("").trim();
+    let end = line.find(". ").map_or(line.len(), |i| i + 1);
+    short(&line[..end], max)
 }
 
 /// The first line of `s`, cut to `max` characters with `…`.
@@ -59,7 +73,7 @@ pub fn items(run: &str, text: &str) -> Vec<Item> {
         (String::new(), String::new(), String::new(), None::<String>);
     let mut titles: HashMap<String, String> = HashMap::new();
     let mut scores: HashMap<String, u64> = HashMap::new();
-    let mut out: Vec<(String, String, Tone, Vec<String>)> = Vec::new();
+    let mut out: Vec<Line> = Vec::new();
     // Each stage's latest report: its summary and its reasons against.
     let mut reports: HashMap<String, (String, Vec<String>)> = HashMap::new();
     let mut last_reported = String::new();
@@ -82,7 +96,8 @@ pub fn items(run: &str, text: &str) -> Vec<Item> {
                 .unwrap_or_else(|| sentence(id))
         };
         let mut details: Option<Vec<String>> = None;
-        let mut push = |text: String, tone| out.push((at.clone(), text, tone, Vec::new()));
+        let mut summary: Option<String> = None;
+        let mut push = |text: String, tone| out.push((at.clone(), text, tone, Vec::new(), None));
         match v.get("event").and_then(Value::as_str) {
             Some("run started") => {
                 ticket = s("ticket");
@@ -183,13 +198,16 @@ pub fn items(run: &str, text: &str) -> Vec<Item> {
                     ),
                 };
                 push(headline, Tone::Attention);
-                let mut d: Vec<String> = Vec::new();
                 let report = reports.get(&id);
                 let rest = rest.trim();
-                if !rest.is_empty() {
+                // The stage's own summary reads best; else the reason's first sentence.
+                let glance = report
+                    .map(|(s, _)| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| Some(first_sentence(rest, 200)).filter(|s| !s.is_empty()));
+                let mut d: Vec<String> = Vec::new();
+                if !rest.is_empty() && glance.as_deref() != Some(rest) {
                     d.push(rest.to_string());
-                } else if let Some((summary, _)) = report.filter(|(s, _)| !s.is_empty()) {
-                    d.push(summary.clone());
                 }
                 if let Some((_, against)) = report {
                     d.extend(
@@ -199,6 +217,7 @@ pub fn items(run: &str, text: &str) -> Vec<Item> {
                             .cloned(),
                     );
                 }
+                summary = glance;
                 details = Some(d);
             }
             // A review waiting on a pull request's author needs nothing from the user.
@@ -269,10 +288,11 @@ pub fn items(run: &str, text: &str) -> Vec<Item> {
         }
         if let (Some(d), Some(last)) = (details, out.last_mut()) {
             last.3 = d;
+            last.4 = summary;
         }
     }
     out.into_iter()
-        .map(|(at, text, tone, details)| Item {
+        .map(|(at, text, tone, details, summary)| Item {
             at,
             run: run.to_string(),
             pipeline: pipeline.clone(),
@@ -282,6 +302,7 @@ pub fn items(run: &str, text: &str) -> Vec<Item> {
             text,
             tone,
             details,
+            summary,
         })
         .collect()
 }
@@ -652,12 +673,34 @@ mod tests {
             "Needs you: Verify scored 92, under its bar of 95"
         );
         assert_eq!(
-            last.details,
-            vec![
-                "Reviewed #1908, no code issues.",
-                "This is a RED-zone auth change, left for a human to approve.",
-            ]
+            last.summary.as_deref(),
+            Some("Reviewed #1908, no code issues.")
         );
+        assert_eq!(
+            last.details,
+            vec!["This is a RED-zone auth change, left for a human to approve."]
+        );
+    }
+
+    #[test]
+    fn a_long_check_reads_as_its_reports_summary_with_the_steps_folded() {
+        let steps = "After backend #1912 and #1915 have merged: (1) The author marks it ready. \
+                     (2) A human reviewer reviews the diff line by line (RED zone, §4.77).";
+        let text = log(&[
+            started("2026-11-10 08:00:00.000"),
+            json!({"at": "2026-11-10 08:10:00.000", "event": "report", "stage": "first",
+                "rating": {"score": 90, "summary": "Review done. A RED-zone PR needs a human \
+                    line-by-line review and approval.",
+                    "reasons": [{"side": "against", "text": "CI was still pending."}]}}),
+            json!({"at": "2026-11-10 08:10:00.001", "event": "needs you",
+                "reason": format!("stage first needs a person to check: {steps}")}),
+        ]);
+        let last = items("r", &text).pop().unwrap();
+        assert_eq!(
+            last.summary.as_deref(),
+            Some("Review done. A RED-zone PR needs a human line-by-line review and approval.")
+        );
+        assert_eq!(last.details, vec![steps, "CI was still pending."]);
     }
 
     #[test]
@@ -674,7 +717,10 @@ mod tests {
         let all = items("r", &text);
         assert_eq!(all[0].details, vec!["Not run against live Dapr."]);
         assert_eq!(all[1].text, "Needs you: Verify is blocked");
-        assert_eq!(all[1].details, vec!["posting was refused"]);
+        // No report: the reason itself is the summary, so nothing more to unfold.
+        assert_eq!(all[1].summary.as_deref(), Some("posting was refused"));
+        assert!(all[1].details.is_empty());
+        assert_eq!(all[0].summary, None);
     }
 
     #[test]

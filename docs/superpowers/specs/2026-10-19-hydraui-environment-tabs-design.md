@@ -124,8 +124,10 @@ the right.
 - Opening a file (tree click, Open file…, Search in files…, Show changes) splits the middle: the
   shown terminal on the left, the file pane on its right, next to the tree. Same file pane as
   today (§7.8 of the hydraui spec), draggable divider.
-- **One file pane per environment** (as today there is one per tab). It stays beside whichever of
-  that environment's terminals is shown. (Our call.)
+- **One file pane per terminal.** Each terminal keeps its own open files, and its own divider
+  position; showing another terminal shows its files, or none. Closing a terminal closes its
+  files, asking first about unsaved edits. A file open beside two terminals is two separate
+  copies. (Changed 2026-11-03 at the user's request: it was one pane per environment.)
 - This is the only split left. The split tree may be kept internally to hold "terminal | file
   pane", or replaced by something simpler: builder's call.
 
@@ -154,13 +156,13 @@ list = { width = 240.0 }         # the terminal list; omitted at its default wid
 [[env]]
 name = "work"
 active = 0                       # index into this env's terminals: the one shown
-files = { files = ["E:/work/api/README.md"], active = 0 }   # the env's file pane, if open
 
 [[env.terminal]]
 title = "claude"                 # optional: set by Rename
 cwd = "E:/work/api"              # its current folder when saved
 shell = "pwsh"                   # optional
 command = "claude"               # optional: run when the layout opens (hand-written only)
+files = { files = ["E:/work/api/README.md"], active = 0 }   # its file pane, if open
 
 [[env.terminal]]
 cwd = "E:/work/api"
@@ -236,6 +238,7 @@ running the app.
 ## 7. Calls made without the user
 
 Marked "our call" above: an environment's tab stays when its last terminal closes; one file pane
-per environment; hand-written `command` kept and run on open; closing one terminal asks when a
+per environment (since changed to one per terminal, §2.4); hand-written `command` kept and
+run on open; closing one terminal asks when a
 command is running. Also: activity dots on the environment tabs; terminal list in creation order;
 new terminal's folder rule; restarting reruns a terminal's startup `command`.

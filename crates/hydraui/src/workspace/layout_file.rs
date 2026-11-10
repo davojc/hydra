@@ -112,7 +112,7 @@ impl Workspace {
 
     /// The window as a version 2 layout (env-tabs design §3): each environment in tab order
     /// with its terminals (name, current folder, shell, a hand-written command and its Tasks
-    /// tab), the shown one, its file pane, the selected environment and the tree.
+    /// tab and its file pane), the shown one, the selected environment and the tree.
     pub(super) fn current_layout(&self, cx: &App) -> Layout {
         let envs = self
             .envs
@@ -136,27 +136,28 @@ impl Workspace {
                                 }
                             }),
                             claude: v.runs_claude(),
+                            files: tab
+                                .files
+                                .get(id)
+                                .and_then(|f| self.files.get(f))
+                                .map(|f| f.read(cx).saved())
+                                .filter(|(files, _)| !files.is_empty())
+                                .map(|(files, active)| FilesFile {
+                                    files: files
+                                        .iter()
+                                        .map(|p| p.to_string_lossy().into_owned())
+                                        .collect(),
+                                    active: Some(active),
+                                }),
                         })
                     })
                     .collect();
-                let files = tab
-                    .files
-                    .and_then(|id| self.files.get(&id))
-                    .map(|f| f.read(cx).saved())
-                    .filter(|(files, _)| !files.is_empty())
-                    .map(|(files, active)| FilesFile {
-                        files: files
-                            .iter()
-                            .map(|p| p.to_string_lossy().into_owned())
-                            .collect(),
-                        active: Some(active),
-                    });
                 EnvFile {
                     name: tab.env.clone(),
                     active: tab
                         .shown
                         .and_then(|s| tab.terminals.iter().position(|&t| t == s)),
-                    files,
+                    files: None,
                     terminals,
                 }
             })
@@ -303,7 +304,7 @@ impl Workspace {
     }
 
     /// Opens a layout's environments in this window (env-tabs design §3): each one's tab, its
-    /// terminals with their names and commands, the shown one and its file pane; then the
+    /// terminals with their names, commands and file panes, and the shown one; then the
     /// tree and the selected environment. What can't open is said in a toast and kept in
     /// `unopened`. Returns whether any environment opened.
     fn open_layout(
@@ -339,6 +340,12 @@ impl Workspace {
                 }
                 self.envs.add_terminal(&env.name, id);
                 ids.push(id);
+                if let Some(f) = t.files {
+                    self.next_pane += 1;
+                    let files = self.next_pane;
+                    self.create_files_pane(files, &f.files, f.active, window, cx);
+                    self.envs.set_files(id, Some(files));
+                }
                 // Its Tasks tab; autosave waits while the layout opens.
                 if let Some(tasks) = t.tasks {
                     self.open_tasks(id, window, cx);
@@ -347,12 +354,6 @@ impl Workspace {
             }
             if let Some(&id) = env.shown.and_then(|i| ids.get(i)) {
                 self.envs.show(id);
-            }
-            if let Some(f) = env.files {
-                self.next_pane += 1;
-                let id = self.next_pane;
-                self.create_files_pane(id, &f.files, f.active, window, cx);
-                self.envs.set_files(&env.name, Some(id));
             }
         }
         // The list's limit leaves room for the tree, the tree's for the list: the list is

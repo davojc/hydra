@@ -58,7 +58,7 @@ use hydraui_sets::layout::Layout;
 use hydraui_term::PromptState;
 
 use crate::config::UiConfig;
-use crate::envs::{EnvTab, EnvTabs, MAX_RATIO, MIN_RATIO, PaneId, new_terminal_cwd};
+use crate::envs::{EnvTab, EnvTabs, PaneId, new_terminal_cwd};
 use crate::file_pane::{FilePane, FilePaneEvent};
 use crate::file_tree::{cd_command, editor_command, quote_path};
 use crate::file_tree_view::{FileTreeView, TreeEvent};
@@ -140,7 +140,7 @@ pub struct Workspace {
     /// The environments' tabs, their terminals and file panes (env-tabs design §2).
     envs: EnvTabs,
     panes: HashMap<PaneId, Entity<PaneView>>,
-    /// File panes (spec §7.8), at most one per environment.
+    /// File panes (spec §7.8), at most one per terminal, shown beside it.
     files: HashMap<PaneId, Entity<FilePane>>,
     file_subs: HashMap<PaneId, Subscription>,
     /// Terminals started by a layout file's hand-written `command`, which is kept when the
@@ -1003,8 +1003,8 @@ impl Workspace {
         self.files.insert(id, view);
     }
 
-    /// Shows `path` in the selected environment's file pane, opening the pane beside the shown
-    /// terminal first when the environment has none (spec §7.8, env-tabs design §2.4).
+    /// Shows `path` in the shown terminal's file pane, opening the pane beside it first when it
+    /// has none (spec §7.8, env-tabs design §2.4).
     fn show_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.show_file_at(path, 0, 0, window, cx);
     }
@@ -1022,8 +1022,12 @@ impl Workspace {
         let Some(tab) = self.envs.active() else {
             return;
         };
+        // Open files belong to a terminal: with none shown there is nowhere to put one.
+        let Some(terminal) = tab.shown else {
+            return;
+        };
         let env = tab.env.clone();
-        let id = match tab.files.filter(|f| self.files.contains_key(f)) {
+        let id = match tab.shown_files().filter(|f| self.files.contains_key(f)) {
             Some(id) => {
                 if let Some(view) = self.files.get(&id).cloned() {
                     view.update(cx, |f, cx| {
@@ -1045,7 +1049,7 @@ impl Workspace {
                 {
                     view.update(cx, |f, cx| f.open_at(path, line, column, window, cx));
                 }
-                self.envs.set_files(&env, Some(id));
+                self.envs.set_files(terminal, Some(id));
                 id
             }
         };
@@ -1058,9 +1062,7 @@ impl Workspace {
     }
 
     fn remove_files_pane(&mut self, id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(env) = self.envs.env_of(id).map(str::to_string) {
-            self.envs.set_files(&env, None);
-        }
+        self.envs.drop_files(id);
         self.files.remove(&id);
         self.file_subs.remove(&id);
         self.focus_active(window, cx);
@@ -1157,8 +1159,8 @@ impl Workspace {
         .detach();
     }
 
-    /// Focuses the selected environment's file pane when it had the focus, else its shown
-    /// terminal; with neither, the window.
+    /// Focuses the shown terminal's file pane when it had the focus, else the terminal; with
+    /// neither, the window.
     fn focus_active(&self, window: &mut Window, cx: &mut App) {
         if self.settings_shown() {
             window.focus(&self.focus, cx);
@@ -1171,7 +1173,7 @@ impl Workspace {
             }
             return;
         }
-        let target = self.envs.active().and_then(|t| match t.files {
+        let target = self.envs.active().and_then(|t| match t.shown_files() {
             Some(f) if t.files_focused => Some(f),
             _ => t.shown,
         });
@@ -1217,7 +1219,7 @@ impl Workspace {
             return;
         };
         if tab.files_focused
-            && let Some(id) = tab.files
+            && let Some(id) = tab.shown_files()
         {
             self.confirm_unsaved(vec![id], window, cx, move |ws, w, cx| {
                 ws.remove_files_pane(id, w, cx)
@@ -1256,28 +1258,43 @@ impl Workspace {
         let Some(name) = self.panes.get(&id).map(|v| v.read(cx).label()) else {
             return;
         };
-        let running = self.running(&[id], cx);
-        self.ask_running("Close", &name, &running, window, cx, move |ws, w, cx| {
-            ws.close_terminal_now(id, w, cx)
+        // Its open files close with it: unsaved edits are asked about first.
+        let files: Vec<PaneId> = self.envs.files_of(id).into_iter().collect();
+        self.confirm_unsaved(files, window, cx, move |ws, w, cx| {
+            let running = ws.running(&[id], cx);
+            let name = name.clone();
+            ws.ask_running("Close", &name, &running, w, cx, move |ws, w, cx| {
+                ws.close_terminal_now(id, w, cx)
+            });
         });
     }
 
     fn close_terminal_now(&mut self, id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        let files = self.envs.files_of(id);
         if !self.envs.close_terminal(id) {
             return;
         }
         self.drop_tasks(id, window, cx);
         self.drop_pane(id);
+        if let Some(files) = files {
+            self.drop_pane(files);
+        }
         self.shown_changed(window, cx);
     }
 
-    /// Closes an environment's tab, its terminals and its file pane, asking first about
+    /// Closes an environment's tab, its terminals and their file panes, asking first about
     /// unsaved edits and running commands (env-tabs design §2.1).
     pub(super) fn close_env(&mut self, env: &str, window: &mut Window, cx: &mut Context<Self>) {
         let panes: Vec<PaneId> = self
             .envs
             .get(env)
-            .map(|t| t.terminals.iter().copied().chain(t.files).collect())
+            .map(|t| {
+                t.terminals
+                    .iter()
+                    .chain(t.files.values())
+                    .copied()
+                    .collect()
+            })
             .unwrap_or_default();
         let env = env.to_string();
         self.confirm_unsaved(panes, window, cx, move |ws, w, cx| {
@@ -1564,7 +1581,7 @@ impl Workspace {
     }
 
     /// Diffs a file against git's last commit off the UI thread, then shows it beside the file
-    /// in the environment's file pane (spec §7.3).
+    /// in the shown terminal's file pane (spec §7.3).
     fn show_changes(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let Some((root, rel, base)) = self.tree.as_ref().and_then(|t| t.read(cx).git_place(&path))
         else {
@@ -1579,7 +1596,7 @@ impl Workspace {
                 let pane = ws
                     .envs
                     .active()
-                    .and_then(|tab| tab.files)
+                    .and_then(|tab| tab.shown_files())
                     .and_then(|p| ws.files.get(&p).cloned());
                 if let Some(pane) = pane {
                     pane.update(cx, |f, cx| f.open_diff(path, patch, window, cx));
@@ -1590,7 +1607,7 @@ impl Workspace {
     }
 
     /// Shows what `commit` changed in `project` (a Verify card's commit, task board spec §5) in
-    /// the selected environment's file pane, opening the pane first when it has none.
+    /// the shown terminal's file pane, opening the pane first when it has none.
     pub(super) fn show_commit(
         &mut self,
         project: PathBuf,
@@ -1605,16 +1622,20 @@ impl Workspace {
                 .background_spawn(async move { git_status::commit_patch(&repo, &hash) })
                 .await;
             let _ = this.update_in(cx, |ws, window, cx| {
-                let Some(env) = ws.envs.active().map(|t| t.env.clone()) else {
+                let Some((env, terminal)) = ws
+                    .envs
+                    .active()
+                    .and_then(|t| Some((t.env.clone(), t.shown?)))
+                else {
                     return;
                 };
-                let id = match ws.envs.get(&env).and_then(|t| t.files) {
+                let id = match ws.envs.files_of(terminal) {
                     Some(id) if ws.files.contains_key(&id) => id,
                     _ => {
                         ws.next_pane += 1;
                         let id = ws.next_pane;
                         ws.create_files_pane(id, &[], 0, window, cx);
-                        ws.envs.set_files(&env, Some(id));
+                        ws.envs.set_files(terminal, Some(id));
                         id
                     }
                 };
@@ -1700,7 +1721,7 @@ impl Workspace {
         if let Some(tab) = self.envs.active_mut()
             && ratio.is_finite()
         {
-            tab.files_ratio = ratio.clamp(MIN_RATIO, MAX_RATIO);
+            tab.set_files_ratio(ratio);
         }
         cx.notify();
     }
@@ -1812,7 +1833,7 @@ impl Workspace {
                     .into_any_element()
             }
         };
-        let Some(files) = tab.files.and_then(|id| self.files.get(&id)) else {
+        let Some(files) = tab.shown_files().and_then(|id| self.files.get(&id)) else {
             return terminal;
         };
         let edge = if tab.files_focused {
@@ -1836,7 +1857,7 @@ impl Workspace {
                     .h_full()
                     .flex_none()
                     .overflow_hidden()
-                    .w(relative(tab.files_ratio))
+                    .w(relative(tab.files_ratio()))
                     .child(terminal),
             )
             .child(

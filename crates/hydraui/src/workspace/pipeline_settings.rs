@@ -850,6 +850,10 @@ impl Workspace {
         });
         let count = draft.stages.len();
         let router_on = self.router_state(orch, cx).is_some_and(|(_, _, ok)| ok);
+        // Product questions sit under Advanced: most pipelines never ask product.
+        let product = draft
+            .advanced
+            .then(|| self.render_product_settings(orch, draft, cx));
         let section = |title: &str| text(11., theme::TEXT_MUTED).child(title.to_uppercase());
         let mut stages = v_flex().gap_2();
         for (i, s) in draft.stages.iter().enumerate() {
@@ -1179,9 +1183,7 @@ impl Workspace {
                                             })),
                                     ),
                             )
-                            // 4. How it asks product.
-                            .child(self.render_product_settings(orch, draft, cx))
-                            // 5. Everything else, folded away.
+                            // 4. Everything else, folded away: how it asks product first.
                             .child(
                                 div()
                                     .id(SharedString::from(format!("settings-advanced-{orch}")))
@@ -1205,6 +1207,7 @@ impl Workspace {
                                         .pl(px(14.))
                                         .border_l_2()
                                         .border_color(color(theme::BORDER_SUBTLE))
+                                        .children(product)
                                         .child(
                                             v_flex()
                                                 .gap_2()

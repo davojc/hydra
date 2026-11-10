@@ -262,14 +262,24 @@ pub fn read_teams(reply: &Value) -> Result<Vec<(String, String)>, LinearError> {
 pub fn team_states_request(teams: &[String]) -> Value {
     json!({
         "query": "query($keys: [String!]) { teams(first: 20, filter: { key: { in: $keys } }) \
-                  { nodes { key states(first: 50) { nodes { name type position } } } } }",
+                  { nodes { key states(first: 50) { nodes { name type position color } } } } }",
         "variables": {"keys": teams},
     })
 }
 
-/// Their state names, each once, in Linear's order: triage, backlog, unstarted, started,
-/// completed, canceled, then by position.
-pub fn read_team_state_names(reply: &Value) -> Result<Vec<String>, LinearError> {
+/// A workflow state as the Tickets page draws it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateInfo {
+    pub name: String,
+    /// Linear's type: `triage`, `backlog`, `unstarted`, `started`, `completed`, `canceled`.
+    pub kind: String,
+    /// Its colour, `#rrggbb`.
+    pub color: String,
+}
+
+/// Their states, each name once (its first team's type and colour), in Linear's order:
+/// triage, backlog, unstarted, started, completed, canceled, then by position.
+pub fn read_team_states(reply: &Value) -> Result<Vec<StateInfo>, LinearError> {
     let teams = data(reply)?["teams"]["nodes"]
         .as_array()
         .ok_or_else(|| unexpected("teams"))?;
@@ -282,25 +292,38 @@ pub fn read_team_state_names(reply: &Value) -> Result<Vec<String>, LinearError> 
         "canceled" => 5,
         _ => 6,
     };
-    let mut states: Vec<(usize, f64, String)> = teams
+    let mut states: Vec<(usize, f64, StateInfo)> = teams
         .iter()
         .flat_map(|t| t["states"]["nodes"].as_array().cloned().unwrap_or_default())
         .filter_map(|n| {
+            let kind = n["type"].as_str().unwrap_or("").to_string();
             Some((
-                rank(n["type"].as_str().unwrap_or("")),
+                rank(&kind),
                 n["position"].as_f64().unwrap_or(0.0),
-                n["name"].as_str()?.to_string(),
+                StateInfo {
+                    name: n["name"].as_str()?.to_string(),
+                    kind,
+                    color: n["color"].as_str().unwrap_or("").to_string(),
+                },
             ))
         })
         .collect();
     states.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
-    let mut out: Vec<String> = Vec::new();
-    for (_, _, name) in states {
-        if !out.contains(&name) {
-            out.push(name);
+    let mut out: Vec<StateInfo> = Vec::new();
+    for (_, _, s) in states {
+        if !out.iter().any(|o| o.name == s.name) {
+            out.push(s);
         }
     }
     Ok(out)
+}
+
+/// The states' names, in the same order.
+pub fn read_team_state_names(reply: &Value) -> Result<Vec<String>, LinearError> {
+    Ok(read_team_states(reply)?
+        .into_iter()
+        .map(|s| s.name)
+        .collect())
 }
 
 /// Whose tickets the Tickets page lists (core spec §53).
@@ -479,7 +502,7 @@ mod tests {
     fn the_chosen_teams_states_come_once_each_in_workflow_order() {
         let reply = json!({"data": {"teams": {"nodes": [
             {"key": "PRE", "states": {"nodes": [
-                {"name": "Done", "type": "completed", "position": 3.0},
+                {"name": "Done", "type": "completed", "position": 3.0, "color": "#5e6ad2"},
                 {"name": "In Progress", "type": "started", "position": 2.0},
                 {"name": "Todo", "type": "unstarted", "position": 1.0}
             ]}},
@@ -492,6 +515,15 @@ mod tests {
         assert_eq!(
             read_team_state_names(&reply).unwrap(),
             vec!["Backlog", "Todo", "In Progress", "In Review", "Done"]
+        );
+        let done = read_team_states(&reply).unwrap().pop().unwrap();
+        assert_eq!(
+            done,
+            StateInfo {
+                name: "Done".into(),
+                kind: "completed".into(),
+                color: "#5e6ad2".into()
+            }
         );
         let req = team_states_request(&["PRE".into(), "INTH".into()]);
         assert_eq!(req["variables"]["keys"], json!(["PRE", "INTH"]));

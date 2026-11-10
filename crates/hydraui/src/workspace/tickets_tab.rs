@@ -20,8 +20,10 @@ pub struct TicketsTab {
     pub env: String,
     /// Every team the key sees, as (key, name); empty until read.
     pub teams: Vec<(String, String)>,
-    /// The chosen teams' state names, in Linear's order; empty until read.
-    pub states: Vec<String>,
+    /// The chosen teams' states (name, type, colour), in Linear's order; empty until read.
+    pub states: Vec<linear::StateInfo>,
+    /// The labels shown on a row when a ticket has them; the others aren't shown.
+    pub pick_labels: Vec<String>,
     /// The filter being chosen; **Save filter** keeps it in config.toml.
     pub pick_teams: Vec<String>,
     pub pick_states: Vec<String>,
@@ -109,6 +111,7 @@ impl Workspace {
             states: Vec::new(),
             pick_teams: self.ui.tickets_teams.clone(),
             pick_states: self.ui.tickets_states.clone(),
+            pick_labels: self.ui.tickets_labels.clone(),
             pick_who: who_from_config(&self.ui.tickets_assignee, &self.ui.tickets_people),
             people: Vec::new(),
             tickets: Vec::new(),
@@ -148,9 +151,7 @@ impl Workspace {
                     let names = if teams.is_empty() {
                         Vec::new()
                     } else {
-                        linear::read_team_state_names(
-                            &http.post(&linear::team_states_request(&teams))?,
-                        )?
+                        linear::read_team_states(&http.post(&linear::team_states_request(&teams))?)?
                     };
                     let people = if teams.is_empty() {
                         Vec::new()
@@ -160,8 +161,10 @@ impl Workspace {
                         )?
                     };
                     // Only states the chosen teams have.
-                    let states: Vec<String> =
-                        states.into_iter().filter(|s| names.contains(s)).collect();
+                    let states: Vec<String> = states
+                        .into_iter()
+                        .filter(|s| names.iter().any(|n| n.name == *s))
+                        .collect();
                     let tickets = if teams.is_empty() || states.is_empty() {
                         Vec::new()
                     } else {
@@ -243,6 +246,7 @@ impl Workspace {
             return;
         };
         let (teams, states) = (t.pick_teams.clone(), t.pick_states.clone());
+        let labels = t.pick_labels.clone();
         let (mode, people) = who_to_config(&t.pick_who);
         if let Err(e) = crate::config::set(
             &self.hydra.paths,
@@ -256,6 +260,7 @@ impl Workspace {
             ("tickets_teams", &teams),
             ("tickets_states", &states),
             ("tickets_people", &people),
+            ("tickets_labels", &labels),
         ] {
             let value: toml_edit::Array = list.iter().map(String::as_str).collect();
             if let Err(e) = crate::config::set(&self.hydra.paths, key, Some(value.into())) {
@@ -267,6 +272,7 @@ impl Workspace {
         self.ui.tickets_states = states;
         self.ui.tickets_assignee = mode;
         self.ui.tickets_people = people;
+        self.ui.tickets_labels = labels;
         // Saved: out of the way, so the tickets have the page.
         if let Some(t) = &mut self.tickets
             && !t.pick_teams.is_empty()
@@ -400,16 +406,44 @@ impl Workspace {
         let state_chips = h_flex()
             .gap_1p5()
             .flex_wrap()
-            .children(t.states.iter().enumerate().map(|(i, name)| {
-                let n = name.clone();
+            .children(t.states.iter().enumerate().map(|(i, st)| {
+                let n = st.name.clone();
                 chip(
                     format!("tickets-state-{i}"),
-                    name.clone(),
-                    t.pick_states.contains(name),
+                    format!("{} {}", status_glyph(&st.kind), st.name),
+                    t.pick_states.contains(&st.name),
                 )
                 .on_click(cx.listener(move |ws, _, _, cx| ws.toggle_ticket_state(n.clone(), cx)))
             }));
+        // Labels to show on rows: those on the tickets listed, plus any already chosen.
+        let mut all_labels: Vec<String> = t
+            .tickets
+            .iter()
+            .flat_map(|k| k.labels.iter().cloned())
+            .chain(t.pick_labels.iter().cloned())
+            .collect();
+        all_labels.sort_by_key(|l| l.to_lowercase());
+        all_labels.dedup();
+        let label_chips =
+            h_flex()
+                .gap_1p5()
+                .flex_wrap()
+                .children(all_labels.iter().enumerate().map(|(i, name)| {
+                    let n = name.clone();
+                    chip(
+                        format!("tickets-label-{i}"),
+                        name.clone(),
+                        t.pick_labels.contains(name),
+                    )
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        if let Some(t) = &mut ws.tickets {
+                            toggle(&mut t.pick_labels, n.clone());
+                        }
+                        cx.notify();
+                    }))
+                }));
         let saved = t.pick_teams == self.ui.tickets_teams
+            && t.pick_labels == self.ui.tickets_labels
             && t.pick_states == self.ui.tickets_states
             && t.pick_who == who_from_config(&self.ui.tickets_assignee, &self.ui.tickets_people);
         // Whose tickets: Anyone, Unassigned, Assigned; with Assigned, the people to narrow to.
@@ -472,9 +506,9 @@ impl Workspace {
         let mut sections = v_flex().gap_1();
         if !t.pick_teams.is_empty() {
             let mut n = 0;
-            for state in t.states.iter().filter(|s| t.pick_states.contains(s)) {
+            for state in t.states.iter().filter(|s| t.pick_states.contains(&s.name)) {
                 let in_state: Vec<&Ticket> =
-                    t.tickets.iter().filter(|k| &k.state == state).collect();
+                    t.tickets.iter().filter(|k| k.state == state.name).collect();
                 sections = sections.child(
                     h_flex()
                         .pt_3()
@@ -483,11 +517,12 @@ impl Workspace {
                         .items_center()
                         .border_b_1()
                         .border_color(color(theme::BORDER))
+                        .child(status_icon(state))
                         .child(
                             div()
                                 .text_sm()
                                 .text_color(color(theme::TEXT))
-                                .child(state.clone()),
+                                .child(state.name.clone()),
                         )
                         .child(
                             div()
@@ -508,7 +543,13 @@ impl Workspace {
                 }
                 for ticket in in_state {
                     let running = t.running.contains(&ticket.identifier.to_ascii_uppercase());
-                    sections = sections.child(self.ticket_row(n, ticket, running, cx));
+                    let shown: Vec<&String> = ticket
+                        .labels
+                        .iter()
+                        .filter(|l| t.pick_labels.contains(l))
+                        .collect();
+                    sections =
+                        sections.child(self.ticket_row(n, ticket, state, &shown, running, cx));
                     n += 1;
                 }
             }
@@ -631,6 +672,10 @@ impl Workspace {
                                     .child(state_chips)
                                     .child(label("Assignee"))
                                     .child(who_chips)
+                                    .when(!all_labels.is_empty(), |d| {
+                                        d.child(label("Show these labels on rows"))
+                                            .child(label_chips)
+                                    })
                                     .when(assigned, |d| {
                                         d.child(label("Assigned to (none chosen: anyone assigned)"))
                                             .child(people_chips)
@@ -649,6 +694,8 @@ impl Workspace {
         &self,
         n: usize,
         ticket: &Ticket,
+        state: &linear::StateInfo,
+        labels: &[&String],
         running: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -662,6 +709,15 @@ impl Workspace {
             .items_center()
             .rounded_md()
             .hover(|d| d.bg(color(theme::RAISED)))
+            .child({
+                let tip = state.name.clone();
+                div()
+                    .id(SharedString::from(format!("ticket-status-{n}")))
+                    .child(status_icon(state))
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                    })
+            })
             .child(
                 div()
                     .id(SharedString::from(format!("ticket-key-{n}")))
@@ -682,17 +738,17 @@ impl Workspace {
                     .text_color(color(theme::TEXT))
                     .child(ticket.title.clone()),
             )
-            .when(!ticket.labels.is_empty(), |d| {
-                d.child(
-                    div()
-                        .flex_none()
-                        .max_w(px(200.))
-                        .truncate()
-                        .text_xs()
-                        .text_color(color(theme::TEXT_MUTED))
-                        .child(ticket.labels.join(" · ")),
-                )
-            })
+            .children(labels.iter().map(|l| {
+                div()
+                    .flex_none()
+                    .px(px(6.))
+                    .py(px(1.))
+                    .rounded(px(4.))
+                    .text_xs()
+                    .bg(color(theme::AMBER_TINT))
+                    .text_color(color(theme::AMBER))
+                    .child((*l).clone())
+            }))
             .child(if running {
                 div()
                     .w(px(110.))
@@ -754,6 +810,38 @@ fn who_text(who: &linear::Assignee, people: &[(String, String)]) -> String {
     }
 }
 
+/// A status's icon as Linear draws it, by its type: a dotted ring for backlog, an empty ring to
+/// do, a half-filled one in progress, a filled one done, a crossed one canceled.
+fn status_glyph(kind: &str) -> &'static str {
+    match kind {
+        "triage" => "◇",
+        "backlog" => "◌",
+        "unstarted" => "○",
+        "started" => "◐",
+        "completed" => "●",
+        "canceled" => "⊘",
+        _ => "○",
+    }
+}
+
+/// `#rrggbb` as a colour, when it is one.
+fn hex_color(hex: &str) -> Option<u32> {
+    let h = hex.strip_prefix('#')?;
+    (h.len() == 6)
+        .then(|| u32::from_str_radix(h, 16).ok())
+        .flatten()
+}
+
+/// A status's icon in its own colour (muted when Linear gave none).
+fn status_icon(state: &linear::StateInfo) -> gpui::Div {
+    div()
+        .flex_none()
+        .w(px(14.))
+        .text_sm()
+        .text_color(color(hex_color(&state.color).unwrap_or(theme::TEXT_MUTED)))
+        .child(status_glyph(&state.kind))
+}
+
 /// Adds `item` to `list`, or takes it out when it is there.
 fn toggle(list: &mut Vec<String>, item: String) {
     match list.iter().position(|x| *x == item) {
@@ -790,6 +878,16 @@ mod tests {
             " · unassigned"
         );
         assert_eq!(super::who_text(&Assignee::Anyone, &people), "");
+    }
+
+    #[test]
+    fn a_status_is_drawn_by_its_type_in_its_colour() {
+        assert_eq!(super::status_glyph("started"), "◐");
+        assert_eq!(super::status_glyph("completed"), "●");
+        assert_eq!(super::status_glyph("odd"), "○");
+        assert_eq!(super::hex_color("#5e6ad2"), Some(0x5e6ad2));
+        assert_eq!(super::hex_color("5e6ad2"), None);
+        assert_eq!(super::hex_color("#5e6"), None);
     }
 
     #[test]

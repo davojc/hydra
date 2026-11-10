@@ -93,6 +93,8 @@ pub struct UiConfig {
     /// user ids to narrow to (none: anyone assigned).
     pub tickets_assignee: String,
     pub tickets_people: Vec<String>,
+    /// Labels the Tickets page shows on a row when the ticket has them.
+    pub tickets_labels: Vec<String>,
 }
 
 /// A Claude plugin the set-up checklist asks for, e.g. the team's skill router.
@@ -133,6 +135,7 @@ impl Default for UiConfig {
             tickets_states: Vec::new(),
             tickets_assignee: "anyone".to_string(),
             tickets_people: Vec::new(),
+            tickets_labels: Vec::new(),
         }
     }
 }
@@ -216,6 +219,7 @@ pub fn parse(text: &str) -> (UiConfig, Vec<String>) {
                 _ => Err(format!("{a:?} isn't anyone, unassigned or assigned")),
             }),
             "tickets_people" => get(value).map(|p| cfg.tickets_people = p),
+            "tickets_labels" => get(value).map(|l| cfg.tickets_labels = l),
             "setup_plugins" => get::<Vec<SetupPlugin>>(value).and_then(|p| {
                 match p.iter().find(|p| !p.plugin.contains('@')) {
                     Some(bad) => Err(format!(
@@ -450,6 +454,7 @@ tickets_teams = ["PRE", "INTH"]
 tickets_states = ["Todo", "In Review"]
 tickets_assignee = "assigned"
 tickets_people = ["u2"]
+tickets_labels = ["Bug"]
 setup_plugins = [{ plugin = "skill-router@iov42", marketplace = "iov42/iov42-marketplace", label = "Team skills" }]
 
 [colors]
@@ -473,6 +478,7 @@ new_terminal = "ctrl-alt-d"
         assert_eq!(cfg.tickets_states, vec!["Todo", "In Review"]);
         assert_eq!(cfg.tickets_assignee, "assigned");
         assert_eq!(cfg.tickets_people, vec!["u2"]);
+        assert_eq!(cfg.tickets_labels, vec!["Bug"]);
         assert_eq!(
             cfg.setup_plugins,
             vec![SetupPlugin {

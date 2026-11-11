@@ -477,7 +477,10 @@ impl Workspace {
     ) {
         let root = self.hydra.paths.root().to_path_buf();
         let names = crate::pipeline::names(&root);
-        let mut labels = vec!["Blank: one stage to fill in".to_string()];
+        let mut labels = vec![
+            "Blank: one stage to fill in".to_string(),
+            "Email triage: Gmail, Jev sorts each email, Claude drafts a reply".to_string(),
+        ];
         labels.extend(
             pipeline_labels(&root, &names)
                 .into_iter()
@@ -499,11 +502,15 @@ impl Workspace {
                     .on_confirm(move |ix, window, cx| {
                         window.close_dialog(cx);
                         let env = env.clone();
-                        if ix.row == names.len() + 1 {
+                        if ix.row == names.len() + 2 {
                             workspace.update(cx, |ws, cx| ws.import_pipeline(env, window, cx));
                             return;
                         }
-                        let from = ix.row.checked_sub(1).and_then(|i| names.get(i).cloned());
+                        let from = match ix.row {
+                            0 => None,
+                            1 => Some(crate::pipeline::EMAIL_TRIAGE.to_string()),
+                            n => names.get(n - 2).cloned(),
+                        };
                         workspace.update(cx, |ws, cx| ws.name_pipeline(from, env, window, cx));
                     }),
             )
@@ -636,6 +643,10 @@ impl Workspace {
         let ws = cx.entity();
         let first = Cell::new(true);
         let hint = match &from {
+            Some(f) if f == crate::pipeline::EMAIL_TRIAGE => "Takes its work from Gmail on \
+                weekday mornings: Jev sorts each email, then Claude investigates and drafts a \
+                reply for a person. Set the mailbox and categories in its settings."
+                .to_string(),
             Some(f) => format!(
                 "A copy of {f}: its stages, bars and prompts. It won't watch Linear or start at \
                  launch until you turn those on in its settings."
@@ -656,8 +667,13 @@ impl Workspace {
                             window.close_dialog(cx);
                             crate::action_log::write(format!(
                                 "new pipeline {name} ({})",
-                                from.as_deref()
-                                    .map_or("blank".into(), |f| format!("from {f}"))
+                                from.as_deref().map_or("blank".into(), |f| {
+                                    if f == crate::pipeline::EMAIL_TRIAGE {
+                                        "email triage starter".into()
+                                    } else {
+                                        format!("from {f}")
+                                    }
+                                })
                             ));
                             let env = env.clone();
                             ws.update(cx, |ws, cx| ws.start_new_pipeline(name, env, window, cx));

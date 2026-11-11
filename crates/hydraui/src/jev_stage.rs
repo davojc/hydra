@@ -18,7 +18,7 @@ pub const DEFAULT_INPUT: &str = "email.md";
 pub const MAX_INPUT: usize = 20_000;
 
 /// What `none` means when the stage doesn't say.
-const NONE_TEXT: &str = "None of these, or it can't be told from the text";
+pub const NONE_TEXT: &str = "None of these, or it can't be told from the text";
 
 /// A Jev stage's question, as its `[[stage]]` sets it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -105,6 +105,39 @@ impl JevStage {
             options: self.options.clone(),
         }
     }
+}
+
+/// What's wrong with a Jev step as Pipeline settings left it, in words for its save bar; `None`
+/// when `JevStage::new` would take it.
+pub fn problem(j: &JevStage) -> Option<&'static str> {
+    if j.instructions.trim().is_empty() {
+        return Some("Give the Jev step its question");
+    }
+    if j.options
+        .keys()
+        .filter(|k| k.as_str() != crate::jev::NONE)
+        .count()
+        < 2
+    {
+        return Some("A Jev step needs at least two categories");
+    }
+    for (name, means) in &j.options {
+        let plain = !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+        if !plain {
+            return Some("Name categories with lowercase letters, digits and _, like how_to");
+        }
+        if means.trim().is_empty() {
+            return Some("Say what each Jev category means");
+        }
+    }
+    let input = j.input.trim();
+    if input.is_empty() || input.contains(['/', '\\']) || input.starts_with('.') {
+        return Some("A Jev step reads a file name in the run's folder, like email.md");
+    }
+    None
 }
 
 /// The run's folder, beside its log: `<root>/hydraui/runs/<run>/`.

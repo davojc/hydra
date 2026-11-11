@@ -177,18 +177,33 @@ Why it holds when a peer is offline: in step 2, both labels land in Gmail whatev
   - Clicking it opens the thread. A person reviews and sends it.
   - Sending is noticed at the next check, when the thread's last message is from our side, and the run finishes.
 
-## 7. In hydraui
+## 7. In hydraui (settings built 2026-11-11)
 
-- **Pipeline settings.**
-  - **Source** offers Mail, with Mailbox, Search, Check (schedule or watch) and Swarm.
-  - A Jev stage edits its options as rows, with name and meaning, and has an optional "finish" per option.
-  - A line reads the setup back, and names a missing sign-in or a swarm the mailbox's people aren't in.
-- **Pipelines and History.**
-  - A mail run's row shows the customer, the subject, the Jev category and confidence, and who holds the claim.
-  - Claims by teammates (from the swarm) show greyed with their name, so the whole team sees who has what.
-- **Notices.**
-  - "Integration emails: 4 new, 3 claimed by you, 1 by Victoria"
-  - "Lost the claim on 'API 401 on /shares' to Victoria"
+Everything below is set in Pipeline settings, not only in the pipeline file.
+
+- **Source: Mail.** It sits beside None, Linear, Slack and Schedule, and has these fields:
+  - **Check** (days and a time, e.g. `weekdays 09:00`);
+  - **Look back (days)**;
+  - **Gmail search** (empty means `in:inbox`);
+  - **Team swarm**;
+  - **In environment**.
+
+  A line reads it back, e.g. "Weekdays at 09:00, it looks at the last 7 days of in:inbox…", or names a mistake. Another line says what hydraui still needs before it can read mail: the Gmail client in config and **Connect Gmail**, and `peer_name`. Choosing another source turns Mail off, and saving without Mail drops `[mail]`.
+- **+ Jev classify step,** beside **+ Claude step**. A Jev step is edited in place:
+  - **Jev's question** (a text box);
+  - **Categories**, as rows of a name and what it means, each with ×, plus **+ Category**. `none` is always offered and isn't shown unless the file gives it other wording.
+  - **Reads**, the file in the run's folder, `email.md` by default;
+  - **Model**, which should be pinned;
+  - its bar slider, which is how sure Jev must be.
+
+  The save bar names what's missing: the question, at least two categories, plain category names like `how_to`, what each category means, or a plain file name. Saving writes `kind = "jev"`, its question and `[stage.options]`, and never a skill, folder, worktree or prompt.
+- **New pipeline… → Email triage.** A ready pipeline:
+  - Mail on weekdays at 09:00, looking back 7 days;
+  - a **Classify** Jev step at bar 70 with how_to, user_error, bug, general and not_a_question;
+  - an **Investigate and draft a reply** Claude step. It reads the email named in its brief and Jev's category from the handoff. For not_a_question it reports done; otherwise it writes `reply.md` beside the email for a person to review, and sends nothing.
+
+  Unlike a copy, a starter keeps its source.
+- **Still to do:** the pipeline rows' mail details (customer, subject, category, claim holder), teammates' claims shown greyed, and the claim notices.
 
 ## 8. Not in v1
 
@@ -215,4 +230,4 @@ Why it holds when a peer is offline: in step 2, both labels land in Gmail whatev
 3. The `[mail]` trigger: one run per thread, plus `email.md`. **Built 2026-11-11**, with `look_back_days` (§3).
 4. Claims: label, swarm file, settle, tie-break and release, with tests for the race using two fake machines and a fake Gmail. **Built 2026-11-11** (§5).
 5. Drafts from `reply.md` with the step 5 re-check.
-6. Pipeline settings, History and notices.
+6. Pipeline settings, History and notices. **Settings built 2026-11-11** (§7); History and notices still to do.

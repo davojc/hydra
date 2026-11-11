@@ -15,6 +15,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
+use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::{Disableable, Sizable, WindowExt, h_flex, v_flex};
 use serde_json::json;
 
@@ -53,6 +54,8 @@ pub(super) struct PipelineTab {
     pub confirm_stop: bool,
     /// The run this tab shows, when its orchestrator holds several; `None` follows its latest.
     pub run: Option<String>,
+    /// A waiting stage's full report is unfolded (core spec §59).
+    pub details: bool,
 }
 
 /// What the tab draws, copied out of the registry so its lock isn't held while drawing.
@@ -1873,33 +1876,19 @@ impl Workspace {
             }
             row
         });
-        let (overline, headline) = match (ai, rating) {
-            (_, Some(r)) if r.outcome == Outcome::Check => (
-                format!(
-                    "{} needs you to check it by hand · {}%",
-                    spec.title, r.score
-                ),
-                r.summary.clone(),
-            ),
-            (_, Some(r)) if r.outcome == Outcome::Blocked => (
-                format!("Blocked at the {} gate", spec.title),
-                r.summary.clone(),
-            ),
-            (_, Some(r)) => (
-                format!(
-                    "Stopped at the {} gate · {}% · bar {bar}%",
-                    spec.title, r.score
-                ),
-                r.summary.clone(),
-            ),
-            (Some(_), None) => (
-                format!("{} failed {} times", spec.title, s.attempts.len()),
-                reason.clone(),
-            ),
-            (None, None) => (
-                "Waiting for the weekly Claude limit".to_string(),
-                reason.clone(),
-            ),
+        let glance = crate::pipeline_view::glance(rating, &reason, &spec.title);
+        // When it's waiting: the ticket, the stage, and its score against the bar.
+        let context = {
+            let mut parts = vec![run.ticket.clone(), spec.title.clone()];
+            match (ai, rating) {
+                (_, Some(r)) if r.outcome == Outcome::Done => {
+                    parts.push(format!("{}% (bar {bar}%)", r.score))
+                }
+                (Some(_), None) => parts.push(format!("failed {} times", s.attempts.len())),
+                (None, None) => parts.push("waiting for the weekly Claude limit".into()),
+                _ => {}
+            }
+            parts.join(" · ")
         };
         let label = ai.map(|ai| session_name(si, &spec.title, ai));
         let can_step_in = ai.is_some_and(|ai| self.pane_of_session(run, si, ai, cx).is_some());
@@ -1911,15 +1900,17 @@ impl Workspace {
         } else {
             format!("Resume at {} with a note", spec.title)
         };
-        let mut actions = h_flex()
-            .px(px(28.))
-            .py(px(14.))
-            .gap_2()
-            .border_t_1()
-            .border_color(color(theme::BORDER_SUBTLE));
+        let (pill_fg, pill_bg) = match glance.pill {
+            "Blocked" => (theme::RED, theme::RED_TINT),
+            _ => (theme::AMBER, theme::AMBER_TINT),
+        };
+        let mut actions = h_flex().mt_2().gap_2().flex_wrap().items_center();
         if tab.confirm_stop {
             let run_id = run_id.clone();
             actions = actions
+                .px(px(12.))
+                .py(px(10.))
+                .rounded(px(6.))
                 .bg(color(theme::RED_TINT))
                 .child(text(12.5, theme::TEXT).flex_1().child(format!(
                     "Stop {}? It's recorded as stopped at {title}; its terminals stay open and \
@@ -1943,12 +1934,26 @@ impl Workspace {
                         })),
                 );
         } else {
-            if check.is_some() {
+            // One main button: open what the person must act on, else say it's done.
+            let link = run.link.clone().filter(|l| l.starts_with("https://"));
+            if let Some(url) = link.clone() {
+                actions = actions.child(
+                    Button::new("pipeline-open-link")
+                        .label(format!("{} ↗", crate::pipeline_view::link_label(&url)))
+                        .primary()
+                        .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url))),
+                );
+            }
+            if glance.person_passes {
                 let (ok_run, ok_title) = (run_id.clone(), title.clone());
                 actions = actions.child(
                     Button::new("pipeline-checked")
-                        .label("✓  I checked it, it works")
-                        .primary()
+                        .label(if check.is_some() {
+                            "I checked it, it works"
+                        } else {
+                            "I've done it, continue"
+                        })
+                        .when(link.is_none(), |b| b.primary())
                         .tooltip(format!("{ok_title} passes and the ticket goes on"))
                         .on_click(cx.listener(move |ws, _, window, cx| {
                             ws.checked_dialog(orch, ok_run.clone(), ok_title.clone(), window, cx)
@@ -1959,122 +1964,158 @@ impl Workspace {
                 actions = actions.child(
                     Button::new("pipeline-step-in")
                         .label(format!("Step into {label}"))
-                        .when(check.is_none(), |b| b.primary())
+                        .when(link.is_none() && !glance.person_passes, |b| b.primary())
                         .on_click(cx.listener(move |ws, _, window, cx| {
                             ws.pipeline_tab_update(orch, cx, |t| t.stepped_in = true);
                             ws.focus_active(window, cx);
                         })),
                 );
             }
+            // Everything else a person can do, out of the way.
             let pane = ai.and_then(|ai| self.pane_of_session(run, si, ai, cx));
-            if let (Some(_), Some(pane)) = (rating, pane) {
-                let again_run = run_id.clone();
-                actions = actions.child(
-                    Button::new("pipeline-score-again")
-                        .label("Score again")
-                        .tooltip(
-                            "Fixed it in the session? It checks its work again and reports a \
-                             new score",
+            let again = rating.and(pane);
+            let ws = cx.entity();
+            actions = actions.child(
+                Button::new("pipeline-more")
+                    .label("More")
+                    .ghost()
+                    .dropdown_caret(true)
+                    .dropdown_menu(move |mut menu, _, _| {
+                        if let Some(pane) = again {
+                            let (ws, r) = (ws.clone(), run_id.clone());
+                            menu = menu.item(PopupMenuItem::new("Score again").on_click(
+                                move |_, window, cx| {
+                                    ws.update(cx, |ws, cx| {
+                                        ws.score_again(orch, &r, si, pane, window, cx)
+                                    })
+                                },
+                            ));
+                        }
+                        let (ws1, r1, t1) = (ws.clone(), run_id.clone(), title.clone());
+                        let (ws2, r2) = (ws.clone(), run_id.clone());
+                        let ws3 = ws.clone();
+                        menu.item(PopupMenuItem::new(rerun_label.clone()).on_click(
+                            move |_, window, cx| {
+                                ws1.update(cx, |ws, cx| {
+                                    ws.rerun_dialog(orch, r1.clone(), t1.clone(), bar, window, cx)
+                                })
+                            },
+                        ))
+                        .item(PopupMenuItem::new("Go back to an earlier stage…").on_click(
+                            move |_, window, cx| {
+                                ws2.update(cx, |ws, cx| {
+                                    ws.back_dialog(orch, r2.clone(), None, window, cx)
+                                })
+                            },
+                        ))
+                        .separator()
+                        .item(
+                            PopupMenuItem::new("Stop this ticket").on_click(move |_, _, cx| {
+                                ws3.update(cx, |ws, cx| {
+                                    ws.pipeline_tab_update(orch, cx, |t| t.confirm_stop = true)
+                                })
+                            }),
                         )
-                        .on_click(cx.listener(move |ws, _, window, cx| {
-                            ws.score_again(orch, &again_run, si, pane, window, cx)
-                        })),
-                );
-            }
-            let (rr_run, rr_title) = (run_id.clone(), title.clone());
-            actions = actions
-                .child(
-                    Button::new("pipeline-rerun")
-                        .label(rerun_label)
-                        .on_click(cx.listener(move |ws, _, window, cx| {
-                            ws.rerun_dialog(orch, rr_run.clone(), rr_title.clone(), bar, window, cx)
-                        })),
-                )
-                .child({
-                    let back_run = run_id.clone();
-                    Button::new("pipeline-back")
-                        .label("Go back…")
-                        .tooltip("Reopen an earlier stage's own session to fix its work")
-                        .on_click(cx.listener(move |ws, _, window, cx| {
-                            ws.back_dialog(orch, back_run.clone(), None, window, cx)
-                        }))
-                })
-                .child(
-                    Button::new("pipeline-stop")
-                        .label("Stop this ticket")
-                        .ghost()
-                        .on_click(cx.listener(move |ws, _, _, cx| {
-                            ws.pipeline_tab_update(orch, cx, |t| t.confirm_stop = true)
-                        })),
-                )
-                .child(div().flex_1())
-                .child(text(11.5, theme::TEXT_MUTED).child(if check.is_some() {
-                    "Only a person's check passes this gate"
-                } else {
-                    "Gates can't be skipped"
-                }));
+                    }),
+            );
         }
+        // The full report, folded: the score, the steps to check, pictures, reasons, evidence.
+        let open = tab.details;
+        let summary_line = rating.map_or_else(
+            || "Details".to_string(),
+            |r| {
+                format!(
+                    "Details: {}% (bar {bar}%), {} reason{}, {} piece{} of evidence",
+                    r.score,
+                    r.reasons.len(),
+                    if r.reasons.len() == 1 { "" } else { "s" },
+                    r.evidence.len(),
+                    if r.evidence.len() == 1 { "" } else { "s" },
+                )
+            },
+        );
+        let details_toggle = h_flex()
+            .id(SharedString::from(format!("pipeline-details-{orch}")))
+            .px(px(28.))
+            .py(px(10.))
+            .gap_2()
+            .cursor_pointer()
+            .border_t_1()
+            .border_color(color(theme::BORDER_SUBTLE))
+            .hover(|d| d.bg(color(theme::RAISED)))
+            .child(text(12.5, theme::TEXT_SECONDARY).child(if open { "▾" } else { "▸" }))
+            .child(text(12.5, theme::TEXT_SECONDARY).child(summary_line))
+            .on_click(cx.listener(move |ws, _, _, cx| {
+                ws.pipeline_tab_update(orch, cx, |t| t.details = !t.details)
+            }));
+        let details = open.then(|| {
+            v_flex()
+                .gap_3()
+                .when_some(check.clone(), |el, check| {
+                    el.child(
+                        v_flex()
+                            .mx(px(28.))
+                            .mt_3()
+                            .gap_1()
+                            .px(px(14.))
+                            .py(px(10.))
+                            .rounded(px(6.))
+                            .bg(color(theme::AMBER_TINT))
+                            .child(text(11.5, theme::AMBER).child("WHAT TO CHECK"))
+                            .child(text(13.5, theme::TEXT).child(check))
+                            .children(shot_row),
+                    )
+                })
+                .children(rating.map(|r| {
+                    let marking = ai.and_then(|ai| marking(orch, run, si, ai));
+                    self.rating_report(r, true, format!("Below the {bar}% bar"), false, marking, cx)
+                }))
+        });
         v_flex()
             .size_full()
             .child(
                 v_flex()
-                    .bg(color(theme::BANNER))
-                    .px(px(28.))
-                    .py(px(22.))
-                    .gap_2()
-                    .child(
-                        text(
-                            12.,
-                            if check.is_some() {
-                                theme::AMBER
-                            } else {
-                                theme::RED
-                            },
-                        )
-                        .child(overline.to_uppercase()),
-                    )
-                    .child(
-                        text(20., theme::TEXT)
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(headline),
-                    )
-                    .when_some(check.clone(), |el, check| {
-                        el.child(
-                            v_flex()
-                                .mt_1()
-                                .gap_1()
-                                .px(px(14.))
-                                .py(px(10.))
-                                .rounded(px(6.))
-                                .bg(color(theme::AMBER_TINT))
-                                .child(text(11.5, theme::AMBER).child("WHAT TO CHECK"))
-                                .child(text(13.5, theme::TEXT).child(check))
-                                .children(shot_row),
-                        )
-                    })
-                    .child(text(12.5, theme::TEXT_SECONDARY).child(
-                        "You were notified in hydraui. Nothing downstream starts until you act.",
-                    )),
-            )
-            .child(
-                div()
                     .id(SharedString::from(format!("pipeline-stopped-{orch}")))
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .children(rating.map(|r| {
-                        let marking = ai.and_then(|ai| marking(orch, run, si, ai));
-                        self.rating_report(
-                            r,
-                            false,
-                            format!("Below the {bar}% bar"),
-                            false,
-                            marking,
-                            cx,
-                        )
-                    })),
+                    .child(
+                        v_flex()
+                            .bg(color(theme::BANNER))
+                            .px(px(28.))
+                            .py(px(22.))
+                            .gap_2()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .px(px(8.))
+                                            .py(px(2.))
+                                            .rounded(px(4.))
+                                            .bg(color(pill_bg))
+                                            .child(text(11.5, pill_fg).child(glance.pill)),
+                                    )
+                                    .child(text(12.5, theme::TEXT_MUTED).child(context)),
+                            )
+                            .child(
+                                text(22., theme::TEXT)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(glance.ask.clone()),
+                            )
+                            .when(!glance.why.is_empty(), |el| {
+                                el.child(
+                                    text(14., theme::TEXT_SECONDARY)
+                                        .max_w(px(760.))
+                                        .child(glance.why.clone()),
+                                )
+                            })
+                            .child(actions),
+                    )
+                    .child(details_toggle)
+                    .children(details),
             )
-            .child(actions)
             .into_any_element()
     }
 }

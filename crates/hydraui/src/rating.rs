@@ -57,6 +57,10 @@ pub struct Rating {
     /// The session's confidence that the stage is done well, 0 to 100.
     pub score: u8,
     pub summary: String,
+    /// What a person must do now, when the stage needs one: one short line starting with a
+    /// verb ("Approve PR #5 on GitHub as a code owner"). The needs-you headline; empty when
+    /// it needs nobody.
+    pub ask: String,
     pub evidence: Vec<Evidence>,
     /// Why this score: at least one reason for or against.
     pub reasons: Vec<Reason>,
@@ -84,6 +88,9 @@ pub fn is_picture(path: &str) -> bool {
             ["png", "jpg", "jpeg", "gif", "webp"].contains(&e.to_ascii_lowercase().as_str())
         })
 }
+
+/// The longest `ask` (characters): one line a person reads at a glance.
+pub const MAX_ASK: usize = 140;
 
 /// The longest `check` (characters): room for a few steps.
 pub const MAX_CHECK: usize = 1500;
@@ -181,6 +188,12 @@ pub fn from_args(args: &Value) -> Result<Rating, String> {
         problems.push("summary is empty".into());
     }
     let reasons = reasons(args, &mut problems);
+    let ask = text(args, "ask");
+    if ask.chars().count() > MAX_ASK || ask.contains('\n') {
+        problems.push(format!(
+            "ask is one line of at most {MAX_ASK} characters: what the person must do now"
+        ));
+    }
     let check = text(args, "check");
     if outcome == Some(Outcome::Check) && check.is_empty() {
         problems
@@ -252,6 +265,7 @@ pub fn from_args(args: &Value) -> Result<Rating, String> {
             outcome,
             score,
             summary,
+            ask,
             evidence,
             reasons,
             handoff: text(args, "handoff"),
@@ -288,6 +302,21 @@ mod tests {
         assert_eq!(r.evidence[0].kind, EvidenceKind::Test);
         assert_eq!(r.handoff, "Fix save().");
         assert!(passes(&r, 86) && !passes(&r, 87));
+    }
+
+    #[test]
+    fn an_ask_is_one_short_line() {
+        assert_eq!(from_args(&good()).unwrap().ask, "");
+        let mut a = good();
+        a["ask"] = json!("  Approve PR #5 on GitHub as a code owner ");
+        assert_eq!(
+            from_args(&a).unwrap().ask,
+            "Approve PR #5 on GitHub as a code owner"
+        );
+        a["ask"] = json!("x".repeat(MAX_ASK + 1));
+        assert!(from_args(&a).unwrap_err().contains("ask"));
+        a["ask"] = json!("Approve it\nthen merge");
+        assert!(from_args(&a).unwrap_err().contains("ask"));
     }
 
     #[test]

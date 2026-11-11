@@ -174,6 +174,12 @@ pub fn report(v: &Verdict, model: &str) -> Value {
             {"side": "against", "text": runner_up},
         ],
         "handoff": format!("category: {}\nconfidence: {:.2}", v.choice, v.confidence),
+        // Shown only when a person must decide: Jev wasn't sure enough, or couldn't tell.
+        "ask": if none {
+            "Read the email and decide what kind it is".to_string()
+        } else {
+            format!("Confirm Jev's pick of {}, or stop the run", v.choice)
+        },
     })
 }
 

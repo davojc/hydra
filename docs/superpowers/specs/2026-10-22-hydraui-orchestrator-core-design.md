@@ -1235,3 +1235,18 @@ env = "iov42"         # optional
 - **The orchestrator's first prompt.** It says work can come from the schedule, so it waits rather than asking for a ticket.
 - **Copies and exports.** These drop `[schedule]`, as they drop `[autostart]`, so a copy never runs beside the original.
 - **Not yet:** the card shows nothing of the schedule. It doesn't run while hydraui is closed.
+
+## 59. Needs you, at a glance (added 2026-11-11)
+
+A run waiting for a person used to show everything its stage reported, all at the same weight: a paragraph headline, a large score, every reason with its buttons, and every piece of evidence. The one thing the person had to do, such as approving a PR on GitHub, had no button.
+
+- **`ask` in a report.** `stage_report` takes an optional `ask`: one line, starting with a verb, of at most 140 characters, saying what a person must do now, e.g. "Approve PR #5 on GitHub as a code owner". A Jev stage sends one too: "Confirm Jev's pick of how_to, or stop the run".
+- **The reason leads with it.** A below-bar report with an ask waits as `<ask> (stage <id>: <score>, bar <bar>)`. So the sidebar, the status bar, notices and History all say what's needed first. History's line reads "Needs you: <stage>", and its summary is the ask.
+- **The panel, top to bottom:**
+  - **The pill and context.** The pill says Needs you, Check by hand or Blocked. Beside it: the ticket, the stage, and its score against the bar.
+  - **The ask** as the headline. Without one, it's "Check <stage> by hand", "Unblock <stage>" or "Decide what <stage> does next". With no report at all, it's the reason's first sentence.
+  - **Why:** at most two sentences of the summary (or of the check steps), cut at 240 characters.
+  - **One main button:** open the run's link ("Open PR on GitHub ↗", "Open in Linear ↗"). Then "I've done it, continue" or "I checked it, it works", and Step into the session.
+  - **More:** Score again, Re-run with a note, Go back to an earlier stage and Stop this ticket.
+  - **Details,** folded by default: "88% (bar 95%), 4 reasons, 6 pieces of evidence". Unfolded, it shows the full check steps and pictures, then the whole report with its reasons, must-address marks and evidence.
+- **A person passes a stage held back for them.** `Choice::Checked` passes a stage that asked for a check by hand, as before. It now also passes a below-bar *done* report that gave an `ask`: the stage held back on purpose and said what a person must do. A below-bar report without an ask still can't be passed by a person. Its gate holds until it's re-run, sent back or stopped.

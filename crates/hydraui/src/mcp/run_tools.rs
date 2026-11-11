@@ -112,6 +112,10 @@ pub fn schemas() -> Vec<Value> {
                         "description": "Your confidence that the stage is done well.",
                     },
                     "summary": string("One or two sentences: what the stage found or did."),
+                    "ask": string("When a person must act (below the bar on purpose, blocked, \
+                        or check): one line, starting with a verb, of what they must do now, at \
+                        most 140 characters, e.g. \"Approve PR #5 on GitHub as a code owner\". \
+                        It's the headline they see. Leave it out when nobody needs to act."),
                     "evidence": {
                         "type": "array", "minItems": 1, "maxItems": rating::MAX_EVIDENCE,
                         "items": {

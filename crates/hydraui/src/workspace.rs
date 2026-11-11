@@ -14,6 +14,7 @@ mod launcher;
 mod layout_file;
 mod linear;
 mod machines_page;
+mod mail;
 mod orchestrator;
 mod phone;
 mod phone_page;
@@ -298,6 +299,10 @@ pub struct Workspace {
     park_checked: Option<std::time::Instant>,
     /// When scheduled pipelines were last looked at (core spec §58).
     schedule_checked: Option<std::time::Instant>,
+    /// `[mail]` pipelines looking at their mailbox now, by file (email triage spec §3).
+    mail_looking: std::collections::HashSet<String>,
+    /// The thread each `[mail]` pipeline last handed over, until it's a run.
+    mail_inflight: HashMap<String, (String, std::time::Instant)>,
     /// Runs' tickets as Linear last said, by identifier: the card's SLA and link (phase 2 §5).
     linear_tickets: HashMap<String, crate::linear::Ticket>,
     /// Cards being offered or just sent, so one card never goes to two sessions.
@@ -575,6 +580,8 @@ impl Workspace {
             starting_up: HashMap::new(),
             park_checked: None,
             schedule_checked: None,
+            mail_looking: Default::default(),
+            mail_inflight: HashMap::new(),
             linear_tickets: HashMap::new(),
             in_flight: Default::default(),
             _mcp_pump: mcp_pump,

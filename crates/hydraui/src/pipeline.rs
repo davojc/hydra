@@ -50,6 +50,8 @@ pub struct Pipeline {
     pub slack: Option<SlackSettings>,
     /// Runs on a timetable instead (`[schedule]`, core spec §58).
     pub schedule: Option<ScheduleSettings>,
+    /// Takes its work from a Gmail mailbox (`[mail]`, email triage spec §3).
+    pub mail: Option<MailSettings>,
 }
 
 /// A pipeline's `[schedule]` table (core spec §58): when it starts a run by itself.
@@ -64,6 +66,26 @@ pub struct ScheduleSettings {
 impl ScheduleSettings {
     pub fn when(&self) -> Option<crate::schedule::When> {
         crate::schedule::parse(&self.every).ok()
+    }
+}
+
+/// A pipeline's `[mail]` table (email triage spec §3): on its timetable, the mailbox's threads
+/// from the last `look_back_days` days that nobody has taken each become a run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MailSettings {
+    /// When it looks, as `[schedule] every` is written: `weekdays 09:00`.
+    pub check: String,
+    /// How far back each look goes, in days: 1 to 30, 7 when left out.
+    pub look_back_days: u8,
+    /// A Gmail search narrowing what it looks at; `in:inbox` when left out.
+    pub query: String,
+    /// The environment its orchestrator runs in, as `[schedule]`'s.
+    pub env: Option<String>,
+}
+
+impl MailSettings {
+    pub fn when(&self) -> Option<crate::schedule::When> {
+        crate::schedule::parse(&self.check).ok()
     }
 }
 
@@ -179,7 +201,10 @@ impl Pipeline {
 
     /// Whether work reaches it by itself, from Linear, Slack or its schedule.
     pub fn has_trigger(&self) -> bool {
-        self.linear.is_some() || self.slack.is_some() || self.schedule.is_some()
+        self.linear.is_some()
+            || self.slack.is_some()
+            || self.schedule.is_some()
+            || self.mail.is_some()
     }
 
     /// How a stage's Claude starts, before its own arguments: with [`PRODUCT_TOOLS`] allowed
@@ -238,6 +263,7 @@ struct File {
     product: Option<FileProduct>,
     slack: Option<FileSlack>,
     schedule: Option<FileSchedule>,
+    mail: Option<FileMail>,
     color: Option<String>,
     runs_at_once: Option<u8>,
 }
@@ -247,6 +273,39 @@ struct File {
 struct FileSchedule {
     every: String,
     env: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileMail {
+    check: String,
+    look_back_days: Option<i64>,
+    query: Option<String>,
+    env: Option<String>,
+}
+
+/// The `[mail]` table, checked.
+fn mail_settings(f: FileMail) -> Result<MailSettings, String> {
+    let check = f.check.split_whitespace().collect::<Vec<_>>().join(" ");
+    crate::schedule::parse(&check).map_err(|e| e.replace("[schedule] every", "[mail] check"))?;
+    let days = f.look_back_days.unwrap_or(7);
+    let look_back_days = u8::try_from(days)
+        .ok()
+        .filter(|d| (1..=30).contains(d))
+        .ok_or(format!("[mail] look_back_days {days} must be from 1 to 30"))?;
+    Ok(MailSettings {
+        check,
+        look_back_days,
+        query: f
+            .query
+            .map(|q| q.trim().to_string())
+            .filter(|q| !q.is_empty())
+            .unwrap_or_else(|| "in:inbox".to_string()),
+        env: f
+            .env
+            .map(|e| e.trim().to_string())
+            .filter(|e| !e.is_empty()),
+    })
 }
 
 /// The `[schedule]` table, checked (core spec §58).
@@ -487,13 +546,14 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
         file.linear.is_some(),
         file.slack.is_some(),
         file.schedule.is_some(),
+        file.mail.is_some(),
     ]
     .iter()
     .filter(|on| **on)
     .count()
         > 1
     {
-        return Err("a pipeline has one trigger: [linear], [slack] or [schedule]".into());
+        return Err("a pipeline has one trigger: [linear], [slack], [schedule] or [mail]".into());
     }
     if file.stages.is_empty() {
         return Err("the pipeline has no stages: add a [[stage]]".into());
@@ -608,6 +668,7 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
             .map(str::to_string),
         slack: file.slack.map(slack_settings).transpose()?,
         schedule: file.schedule.map(schedule_settings).transpose()?,
+        mail: file.mail.map(mail_settings).transpose()?,
         color: file.color.as_deref().map(parse_color).transpose()?,
         runs_at_once: match file.runs_at_once.unwrap_or(1) {
             n @ 1..=MAX_RUNS_AT_ONCE => n,
@@ -641,6 +702,8 @@ pub struct Edit {
     pub color: Option<u32>,
     pub slack: Option<SlackSettings>,
     pub schedule: Option<ScheduleSettings>,
+    /// `[mail]`, kept as the file has it: Pipeline settings doesn't edit it yet.
+    pub mail: Option<MailSettings>,
     pub runs_at_once: u8,
 }
 
@@ -688,6 +751,7 @@ impl From<&Pipeline> for Edit {
             color: p.color,
             slack: p.slack.clone(),
             schedule: p.schedule.clone(),
+            mail: p.mail.clone(),
             runs_at_once: p.runs_at_once,
         }
     }
@@ -741,6 +805,11 @@ pub fn validate(edit: &Edit) -> Result<(), &'static str> {
         if done.eq_ignore_ascii_case(sl.reaction.trim().trim_matches(':')) {
             return Err("The done reaction must differ from the one that marks a message taken");
         }
+    }
+    if edit.mail.is_some()
+        && (edit.linear.is_some() || edit.slack.is_some() || edit.schedule.is_some())
+    {
+        return Err("Take work from one source: this pipeline takes it from [mail]");
     }
     if let Some(sc) = &edit.schedule {
         if edit.linear.is_some() || edit.slack.is_some() {
@@ -1144,8 +1213,10 @@ pub fn create(hydra_root: &Path, title: &str, from: Option<&str>) -> Result<Stri
 fn takes_nothing(doc: &mut toml_edit::DocumentMut) {
     use toml_edit::{Item, value};
     doc.remove("autostart");
-    // A copy on its own timetable would run beside the original (core spec §58).
+    // A copy on its own timetable would run beside the original (core spec §58), and a copy
+    // reading the same mailbox would take the same emails.
     doc.remove("schedule");
+    doc.remove("mail");
     for trigger in ["linear", "slack"] {
         if let Some(t) = doc.get_mut(trigger).and_then(Item::as_table_mut) {
             t["watch"] = value(false);
@@ -1305,6 +1376,51 @@ mod tests {
         let text = std::fs::read_to_string(folder(d.path()).join("prs.toml")).unwrap();
         assert!(!text.contains("runs_at_once"), "{text}");
         edit.runs_at_once = 9;
+        assert!(validate(&edit).is_err());
+    }
+
+    #[test]
+    fn a_mail_trigger_looks_back_and_is_the_only_trigger() {
+        let base = "name = \"Mail\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n";
+        let p = parse(&format!("{base}[mail]\ncheck = \"weekdays  09:00\"\n")).unwrap();
+        let m = p.mail.clone().unwrap();
+        assert_eq!(
+            (
+                m.check.as_str(),
+                m.look_back_days,
+                m.query.as_str(),
+                m.env.as_deref()
+            ),
+            ("weekdays 09:00", 7, "in:inbox", None)
+        );
+        assert_eq!(m.when().unwrap().text(), "Weekdays at 09:00");
+        assert!(p.has_trigger());
+        let m = parse(&format!(
+            "{base}[mail]\ncheck = \"mon 09:00\"\nlook_back_days = 3\nquery = \"to:integrations@iov42.com\"\nenv = \"iov42\"\n"
+        ))
+        .unwrap()
+        .mail
+        .unwrap();
+        assert_eq!(
+            (m.look_back_days, m.query.as_str(), m.env.as_deref()),
+            (3, "to:integrations@iov42.com", Some("iov42"))
+        );
+        for bad in [
+            "[mail]\ncheck = \"mon 6pm\"\n",
+            "[mail]\ncheck = \"mon 09:00\"\nlook_back_days = 0\n",
+            "[mail]\ncheck = \"mon 09:00\"\nlook_back_days = 31\n",
+            "[mail]\ncheck = \"mon 09:00\"\n[schedule]\nevery = \"mon 18:00\"\n",
+        ] {
+            assert!(parse(&format!("{base}{bad}")).is_err(), "{bad}");
+        }
+        // Settings that add another trigger beside [mail] are refused.
+        let mut edit =
+            Edit::from(&parse(&format!("{base}[mail]\ncheck = \"mon 09:00\"\n")).unwrap());
+        assert!(validate(&edit).is_ok());
+        edit.schedule = Some(ScheduleSettings {
+            every: "mon 18:00".into(),
+            env: None,
+        });
         assert!(validate(&edit).is_err());
     }
 

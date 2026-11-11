@@ -66,6 +66,8 @@ pub enum Action {
     ConnectGmail,
     /// Lists the newest threads in the selected environment's Gmail: proof the sign-in reads.
     CheckGmail,
+    /// Every `[mail]` pipeline looks at its mailbox now, not waiting for its time.
+    CheckMailNow,
     /// The pipelines folder, opened by the system (the example written first if it is empty).
     EditPipelines,
 }
@@ -127,6 +129,7 @@ pub fn entries(
     add("Connect Slack…".into(), Action::ConnectSlack);
     add("Connect Gmail…".into(), Action::ConnectGmail);
     add("Check Gmail…".into(), Action::CheckGmail);
+    add("Check mail now".into(), Action::CheckMailNow);
     add("Edit pipelines".into(), Action::EditPipelines);
     add("Keyboard shortcuts".into(), Action::Shortcuts);
     add("Settings".into(), Action::Settings);
@@ -179,6 +182,7 @@ mod tests {
                 "Connect Slack…",
                 "Connect Gmail…",
                 "Check Gmail…",
+                "Check mail now",
                 "Edit pipelines",
                 "Keyboard shortcuts",
                 "Settings",
@@ -244,6 +248,7 @@ mod tests {
                 "Connect Slack…",
                 "Connect Gmail…",
                 "Check Gmail…",
+                "Check mail now",
                 "Edit pipelines",
                 "Keyboard shortcuts",
                 "Settings",
@@ -261,8 +266,9 @@ mod tests {
         assert_eq!(got[18].action, Action::ConnectSlack);
         assert_eq!(got[19].action, Action::ConnectGmail);
         assert_eq!(got[20].action, Action::CheckGmail);
-        assert_eq!(got[21].action, Action::EditPipelines);
-        assert_eq!(got[22].action, Action::Shortcuts);
+        assert_eq!(got[21].action, Action::CheckMailNow);
+        assert_eq!(got[22].action, Action::EditPipelines);
+        assert_eq!(got[23].action, Action::Shortcuts);
         assert_eq!(got[0].action, Action::OpenFile);
         assert_eq!(got[1].action, Action::SearchFiles);
         assert_eq!(got[4].action, Action::StartPage);

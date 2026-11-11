@@ -335,7 +335,13 @@ fn copies_of(side: &Side, p: &str) -> Vec<String> {
     let mut out: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
         .filter_map(|e| e.ok()?.file_name().into_string().ok())
-        .filter(|n| conflict_original(&rel(n)).is_some_and(|o| o == rel(p)))
+        .filter(|n| {
+            let path = match p.rsplit_once('/') {
+                Some((dir, _)) => format!("{dir}/{n}"),
+                None => n.clone(),
+            };
+            conflict_original(&rel(&path)).is_some_and(|o| o == rel(p))
+        })
         .collect();
     out.sort();
     out
@@ -1790,4 +1796,497 @@ async fn an_owners_later_edit_on_top_of_anothers_makes_no_copy() {
     }
     o.shutdown().await;
     p.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Folders sync as a layout: created, renamed and deleted (spec 2026-11-11-swarm-folders).
+
+impl Side {
+    fn is_dir(&self, p: &str) -> bool {
+        self.path(p).is_dir()
+    }
+
+    fn mkdir(&self, p: &str) {
+        std::fs::create_dir_all(self.path(p)).unwrap();
+    }
+
+    fn rename(&self, from: &str, to: &str) {
+        std::fs::rename(self.path(from), self.path(to)).unwrap();
+    }
+
+    fn remove_tree(&self, p: &str) {
+        std::fs::remove_dir_all(self.path(p)).unwrap();
+    }
+
+    /// The names in the folder's root, spelled as they are on disk.
+    fn top_names(&self) -> Vec<String> {
+        let mut out: Vec<String> = std::fs::read_dir(&self.root)
+            .unwrap()
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Waits until this machine has at least `n` moves in the swarm's move log.
+    async fn hears_moves(&self, n: usize) {
+        eventually(&format!("{n} moves"), || async {
+            let roster = self.roster().await;
+            (self.node.moves(&roster).await.unwrap().len() >= n).then_some(())
+        })
+        .await;
+    }
+}
+
+/// An owner and a writer, both holding `p` as "one", written by the writer. A test where the
+/// owner deletes `p` while cut off uses this: iroh-docs 0.101 lets an older entry of the deleting
+/// author, arriving from a machine that still has it, replace that author's newer delete (its
+/// store skips empty entries when checking for newer ones), which brings the file back.
+async fn synced_from_writer(p: &str) -> (Side, Side) {
+    let mut o = owner().await;
+    let mut w = joiner(&o, "wren", Role::Writer).await;
+    w.write(p, "one");
+    w.reconcile().await;
+    o.settle("the file on the owner", |s| {
+        s.read(p).as_deref() == Some("one")
+    })
+    .await;
+    (o, w)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_empty_folder_reaches_the_other_machine() {
+    let (mut o, mut w) = synced_pair("x.md").await;
+    o.mkdir("empty");
+    o.reconcile().await;
+    w.settle("the empty folder on the writer", |s| s.is_dir("empty"))
+        .await;
+    w.mkdir("wrens");
+    w.reconcile().await;
+    o.settle("the writer's empty folder on the owner", |s| {
+        s.is_dir("wrens")
+    })
+    .await;
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_nested_empty_layout_reaches_the_other_machine() {
+    let (mut o, mut w) = synced_pair("x.md").await;
+    for p in ["notes/alice", "notes/bob", "skills"] {
+        o.mkdir(p);
+    }
+    o.reconcile().await;
+    w.settle("the layout on the writer", |s| {
+        ["notes/alice", "notes/bob", "skills"]
+            .iter()
+            .all(|p| s.is_dir(p))
+    })
+    .await;
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rename_carries_a_file_the_renamer_hadnt_seen() {
+    let (mut o, mut w) = synced_pair("notes/a.md").await;
+    cut_off(&o, &w);
+    w.write("notes/new.md", "new");
+    w.reconcile().await;
+    o.rename("notes", "docs");
+    o.reconcile().await;
+    reconnect(&o, &w).await;
+    w.settle("the rename on the writer", |s| {
+        s.read("docs/a.md").as_deref() == Some("one")
+            && s.read("docs/new.md").as_deref() == Some("new")
+            && !s.is_dir("notes")
+    })
+    .await;
+    o.settle("the writer's file in the renamed folder", |s| {
+        s.read("docs/new.md").as_deref() == Some("new")
+    })
+    .await;
+    for side in [&mut o, &mut w] {
+        side.reconcile().await;
+        assert!(!side.is_dir("notes"));
+        assert_eq!(side.read("docs/a.md").as_deref(), Some("one"));
+        assert_eq!(side.read("docs/new.md").as_deref(), Some("new"));
+    }
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_renames_of_one_folder_converge_on_the_later_name() {
+    let (mut o, mut w) = synced_pair("notes/a.md").await;
+    cut_off(&o, &w);
+    w.rename("notes", "wrens");
+    w.reconcile().await;
+    o.rename("notes", "olives");
+    o.reconcile().await;
+    reconnect(&o, &w).await;
+    let events = w
+        .settle("the later name on the writer", |s| {
+            s.read("olives/a.md").as_deref() == Some("one") && !s.is_dir("wrens")
+        })
+        .await;
+    assert!(
+        events.contains(&FolderEvent::RenameLost {
+            mine: rel("wrens"),
+            kept: rel("olives"),
+            machine: "olive-pc".into(),
+        }),
+        "{events:?}"
+    );
+    let events = o
+        .settle("the owner keeps its name", |s| {
+            s.read("olives/a.md").as_deref() == Some("one")
+        })
+        .await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, FolderEvent::RenameLost { .. }))
+    );
+    for side in [&mut o, &mut w] {
+        side.reconcile().await;
+        assert_eq!(side.top_names(), vec!["olives".to_string()]);
+    }
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_edit_under_the_old_name_lands_in_the_renamed_folder_as_the_file() {
+    let (mut o, mut w) = synced_pair("notes/a.md").await;
+    cut_off(&o, &w);
+    w.write("notes/a.md", "edit");
+    w.reconcile().await;
+    o.rename("notes", "docs");
+    o.reconcile().await;
+    reconnect(&o, &w).await;
+    o.settle("the edit on the owner", |s| {
+        s.read("docs/a.md").as_deref() == Some("edit")
+    })
+    .await;
+    w.settle("the rename on the writer", |s| {
+        s.read("docs/a.md").as_deref() == Some("edit") && !s.is_dir("notes")
+    })
+    .await;
+    for side in [&mut o, &mut w] {
+        side.reconcile().await;
+        assert!(copies_of(side, "docs/a.md").is_empty());
+        assert!(side.folder.attention().is_empty());
+        assert!(!side.is_dir("notes"));
+    }
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delete_keeps_an_unseen_file_and_its_folder() {
+    let (mut o, mut w) = synced_from_writer("notes/a.md").await;
+    cut_off(&o, &w);
+    w.write("notes/new.md", "new");
+    w.reconcile().await;
+    o.remove_tree("notes");
+    o.reconcile().await;
+    reconnect(&o, &w).await;
+    let events = w
+        .settle("the known file deleted on the writer", |s| {
+            s.read("notes/a.md").is_none()
+        })
+        .await;
+    assert_eq!(w.read("notes/new.md").as_deref(), Some("new"));
+    assert!(
+        events.contains(&FolderEvent::DeleteKeptForWork {
+            path: rel("notes"),
+            machine: "olive-pc".into(),
+        }),
+        "{events:?}"
+    );
+    let events = o
+        .settle("the unseen file back on the owner", |s| {
+            s.read("notes/new.md").as_deref() == Some("new")
+        })
+        .await;
+    let more = o.settle("the owner told", |_| true).await;
+    let told = events
+        .iter()
+        .chain(&more)
+        .filter(|e| **e == FolderEvent::MyDeleteKept { path: rel("notes") });
+    assert_eq!(told.count(), 1, "{events:?} {more:?}");
+    assert!(o.read("notes/a.md").is_none());
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deleting_every_file_leaves_the_folder_everywhere() {
+    let (mut o, mut w) = synced_pair("notes/a.md").await;
+    o.remove("notes/a.md");
+    o.reconcile().await;
+    w.settle("the delete on the writer", |s| {
+        s.read("notes/a.md").is_none()
+    })
+    .await;
+    for side in [&mut o, &mut w] {
+        side.reconcile().await;
+        assert!(side.is_dir("notes"));
+    }
+    // A machine joining now gets the empty folder too: it is in the layout, not left behind.
+    let mut v = joiner(&o, "vic", Role::Reader).await;
+    v.settle("the empty folder on a new machine", |s| s.is_dir("notes"))
+        .await;
+    for side in [o, w, v] {
+        side.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_modules_folder_with_empty_subfolders_never_syncs() {
+    let (mut o, mut w) = synced_pair("x.md").await;
+    o.write("node_modules/pkg/index.js", "module.exports = 1;");
+    o.mkdir("node_modules/pkg/empty");
+    o.mkdir("node_modules/also-empty");
+    o.mkdir("layout");
+    o.reconcile().await;
+    w.settle("the layout on the writer", |s| s.is_dir("layout"))
+        .await;
+    o.reconcile().await;
+    w.reconcile().await;
+    assert!(!w.is_dir("node_modules"));
+    assert!(o.is_dir("node_modules/also-empty"));
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dot_folder_and_its_empty_subfolders_never_sync() {
+    let (mut o, mut w) = synced_pair("x.md").await;
+    o.write(".github/a.md", "hidden");
+    o.mkdir(".github/workflows");
+    o.mkdir(".empty");
+    o.mkdir("layout");
+    o.reconcile().await;
+    w.settle("the layout on the writer", |s| s.is_dir("layout"))
+        .await;
+    o.reconcile().await;
+    w.reconcile().await;
+    assert!(!w.is_dir(".github"));
+    assert!(!w.is_dir(".empty"));
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_existing_folder_with_files_gets_a_catch_up_record() {
+    let mut o = owner().await;
+    let mut w = joiner(&o, "wren", Role::Writer).await;
+    // As an older hydra left it: the file shared and on both machines, and no folder records.
+    o.write("notes/a.md", "one");
+    w.write("notes/a.md", "one");
+    o.node
+        .put_file(&rel("notes/a.md"), Bytes::from_static(b"one"))
+        .await
+        .unwrap();
+    w.hears("notes/a.md", Some(hash("one"))).await;
+    o.reconcile().await;
+    w.reconcile().await;
+    let roster = o.roster().await;
+    let records = o.node.folder_records(&roster).await.unwrap();
+    assert!(records.contains_key(&rel("notes")), "{records:?}");
+
+    o.remove("notes/a.md");
+    o.reconcile().await;
+    w.settle("the delete on the writer", |s| {
+        s.read("notes/a.md").is_none()
+    })
+    .await;
+    for side in [&mut o, &mut w] {
+        side.reconcile().await;
+        assert!(side.is_dir("notes"));
+    }
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rename_blocked_by_an_open_file_waits_and_then_completes() {
+    let (mut o, mut w) = synced_pair("notes/a.md").await;
+    let open = std::fs::File::open(w.path("notes/a.md")).unwrap();
+    o.rename("notes", "docs");
+    o.reconcile().await;
+    w.hears_moves(1).await;
+    eventually("the owner's folder records on the writer", || async {
+        let roster = w.roster().await;
+        let records = w.node.folder_records(&roster).await.unwrap();
+        records.contains_key(&rel("docs")).then_some(())
+    })
+    .await;
+    w.reconcile().await;
+    assert_eq!(w.read("notes/a.md").as_deref(), Some("one"));
+    assert!(!w.is_dir("docs"));
+    drop(open);
+    w.reconcile().await;
+    assert_eq!(w.read("docs/a.md").as_deref(), Some("one"));
+    assert!(!w.is_dir("notes"));
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn edits_under_the_oldest_name_land_at_the_newest_name() {
+    let (mut o, mut w) = synced_pair("a/x.md").await;
+    cut_off(&o, &w);
+    w.write("a/x.md", "edit");
+    w.reconcile().await;
+    o.rename("a", "b");
+    o.reconcile().await;
+    o.rename("b", "c");
+    o.reconcile().await;
+    reconnect(&o, &w).await;
+    o.settle("the edit at the newest name on the owner", |s| {
+        s.read("c/x.md").as_deref() == Some("edit")
+    })
+    .await;
+    w.settle("the newest name on the writer", |s| {
+        s.read("c/x.md").as_deref() == Some("edit")
+    })
+    .await;
+    for side in [&mut o, &mut w] {
+        side.reconcile().await;
+        assert_eq!(side.top_names(), vec!["c".to_string()]);
+        assert!(copies_of(side, "c/x.md").is_empty());
+    }
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deleted_folder_holding_a_conflict_copy_stays() {
+    let mut o = owner().await;
+    let mut w = joiner(&o, "wren", Role::Writer).await;
+    // Made by the writer: see `synced_from_writer`.
+    w.write("top/mid/deep/x.md", "one");
+    w.mkdir("top/empty");
+    w.mkdir("top/mid/empty");
+    w.reconcile().await;
+    o.settle("the tree on the owner", |s| {
+        s.read("top/mid/deep/x.md").as_deref() == Some("one")
+            && s.is_dir("top/empty")
+            && s.is_dir("top/mid/empty")
+    })
+    .await;
+    // Each edits x.md without seeing the other's edit, then the owner deletes the whole tree.
+    cut_off(&o, &w);
+    o.write("top/mid/deep/x.md", "olive's");
+    o.reconcile().await;
+    w.write("top/mid/deep/x.md", "wren's");
+    w.reconcile().await;
+    o.remove_tree("top");
+    o.reconcile().await;
+    reconnect(&o, &w).await;
+    // The owner's delete and what it was made on top of, so the writer sees its own edit as
+    // one the delete hadn't seen.
+    has_entries(&w, "top/mid/deep/x.md", 2).await;
+    w.settle(
+        "the tree deleted around the conflict copy on the writer",
+        |s| {
+            s.read("top/mid/deep/x.md").is_none()
+                && !s.is_dir("top/empty")
+                && !s.is_dir("top/mid/empty")
+        },
+    )
+    .await;
+    w.reconcile().await;
+    let copies = copies_of(&w, "top/mid/deep/x.md");
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    assert_eq!(
+        w.read(&format!("top/mid/deep/{}", copies[0])).as_deref(),
+        Some("wren's")
+    );
+    o.settle("the conflict copy on the owner", |s| {
+        s.is_dir("top/mid/deep") && copies_of(s, "top/mid/deep/x.md").len() == 1
+    })
+    .await;
+    assert!(!o.is_dir("top/empty"));
+    assert!(!o.is_dir("top/mid/empty"));
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rename_differing_only_by_case_reaches_the_other_machine() {
+    let (mut o, mut w) = synced_pair("Notes/a.md").await;
+    // Through a temporary name, so a disk that ignores case takes it too.
+    o.rename("Notes", "tmp");
+    o.rename("tmp", "notes");
+    o.reconcile().await;
+    w.settle("the new spelling on the writer", |s| {
+        s.top_names() == vec!["notes".to_string()]
+    })
+    .await;
+    for side in [&mut o, &mut w] {
+        side.reconcile().await;
+        assert_eq!(side.top_names(), vec!["notes".to_string()]);
+        assert_eq!(side.read("notes/a.md").as_deref(), Some("one"));
+    }
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rename_onto_a_folder_made_elsewhere_merges_them() {
+    let (mut o, mut w) = synced_pair("notes/a.md").await;
+    cut_off(&o, &w);
+    w.write("docs/b.md", "b");
+    w.reconcile().await;
+    o.rename("notes", "docs");
+    o.reconcile().await;
+    reconnect(&o, &w).await;
+    w.settle("both folders merged on the writer", |s| {
+        s.read("docs/a.md").as_deref() == Some("one")
+            && s.read("docs/b.md").as_deref() == Some("b")
+            && !s.is_dir("notes")
+    })
+    .await;
+    o.settle("both folders merged on the owner", |s| {
+        s.read("docs/b.md").as_deref() == Some("b")
+    })
+    .await;
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_file_made_under_the_old_name_after_the_rename_stays_there() {
+    let (mut o, mut w) = synced_pair("notes/a.md").await;
+    cut_off(&o, &w);
+    o.rename("notes", "docs");
+    o.reconcile().await;
+    // Made after the rename by the clock, so it is a new folder at the old name (spec §5.2).
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    w.write("notes/new.md", "new");
+    w.reconcile().await;
+    reconnect(&o, &w).await;
+    w.settle("the rename on the writer", |s| {
+        s.read("docs/a.md").as_deref() == Some("one")
+    })
+    .await;
+    o.settle("the new file at the old name on the owner", |s| {
+        s.read("notes/new.md").as_deref() == Some("new")
+    })
+    .await;
+    for side in [&mut o, &mut w] {
+        side.reconcile().await;
+        assert_eq!(side.read("notes/new.md").as_deref(), Some("new"));
+        assert_eq!(side.read("docs/new.md"), None);
+        assert_eq!(side.read("docs/a.md").as_deref(), Some("one"));
+    }
+    assert_eq!(o.remote_hash("notes/new.md").await, Some(Some(hash("new"))));
+    o.shutdown().await;
+    w.shutdown().await;
 }

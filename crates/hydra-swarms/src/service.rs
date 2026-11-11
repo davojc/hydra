@@ -2067,6 +2067,12 @@ impl Worker {
                     continue;
                 }
                 FolderEvent::Held(_) | FolderEvent::Attention(_) => continue,
+                // Not on the bell yet: their wording is still to be settled (spec §7).
+                FolderEvent::RenameLost { .. }
+                | FolderEvent::DeleteKeptForWork { .. }
+                | FolderEvent::MyDeleteKept { .. }
+                | FolderEvent::MyDeleteLostToRename { .. }
+                | FolderEvent::MyRenameSurvivedDelete { .. } => continue,
             };
             self.shared.toast(&self.ns, text);
         }

@@ -38,12 +38,12 @@ fn below<'p>(p: &'p str, base: &str) -> Option<&'p str> {
 }
 
 /// Whether `p` is strictly inside `base`.
-fn inside(p: &RelPath, base: &RelPath) -> bool {
+pub(crate) fn inside(p: &RelPath, base: &RelPath) -> bool {
     below(p.as_str(), base.as_str()).is_some_and(|rest| !rest.is_empty())
 }
 
 /// `p` with `from`, if `p` is it or is in it, swapped for `to`.
-fn rebase(p: &RelPath, from: &RelPath, to: &RelPath) -> Option<RelPath> {
+pub(crate) fn rebase(p: &RelPath, from: &RelPath, to: &RelPath) -> Option<RelPath> {
     match below(p.as_str(), from.as_str())? {
         "" => Some(to.clone()),
         rest => safe_rel_path(&format!("{}/{rest}", to.as_str())),
@@ -70,7 +70,7 @@ fn ancestors(p: &RelPath) -> impl Iterator<Item = RelPath> {
 }
 
 /// `p` after a sequence of folder renames, applied in order.
-fn after(renames: &[(RelPath, RelPath)], p: &RelPath) -> RelPath {
+pub(crate) fn after(renames: &[(RelPath, RelPath)], p: &RelPath) -> RelPath {
     renames
         .iter()
         .fold(p.clone(), |p, (from, to)| rebase(&p, from, to).unwrap_or(p))

@@ -19,7 +19,8 @@ use tokio::sync::mpsc;
 
 use crate::decide::{Action, Held, Local, Remote, decide};
 use crate::ids::to_hex;
-use crate::node::{FileHistory, ParentRecord, SwarmNode, now_micros};
+use crate::layout::{self, DiskFolder, KnownFolder, LayoutInput, LayoutNotice, Moves};
+use crate::node::{FileHistory, MoveVersion, ParentRecord, SwarmNode, now_micros};
 use crate::paths::{
     MAX_FILE_BYTES, RelPath, allowed, conflict_name, conflict_original, is_conflict_copy,
     numbered_copy, rel_from_disk, safe_rel_path,
@@ -37,6 +38,14 @@ const SETTLE: Duration = Duration::from_millis(100);
 /// How often an idle watcher checks that someone is still listening.
 const IDLE: Duration = Duration::from_secs(1);
 const INDEX_FILE: &str = "index.json";
+/// The key the folder index is kept under in `index.json`, beside the file index's paths. No
+/// path can start with `/`, so it never meets a file's key, and an older hydra reading the file
+/// skips it as it skips any key that isn't a safe path.
+const FOLDERS_KEY: &str = "/folders";
+/// Ends the name a folder is given for a moment while its name changes only by case, on a disk
+/// that won't take that change directly. The scan treats it as any folder: if hydra stops part
+/// way, the folder is seen as renamed to this name, never as its files deleted.
+const RECASE_SUFFIX: &str = ".hydra-recase";
 /// How many earlier versions a parent record lists.
 const MAX_ANCESTORS: usize = 200;
 
@@ -88,6 +97,35 @@ pub enum FolderEvent {
     PublishIgnore {
         text: String,
         replaces: Option<String>,
+    },
+    /// This machine renamed a folder to `mine`, and `machine`'s rename of it at about the same
+    /// time won, so it is at `kept`, with everything from both sides in it.
+    RenameLost {
+        mine: RelPath,
+        kept: RelPath,
+        machine: String,
+    },
+    /// `machine` deleted `path`, but it holds work added here that the delete didn't cover, so
+    /// it was kept.
+    DeleteKeptForWork {
+        path: RelPath,
+        machine: String,
+    },
+    /// This machine deleted `path`, but it holds work someone else added, so it was kept.
+    MyDeleteKept {
+        path: RelPath,
+    },
+    /// This machine deleted `path`, but `machine` had renamed it to `to`, so it was kept there.
+    MyDeleteLostToRename {
+        path: RelPath,
+        to: RelPath,
+        machine: String,
+    },
+    /// This machine renamed a folder to `to`, and `machine` deleted it under its old name; the
+    /// delete didn't reach the renamed folder.
+    MyRenameSurvivedDelete {
+        to: RelPath,
+        machine: String,
     },
 }
 
@@ -183,6 +221,71 @@ struct Scan {
     too_big: BTreeSet<RelPath>,
     /// Allowed files that couldn't be read this time; left alone until they can.
     unreadable: BTreeSet<RelPath>,
+    /// Every folder the scan went into, as the disk spells it. The swarm folder itself isn't one.
+    folders: BTreeMap<RelPath, DiskFolder>,
+}
+
+impl Scan {
+    /// Every file path in the scan at or in `from` moved to `to`, as a folder rename on disk
+    /// leaves them, except those in `keep`.
+    fn rebase(&mut self, from: &RelPath, to: &RelPath, keep: &BTreeSet<RelPath>) {
+        let moved = |p: &RelPath| {
+            if keep.contains(p) {
+                None
+            } else {
+                layout::rebase(p, from, to)
+            }
+        };
+        self.files = rekey(std::mem::take(&mut self.files), moved);
+        self.seen = rekey(std::mem::take(&mut self.seen), moved);
+        let set = |s: &mut BTreeSet<RelPath>| {
+            *s = std::mem::take(s)
+                .into_iter()
+                .map(|p| moved(&p).unwrap_or(p))
+                .collect();
+        };
+        set(&mut self.too_big);
+        set(&mut self.unreadable);
+    }
+}
+
+/// `map` with each key `moved` gives a new place for moved there. A moved key never replaces
+/// one already at its new place.
+fn rekey<V>(
+    map: BTreeMap<RelPath, V>,
+    moved: impl Fn(&RelPath) -> Option<RelPath>,
+) -> BTreeMap<RelPath, V> {
+    let (go, stay): (Vec<_>, Vec<_>) = map.into_iter().partition(|(p, _)| moved(p).is_some());
+    let mut out: BTreeMap<RelPath, V> = stay.into_iter().collect();
+    for (p, v) in go {
+        if let Some(n) = moved(&p) {
+            out.entry(n).or_insert(v);
+        }
+    }
+    out
+}
+
+/// What the folder layout's part of a pass leaves for after the file pass.
+struct LayoutPass {
+    remove_if_empty: Vec<RelPath>,
+    forget: Vec<RelPath>,
+    know: Vec<(RelPath, KnownFolder)>,
+    notices: Vec<LayoutNotice>,
+    /// Folder renames carried out on disk this pass.
+    done: Vec<(RelPath, RelPath)>,
+    /// Folder renames that couldn't be carried out this pass (a file in the folder is open, say),
+    /// and every one after them. They are tried again next pass; until then nothing at or in
+    /// either of their folders is touched, so nothing is half done.
+    waiting: Vec<(RelPath, RelPath)>,
+}
+
+impl LayoutPass {
+    /// Whether `p` is at or in a folder whose rename is waiting.
+    fn blocked(&self, p: &RelPath) -> bool {
+        self.waiting.iter().any(|(from, to)| {
+            layout::rebase(p, from, from).is_some() || layout::rebase(p, to, to).is_some()
+        })
+    }
 }
 
 /// What one pass knows of the swarm, for carrying out decisions.
@@ -201,6 +304,10 @@ pub struct Folder {
     /// Where the index is kept: this machine's state for the swarm, outside the folder.
     state: PathBuf,
     index: BTreeMap<RelPath, Entry>,
+    /// The folder index: the folders this machine and the swarm last agreed on. None until it
+    /// has first been saved, which tells an upgrade (or a lost index) from a layout with no
+    /// folders in it.
+    folders: Option<BTreeMap<RelPath, KnownFolder>>,
     /// Conflict copies in the folder as of the last pass.
     copies: BTreeSet<RelPath>,
     too_big: BTreeSet<RelPath>,
@@ -221,11 +328,12 @@ impl Folder {
         }
         fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
         fs::create_dir_all(&state).with_context(|| format!("creating {}", state.display()))?;
-        let index = load_index(&state.join(INDEX_FILE))?;
+        let (index, folders) = load_index(&state.join(INDEX_FILE))?;
         Ok(Folder {
             root,
             state,
             index,
+            folders,
             copies: BTreeSet::new(),
             too_big: BTreeSet::new(),
             reported: Vec::new(),
@@ -246,7 +354,7 @@ impl Folder {
             &roster.types,
             roster.ignore.as_ref().map(|i| i.text.as_str()),
         ));
-        let scan = {
+        let mut scan = {
             let root = self.root.clone();
             let seen: HashMap<RelPath, Seen> = self
                 .index
@@ -259,12 +367,31 @@ impl Folder {
         // Ruling P1: a `files/.swarmignore` entry is never read, since any writer can put one
         // there and the file must count only as an owner set it in the roster.
         let syncs = |p: &RelPath| p.as_str() != SWARMIGNORE && rules.file_syncs(p);
-        let history: BTreeMap<RelPath, FileHistory> = node
-            .file_entries(roster)
-            .await?
-            .into_iter()
-            .filter(|(p, _)| syncs(p))
-            .collect();
+        let raw = node.file_entries(roster).await?;
+        let writer = roster
+            .role_of(&me.person)
+            .is_some_and(|r| r >= Role::Writer)
+            && node.can_write();
+        let author = node.author();
+        let machine = machine_name(roster, me, &node.endpoint_id());
+        let tz = TimeZone::system();
+        let mut events = Vec::new();
+        // The layout first (spec §5.2): a folder renamed elsewhere is renamed here before any file
+        // change from the same rename is applied, and file entries are read at the paths the
+        // folder moves put them.
+        let (layout, history) = self
+            .layout_before_files(
+                node,
+                roster,
+                &rules,
+                &mut scan,
+                &raw,
+                &syncs,
+                (writer, &author, &machine),
+                &tz,
+                &mut events,
+            )
+            .await?;
         // A path that has stopped syncing forgets the version it last agreed on (and stays as it
         // is on disk), so that if it syncs again it comes back as a new file would. Otherwise a
         // delete or edit made meanwhile would be taken as a change to the swarm's copy.
@@ -287,13 +414,6 @@ impl Folder {
         for (p, seen) in &scan.seen {
             self.index.entry(p.clone()).or_default().seen = Some(*seen);
         }
-        let writer = roster
-            .role_of(&me.person)
-            .is_some_and(|r| r >= Role::Writer)
-            && node.can_write();
-        let author = node.author();
-        let machine = machine_name(roster, me, &node.endpoint_id());
-        let tz = TimeZone::system();
         let pass = Pass {
             node,
             history: &history,
@@ -301,7 +421,6 @@ impl Folder {
             machine: &machine,
         };
 
-        let mut events = Vec::new();
         let mut last: Option<(String, u64)> = None;
         match self
             .sync_ignore(
@@ -329,7 +448,7 @@ impl Folder {
                 .map(|(p, _)| p.clone()),
         );
         for p in paths {
-            if scan.too_big.contains(&p) || scan.unreadable.contains(&p) {
+            if scan.too_big.contains(&p) || scan.unreadable.contains(&p) || layout.blocked(&p) {
                 continue;
             }
             let mut entry = self.index.get(&p).cloned().unwrap_or_default();
@@ -429,7 +548,11 @@ impl Folder {
             let cased = shadowed
                 .iter()
                 .filter_map(|(owner, key)| Some((owner, newest(&history[key].entries)?)));
-            for (p, edit) in unseen.chain(cased).collect::<Vec<_>>() {
+            let all: Vec<_> = unseen
+                .chain(cased)
+                .filter(|(p, _)| !layout.blocked(p))
+                .collect();
+            for (p, edit) in all {
                 match self.capture(&pass, p, edit, &tz, &scan.files, true).await {
                     Ok(Some(copy)) => events.push(FolderEvent::NewConflict {
                         path: p.clone(),
@@ -440,6 +563,7 @@ impl Folder {
                 }
             }
         }
+        self.layout_after_files(layout, &mut events);
         self.index.retain(|_, e| e.worth_keeping());
         self.too_big = scan.too_big;
         self.copies = scan
@@ -459,6 +583,391 @@ impl Folder {
             self.reported = attention;
         }
         Ok(events)
+    }
+
+    /// The folder layout's part of a pass before the file pass: works out the plan, publishes its
+    /// records, carries out renames found here and incoming ones, and makes the folders the swarm
+    /// has. Gives what is left for after the file pass, and the swarm's file entries at the paths
+    /// the folder moves put them, this machine's own new renames included.
+    #[allow(clippy::too_many_arguments)]
+    async fn layout_before_files(
+        &mut self,
+        node: &SwarmNode,
+        roster: &Roster,
+        rules: &SyncRules,
+        scan: &mut Scan,
+        raw: &BTreeMap<RelPath, FileHistory>,
+        syncs: &(dyn Fn(&RelPath) -> bool + Sync),
+        (writer, author, machine): (bool, &str, &str),
+        tz: &TimeZone,
+        events: &mut Vec<FolderEvent>,
+    ) -> anyhow::Result<(LayoutPass, BTreeMap<RelPath, FileHistory>)> {
+        let records = node.folder_records(roster).await?;
+        let mut log = node.moves(roster).await?;
+        let mut history = mapped(raw, &Moves::from_moves(&log), syncs);
+        let live_files: BTreeSet<RelPath> = history
+            .iter()
+            .filter(|(_, h)| newest(&h.entries).is_some_and(|e| e.hash.is_some()))
+            .map(|(p, _)| p.clone())
+            .collect();
+        let newest_file_at = |f: &RelPath| {
+            history
+                .iter()
+                .filter(|(p, _)| layout::inside(p, f))
+                .flat_map(|(_, h)| h.entries.iter().map(|e| e.at))
+                .max()
+        };
+        let syncs_folder = |p: &RelPath| rules.folder_may_sync(p);
+        let known = self.folders.clone().unwrap_or_default();
+        let plan = layout::plan(&LayoutInput {
+            me: author,
+            known: &known,
+            disk: &scan.folders,
+            records: &records,
+            moves: &log,
+            live_files: &live_files,
+            writer,
+            now: now_micros(),
+            newest_file_at: &newest_file_at,
+            syncs_folder: &syncs_folder,
+            first_pass: self.folders.is_none(),
+        });
+
+        // Published before anything here changes. If the swarm can't take them, the pass stops
+        // and the next one finds the same changes again, rather than this machine moving on with a
+        // rename the swarm never heard of.
+        for m in &plan.publish_moves {
+            node.put_move(m).await?;
+        }
+        for (p, r) in &plan.publish {
+            node.put_folder(p, r).await?;
+        }
+        // This machine's own renames are in force for the file pass at once, so its entries under
+        // the old name are read under the new one rather than written back there.
+        if !plan.publish_moves.is_empty() {
+            log.extend(plan.publish_moves.iter().map(|m| MoveVersion {
+                record: m.clone(),
+                author: author.to_string(),
+                machine: machine.to_string(),
+            }));
+            history = mapped(raw, &Moves::from_moves(&log), syncs);
+        }
+
+        // Paths from here on are the disk's own spellings, as the scan found them.
+        self.disk_names.clear();
+        // Renamed here: the files are already at the new path on disk, so only the index follows.
+        for (from, to) in &plan.detected_moves {
+            self.rebase_index(from, to, &BTreeSet::new());
+        }
+        let mut pass = LayoutPass {
+            remove_if_empty: plan.remove_if_empty,
+            forget: plan.forget,
+            know: plan.know,
+            notices: plan.notices,
+            done: Vec::new(),
+            waiting: Vec::new(),
+        };
+        for (from, to) in plan.disk_moves {
+            // Each rename starts from where the ones before it left things.
+            if !pass.waiting.is_empty() {
+                pass.waiting.push((from, to));
+                continue;
+            }
+            match self.move_folder(&from, &to, machine, tz) {
+                Ok(clashes) => {
+                    self.settle_move(scan, &history, &from, &to, clashes);
+                    pass.done.push((from, to));
+                }
+                Err(e) => {
+                    events.push(FolderEvent::Error(format!(
+                        "{} couldn't be renamed to {} yet, so it will be tried again: {e:#}",
+                        from.as_str(),
+                        to.as_str()
+                    )));
+                    pass.waiting.push((from, to));
+                }
+            }
+        }
+        for p in &plan.create {
+            if pass.blocked(p) {
+                continue;
+            }
+            if let Err(e) = self.make_folder(p) {
+                events.push(FolderEvent::Error(format!("{}: {e:#}", p.as_str())));
+            }
+        }
+        Ok((pass, history))
+    }
+
+    /// The folder layout's part of a pass after the file pass: removes the folders the swarm
+    /// deleted once the file pass has emptied them, updates the folder index and tells the
+    /// person what they need to know.
+    fn layout_after_files(&mut self, mut pass: LayoutPass, events: &mut Vec<FolderEvent>) {
+        // Deepest first, and only a folder with nothing left in it: one still holding anything,
+        // synced or not, stays (spec §6), so a failure here is expected and not an error.
+        for p in &pass.remove_if_empty {
+            if pass.blocked(p) {
+                continue;
+            }
+            if let Ok(Some(path)) = self.inside(p, false)
+                && fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir() && !m.is_symlink())
+            {
+                let _ = fs::remove_dir(&path);
+            }
+        }
+        let mut folders = self.folders.take().unwrap_or_default();
+        for k in &pass.forget {
+            let now_at = layout::after(&pass.done, k);
+            // Still waiting to be renamed: it stays known where it is now, so the rename is
+            // planned again next pass.
+            if pass
+                .waiting
+                .iter()
+                .any(|(from, _)| layout::rebase(&now_at, from, from).is_some())
+            {
+                if let Some(v) = folders.remove(k) {
+                    folders.insert(now_at, v);
+                }
+                continue;
+            }
+            folders.remove(k);
+        }
+        for (p, k) in &pass.know {
+            if !pass.blocked(p) {
+                folders.insert(p.clone(), k.clone());
+            }
+        }
+        self.folders = Some(folders);
+        for notice in std::mem::take(&mut pass.notices) {
+            let (at, event) = match notice {
+                LayoutNotice::RenameLost {
+                    mine,
+                    kept,
+                    by_machine,
+                } => (
+                    kept.clone(),
+                    FolderEvent::RenameLost {
+                        mine,
+                        kept,
+                        machine: by_machine,
+                    },
+                ),
+                LayoutNotice::DeleteKeptForWork {
+                    path,
+                    deleted_by_machine,
+                } => (
+                    path.clone(),
+                    FolderEvent::DeleteKeptForWork {
+                        path,
+                        machine: deleted_by_machine,
+                    },
+                ),
+                LayoutNotice::MyDeleteKept { path } => {
+                    (path.clone(), FolderEvent::MyDeleteKept { path })
+                }
+                LayoutNotice::MyDeleteLostToRename {
+                    path,
+                    to,
+                    by_machine,
+                } => (
+                    to.clone(),
+                    FolderEvent::MyDeleteLostToRename {
+                        path,
+                        to,
+                        machine: by_machine,
+                    },
+                ),
+                LayoutNotice::MyRenameSurvivedDelete { to, by_machine } => (
+                    to.clone(),
+                    FolderEvent::MyRenameSurvivedDelete {
+                        to,
+                        machine: by_machine,
+                    },
+                ),
+            };
+            // A waiting rename plans the same notice again next pass, once it is done.
+            if !pass.blocked(&at) {
+                events.push(event);
+            }
+        }
+    }
+
+    /// Index keys at or in `from` moved to `to`, except those in `keep`. An entry already at the
+    /// new key stays.
+    fn rebase_index(&mut self, from: &RelPath, to: &RelPath, keep: &BTreeSet<RelPath>) {
+        self.index = rekey(std::mem::take(&mut self.index), |p| {
+            if keep.contains(p) {
+                None
+            } else {
+                layout::rebase(p, from, to)
+            }
+        });
+    }
+
+    /// After a folder moved on disk from `from` to `to`: the index and the scan follow it, so the
+    /// file pass sees the same files, unchanged, under the new name, and never a delete of the
+    /// old paths.
+    fn settle_move(
+        &mut self,
+        scan: &mut Scan,
+        history: &BTreeMap<RelPath, FileHistory>,
+        from: &RelPath,
+        to: &RelPath,
+        clashes: Vec<(RelPath, RelPath)>,
+    ) {
+        // Met a file of the same name and went in under a copy name: new files there, made from
+        // nothing the swarm has at that name.
+        for (old, copy) in clashes {
+            self.index.remove(&old);
+            scan.seen.remove(&old);
+            if let Some(f) = scan.files.remove(&old) {
+                scan.files.insert(copy, f);
+            }
+        }
+        // A file whose newest entry is newer than the move stays at the old name in the swarm: a
+        // new folder made there by someone who hadn't seen the rename (spec §5.2). It goes back
+        // there, so this machine ends with what every other one has.
+        let mut stay = BTreeSet::new();
+        let under: Vec<RelPath> = scan
+            .files
+            .keys()
+            .filter(|p| layout::inside(p, from))
+            .cloned()
+            .collect();
+        for p in under {
+            let Some(q) = layout::rebase(&p, from, to) else {
+                continue;
+            };
+            let stands = history
+                .get(&p)
+                .and_then(|h| newest(&h.entries))
+                .is_some_and(|e| e.hash.is_some())
+                && !history.contains_key(&q);
+            if stands && self.move_file(&q, &p).is_ok() {
+                stay.insert(p);
+            }
+        }
+        self.rebase_index(from, to, &stay);
+        scan.rebase(from, to, &stay);
+    }
+
+    /// `p` on disk when it is a folder there, not a link.
+    fn folder_at(&self, p: &RelPath) -> anyhow::Result<Option<PathBuf>> {
+        let Some(path) = self.inside(p, false)? else {
+            return Ok(None);
+        };
+        Ok(fs::symlink_metadata(&path)
+            .is_ok_and(|m| m.is_dir() && !m.is_symlink())
+            .then_some(path))
+    }
+
+    /// Makes the folder `p`, and any folder on the way to it.
+    fn make_folder(&self, p: &RelPath) -> anyhow::Result<()> {
+        let path = self
+            .inside(p, true)?
+            .context("a folder on the way is missing")?;
+        match fs::create_dir(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("creating {}", path.display())),
+        }
+    }
+
+    /// Moves the file at `from` to `to`, which must be free.
+    fn move_file(&self, from: &RelPath, to: &RelPath) -> anyhow::Result<()> {
+        let src = self.inside(from, false)?.context("it isn't there")?;
+        let dst = self
+            .inside(to, true)?
+            .context("a folder on the way is missing")?;
+        if fs::symlink_metadata(&dst).is_ok() {
+            bail!("{} is taken", to.as_str());
+        }
+        fs::rename(&src, &dst).with_context(|| format!("moving {}", src.display()))
+    }
+
+    /// Renames the folder `from` to `to` on disk, with everything in it. When another folder is
+    /// already at `to`, the two merge (spec §5.2): each thing in `from` moves in, and a file
+    /// meeting a file of the same name goes in under a conflict-copy name, so nothing is
+    /// overwritten or deleted. Gives those files, as (path before, copy). On an error `from` is
+    /// as it was, or, part way through a merge, holds what hadn't moved yet; the next pass
+    /// carries on from there.
+    fn move_folder(
+        &self,
+        from: &RelPath,
+        to: &RelPath,
+        machine: &str,
+        tz: &TimeZone,
+    ) -> anyhow::Result<Vec<(RelPath, RelPath)>> {
+        let src = self
+            .folder_at(from)?
+            .with_context(|| format!("{} isn't there", from.as_str()))?;
+        let dst = self
+            .inside(to, true)?
+            .context("a folder on the way is missing")?;
+        let mut clashes = Vec::new();
+        match other_entry(&dst, &src)? {
+            Some(there) if fs::symlink_metadata(&there).is_ok_and(|m| m.is_dir()) => {
+                self.merge(&src, &there, (from, to), (machine, tz), &mut clashes)?;
+            }
+            Some(_) => bail!("something other than a folder is at {}", to.as_str()),
+            None => rename_dir(&src, &dst)?,
+        }
+        Ok(clashes)
+    }
+
+    /// Moves everything in the folder `src` into the folder `dst`, as `move_folder` says.
+    fn merge(
+        &self,
+        src: &Path,
+        dst: &Path,
+        (from, to): (&RelPath, &RelPath),
+        (machine, tz): (&str, &TimeZone),
+        clashes: &mut Vec<(RelPath, RelPath)>,
+    ) -> anyhow::Result<()> {
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            let name = entry.file_name();
+            let s = entry.path();
+            let Some(there) = other_entry(&dst.join(&name), &s)? else {
+                fs::rename(&s, dst.join(&name))
+                    .with_context(|| format!("moving {}", s.display()))?;
+                continue;
+            };
+            let name = name.to_string_lossy();
+            let (Some(old), Some(new)) = (
+                safe_rel_path(&format!("{}/{name}", from.as_str())),
+                safe_rel_path(&format!("{}/{name}", to.as_str())),
+            ) else {
+                continue;
+            };
+            let there_is_dir = fs::symlink_metadata(&there).is_ok_and(|m| m.is_dir());
+            if kind.is_dir() && there_is_dir {
+                self.merge(&s, &there, (&old, &new), (machine, tz), clashes)?;
+            } else if kind.is_file() {
+                let bytes = fs::read(&s).with_context(|| format!("reading {}", s.display()))?;
+                // Named for the version it holds, as a conflict copy taken from the swarm is, so
+                // machines merging the same folders name it the same.
+                let name = match self.index.get(&old).and_then(|e| e.from.as_ref()) {
+                    Some(made) => conflict_name(&new, &made.machine, timestamp(made.at), tz),
+                    None => {
+                        let at = modified(&entry.metadata()?);
+                        conflict_name(&new, machine, timestamp(at), tz)
+                    }
+                };
+                let copy = self.free_copy_name(&name, Hash::new(&bytes), &BTreeMap::new())?;
+                let path = self
+                    .inside(&copy, true)?
+                    .context("a folder on the way is missing")?;
+                fs::rename(&s, &path).with_context(|| format!("moving {}", s.display()))?;
+                clashes.push((old, copy));
+            }
+            // Anything else (a folder meeting a file, a link) stays where it is, and so does
+            // the old folder holding it.
+        }
+        // Empty now, unless something had to stay.
+        let _ = fs::remove_dir(src);
+        Ok(())
     }
 
     pub fn attention(&self) -> Vec<Attention> {
@@ -621,7 +1130,11 @@ impl Folder {
             self.tidy(path);
             return self.save();
         }
-        let remote = node.files(&roster).await?.remove(path);
+        let remote = swarm_history(node, &roster)
+            .await?
+            .get(path)
+            .and_then(|h| newest(&h.entries))
+            .cloned();
         let from = remote.as_ref().map(Source::of);
         let base = match remote.and_then(|r| r.hash) {
             Some(hash) => {
@@ -1308,8 +1821,15 @@ impl Folder {
     }
 
     fn save(&self) -> anyhow::Result<()> {
-        let index: BTreeMap<&str, &Entry> =
-            self.index.iter().map(|(p, e)| (p.as_str(), e)).collect();
+        let mut index = serde_json::Map::new();
+        for (p, e) in &self.index {
+            index.insert(p.as_str().to_string(), serde_json::to_value(e)?);
+        }
+        if let Some(folders) = &self.folders {
+            let folders: BTreeMap<&str, &KnownFolder> =
+                folders.iter().map(|(p, k)| (p.as_str(), k)).collect();
+            index.insert(FOLDERS_KEY.to_string(), serde_json::to_value(folders)?);
+        }
         let bytes = serde_json::to_vec_pretty(&index)?;
         write_via_temp(&self.state.join(INDEX_FILE), &bytes)
     }
@@ -1510,7 +2030,117 @@ async fn node_history(node: &SwarmNode) -> anyhow::Result<BTreeMap<RelPath, File
         .roster()
         .await?
         .context("This swarm's member list hasn't arrived yet.")?;
-    node.file_entries(&roster).await
+    swarm_history(node, &roster).await
+}
+
+/// Every counting entry per path, at the path the folder moves put it.
+async fn swarm_history(
+    node: &SwarmNode,
+    roster: &Roster,
+) -> anyhow::Result<BTreeMap<RelPath, FileHistory>> {
+    let moves = Moves::from_moves(&node.moves(roster).await?);
+    Ok(mapped(&node.file_entries(roster).await?, &moves, &|_| true))
+}
+
+/// `raw` with each entry, and its author's parent record, at the path it belongs at now that the
+/// folder moves are applied (`Moves::map`), keeping only paths that `syncs`. A path an entry was
+/// made at before a rename reached its author is read at the renamed path, so work done under
+/// the old name lands in the renamed folder as the same file.
+fn mapped(
+    raw: &BTreeMap<RelPath, FileHistory>,
+    moves: &Moves,
+    syncs: &dyn Fn(&RelPath) -> bool,
+) -> BTreeMap<RelPath, FileHistory> {
+    let mut out: BTreeMap<RelPath, FileHistory> = BTreeMap::new();
+    for (p, h) in raw {
+        for e in &h.entries {
+            out.entry(moves.map(p, e.at))
+                .or_default()
+                .entries
+                .push(e.clone());
+        }
+        // A parent record goes where its author's entry went. One whose entry hasn't arrived yet
+        // follows every move, as the oldest entry would.
+        for (author, r) in &h.records {
+            let at = h
+                .entries
+                .iter()
+                .filter(|e| &e.author == author)
+                .map(|e| e.at)
+                .max()
+                .unwrap_or(0);
+            out.entry(moves.map(p, at))
+                .or_default()
+                .records
+                .push((author.clone(), r.clone()));
+        }
+    }
+    out.retain(|p, _| syncs(p));
+    for h in out.values_mut() {
+        h.entries
+            .sort_by(|a, b| (a.at, &a.author).cmp(&(b.at, &b.author)));
+    }
+    out
+}
+
+/// What is at `dst` other than the folder `src` itself, as the disk spells it: an entry of that
+/// exact name, or else one differing only by case, which a disk that ignores case takes as the
+/// same name.
+fn other_entry(dst: &Path, src: &Path) -> anyhow::Result<Option<PathBuf>> {
+    let (Some(dir), Some(name)) = (dst.parent(), dst.file_name()) else {
+        return Ok(None);
+    };
+    let name = name.to_string_lossy();
+    let entries: Vec<PathBuf> = match fs::read_dir(dir) {
+        Ok(d) => d.filter_map(|e| Some(e.ok()?.path())).collect(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    };
+    let named = |p: &&PathBuf, folded: bool| {
+        p.file_name().is_some_and(|n| {
+            let n = n.to_string_lossy();
+            if folded {
+                n.to_lowercase() == name.to_lowercase()
+            } else {
+                n == name
+            }
+        })
+    };
+    let found = entries
+        .iter()
+        .find(|p| named(p, false))
+        .or_else(|| entries.iter().find(|p| named(p, true)));
+    // The folder itself, spelled differently: a change of case, not another folder.
+    let itself = |p: &PathBuf| {
+        p == src
+            || fs::canonicalize(p)
+                .ok()
+                .is_some_and(|c| fs::canonicalize(src).ok() == Some(c))
+    };
+    Ok(found.filter(|p| !itself(p)).cloned())
+}
+
+/// Renames the folder `src` to `dst`. A change of case alone goes through a temporary name when
+/// the disk won't take it directly, and is put back if the second step fails, so the folder is
+/// never left under the temporary name.
+fn rename_dir(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    fs::rename(src, dst).with_context(|| format!("renaming {}", src.display()))?;
+    let (Some(dir), Some(name)) = (dst.parent(), dst.file_name()) else {
+        return Ok(());
+    };
+    let spelled = fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .any(|e| e.file_name() == name);
+    if spelled {
+        return Ok(());
+    }
+    let tmp = dir.join(format!("{}{RECASE_SUFFIX}", name.to_string_lossy()));
+    fs::rename(dst, &tmp).with_context(|| format!("renaming {}", src.display()))?;
+    if let Err(e) = fs::rename(&tmp, dst) {
+        let _ = fs::rename(&tmp, src);
+        return Err(e).with_context(|| format!("renaming {}", src.display()));
+    }
+    Ok(())
 }
 
 fn check_copy(path: &RelPath, copy: &RelPath) -> anyhow::Result<()> {
@@ -1556,18 +2186,42 @@ fn modified(meta: &Metadata) -> u64 {
         .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
 }
 
-fn load_index(file: &Path) -> anyhow::Result<BTreeMap<RelPath, Entry>> {
+/// The file index and the folder index (None when it has never been saved) from `index.json`.
+#[allow(clippy::type_complexity)]
+fn load_index(
+    file: &Path,
+) -> anyhow::Result<(
+    BTreeMap<RelPath, Entry>,
+    Option<BTreeMap<RelPath, KnownFolder>>,
+)> {
     let bytes = match fs::read(file) {
         Ok(b) => b,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((BTreeMap::new(), None)),
         Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
     };
-    let raw: BTreeMap<String, Entry> = serde_json::from_slice(&bytes)
-        .with_context(|| format!("the folder index {} is damaged", file.display()))?;
-    Ok(raw
-        .into_iter()
-        .filter_map(|(p, e)| Some((safe_rel_path(&p)?, e)))
-        .collect())
+    let damaged = || format!("the folder index {} is damaged", file.display());
+    let mut raw: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(&bytes).with_context(damaged)?;
+    let folders = match raw.remove(FOLDERS_KEY) {
+        Some(v) => {
+            let map: BTreeMap<String, KnownFolder> =
+                serde_json::from_value(v).with_context(damaged)?;
+            Some(
+                map.into_iter()
+                    .filter_map(|(p, k)| Some((safe_rel_path(&p)?, k)))
+                    .collect(),
+            )
+        }
+        None => None,
+    };
+    let mut files = BTreeMap::new();
+    for (p, v) in raw {
+        let entry: Entry = serde_json::from_value(v).with_context(damaged)?;
+        if let Some(p) = safe_rel_path(&p) {
+            files.insert(p, entry);
+        }
+    }
+    Ok((files, folders))
 }
 
 /// Writes `bytes` to a temp file beside `path`, then renames it over `path`, so nobody ever sees
@@ -1595,22 +2249,56 @@ fn write_via_temp(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 /// out). The root `.swarmignore` is read on its own, for the pass to sync through the roster.
 fn scan(root: &Path, rules: &SyncRules, seen: &HashMap<RelPath, Seen>) -> io::Result<Scan> {
     let mut out = Scan::default();
-    let mut dirs = vec![root.to_path_buf()];
-    while let Some(dir) = dirs.pop() {
+    // Folders holding something other than folders the scan went into, so not empty.
+    let mut cluttered: BTreeSet<RelPath> = BTreeSet::new();
+    let mut dirs: Vec<(PathBuf, Option<RelPath>)> = vec![(root.to_path_buf(), None)];
+    while let Some((dir, here)) = dirs.pop() {
+        let mut clutter = |here: &Option<RelPath>| {
+            if let Some(h) = here {
+                cluttered.insert(h.clone());
+            }
+        };
+        // Records a synced file's name in the folder it is in, for spotting a rename by names.
+        let synced = |out: &mut Scan, name: &str| {
+            if let Some(f) = here.as_ref().and_then(|h| out.folders.get_mut(h)) {
+                f.synced_files.insert(name.to_string());
+            }
+        };
         for entry in fs::read_dir(&dir)? {
             let entry = entry?;
             let kind = entry.file_type()?;
+            let name = entry.file_name().to_string_lossy().into_owned();
             if kind.is_symlink() {
+                clutter(&here);
                 continue;
             }
             let path = entry.path();
             if kind.is_dir() {
-                if rel_from_disk(root, &path).is_none_or(|p| rules.folder_may_sync(&p)) {
-                    dirs.push(path);
+                match rel_from_disk(root, &path) {
+                    Some(p) if rules.folder_may_sync(&p) => {
+                        if let Some(f) = here.as_ref().and_then(|h| out.folders.get_mut(h)) {
+                            f.subfolders.insert(name);
+                        }
+                        out.folders.insert(
+                            p.clone(),
+                            DiskFolder {
+                                empty: false,
+                                synced_files: BTreeSet::new(),
+                                subfolders: BTreeSet::new(),
+                            },
+                        );
+                        dirs.push((path, Some(p)));
+                    }
+                    Some(_) => clutter(&here),
+                    None => {
+                        clutter(&here);
+                        dirs.push((path, None));
+                    }
                 }
                 continue;
             }
-            if !kind.is_file() || entry.file_name().to_string_lossy().ends_with(TMP_SUFFIX) {
+            clutter(&here);
+            if !kind.is_file() || name.ends_with(TMP_SUFFIX) {
                 continue;
             }
             let Some(p) = rel_from_disk(root, &path) else {
@@ -1623,6 +2311,7 @@ fn scan(root: &Path, rules: &SyncRules, seen: &HashMap<RelPath, Seen>) -> io::Re
             if !rules.file_syncs(&p) {
                 continue;
             }
+            synced(&mut out, &name);
             let Ok(meta) = entry.metadata() else {
                 out.unreadable.insert(p);
                 continue;
@@ -1661,6 +2350,20 @@ fn scan(root: &Path, rules: &SyncRules, seen: &HashMap<RelPath, Seen>) -> io::Re
                 },
             };
             out.files.insert(p, OnDisk { modified, hash });
+        }
+    }
+    // Empty means nothing but empty folders, so the deepest are settled first.
+    let mut deepest: Vec<RelPath> = out.folders.keys().cloned().collect();
+    deepest.sort_by_key(|p| std::cmp::Reverse(p.as_str().matches('/').count()));
+    for p in deepest {
+        let empty = !cluttered.contains(&p)
+            && out.folders[&p].subfolders.iter().all(|n| {
+                safe_rel_path(&format!("{}/{n}", p.as_str()))
+                    .and_then(|c| out.folders.get(&c))
+                    .is_some_and(|f| f.empty)
+            });
+        if let Some(f) = out.folders.get_mut(&p) {
+            f.empty = empty;
         }
     }
     Ok(out)
@@ -1738,4 +2441,57 @@ fn sizes_settled(paths: &HashSet<PathBuf>) -> bool {
     let before = sizes();
     std::thread::sleep(SETTLE);
     before == sizes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rel(s: &str) -> RelPath {
+        safe_rel_path(s).unwrap()
+    }
+
+    #[test]
+    fn an_older_index_has_no_folder_index_and_an_older_hydra_can_read_a_newer_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(INDEX_FILE);
+        let base = Hash::new(b"one");
+        // As an older hydra wrote it: paths only.
+        let older = serde_json::json!({ "notes/a.md": { "base": base } });
+        fs::write(&file, serde_json::to_vec(&older).unwrap()).unwrap();
+        let (files, folders) = load_index(&file).unwrap();
+        assert_eq!(files[&rel("notes/a.md")].base, Some(base));
+        assert!(folders.is_none());
+
+        let mut f = Folder::new(dir.path().join("root"), dir.path().to_path_buf(), false).unwrap();
+        f.folders = Some(BTreeMap::new());
+        f.save().unwrap();
+        let (_, folders) = load_index(&file).unwrap();
+        assert_eq!(
+            folders,
+            Some(BTreeMap::new()),
+            "saved and empty, not never saved"
+        );
+
+        f.folders = Some(BTreeMap::from([(
+            rel("notes"),
+            KnownFolder {
+                applied_at: 5,
+                notified_at: 0,
+            },
+        )]));
+        f.save().unwrap();
+        // How an older hydra reads it: every key as a file entry, keeping only safe paths.
+        let raw: BTreeMap<String, Entry> =
+            serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        let paths: Vec<&str> = raw
+            .keys()
+            .filter(|p| safe_rel_path(p).is_some())
+            .map(|p| p.as_str())
+            .collect();
+        assert_eq!(paths, vec!["notes/a.md"]);
+        let (files, folders) = load_index(&file).unwrap();
+        assert_eq!(files[&rel("notes/a.md")].base, Some(base));
+        assert_eq!(folders.unwrap()[&rel("notes")].applied_at, 5);
+    }
 }

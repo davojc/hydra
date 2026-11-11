@@ -7,7 +7,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use hydra_swarms::ids::{PersonId, PersonKey};
 use hydra_swarms::invites::{INVITE_LIFETIME, InviteCode, Invites, redeem_at};
-use hydra_swarms::node::{NodeConfig, NodeEvent, SwarmNode};
+use hydra_swarms::node::{FolderRecord, FolderState, NodeConfig, NodeEvent, SwarmNode};
 use hydra_swarms::paths::{RelPath, safe_rel_path};
 use hydra_swarms::roster::{Change, Machine, Member, Role, Roster, SignedChange};
 use iroh_docs::{Author, Capability};
@@ -228,6 +228,40 @@ async fn a_delete_reaches_the_other_side_as_a_tombstone() {
     })
     .await;
     assert_eq!(gone, o.node.author());
+    o.node.shutdown().await;
+    w.node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn folder_records_from_a_writer_reach_the_other_machine() {
+    let o = create_owner().await;
+    let cap = o.node.capability(Role::Writer).await.unwrap();
+    let w = join(&o, "wren", Some(Role::Writer), cap).await;
+    connect(&o.node, &w.node).await;
+    let r = roster_with(&w.node, 2).await;
+
+    let present = FolderRecord {
+        state: FolderState::Present,
+        at: 5,
+    };
+    let moved = FolderRecord {
+        state: FolderState::MovedTo { to: "docs".into() },
+        at: 9,
+    };
+    o.node.put_folder(&rel("notes"), &present).await.unwrap();
+    o.node.put_folder(&rel("old"), &moved).await.unwrap();
+
+    let got = eventually("both folder records on the writer", || async {
+        let records = w.node.folder_records(&r).await.unwrap();
+        (records.len() == 2).then_some(records)
+    })
+    .await;
+    let notes = &got[&rel("notes")];
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].record, present);
+    assert_eq!(notes[0].author, o.node.author());
+    assert_eq!(notes[0].machine, "olive-pc");
+    assert_eq!(got[&rel("old")][0].record, moved);
     o.node.shutdown().await;
     w.node.shutdown().await;
 }

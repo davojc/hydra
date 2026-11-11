@@ -17,6 +17,7 @@ use anyhow::{Context, bail};
 use futures::StreamExt;
 use futures::channel::{mpsc as fmpsc, oneshot};
 use iroh::{EndpointAddr, EndpointId, RelayUrl, SecretKey};
+use iroh_blobs::Hash;
 use iroh_docs::{Author, Capability, NamespaceId, NamespaceSecret};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,8 @@ use tokio::sync::{Notify, broadcast, mpsc};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 
+use crate::bridge::Host;
+use crate::claims::{ContextSettings, Holder};
 use crate::folder::{Attention, Folder, FolderEvent};
 use crate::ids::{PersonId, PersonKey, to_hex};
 use crate::ids::{RekeyCert, chain_ends};
@@ -32,7 +35,7 @@ use crate::mine::DEVICE_KEY_ID;
 use crate::node::{NodeConfig, NodeEvent, SwarmNode, now_micros};
 use crate::paths::{RelPath, safe_rel_path};
 use crate::roster::{Change, Kept, Machine, Member, Role, Roster, SignedChange};
-use crate::wire::{MineReply, Offer};
+use crate::wire::{ClaimAnswer, MineReply, Offer};
 
 /// How often every swarm reconciles its folder, and retries what it couldn't send.
 const PERIODIC: Duration = Duration::from_secs(60);
@@ -52,6 +55,9 @@ const RELAY_RETRY: Duration = Duration::from_secs(5);
 const FRESH_RETRY: Duration = Duration::from_secs(2);
 /// How many times a machine new to the roster is tried again.
 const FRESH_TRIES: u32 = 4;
+/// How long content found missing is left to iroh-docs before this machine asks for it itself.
+/// Each time asking doesn't bring a piece of it, that piece's wait doubles, up to `PERIODIC`.
+const FETCH_AFTER: Duration = Duration::from_secs(5);
 /// How long a machine of yours waits for the roster to show another one joining through it.
 const JOINING_WAIT: Duration = Duration::from_secs(20);
 const REGISTRY_FILE: &str = "registry.json";
@@ -73,7 +79,12 @@ pub type SwarmKeyFn = Box<dyn Fn(&str) -> Result<[u8; 32], String> + Send>;
 /// Keeps a new personal key, in place of the one before.
 pub type PersonKeyFn = Box<dyn Fn([u8; 32]) -> Result<(), String> + Send>;
 
+mod claims;
 mod linking;
+
+pub use claims::NO_LONGER_YOURS;
+use claims::{CLOCK_SLACK, ClaimBook, TakeReply, resolve_swarm};
+pub use claims::{ClaimHandle, ClaimOutcome, ClaimView, ContextView, DoneView, LostReason};
 
 pub struct ServiceConfig {
     /// `state_root/swarms`.
@@ -87,8 +98,10 @@ pub struct ServiceConfig {
     /// The keyring in hydraui, for a personal key this machine is given or makes.
     pub set_person: PersonKeyFn,
     pub relays: bool,
+    bridge: Option<PathBuf>,
     direct_peers: Option<DirectPeers>,
     lose_relays: Duration,
+    claim_slack: Duration,
 }
 
 impl ServiceConfig {
@@ -105,9 +118,24 @@ impl ServiceConfig {
             swarm_key,
             set_person,
             relays,
+            bridge: None,
             direct_peers: None,
             lose_relays: Duration::ZERO,
+            claim_slack: CLOCK_SLACK,
         }
+    }
+
+    /// Lets other windows on this machine reach the claims through `file`, which says how for
+    /// as long as the service runs.
+    pub fn bridge_file(mut self, file: PathBuf) -> Self {
+        self.bridge = Some(file);
+        self
+    }
+
+    /// Allows `d` for clocks running late before a claim lapses, so tests can see a lapse soon.
+    pub fn claim_slack_for_tests(mut self, d: Duration) -> Self {
+        self.claim_slack = d;
+        self
     }
 
     /// Finds peers through `book` rather than address lookup, for tests with relays off: every
@@ -168,6 +196,8 @@ pub struct SwarmView {
     pub removed: bool,
     /// How many other machines of yours are in this swarm.
     pub my_other_machines: usize,
+    /// Every claim context in this swarm.
+    pub claims: Vec<ContextView>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -290,6 +320,70 @@ pub enum Command {
     DeclineOffer {
         swarm: String,
     },
+    /// Asks for a key. Without a swarm, the only one with that context; with one, its id or name.
+    ClaimTake {
+        swarm: Option<String>,
+        context: String,
+        key: String,
+        holder: Holder,
+        /// For a holder that had this claim through another window's host: it may only go on
+        /// with the claim this machine already has, and never makes a new one.
+        retake: bool,
+        reply: TakeReply,
+    },
+    ClaimsList {
+        swarm: Option<String>,
+        context: String,
+        reply: oneshot::Sender<Result<ContextView, String>>,
+    },
+    /// Ends the claim the machine with author id `author` holds on `key`.
+    ClaimRelease {
+        swarm: String,
+        context: String,
+        key: String,
+        author: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Undoes a done on `key`, so it can be claimed again. Writers only. With `done_at` (the
+    /// `at` of the done the person saw), refused unless that done is still the current one.
+    ClaimReopen {
+        swarm: String,
+        context: String,
+        key: String,
+        done_at: Option<u64>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Makes the context `name`, or changes its settings.
+    ClaimContextSet {
+        swarm: String,
+        name: String,
+        settings: ContextSettings,
+    },
+    /// Makes this machine's claim look `by_secs` older, as if the machine had been asleep.
+    #[doc(hidden)]
+    ClaimAgeForTests {
+        swarm: String,
+        context: String,
+        key: String,
+        by_secs: u64,
+    },
+    /// From now on this machine takes questions about claims and never answers them.
+    #[doc(hidden)]
+    ClaimsSilentForTests {
+        swarm: String,
+    },
+    /// From now on reading `context`'s claims here fails.
+    #[doc(hidden)]
+    ClaimsUnreadableForTests {
+        swarm: String,
+        context: String,
+    },
+    /// From now on iroh-docs brings this machine no content, so only asking for it can.
+    #[doc(hidden)]
+    ContentUnfetchedForTests {
+        swarm: String,
+        reply: oneshot::Sender<()>,
+    },
     Stop,
 }
 
@@ -304,7 +398,17 @@ impl Command {
             | Command::SetTypes { swarm, .. }
             | Command::SetFolder { swarm, .. }
             | Command::Leave { swarm }
-            | Command::Resolve { swarm, .. } => Some(swarm),
+            | Command::Resolve { swarm, .. }
+            | Command::ClaimRelease { swarm, .. }
+            | Command::ClaimReopen { swarm, .. }
+            | Command::ClaimContextSet { swarm, .. }
+            | Command::ClaimAgeForTests { swarm, .. }
+            | Command::ClaimsSilentForTests { swarm }
+            | Command::ClaimsUnreadableForTests { swarm, .. }
+            | Command::ContentUnfetchedForTests { swarm, .. } => Some(swarm),
+            Command::ClaimTake { swarm, .. } | Command::ClaimsList { swarm, .. } => {
+                swarm.as_deref()
+            }
             Command::Create { .. }
             | Command::Join { .. }
             | Command::SetIdentity { .. }
@@ -383,6 +487,7 @@ impl SwarmsService {
                     relays: cfg.relays,
                     direct: cfg.direct_peers,
                     lose_relays_until: Instant::now() + cfg.lose_relays,
+                    claim_slack: cfg.claim_slack,
                     events: ev_tx,
                     registry,
                     views: Mutex::default(),
@@ -394,17 +499,24 @@ impl SwarmsService {
                 if let Some(text) = damaged {
                     shared.failed(text);
                 }
-                rt.block_on(run(shared, cfg.identity, cfg.set_person, cmd_rx, left_rx));
+                rt.block_on(run(
+                    shared,
+                    cfg.identity,
+                    cfg.set_person,
+                    cmd_rx,
+                    left_rx,
+                    cfg.bridge,
+                ));
             })?;
         Ok((cmd_tx, ev_rx))
     }
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn random32() -> anyhow::Result<[u8; 32]> {
+pub(crate) fn random32() -> anyhow::Result<[u8; 32]> {
     let mut b = [0u8; 32];
     getrandom::fill(&mut b).map_err(|e| anyhow::anyhow!("random bytes: {e}"))?;
     Ok(b)
@@ -528,6 +640,8 @@ struct Shared {
     direct: Option<DirectPeers>,
     /// Until when owners' answers to relays are treated as lost (tests only).
     lose_relays_until: Instant,
+    /// What claims allow for clocks running late.
+    claim_slack: Duration,
     events: fmpsc::UnboundedSender<ServiceEvent>,
     registry: Registry,
     views: Mutex<BTreeMap<String, SwarmView>>,
@@ -643,6 +757,16 @@ enum Msg {
     Joining(SignedChange, oneshot::Sender<MineReply>),
     /// This person's new key, after one of their machines was removed.
     Person([u8; 32]),
+    /// A claim's handle was dropped: its renewals stop, and it lapses by itself.
+    ClaimDrop {
+        id: u64,
+    },
+    /// A claim's handle gave it up, or finished it when `done`.
+    ClaimFinish {
+        id: u64,
+        done: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     Stop,
 }
 
@@ -653,7 +777,21 @@ async fn run(
     set_person: PersonKeyFn,
     mut commands: fmpsc::UnboundedReceiver<Command>,
     mut left: mpsc::UnboundedReceiver<String>,
+    bridge: Option<PathBuf>,
 ) {
+    // Apart from `commands`, so clients still connected don't keep the service alive once
+    // hydraui has dropped its sender.
+    let (host_tx, mut host_commands) = mpsc::unbounded_channel();
+    let host = match bridge {
+        Some(file) => match Host::start(file, host_tx).await {
+            Ok(host) => Some(host),
+            Err(e) => {
+                shared.failed(format!("Other windows can't claim through this one: {e:#}"));
+                None
+            }
+        },
+        None => None,
+    };
     let (up_tx, mut up) = mpsc::unbounded_channel();
     let machines = match start_machines(&shared, &identity, set_person, up_tx).await {
         Ok(m) => Some(m),
@@ -788,8 +926,9 @@ async fn run(
                         m.decline(&swarm);
                     }
                 }
-                Some(cmd) => to_swarm(&shared, &mut swarms, cmd),
+                Some(cmd) => route(&shared, &mut swarms, cmd),
             },
+            Some(cmd) = host_commands.recv() => route(&shared, &mut swarms, cmd),
             Some(ns) = left.recv() => {
                 // Left here: not offered back by your other machines.
                 if let Some(m) = &machines {
@@ -812,7 +951,8 @@ async fn run(
                         m.note_endpoint(&node.endpoint_id());
                     }
                     let (tx, rx) = mpsc::unbounded_channel();
-                    let worker = Worker::new(Arc::clone(&shared), identity.clone(), opened);
+                    let own_tx = tx.downgrade();
+                    let worker = Worker::new(Arc::clone(&shared), identity.clone(), opened, own_tx);
                     let task = tokio::spawn(worker.run(rx));
                     swarms.insert(ns, Handle { tx, task });
                 }
@@ -839,6 +979,10 @@ async fn run(
                 shared.emit(ServiceEvent::Swarms(views));
             }
         }
+    }
+    // First, so other windows hear at once, and no handle outlives its swarm.
+    if let Some(host) = host {
+        host.stop().await;
     }
     // Swarms still being made or joined are let finish, then closed with the rest.
     while let Some(done) = opening.join_next().await {
@@ -884,6 +1028,50 @@ async fn start_machines(
     linking::Machines::start(Arc::clone(shared), device_key, identity, set_person, up).await
 }
 
+/// Passes a command to its swarm's task, once it is clear which swarm a claim command means.
+fn route(shared: &Shared, swarms: &mut HashMap<String, Handle>, cmd: Command) {
+    let cmd = match cmd {
+        Command::ClaimTake {
+            swarm,
+            context,
+            key,
+            holder,
+            retake,
+            reply,
+        } => match resolve_swarm(&shared.views(), swarm.as_deref(), &context) {
+            Ok(id) => Command::ClaimTake {
+                swarm: Some(id),
+                context,
+                key,
+                holder,
+                retake,
+                reply,
+            },
+            Err(text) => {
+                let _ = reply.send(Err(text));
+                return;
+            }
+        },
+        Command::ClaimsList {
+            swarm,
+            context,
+            reply,
+        } => match resolve_swarm(&shared.views(), swarm.as_deref(), &context) {
+            Ok(id) => Command::ClaimsList {
+                swarm: Some(id),
+                context,
+                reply,
+            },
+            Err(text) => {
+                let _ = reply.send(Err(text));
+                return;
+            }
+        },
+        cmd => cmd,
+    };
+    to_swarm(shared, swarms, cmd);
+}
+
 /// Passes a command to its swarm's task.
 fn to_swarm(shared: &Shared, swarms: &mut HashMap<String, Handle>, cmd: Command) {
     let ns = cmd.swarm().unwrap_or_default().to_string();
@@ -899,8 +1087,24 @@ fn to_swarm(shared: &Shared, swarms: &mut HashMap<String, Handle>, cmd: Command)
         None => cmd,
     };
     let text = "That swarm isn't on this machine.".to_string();
-    if let Command::Invite { reply, .. } = cmd {
-        let _ = reply.send(Err(text.clone()));
+    // Whoever asked about a claim gets the answer; it isn't anything to show the person.
+    match cmd {
+        Command::ClaimTake { reply, .. } => {
+            let _ = reply.send(Err(text));
+            return;
+        }
+        Command::ClaimsList { reply, .. } => {
+            let _ = reply.send(Err(text));
+            return;
+        }
+        Command::ClaimRelease { reply, .. } | Command::ClaimReopen { reply, .. } => {
+            let _ = reply.send(Err(text));
+            return;
+        }
+        Command::Invite { reply, .. } => {
+            let _ = reply.send(Err(text.clone()));
+        }
+        _ => {}
     }
     shared.failed(text);
 }
@@ -1240,6 +1444,67 @@ enum Sent {
     Removed,
     /// A machine of yours joining through this one has had its answer.
     Answered,
+    /// The members had their chance to say what they know about claim `id`.
+    ClaimAsked {
+        id: u64,
+        answers: Vec<ClaimAnswer>,
+    },
+    /// The members were asked for this content, found missing.
+    Fetched {
+        hashes: Vec<Hash>,
+    },
+}
+
+/// How long one piece of missing content has left, and how long it waits after that if asking
+/// doesn't bring it.
+struct FetchWait {
+    due: Instant,
+    wait: Duration,
+}
+
+/// When to ask the members for each piece of content passes are finding missing. Each has its own
+/// wait, so what iroh-docs is still bringing is left to it, and something nobody has doesn't hold
+/// up what was found missing since.
+#[derive(Default)]
+struct FetchWaits {
+    waits: HashMap<Hash, FetchWait>,
+}
+
+impl FetchWaits {
+    /// What a pass found missing. What is new starts its wait, and what it no longer found, such
+    /// as content a later version replaced, is forgotten.
+    fn noted(&mut self, noted: &HashSet<Hash>, now: Instant) {
+        self.waits.retain(|hash, _| noted.contains(hash));
+        for hash in noted {
+            self.waits.entry(*hash).or_insert(FetchWait {
+                due: now + FETCH_AFTER,
+                wait: FETCH_AFTER,
+            });
+        }
+    }
+
+    fn due(&self, now: Instant) -> Vec<Hash> {
+        let due = self.waits.iter().filter(|(_, w)| w.due <= now);
+        due.map(|(hash, _)| *hash).collect()
+    }
+
+    fn forget(&mut self, hash: &Hash) {
+        self.waits.remove(hash);
+    }
+
+    /// Asking for `hashes` has finished as of `now`, and whatever is still wanted waits longer.
+    fn asked(&mut self, hashes: &[Hash], now: Instant) {
+        for hash in hashes {
+            if let Some(w) = self.waits.get_mut(hash) {
+                w.wait = (w.wait * 2).min(PERIODIC);
+                w.due = now + w.wait;
+            }
+        }
+    }
+
+    fn next_due(&self) -> Option<Instant> {
+        self.waits.values().map(|w| w.due).min()
+    }
 }
 
 /// One swarm's task: its node, its folder and everything this machine knows of it.
@@ -1301,10 +1566,28 @@ struct Worker {
     /// Old keys this machine has asked to move this person from, and removed machines it has
     /// asked to take out, so each is asked once.
     rekeyed: HashSet<String>,
+    /// The claims this machine holds for something alive.
+    claim_book: ClaimBook,
+    /// When something in the book is next due.
+    claims_at: Option<Instant>,
+    /// What the view shows of claims, kept since reading them takes more than a view should.
+    claims_view: Vec<ContextView>,
+    /// For the handles it gives out. Weak, so this task doesn't keep its own channel open.
+    own_tx: mpsc::WeakUnboundedSender<Msg>,
+    /// When to ask the members for each piece of content passes are finding missing.
+    fetches: FetchWaits,
+    /// When the first of those is due. None during a try, as a pass follows that anyway.
+    fetch_at: Option<Instant>,
+    fetching: bool,
 }
 
 impl Worker {
-    fn new(shared: Arc<Shared>, identity: Identity, opened: Opened) -> Worker {
+    fn new(
+        shared: Arc<Shared>,
+        identity: Identity,
+        opened: Opened,
+        own_tx: mpsc::WeakUnboundedSender<Msg>,
+    ) -> Worker {
         let Opened {
             entry,
             node,
@@ -1350,6 +1633,13 @@ impl Worker {
             names_checked: false,
             dropped: false,
             rekeyed: HashSet::new(),
+            claim_book: ClaimBook::new(),
+            claims_at: None,
+            claims_view: Vec::new(),
+            own_tx,
+            fetches: FetchWaits::default(),
+            fetch_at: None,
+            fetching: false,
             shared,
         }
     }
@@ -1366,18 +1656,28 @@ impl Worker {
                     Some(Msg::Identity(id)) => self.set_identity(id).await,
                     Some(Msg::Joining(change, reply)) => self.joining(change, reply).await,
                     Some(Msg::Person(key)) => self.set_person(key),
+                    Some(Msg::ClaimDrop { id }) => self.claim_drop(id),
+                    Some(Msg::ClaimFinish { id, done, reply }) => {
+                        self.claim_finish(id, done, reply).await;
+                    }
                 },
                 ev = next_event(&mut self.events) => self.node_event(ev),
                 Some(()) = next_signal(&mut self.watch) => self.soon(Duration::ZERO),
                 _ = tick.tick() => self.periodic().await,
-                () = sleep_until(self.pass_at) => self.pass().await,
+                () = sleep_until(self.pass_at) => {
+                    self.pass().await;
+                    self.claims_refresh().await;
+                    self.fetch_wanted().await;
+                }
+                () = sleep_until(self.fetch_at) => self.fetch_due().await,
+                () = sleep_until(self.claims_at) => self.claims_due().await,
                 () = sleep_until(self.relay_retry_at) => {
                     self.relay_retry_at = None;
                     self.deliver(true);
                 }
                 Some(done) = self.sends.join_next(), if !self.sends.is_empty() => {
                     if let Ok(sent) = done {
-                        self.sent(sent);
+                        self.sent(sent).await;
                     }
                 }
             }
@@ -1385,6 +1685,7 @@ impl Worker {
             if self.finished {
                 return;
             }
+            self.claims_at = self.next_claims_at();
         }
         self.close().await;
     }
@@ -1408,6 +1709,8 @@ impl Worker {
         self.events = None;
         self.watch = None;
         self.folder = None;
+        self.claim_book.close(&self.name);
+        self.claims_view.clear();
         if let Some(node) = self.node.take() {
             match Arc::try_unwrap(node) {
                 Ok(node) => node.shutdown().await,
@@ -1457,6 +1760,8 @@ impl Worker {
                 self.dropped = true;
                 self.removed_now = true;
             }
+            // Neither is anything to the folder, so nothing here says it's syncing.
+            Ok(NodeEvent::ClaimsChanged | NodeEvent::ClaimHeard) => self.claims_changed(),
             Err(broadcast::error::RecvError::Closed) => self.events = None,
         }
     }
@@ -1479,6 +1784,7 @@ impl Worker {
                 let _ = node.sync_with(&others).await;
             }
         }
+        self.prune_claims(&node).await;
         self.deliver(true);
     }
 
@@ -1525,6 +1831,67 @@ impl Worker {
             }
         }
         self.syncing = false;
+    }
+
+    /// Asks the members for content this pass found missing, once iroh-docs has had its time to
+    /// bring each piece. A pass follows each try, to use what came and see what didn't.
+    async fn fetch_wanted(&mut self) {
+        self.fetch_at = None;
+        let Some(node) = self.node.clone() else {
+            return;
+        };
+        self.fetches.noted(&node.take_missing(), Instant::now());
+        if self.fetching {
+            return;
+        }
+        let hashes = self.still_missing(&node).await;
+        if !hashes.is_empty() {
+            let others: Vec<String> = self
+                .roster
+                .iter()
+                .flat_map(Roster::endpoints)
+                .filter(|e| *e != self.my_endpoint)
+                .collect();
+            if !others.is_empty() {
+                self.fetching = true;
+                self.shared.remember_peers(&node);
+                self.sends.spawn(async move {
+                    node.fetch_content(&hashes, &others, PERIODIC).await;
+                    Sent::Fetched { hashes }
+                });
+                return;
+            }
+            self.fetches.asked(&hashes, Instant::now());
+        }
+        self.fetch_at = self.fetches.next_due();
+    }
+
+    /// A wait has run out. If what it was for is still missing, a pass says whether it's still
+    /// wanted and asks for it. If it came meanwhile, as it does when a read was merely early,
+    /// nothing needs a pass.
+    async fn fetch_due(&mut self) {
+        self.fetch_at = None;
+        let Some(node) = self.node.clone() else {
+            return;
+        };
+        if self.still_missing(&node).await.is_empty() {
+            self.fetch_at = self.fetches.next_due();
+        } else {
+            self.soon(Duration::ZERO);
+        }
+    }
+
+    /// What is due and still isn't here. What has arrived is forgotten.
+    async fn still_missing(&mut self, node: &SwarmNode) -> Vec<Hash> {
+        let mut missing = Vec::new();
+        for hash in self.fetches.due(Instant::now()) {
+            if matches!(node.has_content(hash).await, Ok(true)) {
+                self.fetches.forget(&hash);
+            } else {
+                missing.push(hash);
+            }
+        }
+        missing
     }
 
     /// Ruling 9: the gate follows the roster, every new member machine is synced with, and a
@@ -1739,6 +2106,73 @@ impl Worker {
             Command::SetFolder { folder, .. } => self.set_folder(folder),
             Command::Leave { .. } => self.leave().await,
             Command::Resolve { action, .. } => self.resolve(action).await,
+            Command::ClaimTake {
+                context,
+                key,
+                holder,
+                retake,
+                reply,
+                ..
+            } => {
+                self.claim_take(context, key, holder, retake, reply).await;
+                Ok(())
+            }
+            Command::ClaimsList { context, reply, .. } => {
+                let _ = reply.send(self.claims_list(&context).await);
+                Ok(())
+            }
+            Command::ClaimRelease {
+                context,
+                key,
+                author,
+                reply,
+                ..
+            } => {
+                let _ = reply.send(self.claim_release(&context, &key, &author).await);
+                Ok(())
+            }
+            Command::ClaimReopen {
+                context,
+                key,
+                done_at,
+                reply,
+                ..
+            } => {
+                let _ = reply.send(self.claim_reopen(&context, &key, done_at).await);
+                Ok(())
+            }
+            Command::ClaimContextSet { name, settings, .. } => {
+                self.claim_context_set(name, settings).await
+            }
+            Command::ClaimAgeForTests {
+                context,
+                key,
+                by_secs,
+                ..
+            } => {
+                self.claim_age_for_tests(&context, &key, by_secs);
+                Ok(())
+            }
+            Command::ClaimsSilentForTests { .. } => {
+                if let Some(node) = &self.node {
+                    node.silent_claims_for_tests();
+                }
+                Ok(())
+            }
+            Command::ClaimsUnreadableForTests { context, .. } => {
+                if let Some(node) = &self.node {
+                    node.unreadable_claims_for_tests(&context);
+                }
+                Ok(())
+            }
+            Command::ContentUnfetchedForTests { reply, .. } => {
+                let done = match &self.node {
+                    Some(node) => node.leave_content_unfetched_for_tests().await,
+                    None => Ok(()),
+                };
+                let _ = reply.send(());
+                done.map_err(|e| format!("{e:#}"))
+            }
             Command::Create { .. }
             | Command::Join { .. }
             | Command::SetIdentity { .. }
@@ -2001,6 +2435,7 @@ impl Worker {
         self.leaving = true;
         self.watch = None;
         self.folder = None;
+        self.claim_book.close(&self.name);
         if let Err(e) = self.shared.registry.update(&self.ns, |e| e.leaving = true) {
             self.report(format!("{}: {e:#}", self.name));
         }
@@ -2355,7 +2790,7 @@ impl Worker {
         }
     }
 
-    fn sent(&mut self, sent: Sent) {
+    async fn sent(&mut self, sent: Sent) {
         match sent {
             Sent::Promoted { endpoint, ok } => {
                 self.in_flight.remove(&endpoint);
@@ -2381,6 +2816,12 @@ impl Worker {
                 }
             }
             Sent::Removed | Sent::Answered => {}
+            Sent::ClaimAsked { id, answers } => self.claim_asked(id, answers).await,
+            Sent::Fetched { hashes } => {
+                self.fetches.asked(&hashes, Instant::now());
+                self.fetching = false;
+                self.soon(SETTLE);
+            }
         }
     }
 
@@ -2472,6 +2913,7 @@ impl Worker {
                         .count()
                 })
                 .unwrap_or(0),
+            claims: self.claims_view.clone(),
         }
     }
 }
@@ -2503,6 +2945,172 @@ fn copy_machine(copy: &RelPath) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn noted(hashes: &[Hash]) -> HashSet<Hash> {
+        hashes.iter().copied().collect()
+    }
+
+    #[test]
+    fn a_hash_noted_just_before_anothers_deadline_is_not_due_with_it() {
+        let (a, b) = (Hash::new(b"a"), Hash::new(b"b"));
+        let start = Instant::now();
+        let mut waits = FetchWaits::default();
+        waits.noted(&noted(&[a]), start);
+        let just_before = start + FETCH_AFTER - Duration::from_millis(1);
+        waits.noted(&noted(&[a, b]), just_before);
+        assert!(waits.due(just_before).is_empty());
+        // Being noted again doesn't start a's wait over.
+        assert_eq!(waits.due(start + FETCH_AFTER), vec![a]);
+        assert_eq!(
+            waits.due(just_before + FETCH_AFTER).len(),
+            2,
+            "b's own wait has run out too",
+        );
+    }
+
+    #[test]
+    fn a_stuck_hash_backing_off_does_not_delay_a_new_hash() {
+        let (stuck, new) = (Hash::new(b"stuck"), Hash::new(b"new"));
+        let mut now = Instant::now();
+        let mut waits = FetchWaits::default();
+        waits.noted(&noted(&[stuck]), now);
+        now += FETCH_AFTER;
+        assert_eq!(waits.due(now), vec![stuck]);
+        // Each try that doesn't bring it doubles its wait, up to `PERIODIC`.
+        for wait in [10, 20, 40, 60, 60] {
+            waits.asked(&[stuck], now);
+            let wait = Duration::from_secs(wait);
+            assert_eq!(waits.next_due(), Some(now + wait));
+            assert!(waits.due(now + wait - Duration::from_millis(1)).is_empty());
+            now += wait;
+            assert_eq!(waits.due(now), vec![stuck]);
+        }
+        waits.asked(&[stuck], now);
+        waits.noted(&noted(&[stuck, new]), now);
+        assert_eq!(waits.next_due(), Some(now + FETCH_AFTER));
+        assert_eq!(waits.due(now + FETCH_AFTER), vec![new]);
+    }
+
+    #[test]
+    fn an_arrived_or_no_longer_noted_hash_is_forgotten() {
+        let (arrived, superseded, stuck) = (
+            Hash::new(b"arrived"),
+            Hash::new(b"old"),
+            Hash::new(b"stuck"),
+        );
+        let start = Instant::now();
+        let mut waits = FetchWaits::default();
+        waits.noted(&noted(&[arrived, superseded, stuck]), start);
+        waits.forget(&arrived);
+        waits.noted(&noted(&[stuck]), start);
+        let later = start + FETCH_AFTER;
+        assert_eq!(waits.due(later), vec![stuck]);
+        // Forgotten, it starts over if something wants it again, and a try that ended after it
+        // went doesn't bring it back.
+        waits.asked(&[arrived, stuck], later);
+        waits.noted(&noted(&[stuck, superseded]), later);
+        assert_eq!(waits.next_due(), Some(later + FETCH_AFTER));
+        assert_eq!(waits.due(later + FETCH_AFTER), vec![superseded]);
+        waits.noted(&noted(&[]), later);
+        assert_eq!(waits.next_due(), None);
+    }
+
+    #[test]
+    fn the_next_due_time_is_the_earliest_hash_waits_for() {
+        let (a, b, c) = (Hash::new(b"a"), Hash::new(b"b"), Hash::new(b"c"));
+        let start = Instant::now();
+        let mut waits = FetchWaits::default();
+        assert_eq!(waits.next_due(), None);
+        waits.noted(&noted(&[a]), start);
+        assert_eq!(waits.next_due(), Some(start + FETCH_AFTER));
+        let later = start + Duration::from_secs(3);
+        waits.noted(&noted(&[a, b]), later);
+        assert_eq!(waits.next_due(), Some(start + FETCH_AFTER));
+        // Once a has been asked for, b is next.
+        let asked = start + FETCH_AFTER;
+        waits.asked(&[a], asked);
+        assert_eq!(waits.next_due(), Some(later + FETCH_AFTER));
+        // With b gone, a's longer wait is next, until c comes in ahead of it.
+        waits.noted(&noted(&[a]), asked);
+        assert_eq!(waits.next_due(), Some(asked + FETCH_AFTER * 2));
+        waits.noted(&noted(&[a, c]), asked);
+        assert_eq!(waits.next_due(), Some(asked + FETCH_AFTER));
+    }
+
+    fn view_with_contexts(id: &str, name: &str, contexts: &[&str]) -> SwarmView {
+        SwarmView {
+            id: id.to_string(),
+            name: name.to_string(),
+            folder: PathBuf::new(),
+            my_role: Role::Writer,
+            members: Vec::new(),
+            types: Vec::new(),
+            pending_invites: Vec::new(),
+            attention: Vec::new(),
+            online: 1,
+            machines: 1,
+            syncing: false,
+            last_change: None,
+            removed: false,
+            my_other_machines: 0,
+            claims: contexts
+                .iter()
+                .map(|c| ContextView {
+                    name: c.to_string(),
+                    settings: ContextSettings::default(),
+                    live: Vec::new(),
+                    done: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_claim_finds_its_swarm() {
+        let gone = SwarmView {
+            removed: true,
+            ..view_with_contexts("r", "Gone", &["both", "lonely"])
+        };
+        let views = vec![
+            view_with_contexts("a", "Notes", &["both", "only-a"]),
+            view_with_contexts("b", "Work", &["both"]),
+            view_with_contexts("c", "Twin", &[]),
+            view_with_contexts("d", "Twin", &[]),
+            gone,
+        ];
+        let no_context = |c: &str| Err(format!("No swarm here has a context called {c}."));
+        let not_here = Err("That swarm isn't on this machine.".to_string());
+        for (swarm, context, want) in [
+            (Some("a"), "both", Ok("a".to_string())),
+            // Named, the swarm itself says whether it has the context.
+            (Some("a"), "nope", Ok("a".to_string())),
+            (Some("Work"), "both", Ok("b".to_string())),
+            // An id comes before a name.
+            (Some("r"), "both", Ok("r".to_string())),
+            (Some("Gone"), "both", not_here.clone()),
+            (Some("nope"), "both", not_here),
+            (
+                Some("Twin"),
+                "both",
+                Err("More than one swarm here is called Twin: use its id.".to_string()),
+            ),
+            (None, "only-a", Ok("a".to_string())),
+            (None, "nope", no_context("nope")),
+            // A swarm this machine was removed from has no say.
+            (None, "lonely", no_context("lonely")),
+            (
+                None,
+                "both",
+                Err("both is in more than one swarm: name which one.".to_string()),
+            ),
+        ] {
+            assert_eq!(
+                resolve_swarm(&views, swarm, context),
+                want,
+                "{swarm:?} {context}"
+            );
+        }
+    }
 
     #[test]
     fn a_copy_names_its_machine() {

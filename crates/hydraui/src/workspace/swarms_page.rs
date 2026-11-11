@@ -776,6 +776,9 @@ impl Workspace {
         }
         page = page
             .child(self.swarm_members(swarm, owner, &tz, now, cx))
+            .when_some(self.swarm_claims(swarm, owner, &tz, now, cx), |d, c| {
+                d.child(c)
+            })
             .child(self.swarm_types(swarm, owner, cx))
             .child(self.swarm_leave(swarm, cx));
         page.into_any_element()
@@ -1238,7 +1241,7 @@ pub(super) fn labelled(label: &'static str, control: impl IntoElement, cx: &App)
         .into_any_element()
 }
 
-fn section_label(label: &'static str, cx: &App) -> AnyElement {
+pub(super) fn section_label(label: &'static str, cx: &App) -> AnyElement {
     div()
         .text_xs()
         .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -1616,7 +1619,7 @@ fn with_type(types: &[String], typed: &str) -> Result<Vec<String>, String> {
     Ok(types)
 }
 
-fn now_secs() -> u64 {
+pub(super) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
@@ -1633,7 +1636,7 @@ pub(super) fn day(secs: u64, tz: &TimeZone) -> String {
 }
 
 /// "13:02" today, else "26 Oct 13:02".
-fn when(secs: u64, now: u64, tz: &TimeZone) -> String {
+pub(super) fn when(secs: u64, now: u64, tz: &TimeZone) -> String {
     let (Some(at), Some(today)) = (zoned(secs, tz), zoned(now, tz)) else {
         return String::new();
     };
@@ -1689,6 +1692,7 @@ mod tests {
             last_change: None,
             removed: false,
             my_other_machines: 0,
+            claims: Vec::new(),
         }
     }
 

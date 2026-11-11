@@ -1,6 +1,8 @@
 //! Swarms: folders kept in sync between hydra machines. This crate holds the people (signing
 //! keys), the signed membership roster, each swarm's iroh node, and the invites and hydra
 //! protocol that bring machines in.
+pub mod bridge;
+pub mod claims;
 pub mod decide;
 pub mod device;
 pub mod folder;
@@ -13,10 +15,12 @@ pub mod roster;
 pub mod service;
 pub mod wire;
 
+pub use bridge::{ClaimsClient, TakeReply};
 pub use folder::Attention;
 pub use invites::Invite;
 pub use roster::Role;
 pub use service::{
-    Command, DeviceView, DirectPeers, Identity, MachineView, MachinesView, MemberView, Resolution,
-    ServiceConfig, ServiceEvent, SwarmView, SwarmsService,
+    ClaimHandle, ClaimOutcome, ClaimView, Command, ContextView, DeviceView, DirectPeers, DoneView,
+    Identity, LostReason, MachineView, MachinesView, MemberView, Resolution, ServiceConfig,
+    ServiceEvent, SwarmView, SwarmsService,
 };

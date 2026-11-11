@@ -1802,17 +1802,28 @@ email = \"p@example.com\"
 
     #[test]
     fn with_a_claude_base_the_install_points_claude_at_it() {
-        let f = fx("claude_base = \"/team/claude\"\n");
+        // Absolute on this OS: config.toml refuses a claude_base that isn't, and on
+        // Windows that takes a drive.
+        let base = if cfg!(windows) {
+            "C:/team/claude"
+        } else {
+            "/team/claude"
+        };
+        let f = fx(&format!("claude_base = \"{base}\"\n"));
         let req =
             f.hydra
                 .plugin_install_request("work", &router(), f.free.clone(), ShellKind::Bash);
         let cmd = req.command.unwrap();
         assert!(
-            cmd.starts_with("CLAUDE_CONFIG_DIR='/team/claude' 'claude' 'plugin' 'marketplace'"),
+            cmd.starts_with(&format!(
+                "CLAUDE_CONFIG_DIR='{base}' 'claude' 'plugin' 'marketplace'"
+            )),
             "{cmd}"
         );
         assert!(
-            cmd.contains("&& CLAUDE_CONFIG_DIR='/team/claude' 'claude' 'plugin' 'install'"),
+            cmd.contains(&format!(
+                "&& CLAUDE_CONFIG_DIR='{base}' 'claude' 'plugin' 'install'"
+            )),
             "{cmd}"
         );
         let pwsh = f
@@ -1821,7 +1832,7 @@ email = \"p@example.com\"
             .command
             .unwrap();
         assert!(
-            pwsh.starts_with("$env:CLAUDE_CONFIG_DIR = '/team/claude'; "),
+            pwsh.starts_with(&format!("$env:CLAUDE_CONFIG_DIR = '{base}'; ")),
             "{pwsh}"
         );
         assert!(

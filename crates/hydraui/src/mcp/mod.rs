@@ -1,5 +1,6 @@
 //! hydraui's MCP server (spec: docs/superpowers/specs/2026-10-20-hydraui-mcp-server-design.md):
 //! the token registry and the task-board tools.
+pub mod claims_tools;
 pub mod project_tools;
 pub mod registry;
 pub mod run_tools;
@@ -186,6 +187,10 @@ impl Drop for McpTerminal {
             }
             changes
         };
+        // Outside the registry's lock, which every tool call needs. This never blocks.
+        if let Some(claims) = self.server.claims() {
+            claims.terminal_closed(&self.token);
+        }
         if !changes.is_empty() {
             self.server.broadcast(server::McpEvent::RunChanged(changes));
         }
@@ -291,6 +296,20 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c.what, crate::runs::Decided::Failed(_)))
         );
+    }
+
+    #[test]
+    fn closing_a_terminal_ends_its_claims_outside_the_registry() {
+        let server = server::Server::start().unwrap();
+        let fake = Arc::new(claims_tools::testing::Fake::default());
+        let sessions = Arc::new(claims_tools::ClaimsSessions::new(fake.clone()));
+        server.set_claims(sessions.clone());
+        let term = McpTerminal::register_on(server.clone(), PathBuf::from("C:/w/web"), None);
+        let terminal = server::lock(server.registry()).get(term.token()).unwrap();
+        let args = serde_json::json!({"context": "mail", "key": "m-1"});
+        sessions.call(term.token(), &terminal, "claims_take", &args);
+        drop(term);
+        assert_eq!(*fake.ended.lock().unwrap(), vec![1]);
     }
 
     #[test]

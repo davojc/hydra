@@ -622,8 +622,17 @@ impl Workspace {
                 let slot = self.slot_for_work(orch, window, cx).unwrap_or(orch);
                 self.linear_watch.entry(slot).or_default().starting =
                     Some((ticket.identifier.clone(), SystemTime::now()));
-                self.pending_wakes
-                    .insert(slot, (ticket.identifier.clone(), prompt));
+                // This replaces what waits for the slot, unless that tells of a lost claim.
+                let loss_waits = self
+                    .pending_wakes
+                    .get(&slot)
+                    .is_some_and(|(run, _)| run == super::orchestrator::CLAIMS_WAKE);
+                if loss_waits {
+                    self.queue_wake(slot, ticket.identifier.clone(), prompt);
+                } else {
+                    self.pending_wakes
+                        .insert(slot, (ticket.identifier.clone(), prompt));
+                }
                 self.send_wakes(window, cx);
             }
             Ok(check) => {

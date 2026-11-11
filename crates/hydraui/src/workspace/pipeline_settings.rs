@@ -974,6 +974,8 @@ impl Workspace {
         let tone = if ok { theme::TEAL } else { theme::AMBER };
         Some(
             h_flex()
+                .w_full()
+                .min_w_0()
                 .gap_2()
                 .items_start()
                 .px(px(12.))
@@ -989,6 +991,7 @@ impl Workspace {
                 .child(
                     text(12.5, theme::TEXT_SECONDARY)
                         .flex_1()
+                        .min_w_0()
                         .whitespace_normal()
                         .child(note),
                 )
@@ -1006,6 +1009,7 @@ fn color_swatches(
     let chosen = chosen.unwrap_or(theme::TEAL);
     h_flex()
         .gap_2()
+        .flex_wrap()
         .children(pipeline::COLORS.iter().map(|(name, hex)| {
             let (name, hex) = (*name, *hex);
             let on = hex == chosen;

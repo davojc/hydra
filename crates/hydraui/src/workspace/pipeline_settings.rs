@@ -41,7 +41,34 @@ struct DraftStage {
     /// What its session is asked, before hydraui's note.
     prompt: Entity<TextareaState>,
     /// A Jev stage's question: shown, not edited here.
-    jev: Option<crate::jev_stage::JevStage>,
+    jev: Option<JevDraft>,
+}
+
+/// A Jev step being edited (email triage spec §4): its question, its categories as rows, the
+/// file it reads and the model.
+struct JevDraft {
+    instructions: Entity<TextareaState>,
+    /// Each category's row key, name and meaning.
+    options: Vec<(u64, Entity<InputState>, Entity<InputState>)>,
+    input: Entity<InputState>,
+    model: Entity<InputState>,
+}
+
+impl JevDraft {
+    fn edit(&self, cx: &App) -> crate::jev_stage::JevStage {
+        let text = |i: &Entity<InputState>| i.read(cx).value().trim().to_string();
+        crate::jev_stage::JevStage {
+            input: text(&self.input),
+            model: Some(text(&self.model)).filter(|m| !m.is_empty()),
+            instructions: self.instructions.read(cx).value().trim().to_string(),
+            options: self
+                .options
+                .iter()
+                .map(|(_, k, v)| (text(k), text(v)))
+                .filter(|(k, v)| !(k.is_empty() && v.is_empty()))
+                .collect(),
+        }
+    }
 }
 
 /// The settings being edited for one orchestrator's pipeline file.
@@ -72,13 +99,44 @@ pub(super) struct SettingsDraft {
     linear: LinearDraft,
     slack: SlackDraft,
     schedule: ScheduleDraft,
-    /// The Trigger dropdown: None, Linear, Slack or Schedule.
+    mail: MailDraft,
+    /// The Trigger dropdown: None, Linear, Slack, Schedule or Mail.
     trigger: Entity<SelectState<Vec<&'static str>>>,
     _subs: Vec<Subscription>,
 }
 
 /// The Trigger dropdown's choices, in order.
-const TRIGGERS: [&str; 4] = ["None", "Linear", "Slack", "Schedule"];
+const TRIGGERS: [&str; 5] = ["None", "Linear", "Slack", "Schedule", "Mail"];
+
+/// The Mail section (email triage spec §3): off saves the pipeline without a `[mail]` table.
+struct MailDraft {
+    on: bool,
+    /// When it looks: days and a time, e.g. `weekdays 09:00`.
+    check: Entity<InputState>,
+    /// Days each look covers.
+    look_back: Entity<InputState>,
+    /// A Gmail search narrowing it; empty: `in:inbox`.
+    query: Entity<InputState>,
+    /// The team swarm claims show in; empty: the labels alone.
+    swarm: Entity<InputState>,
+    env: Entity<InputState>,
+}
+
+impl MailDraft {
+    fn edit(&self, cx: &App) -> Option<pipeline::MailSettings> {
+        let text = |i: &Entity<InputState>| i.read(cx).value().trim().to_string();
+        self.on.then(|| pipeline::MailSettings {
+            check: text(&self.check),
+            // Not a number: 0, which the save bar names.
+            look_back_days: text(&self.look_back).parse().unwrap_or(0),
+            query: Some(text(&self.query))
+                .filter(|q| !q.is_empty())
+                .unwrap_or_else(|| "in:inbox".to_string()),
+            env: Some(text(&self.env)).filter(|e| !e.is_empty()),
+            swarm: Some(text(&self.swarm)).filter(|e| !e.is_empty()),
+        })
+    }
+}
 
 /// The Schedule section (core spec §58): off saves the pipeline without a `[schedule]` table.
 struct ScheduleDraft {
@@ -198,7 +256,7 @@ impl SettingsDraft {
             linear: self.linear.edit(cx),
             slack: self.slack.edit(cx),
             schedule: self.schedule.edit(cx),
-            mail: self.saved.mail.clone(),
+            mail: self.mail.edit(cx),
             autostart: self.saved.autostart.clone(),
             product_channel: Some(self.product.read(cx).value().trim().to_string())
                 .filter(|c| !c.is_empty()),
@@ -219,7 +277,7 @@ impl SettingsDraft {
                     folder: s.folder.clone(),
                     bar: s.own.then(|| slider_value(&s.bar, cx)),
                     prompt: s.prompt.read(cx).value().to_string(),
-                    jev: s.jev.clone(),
+                    jev: s.jev.as_ref().map(|j| j.edit(cx)),
                 })
                 .collect(),
         }
@@ -419,7 +477,36 @@ impl Workspace {
                 "Environment; empty: the default",
             ),
         };
-        let chosen = if saved.schedule.is_some() {
+        let ml = saved.mail.clone();
+        let mail = MailDraft {
+            on: ml.is_some(),
+            check: input(
+                ml.as_ref()
+                    .map_or("weekdays 09:00".to_string(), |m| m.check.clone()),
+                "weekdays 09:00 · mon 09:00 · daily 08:30",
+            ),
+            look_back: input(ml.as_ref().map_or(7, |m| m.look_back_days).to_string(), "7"),
+            query: input(
+                ml.as_ref()
+                    .map(|m| m.query.clone())
+                    .filter(|q| q != "in:inbox")
+                    .unwrap_or_default(),
+                "Gmail search; empty: in:inbox",
+            ),
+            swarm: input(
+                ml.as_ref()
+                    .and_then(|m| m.swarm.clone())
+                    .unwrap_or_default(),
+                "Team swarm for claims; empty: Gmail labels alone",
+            ),
+            env: input(
+                ml.as_ref().and_then(|m| m.env.clone()).unwrap_or_default(),
+                "Environment; empty: the default",
+            ),
+        };
+        let chosen = if saved.mail.is_some() {
+            4
+        } else if saved.schedule.is_some() {
             3
         } else if saved.slack.is_some() {
             2
@@ -449,6 +536,7 @@ impl Workspace {
                     d.linear.on = choice == "Linear";
                     d.slack.on = choice == "Slack";
                     d.schedule.on = choice == "Schedule";
+                    d.mail.on = choice == "Mail";
                 })
             },
         ));
@@ -471,6 +559,7 @@ impl Workspace {
             linear,
             slack,
             schedule,
+            mail,
             trigger,
             _subs: Vec::new(),
         };
@@ -522,6 +611,52 @@ impl Workspace {
                 cx.notify();
             }),
         );
+        let jev = s.jev.as_ref().map(|j| {
+            let instructions = cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .auto_grow(2, 8)
+                    .placeholder(
+                        "e.g. A customer email to our integrations team. What are they asking for?",
+                    )
+                    .default_value(j.instructions.clone())
+            });
+            subs.push(
+                cx.subscribe_in(&instructions, window, |_, _, _: &InputEvent, _, cx| {
+                    cx.notify()
+                }),
+            );
+            let mut line = |value: String, placeholder: &'static str| {
+                let i = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder(placeholder)
+                        .default_value(value)
+                });
+                subs.push(cx.subscribe_in(&i, window, |_, _, _: &InputEvent, _, cx| cx.notify()));
+                i
+            };
+            let mut options = Vec::new();
+            // `none` is always offered: its row shows only when it says something else.
+            for (k, v) in j.options.iter().filter(|(k, v)| {
+                !(k.as_str() == crate::jev::NONE && v.as_str() == crate::jev_stage::NONE_TEXT)
+            }) {
+                let row_key = draft.next_key;
+                draft.next_key += 1;
+                options.push((
+                    row_key,
+                    line(k.clone(), "how_to"),
+                    line(v.clone(), "Asks how to do something with the platform"),
+                ));
+            }
+            JevDraft {
+                instructions,
+                options,
+                input: line(j.input.clone(), crate::jev_stage::DEFAULT_INPUT),
+                model: line(
+                    j.model.clone().unwrap_or_default(),
+                    "jev-latest: pin a version",
+                ),
+            }
+        });
         DraftStage {
             key,
             id: s.id.clone(),
@@ -531,7 +666,7 @@ impl Workspace {
             bar,
             own: s.bar.is_some(),
             prompt,
-            jev: s.jev.clone(),
+            jev,
         }
     }
 
@@ -715,6 +850,81 @@ impl Workspace {
         body
     }
 
+    /// The Mail source's fields, read back in words, with what's still missing to read mail.
+    fn render_mail_settings(&self, draft: &SettingsDraft, cx: &App) -> impl IntoElement + use<> {
+        let m = &draft.mail;
+        let mut body = v_flex().gap_2();
+        if !m.on {
+            return body;
+        }
+        let row = |label: &str, input: &Entity<InputState>| {
+            h_flex()
+                .gap_3()
+                .child(
+                    text(12.5, theme::TEXT_SECONDARY)
+                        .w(px(170.))
+                        .flex_none()
+                        .child(label.to_string()),
+                )
+                .child(div().w(px(300.)).child(Input::new(input).small()))
+        };
+        let check = m.check.read(cx).value().to_string();
+        let days = m.look_back.read(cx).value().trim().to_string();
+        let query = Some(m.query.read(cx).value().trim().to_string())
+            .filter(|q| !q.is_empty())
+            .unwrap_or_else(|| "in:inbox".into());
+        let reads = match (crate::schedule::parse(&check), days.parse::<u8>()) {
+            (Ok(w), Ok(d)) if (1..=30).contains(&d) => (
+                format!(
+                    "{}, it looks at the last {d} day{} of {query}: each thread nobody has \
+                     claimed becomes a run, named like MAIL-18C2F0A9. Check mail now in the \
+                     launcher looks at once.",
+                    w.text(),
+                    if d == 1 { "" } else { "s" }
+                ),
+                theme::TEXT_SECONDARY,
+            ),
+            (Err(e), _) => (e.replace("[schedule] every", "Check"), theme::AMBER),
+            _ => ("Look back 1 to 30 days".to_string(), theme::AMBER),
+        };
+        // What it still needs before it can read mail, from hydraui's config.
+        let mut missing = Vec::new();
+        if self.ui.gmail_client().is_none() {
+            missing.push(
+                "set gmail_client_id and gmail_client_secret in config.toml, then Connect Gmail",
+            );
+        }
+        if self
+            .ui
+            .peer_name
+            .as_deref()
+            .is_none_or(|n| n.trim().is_empty())
+        {
+            missing.push("set peer_name in config.toml, so claims say who has each email");
+        }
+        body = body
+            .child(row("Check", &m.check))
+            .child(row("Look back (days)", &m.look_back))
+            .child(row("Gmail search", &m.query))
+            .child(row("Team swarm", &m.swarm))
+            .child(row("In environment", &m.env))
+            .child(
+                text(12., reads.1)
+                    .pl(px(182.))
+                    .whitespace_normal()
+                    .child(reads.0),
+            );
+        if !missing.is_empty() {
+            body = body.child(
+                text(12., theme::AMBER)
+                    .pl(px(182.))
+                    .whitespace_normal()
+                    .child(format!("Before it can read mail: {}.", missing.join("; "))),
+            );
+        }
+        body
+    }
+
     fn with_draft(
         &mut self,
         orch: PaneId,
@@ -727,7 +937,8 @@ impl Workspace {
         cx.notify();
     }
 
-    fn add_stage(&mut self, orch: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+    /// **+ Claude step** or **+ Jev classify step** (`jev`): a new last step to fill in.
+    fn add_stage(&mut self, orch: PaneId, jev: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(mut draft) = self.pipeline_settings.remove(&orch) else {
             return;
         };
@@ -737,14 +948,31 @@ impl Workspace {
         let stage = self.new_stage(
             orch,
             &mut draft,
-            &EditStage {
-                id: None,
-                title: "New stage".into(),
-                skill,
-                folder: None,
-                bar: None,
-                prompt: String::new(),
-                jev: None,
+            &if jev {
+                EditStage {
+                    id: None,
+                    title: "Classify".into(),
+                    skill: None,
+                    folder: None,
+                    bar: Some(70),
+                    prompt: String::new(),
+                    jev: Some(crate::jev_stage::JevStage {
+                        input: crate::jev_stage::DEFAULT_INPUT.into(),
+                        model: None,
+                        instructions: String::new(),
+                        options: [("".to_string(), "".to_string())].into(),
+                    }),
+                }
+            } else {
+                EditStage {
+                    id: None,
+                    title: "New stage".into(),
+                    skill,
+                    folder: None,
+                    bar: None,
+                    prompt: String::new(),
+                    jev: None,
+                }
             },
             default,
             window,
@@ -754,6 +982,41 @@ impl Workspace {
         draft.stages.push(stage);
         draft._subs.extend(subs);
         self.pipeline_settings.insert(orch, draft);
+        cx.notify();
+    }
+
+    /// **+ Category** on Jev step `key`: an empty row to name and describe.
+    fn add_jev_option(
+        &mut self,
+        orch: PaneId,
+        key: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(draft) = self.pipeline_settings.get_mut(&orch) else {
+            return;
+        };
+        let row_key = draft.next_key;
+        draft.next_key += 1;
+        let mut subs = Vec::new();
+        let mut line = |placeholder: &'static str| {
+            let i = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+            subs.push(cx.subscribe_in(&i, window, |_, _, _: &InputEvent, _, cx| cx.notify()));
+            i
+        };
+        let (name, means) = (line("category_name"), line("What it means, for Jev"));
+        let Some(draft) = self.pipeline_settings.get_mut(&orch) else {
+            return;
+        };
+        if let Some(j) = draft
+            .stages
+            .iter_mut()
+            .find(|s| s.key == key)
+            .and_then(|s| s.jev.as_mut())
+        {
+            j.options.push((row_key, name, means));
+        }
+        draft._subs.extend(subs);
         cx.notify();
     }
 
@@ -1096,9 +1359,9 @@ impl Workspace {
                                         .w(px(120. + 165. + 24. + 20.))
                                         .flex_none()
                                         .child(format!(
-                                            "Jev · {} options · reads {}",
+                                            "Jev classify · {} categor{}",
                                             j.options.len(),
-                                            j.input
+                                            if j.options.len() == 1 { "y" } else { "ies" }
                                         )),
                                 )
                             })
@@ -1151,22 +1414,65 @@ impl Workspace {
                                         .child(Textarea::new(&s.prompt))
                                 })
                                 .when_some(s.jev.as_ref(), |d, j| {
-                                    d.child(text(11.5, theme::TEXT_MUTED).child(
-                                        "Jev's question: its confidence is the stage's score, \
-                                             so the bar is how sure it must be. Edit it in the \
-                                             pipeline file (Edit pipelines).",
+                                    let label = |t: &'static str| text(11.5, theme::TEXT_MUTED).child(t);
+                                    d.child(label(
+                                        "Jev's question. Jev picks one category per run, and its \
+                                         confidence is the step's score: the bar is how sure it \
+                                         must be, or a person decides. The next step reads the \
+                                         category in its brief.",
                                     ))
+                                    .child(Textarea::new(&j.instructions))
+                                    .child(label("Categories: a name, and what it means"))
+                                    .children(j.options.iter().map(|(row, name, means)| {
+                                        let row = *row;
+                                        h_flex()
+                                            .gap_2()
+                                            .child(div().w(px(170.)).flex_none().child(Input::new(name).small()))
+                                            .child(div().flex_1().child(Input::new(means).small()))
+                                            .child(
+                                                Button::new(SharedString::from(format!("jev-opt-x-{key}-{row}")))
+                                                    .label("×")
+                                                    .ghost()
+                                                    .xsmall()
+                                                    .on_click(cx.listener(move |ws, _, _, cx| {
+                                                        ws.with_draft(orch, cx, |d| {
+                                                            if let Some(j) = d
+                                                                .stages
+                                                                .iter_mut()
+                                                                .find(|s| s.key == key)
+                                                                .and_then(|s| s.jev.as_mut())
+                                                            {
+                                                                j.options.retain(|(r, _, _)| *r != row);
+                                                            }
+                                                        })
+                                                    })),
+                                            )
+                                    }))
                                     .child(
-                                        text(12.5, theme::TEXT_SECONDARY)
-                                            .whitespace_normal()
-                                            .child(j.instructions.clone()),
+                                        h_flex()
+                                            .gap_3()
+                                            .items_center()
+                                            .child(
+                                                Button::new(SharedString::from(format!("jev-opt-add-{key}")))
+                                                    .label("+ Category")
+                                                    .ghost()
+                                                    .small()
+                                                    .on_click(cx.listener(move |ws, _, window, cx| {
+                                                        ws.add_jev_option(orch, key, window, cx)
+                                                    })),
+                                            )
+                                            .child(text(11.5, theme::TEXT_MUTED).child(
+                                                "None of these is always offered, so Jev can say it can't tell.",
+                                            )),
                                     )
-                                    .children(
-                                        j.options.iter().map(|(k, v)| {
-                                            text(12., theme::TEXT_SECONDARY)
-                                                .whitespace_normal()
-                                                .child(format!("• {k}: {v}"))
-                                        }),
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .items_center()
+                                            .child(label("Reads"))
+                                            .child(div().w(px(150.)).child(Input::new(&j.input).small()))
+                                            .child(label("from the run's folder · Model"))
+                                            .child(div().w(px(220.)).child(Input::new(&j.model).small())),
                                     )
                                 }),
                         ),
@@ -1285,7 +1591,8 @@ impl Workspace {
                                     )
                                     .child(self.render_linear_settings(orch, draft, cx))
                                     .child(self.render_slack_settings(draft))
-                                    .child(self.render_schedule_settings(draft, cx)),
+                                    .child(self.render_schedule_settings(draft, cx))
+                                    .child(self.render_mail_settings(draft, cx)),
                             )
                             // 3. What it does, step by step.
                             .child(
@@ -1301,24 +1608,39 @@ impl Workspace {
                                     .children(self.render_router_note(orch, cx))
                                     .child(stages)
                                     .child(
-                                        div()
-                                            .id(SharedString::from(format!("settings-add-{orch}")))
-                                            .px(px(14.))
-                                            .py(px(10.))
-                                            .rounded(px(10.))
-                                            .border_1()
-                                            .border_dashed()
-                                            .border_color(color(0x2f7d6f))
-                                            .bg(color(0x0f2622))
-                                            .hover(|d| d.bg(color(0x133630)))
-                                            .cursor_pointer()
-                                            .text_center()
-                                            .text_color(color(theme::TEAL))
-                                            .text_size(px(13.5))
-                                            .child("+ Add step")
-                                            .on_click(cx.listener(move |ws, _, window, cx| {
-                                                ws.add_stage(orch, window, cx)
-                                            })),
+                                        h_flex().gap_2().children(
+                                            [
+                                                ("claude", "+ Claude step", false),
+                                                ("jev", "+ Jev classify step", true),
+                                            ]
+                                            .map(
+                                                |(id, label, jev)| {
+                                                    div()
+                                                        .id(SharedString::from(format!(
+                                                            "settings-add-{id}-{orch}"
+                                                        )))
+                                                        .px(px(14.))
+                                                        .py(px(10.))
+                                                        .rounded(px(10.))
+                                                        .border_1()
+                                                        .border_dashed()
+                                                        .border_color(color(0x2f7d6f))
+                                                        .bg(color(0x0f2622))
+                                                        .hover(|d| d.bg(color(0x133630)))
+                                                        .cursor_pointer()
+                                                        .text_center()
+                                                        .text_color(color(theme::TEAL))
+                                                        .text_size(px(13.5))
+                                                        .flex_1()
+                                                        .child(label)
+                                                        .on_click(cx.listener(
+                                                            move |ws, _, window, cx| {
+                                                                ws.add_stage(orch, jev, window, cx)
+                                                            },
+                                                        ))
+                                                },
+                                            ),
+                                        ),
                                     ),
                             )
                             // 4. While a stage waits: one rule for every pipeline, in sight.

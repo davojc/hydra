@@ -135,6 +135,10 @@ pub enum Change {
     SetTypes {
         types: Vec<String>,
     },
+    /// An owner sets the `.swarmignore` patterns every machine applies.
+    SetIgnore {
+        text: String,
+    },
     /// An owner sets the rules for claims in the context `name`.
     SetClaimContext {
         name: String,
@@ -220,11 +224,24 @@ impl SignedChange {
     }
 }
 
+/// The most `.swarmignore` text a roster keeps, so one change cannot bloat every machine's roster.
+pub const MAX_IGNORE_BYTES: usize = 64 * 1024;
+
+/// The ignore patterns an owner set for the swarm.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct IgnoreSetting {
+    pub text: String,
+    pub at: u64,
+    pub by: PersonId,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Roster {
     pub name: String,
     pub members: Vec<Member>,
     pub types: Vec<String>,
+    /// The `.swarmignore` text an owner set, with who set it and when.
+    pub ignore: Option<IgnoreSetting>,
     /// The rules for claims in each context an owner has set up, by context name.
     pub claim_contexts: BTreeMap<String, ContextSettings>,
     /// People taken out of the swarm (removed or left), until an owner adds them back.
@@ -430,6 +447,7 @@ impl Roster {
             name: name.clone(),
             members: Vec::new(),
             types: DEFAULT_TYPES.iter().map(|t| t.to_string()).collect(),
+            ignore: None,
             claim_contexts: BTreeMap::new(),
             removed: Vec::new(),
             retired: BTreeMap::new(),
@@ -577,6 +595,21 @@ impl Roster {
             Change::SetTypes { types } => {
                 if by_owner {
                     self.types = normalise_types(types);
+                }
+            }
+            Change::SetIgnore { text } => {
+                // Changes fold in (time, signature) order, so the later one normally lands last;
+                // comparing anyway keeps the winner the same if the order ever differs.
+                let newer = self
+                    .ignore
+                    .as_ref()
+                    .is_none_or(|i| (c.at, c.by) >= (i.at, i.by));
+                if by_owner && newer && text.len() <= MAX_IGNORE_BYTES {
+                    self.ignore = Some(IgnoreSetting {
+                        text: text.clone(),
+                        at: c.at,
+                        by: c.by,
+                    });
                 }
             }
             Change::SetClaimContext { name, settings } => {
@@ -1106,6 +1139,65 @@ mod tests {
         let mut g = genesis(&o);
         g.sig = "zz".into();
         assert!(fold(&o, &[g]).is_none());
+    }
+
+    #[test]
+    fn an_owners_ignore_change_sets_the_ignore() {
+        let o = PersonKey::generate();
+        let text = "build/\n".to_string();
+        let r = fold(
+            &o,
+            &[
+                genesis(&o),
+                sign(&o, 2, Change::SetIgnore { text: text.clone() }),
+            ],
+        )
+        .unwrap();
+        let set = r.ignore.unwrap();
+        assert_eq!((set.text, set.at, set.by), (text, 2, o.id()));
+    }
+
+    #[test]
+    fn a_writers_ignore_change_is_dropped() {
+        let o = PersonKey::generate();
+        let w = PersonKey::generate();
+        let r = fold(
+            &o,
+            &[
+                genesis(&o),
+                add(&o, 2, &w, "wren", Role::Writer),
+                sign(&w, 3, Change::SetIgnore { text: "x".into() }),
+            ],
+        )
+        .unwrap();
+        assert!(r.ignore.is_none());
+    }
+
+    #[test]
+    fn the_later_ignore_change_wins() {
+        let o = PersonKey::generate();
+        let set = |at, text: &str| sign(&o, at, Change::SetIgnore { text: text.into() });
+        let log = [genesis(&o), set(2, "first"), set(3, "second")];
+        assert_eq!(fold(&o, &log).unwrap().ignore.unwrap().text, "second");
+        // The same either way round.
+        let log = [genesis(&o), set(3, "second"), set(2, "first")];
+        assert_eq!(fold(&o, &log).unwrap().ignore.unwrap().text, "second");
+    }
+
+    #[test]
+    fn an_oversize_ignore_change_is_dropped() {
+        let o = PersonKey::generate();
+        let big = "a".repeat(MAX_IGNORE_BYTES + 1);
+        let r = fold(
+            &o,
+            &[
+                genesis(&o),
+                sign(&o, 2, Change::SetIgnore { text: "ok".into() }),
+                sign(&o, 3, Change::SetIgnore { text: big }),
+            ],
+        )
+        .unwrap();
+        assert_eq!(r.ignore.unwrap().text, "ok");
     }
 
     #[test]

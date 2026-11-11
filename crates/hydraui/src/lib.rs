@@ -19,6 +19,7 @@ pub mod file_tree_view;
 pub mod frame;
 pub mod git_status;
 pub mod git_watch;
+pub mod gmail;
 pub mod grammars;
 pub mod hydra;
 pub mod inbox;

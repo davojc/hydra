@@ -6,6 +6,7 @@ mod all_tasks;
 mod asking;
 mod busy;
 mod finder;
+mod gmail;
 mod history_tab;
 mod inbox_panel;
 mod launcher;

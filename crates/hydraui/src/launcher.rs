@@ -61,6 +61,11 @@ pub enum Action {
     /// The selected environment's Slack, for pipelines that watch a channel: signed in through
     /// the team's Canopy.
     ConnectSlack,
+    /// The selected environment's Gmail sign-in, to the shared mailbox's own Google account,
+    /// for email triage (spec 2026-11-10 §3).
+    ConnectGmail,
+    /// Lists the newest threads in the selected environment's Gmail: proof the sign-in reads.
+    CheckGmail,
     /// The pipelines folder, opened by the system (the example written first if it is empty).
     EditPipelines,
 }
@@ -120,6 +125,8 @@ pub fn entries(
     add("Export pipeline…".into(), Action::ExportPipeline);
     add("Import pipeline…".into(), Action::ImportPipeline);
     add("Connect Slack…".into(), Action::ConnectSlack);
+    add("Connect Gmail…".into(), Action::ConnectGmail);
+    add("Check Gmail…".into(), Action::CheckGmail);
     add("Edit pipelines".into(), Action::EditPipelines);
     add("Keyboard shortcuts".into(), Action::Shortcuts);
     add("Settings".into(), Action::Settings);
@@ -170,6 +177,8 @@ mod tests {
                 "Export pipeline…",
                 "Import pipeline…",
                 "Connect Slack…",
+                "Connect Gmail…",
+                "Check Gmail…",
                 "Edit pipelines",
                 "Keyboard shortcuts",
                 "Settings",
@@ -233,6 +242,8 @@ mod tests {
                 "Export pipeline…",
                 "Import pipeline…",
                 "Connect Slack…",
+                "Connect Gmail…",
+                "Check Gmail…",
                 "Edit pipelines",
                 "Keyboard shortcuts",
                 "Settings",
@@ -248,8 +259,10 @@ mod tests {
         assert_eq!(got[16].action, Action::ExportPipeline);
         assert_eq!(got[17].action, Action::ImportPipeline);
         assert_eq!(got[18].action, Action::ConnectSlack);
-        assert_eq!(got[19].action, Action::EditPipelines);
-        assert_eq!(got[20].action, Action::Shortcuts);
+        assert_eq!(got[19].action, Action::ConnectGmail);
+        assert_eq!(got[20].action, Action::CheckGmail);
+        assert_eq!(got[21].action, Action::EditPipelines);
+        assert_eq!(got[22].action, Action::Shortcuts);
         assert_eq!(got[0].action, Action::OpenFile);
         assert_eq!(got[1].action, Action::SearchFiles);
         assert_eq!(got[4].action, Action::StartPage);

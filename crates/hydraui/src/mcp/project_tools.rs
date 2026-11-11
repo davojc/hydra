@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use hydraui_projects::{
     Decision, DecisionMeta, Milestone, MilestoneStatus, Project, Review, Ticket, TicketKind,
-    TicketMeta, TicketStatus, next_id, progress, repo,
+    TicketMeta, TicketStatus, next_id, progress, repo, stages,
 };
 use serde_json::{Value, json};
 
@@ -900,14 +900,8 @@ fn work(dir: &Path, ticket: &str, name: &str, args: &Value) -> Result<String, St
             let mut t = t.clone();
             // With no pull request there's nothing to review or merge: the summary is the result.
             let done = prs.is_empty();
-            t.meta.prs = prs;
-            t.meta.status = if done {
-                TicketStatus::Done
-            } else {
-                TicketStatus::Testing
-            };
-            // New work, or a fix after a failed test: tested afresh either way.
-            t.meta.check.clear();
+            // On to the next stage: new work, or a fix after a failed check, is checked afresh.
+            stages::after_report(&p.file.stages(), &mut t.meta, prs);
             t.meta.finished_at = Some(progress::now());
             t.body = format!("{}\n\n## Work\n\n{summary}\n", t.body.trim_end());
             repo::write_ticket(dir, &t).map_err(|e| e.to_string())?;
@@ -947,8 +941,9 @@ fn work(dir: &Path, ticket: &str, name: &str, args: &Value) -> Result<String, St
                 )
             } else {
                 format!(
-                    "Reported: {} goes to testing with its pull requests.{filed}",
-                    t.id
+                    "Reported: {} goes to {} with its pull requests.{filed}",
+                    t.id,
+                    where_now(&p.file.stages(), &t.meta)
                 )
             })
         }
@@ -959,21 +954,19 @@ fn work(dir: &Path, ticket: &str, name: &str, args: &Value) -> Result<String, St
                 .ok_or("Say whether the check passed (passed: true or false).")?;
             let summary = need(args, "summary")?;
             let mut t = t.clone();
-            t.meta.check = if passed { "passed" } else { "failed" }.into();
+            let all = p.file.stages();
+            stages::after_check(&all, &mut t.meta, passed, FAILURES_BEFORE_A_PERSON);
             t.meta.check_note = summary.clone();
             let next = if passed {
-                t.meta.status = TicketStatus::InReview;
-                "It's in review."
+                format!("It goes to {}.", where_now(&all, &t.meta))
+            } else if t.meta.status == TicketStatus::InProgress {
+                // Back to a work session, which reads what failed and fixes it.
+                format!(
+                    "{} fixes it next, then it's checked again.",
+                    where_now(&all, &t.meta)
+                )
             } else {
-                t.meta.check_failures += 1;
-                if t.meta.check_failures < FAILURES_BEFORE_A_PERSON {
-                    // Back to a work session, which reads what failed and fixes it.
-                    t.meta.status = TicketStatus::InProgress;
-                    "A work session fixes it next, then it's tested again."
-                } else {
-                    t.meta.status = TicketStatus::Testing;
-                    "It failed before, so the run stops here for a person."
-                }
+                "It failed before, so the run stops here for a person.".to_string()
             };
             t.body = format!(
                 "{}\n\n## Check\n\n{}: {summary}\n",
@@ -989,6 +982,11 @@ fn work(dir: &Path, ticket: &str, name: &str, args: &Value) -> Result<String, St
         }
         _ => Err(format!("unknown tool {name}")),
     }
+}
+
+/// Where a ticket is now, in words: its stage's title, or its status.
+fn where_now(all: &[stages::Stage], t: &hydraui_projects::TicketMeta) -> String {
+    stages::current(all, t).map_or_else(|| t.status.label().to_lowercase(), |s| s.title.clone())
 }
 
 fn read_resource(dir: &Path, name: &str) -> Result<String, String> {
@@ -1736,6 +1734,91 @@ mod tests {
         assert!(run(&reg, "plan", "ticket_show", json!({})).is_error);
         assert!(run(&reg, "stranger", "plan_show", json!({})).is_error);
         assert!(call(&reg, "plan", "tasks_read", &json!({})).is_none());
+    }
+
+    #[test]
+    fn a_projects_own_stages_decide_where_a_ticket_goes() {
+        let (_tmp, mut reg, dir) = setup();
+        run(
+            &reg,
+            "plan",
+            "plan_propose_milestone",
+            json!({"title": "Model", "points": [{"point": "x", "detail": "y"}]}),
+        );
+        approve(&dir, "M1");
+        run(
+            &reg,
+            "plan",
+            "plan_propose_ticket",
+            json!({"milestone": "M1", "title": "Schema", "description": "x", "repo": "iov42/a"}),
+        );
+        approve(&dir, "PG-1");
+        let mut file = repo::load(&dir).unwrap().file;
+        file.stages = stages::defaults();
+        file.stages.push(stages::Stage {
+            id: "security".into(),
+            title: "Security review".into(),
+            kind: stages::StageKind::Check,
+            ..Default::default()
+        });
+        repo::write_project_file(&dir, &file).unwrap();
+        for (token, session) in [
+            (
+                "work",
+                Session::Work {
+                    dir: dir.clone(),
+                    ticket: "PG-1".into(),
+                },
+            ),
+            (
+                "check",
+                Session::Check {
+                    dir: dir.clone(),
+                    ticket: "PG-1".into(),
+                },
+            ),
+        ] {
+            reg.project_sessions.insert(token.into(), session);
+        }
+        let pr = "https://github.com/iov42/a/pull/1";
+        let out = run(
+            &reg,
+            "work",
+            "ticket_report",
+            json!({"prs": [pr], "summary": "x"}),
+        );
+        assert!(out.text.contains("goes to Testing"), "{}", out.text);
+        let passed = json!({"passed": true, "summary": "All green."});
+        let out = run(&reg, "check", "ticket_checked", passed.clone());
+        assert!(out.text.contains("goes to Security review"), "{}", out.text);
+        let t = repo::load(&dir).unwrap().tickets.remove(0);
+        assert_eq!(
+            (t.meta.status, t.meta.stage.as_str()),
+            (TicketStatus::Testing, "security")
+        );
+        assert_eq!(t.meta.passed, vec!["testing".to_string()]);
+        let failed = json!({"passed": false, "summary": "Token in a log line."});
+        let out = run(&reg, "check", "ticket_checked", failed);
+        assert!(
+            out.text.contains("Development fixes it next"),
+            "{}",
+            out.text
+        );
+        let t = repo::load(&dir).unwrap().tickets.remove(0);
+        assert_eq!(
+            (t.meta.status, t.meta.stage.as_str(), t.meta.check.as_str()),
+            (TicketStatus::InProgress, "dev", "failed")
+        );
+        // The fix is checked from the first check stage again.
+        run(
+            &reg,
+            "work",
+            "ticket_report",
+            json!({"prs": [pr], "summary": "fixed"}),
+        );
+        let t = repo::load(&dir).unwrap().tickets.remove(0);
+        assert_eq!(t.meta.stage, "testing");
+        assert!(t.meta.passed.is_empty());
     }
 
     #[test]

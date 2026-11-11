@@ -776,3 +776,43 @@ keep a description's old text, so hydraui reads it and works out the difference 
   (§14.6): Claude proposes changes, started tickets get follow-ups, the lead accepts.
 - **When:** **Check Linear** by hand, at linking, and at each of the project's sync times
   for the lead.
+### 14.8 Stages, set like a pipeline's (added 2026-11-11)
+
+A project's tickets used to be worked in fixed steps: development, then testing, with prompts nobody could see. Now a project sets its own stages in `project.toml`, shared through the projects repo, as a pipeline does:
+
+```toml
+[[stage]]
+id = "dev"
+title = "Development"
+skill = "angular"          # optional: every session of this stage loads it, by name
+prompt = """…"""           # optional: empty is hydraui's default wording
+fix_prompt = """…"""       # optional: what a work stage is told after a check failed
+
+[[stage]]
+id = "testing"
+title = "Testing"
+kind = "check"             # work (the default) or check
+on_fail = "dev"            # optional: the earlier work stage a failure goes back to
+```
+
+- **Kinds.** A **work** stage makes the change and opens pull requests. A **check** stage passes or fails them.
+- **The defaults.** A project with no `[[stage]]` has Development then Testing, in today's words. Saving the stages exactly as the defaults writes nothing, and a prompt left as its default is stored empty, so improved wording reaches it.
+- **Rules.**
+  - There must be at least one stage, and the first is a work stage.
+  - Ids are plain: lowercase letters, digits and dashes.
+  - Ids and titles are unique.
+  - `on_fail` names an earlier work stage.
+- **Statuses.** Tickets keep the six statuses. A ticket in progress or testing also records its `stage`; empty means the first stage of that kind, so tickets from before stages read as before. `passed` lists the check stages it has passed since its work last changed.
+- **Moves.**
+  - `ticket_report` moves a ticket to the stage after its own, and forgets passes from that stage on. Past the last stage, it goes to In review. With no pull requests it goes to Done, as before.
+  - `ticket_checked` passed moves it to the next stage. Failed sends it back to `on_fail` (else the nearest earlier work stage) to fix, then a second failure leaves it for a person, as before.
+- **Prompts.**
+  - Each stage's prompt is its own text with `{id} {title} {project} {stage} {branch} {place} {prs} {what_failed} {skills}` filled in.
+  - hydraui then adds how the session finishes (`ticket_report` or `ticket_checked`, and `ticket_ask`). That part can't be changed: the run moves on by it.
+  - A stage's `skill` wins over the engineer's own choice for that repo.
+- **The progress check.** A merged pull request moves a ticket to Done only once it has passed every check stage. Until then a ticket before testing goes to testing, so the run checks it. A ticket already being checked stays where it is.
+- **Done tickets that skipped a check,** such as ones done before a check stage was added: the milestone says how many, with **Check them**. That moves each back to the first check stage it hasn't passed, for the run to check.
+- **The board.** Columns are Todo, one per stage, In review, then Done. A card's **Move to** lists the same. Moving a ticket to a stage reruns that stage and every check after it.
+- **Project settings.** A **Stages** card lists them in order, with each one's kind, where a failure goes, its wording and its skill.
+  - **Preview** shows exactly what a session is told, for a ticket at that stage or an example. A work stage's preview also shows its fix prompt.
+  - The lead has **Edit…**, ↑ and ↓, **Remove**, **+ Work stage**, **+ Check stage** and **Back to the defaults**. Changes go out with the plan for review, like any other change to the project.

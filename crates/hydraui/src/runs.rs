@@ -357,6 +357,20 @@ pub enum Choice {
     Checked { note: String },
 }
 
+/// The stage a run waiting on you stopped at, and its latest session's token: what **Open
+/// session** shows, or **Resume session** reopens when its terminal is gone. `None` unless the
+/// run needs you.
+pub fn waiting_session(r: &Run) -> Option<(usize, String)> {
+    if !matches!(r.state, RunState::NeedsYou(_)) {
+        return None;
+    }
+    let si = r
+        .stages
+        .iter()
+        .position(|s| s.status == StageStatus::Stopped)?;
+    Some((si, r.stages[si].latest()?.session.clone()?))
+}
+
 /// Whether `used`, a skill a session invoked, is `wanted`: the same name, ignoring case, or a
 /// plugin's copy of it (`plugin:name`).
 fn same_skill(used: &str, wanted: &str) -> bool {
@@ -2244,6 +2258,37 @@ mod tests {
         runs.person(&id, checked("Approved on GitHub")).unwrap();
         assert_eq!(status(&runs, &id, 0), StageStatus::Passed);
         assert_eq!(runs.run(&id).unwrap().state, RunState::Running);
+    }
+
+    #[test]
+    fn a_stage_waiting_on_you_names_its_session_and_takes_a_resumed_one() {
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        assert_eq!(
+            waiting_session(runs.run(&id).unwrap()),
+            Some((1, "t2".to_string()))
+        );
+        // Its terminal closed; a person resumes its conversation in a new one.
+        runs.relink(&id, 1, "t9", "2. B");
+        assert_eq!(
+            waiting_session(runs.run(&id).unwrap()),
+            Some((1, "t9".to_string()))
+        );
+        assert_eq!(status(&runs, &id, 1), StageStatus::Stopped);
+        assert!(matches!(
+            runs.run(&id).unwrap().state,
+            RunState::NeedsYou(_)
+        ));
+        // The resumed session is the stage's now: it can look again and report.
+        runs.look_again(&id, 1).unwrap();
+        assert!(runs.report("t9", rated(90)).is_ok());
+        // Nothing waits: no session to open.
+        assert_eq!(waiting_session(runs.run(&id).unwrap()), None);
+        // A ticket a person stopped still has its stopped stage, but waits on nobody.
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        runs.person(&id, Choice::Stop).unwrap();
+        assert_eq!(waiting_session(runs.run(&id).unwrap()), None);
     }
 
     #[test]

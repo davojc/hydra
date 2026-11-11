@@ -80,6 +80,8 @@ fn after(renames: &[(RelPath, RelPath)], p: &RelPath) -> RelPath {
 #[derive(Debug, Clone)]
 struct Move {
     from: RelPath,
+    /// The source as its author wrote it.
+    written_from: RelPath,
     to: RelPath,
     /// The target as its author wrote it, before older moves were applied to the folder it is
     /// in. The `Present` written beside a move, and its author's own copy of the folder, are
@@ -151,6 +153,15 @@ impl Moves {
         }
     }
 
+    /// `p` after every move older than `at`, whatever the entry's time: where a folder its
+    /// author named before `at` had got to by then.
+    fn before(&self, at: u64, p: &RelPath) -> RelPath {
+        self.list
+            .iter()
+            .filter(|m| m.at < at)
+            .fold(p.clone(), |p, m| rebase(&p, &m.from, &m.to).unwrap_or(p))
+    }
+
     /// Where an entry for `p` made at `at` belongs now.
     pub fn map(&self, p: &RelPath, at: u64) -> RelPath {
         self.place(p, at, false).0
@@ -208,6 +219,7 @@ fn build(
                 list.push(Move {
                     from,
                     to,
+                    written_from: d.to.clone(),
                     written_to: d.from.clone(),
                     at: w.at,
                     author: d.author.clone(),
@@ -230,6 +242,7 @@ fn build(
         list.push(Move {
             from,
             to,
+            written_from: w.from.clone(),
             written_to: w.to.clone(),
             at: w.at,
             author: w.author.clone(),
@@ -259,8 +272,6 @@ fn target(list: &[Move], to: &RelPath) -> RelPath {
 
 /// A folder in the swarm folder as scanned now.
 pub struct DiskFolder {
-    /// False when the dot rule or an owner's `.swarmignore` takes it out of the layout.
-    pub may_sync: bool,
     /// Nothing in it but empty folders.
     pub empty: bool,
     /// The names of the files directly in it that sync.
@@ -274,6 +285,10 @@ pub struct DiskFolder {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct KnownFolder {
     pub applied_at: u64,
+    /// The newest record this machine has told its person about for this folder, so a notice
+    /// fires once whatever order records arrive in. Older indexes have none.
+    #[serde(default)]
+    pub notified_at: u64,
 }
 
 pub struct LayoutInput<'a> {
@@ -292,6 +307,13 @@ pub struct LayoutInput<'a> {
     pub now: u64,
     /// The newest file entry under a folder, for catch-up records (Ruling A).
     pub newest_file_at: &'a dyn Fn(&RelPath) -> Option<u64>,
+    /// False when the dot rule or an owner's `.swarmignore` takes a folder out of the layout
+    /// (`SyncRules::folder_may_sync`). Such a folder is never created, published or moved into.
+    pub syncs_folder: &'a dyn Fn(&RelPath) -> bool,
+    /// This machine's folder index has never been saved (an upgrade, or a lost index). Only then
+    /// does an unknown folder on disk follow the swarm's moves and deletes; otherwise it is the
+    /// person's own new folder.
+    pub first_pass: bool,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -459,8 +481,7 @@ fn counts(
         disk.iter()
             .any(|(p, f)| !f.synced_files.is_empty() && below(p.as_str(), d.as_str()).is_some())
     };
-    here.may_sync
-        && (here.empty || holds_synced())
+    (here.empty || holds_synced())
         && ancestors(d).all(|a| in_layout(&a) || counts(&a, disk, in_layout))
 }
 
@@ -476,6 +497,8 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
         writer,
         now,
         newest_file_at,
+        syncs_folder,
+        first_pass,
     } = *input;
     let moves = Moves::from_moves(log);
     let words = newest_words(records, &moves);
@@ -491,19 +514,16 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
             .map(|w| w.at);
         newest_file_at(p).into_iter().chain(records).max()
     };
-    let ignored: Vec<&RelPath> = disk
-        .iter()
-        .filter(|(_, d)| !d.may_sync)
-        .map(|(p, _)| p)
-        .collect();
-    let is_ignored = |p: &RelPath| {
-        ignored
-            .iter()
-            .any(|i| below(p.as_str(), i.as_str()).is_some())
-    };
-    let renamed_by_me = |p: &RelPath, before: u64| {
+    let is_ignored = |p: &RelPath| !syncs_folder(p) || ancestors(p).any(|a| !syncs_folder(&a));
+    // My rename to `p` lost to `winner` only when both started from the same folder: a rename
+    // of the folder after mine, by someone who had seen it, is an ordinary later rename.
+    let lost_to = |p: &RelPath, winner: &Move| {
         log.iter().any(|v| {
-            v.author == me && v.record.at < before && fold(&v.record.to) == fold(p.as_str())
+            v.author == me
+                && v.record.at < winner.at
+                && fold(&v.record.to) == fold(p.as_str())
+                && fold(moves.before(v.record.at, &winner.written_from).as_str())
+                    == fold(&v.record.from)
         })
     };
 
@@ -514,6 +534,8 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
     let mut remove_if_empty: Vec<RelPath> = Vec::new();
     let mut forget: BTreeSet<RelPath> = BTreeSet::new();
     let mut know: BTreeMap<RelPath, u64> = BTreeMap::new();
+    // `notified_at` for index entries written here, where it isn't the old entry's.
+    let mut told: BTreeMap<RelPath, u64> = BTreeMap::new();
     let mut notices: Vec<LayoutNotice> = Vec::new();
     // Folded paths a known folder answers for, so records there don't also create it.
     let mut handled: HashSet<String> = known.keys().map(|k| fold(k.as_str())).collect();
@@ -558,12 +580,13 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
             && folded(&now_there.subfolders) == last_subfolders(k)
     };
 
-    // A folder on disk the index doesn't have, at a path a move in force took away, with no
-    // synced file there newer than the move, is the old folder: it follows the move rather than
-    // bringing the old name back (a machine that upgrades, or catches up, after the rename). One
-    // that is this writer's own rename, found this scan, is left to the rename check.
+    // On a first pass, a folder on disk the index doesn't have, at a path a move in force took
+    // away, with no synced file there newer than the move, is the old folder: it follows the move
+    // rather than bringing the old name back for everyone. One that is this writer's own rename,
+    // found this scan, is left to the rename check. Once the index exists, such a folder is one
+    // the person made, and §5.2 says a newer folder at the old name stands.
     let mut followers: BTreeMap<&RelPath, (RelPath, Option<&Move>)> = BTreeMap::new();
-    for d in disk.keys() {
+    for d in disk.keys().filter(|_| first_pass) {
         if known.contains_key(d) || is_ignored(d) || (writer && missing.iter().any(|k| same(k, d)))
         {
             continue;
@@ -573,6 +596,16 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
             followers.insert(d, (t, last));
         }
     }
+    // A known folder whose move would take it somewhere the rules keep out of the layout isn't
+    // moved; it leaves the layout here, as an ignored folder does.
+    placed.retain(|k, (t, _)| {
+        let keep = !is_ignored(t);
+        if !keep {
+            forget.insert((*k).clone());
+        }
+        keep
+    });
+    followers.retain(|_, (t, _)| !is_ignored(t));
     let targets: BTreeMap<&RelPath, RelPath> = placed
         .iter()
         .chain(&followers)
@@ -588,13 +621,15 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
 
     for (k, (t, last)) in &placed {
         let applied = known[*k].applied_at;
+        let notified = known[*k].notified_at;
         let mut applied_now = applied;
         if t != *k {
             forget.insert((*k).clone());
+            told.insert(t.clone(), notified);
             applied_now = applied.max(last.map_or(0, |m| m.at));
             if let Some(m) = last
                 && m.author != me
-                && renamed_by_me(k, m.at)
+                && lost_to(k, m)
             {
                 notices.push(LayoutNotice::RenameLost {
                     mine: (*k).clone(),
@@ -630,8 +665,8 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
             }
             _ => {}
         }
-        // Someone else deleted the folder under its old name after this machine renamed it, so
-        // the delete stopped at the old name: the renamer is told, once.
+        // Someone else deleted the folder under its old name, before or after this machine renamed
+        // it, and the renamed folder survived: the renamer is told, once.
         let late_delete = log
             .iter()
             .filter(|m| m.author == me)
@@ -646,21 +681,21 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
                     .filter(move |(p, _)| fold(p.as_str()) == fold(&m.record.from))
                     .flat_map(|(_, versions)| versions)
                     .filter(move |v| {
-                        matches!(v.record.state, FolderState::Deleted)
-                            && v.author != me
-                            && v.record.at > m.record.at
+                        matches!(v.record.state, FolderState::Deleted) && v.author != me
                     })
             })
-            .filter(|v| v.record.at > applied)
+            .filter(|v| v.record.at > notified)
             .max_by_key(|v| v.record.at);
+        let mut notified_now = notified;
         if let Some(v) = late_delete {
             notices.push(LayoutNotice::MyRenameSurvivedDelete {
                 to: t.clone(),
                 by_machine: v.machine.clone(),
             });
-            applied_now = applied_now.max(v.record.at);
+            notified_now = v.record.at;
+            told.insert(t.clone(), notified_now);
         }
-        if t != *k || applied_now != applied {
+        if t != *k || applied_now != applied || notified_now != notified {
             know.insert(t.clone(), applied_now);
         }
     }
@@ -686,6 +721,7 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
             let carried = renames.iter().find_map(|(from, to)| rebase(k, from, to));
             if let Some(c) = carried.filter(|c| disk.contains_key(c)) {
                 carried_along.insert(k);
+                told.insert(c.clone(), known[*k].notified_at);
                 know.insert(c.clone(), known[*k].applied_at);
                 claimed.insert(c);
                 continue;
@@ -744,10 +780,11 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
             let (t, _) = moves.place(k, applied, true);
             handled.insert(fold(t.as_str()));
             match word(&t) {
-                Some(w) if w.at > applied && w.present() => {
+                Some(w) if w.at > applied && w.present() && !is_ignored(&t) => {
                     create.insert(t.clone());
                     if t != **k {
                         forget.insert((*k).clone());
+                        told.insert(t.clone(), known[*k].notified_at);
                     }
                     know.insert(t, w.at);
                 }
@@ -774,6 +811,18 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
         }
         let f = after(&disk_moves, d);
         if handled.contains(&fold(f.as_str())) || !joined.insert(fold(f.as_str())) {
+            continue;
+        }
+        // On a first pass, a folder deleted elsewhere that an older hydra left here, emptied of
+        // synced files, is that deleted folder: it goes, rather than coming back for everyone
+        // with a record newer than the delete.
+        if first_pass
+            && let Some(w) = word(&f)
+            && w.deleted()
+            && !live_under(&f)
+            && newest_file_at(&f).is_none_or(|at| at <= w.at)
+        {
+            remove_if_empty.push(f);
             continue;
         }
         match word(&f) {
@@ -860,7 +909,20 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
             .collect(),
         know: know
             .into_iter()
-            .map(|(p, applied_at)| (p, KnownFolder { applied_at }))
+            .map(|(p, applied_at)| {
+                let notified_at = told
+                    .get(&p)
+                    .copied()
+                    .or_else(|| known.get(&p).map(|k| k.notified_at))
+                    .unwrap_or(0);
+                (
+                    p,
+                    KnownFolder {
+                        applied_at,
+                        notified_at,
+                    },
+                )
+            })
             .collect(),
         notices,
     }
@@ -931,7 +993,6 @@ mod tests {
     /// A folder with nothing in it but empty folders.
     fn empty(subfolders: &[&str]) -> DiskFolder {
         DiskFolder {
-            may_sync: true,
             empty: true,
             synced_files: BTreeSet::new(),
             subfolders: names(subfolders),
@@ -942,7 +1003,6 @@ mod tests {
     /// when `synced` is empty.
     fn holding(synced: &[&str], subfolders: &[&str]) -> DiskFolder {
         DiskFolder {
-            may_sync: true,
             empty: false,
             synced_files: names(synced),
             subfolders: names(subfolders),
@@ -957,6 +1017,8 @@ mod tests {
         records: BTreeMap<RelPath, Vec<FolderVersion>>,
         moves: Vec<MoveVersion>,
         files: BTreeMap<RelPath, u64>,
+        ignored: Vec<RelPath>,
+        first_pass: bool,
     }
 
     impl World {
@@ -969,6 +1031,8 @@ mod tests {
                 records: BTreeMap::new(),
                 moves: Vec::new(),
                 files: BTreeMap::new(),
+                ignored: Vec::new(),
+                first_pass: false,
             }
         }
 
@@ -979,8 +1043,30 @@ mod tests {
             }
         }
 
-        fn known(mut self, p: &str, applied_at: u64) -> World {
-            self.known.insert(rel(p), KnownFolder { applied_at });
+        fn known(self, p: &str, applied_at: u64) -> World {
+            self.known_told(p, applied_at, 0)
+        }
+
+        fn known_told(mut self, p: &str, applied_at: u64, notified_at: u64) -> World {
+            self.known.insert(
+                rel(p),
+                KnownFolder {
+                    applied_at,
+                    notified_at,
+                },
+            );
+            self
+        }
+
+        /// An owner's `.swarmignore` line (or the dot rule) takes `p` out of the layout.
+        fn ignore(mut self, p: &str) -> World {
+            self.ignored.push(rel(p));
+            self
+        }
+
+        /// This machine's folder index has never been saved: an upgrade, or a lost index.
+        fn first_pass(mut self) -> World {
+            self.first_pass = true;
             self
         }
 
@@ -1019,6 +1105,11 @@ mod tests {
                     .map(|(_, at)| *at)
                     .max()
             };
+            let syncs = |folder: &RelPath| {
+                !self.ignored.iter().any(|i| {
+                    folder == i || folder.as_str().starts_with(&format!("{}/", i.as_str()))
+                })
+            };
             plan(&LayoutInput {
                 me: &self.me,
                 known: &self.known,
@@ -1029,6 +1120,8 @@ mod tests {
                 writer: self.writer,
                 now: NOW,
                 newest_file_at: &newest,
+                syncs_folder: &syncs,
+                first_pass: self.first_pass,
             })
         }
     }
@@ -1172,7 +1265,16 @@ mod tests {
         assert_eq!(pairs(&p.disk_moves), vec![("notes", "docs")]);
         assert!(p.publish.is_empty() && p.create.is_empty());
         assert_eq!(paths(&p.forget), vec!["notes"]);
-        assert_eq!(p.know, vec![(rel("docs"), KnownFolder { applied_at: 20 })]);
+        assert_eq!(
+            p.know,
+            vec![(
+                rel("docs"),
+                KnownFolder {
+                    applied_at: 20,
+                    notified_at: 0
+                }
+            )]
+        );
     }
 
     fn two_renames(me: &str) -> World {
@@ -1453,13 +1555,8 @@ mod tests {
         let p = World::writer("me")
             .known("build", 5)
             .record("build", present(5, "x"))
-            .disk(
-                "build",
-                DiskFolder {
-                    may_sync: false,
-                    ..empty(&[])
-                },
-            )
+            .ignore("build")
+            .disk("build", empty(&[]))
             .plan();
         assert_eq!(paths(&p.forget), vec!["build"]);
         assert!(p.publish.is_empty() && p.remove_if_empty.is_empty() && p.create.is_empty());
@@ -1507,6 +1604,7 @@ mod tests {
     fn a_folder_found_at_a_moved_away_name_follows_the_move() {
         // On upgrade: no index, A still on disk with its old files, and A has moved to B.
         let p = World::writer("z")
+            .first_pass()
             .rename("A", "B", 20, "x")
             .record("B", present(20, "x"))
             .file("B/old.md", 10)
@@ -1518,6 +1616,7 @@ mod tests {
 
         // A file there newer than the move means A was made again after it: it stays.
         let p = World::writer("z")
+            .first_pass()
             .rename("A", "B", 20, "x")
             .record("B", present(20, "x"))
             .file("A/new.md", 30)
@@ -1551,27 +1650,101 @@ mod tests {
 
     #[test]
     fn a_rename_that_survives_a_delete_tells_the_renamer_once() {
-        let w = World::writer("x")
-            .rename("notes", "docs", 20, "x")
-            .record("docs", present(20, "x"))
-            .record("notes", deleted(30, "y"))
-            .disk("docs", empty(&[]));
-        let p = w.known("docs", 20).plan();
-        assert_eq!(
-            p.notices,
-            vec![LayoutNotice::MyRenameSurvivedDelete {
-                to: rel("docs"),
-                by_machine: machine("y"),
-            }]
-        );
-        assert_eq!(p.know, vec![(rel("docs"), KnownFolder { applied_at: 30 })]);
-        assert!(p.remove_if_empty.is_empty());
+        // y deleted notes before x's rename and after it: x is told either way, once.
+        for delete_at in [10, 30] {
+            let w = || {
+                World::writer("x")
+                    .rename("notes", "docs", 20, "x")
+                    .record("docs", present(20, "x"))
+                    .record("notes", deleted(delete_at, "y"))
+                    .disk("docs", empty(&[]))
+            };
+            let p = w().known("docs", 20).plan();
+            assert_eq!(
+                p.notices,
+                vec![LayoutNotice::MyRenameSurvivedDelete {
+                    to: rel("docs"),
+                    by_machine: machine("y"),
+                }],
+                "{delete_at}"
+            );
+            assert_eq!(
+                p.know,
+                vec![(
+                    rel("docs"),
+                    KnownFolder {
+                        applied_at: 20,
+                        notified_at: delete_at
+                    }
+                )]
+            );
+            assert!(p.remove_if_empty.is_empty());
+            assert_eq!(
+                w().known_told("docs", 20, delete_at).plan(),
+                LayoutPlan::default(),
+                "{delete_at}"
+            );
+        }
+    }
 
-        let w = World::writer("x")
-            .rename("notes", "docs", 20, "x")
-            .record("docs", present(20, "x"))
-            .record("notes", deleted(30, "y"))
-            .disk("docs", empty(&[]));
-        assert_eq!(w.known("docs", 30).plan(), LayoutPlan::default());
+    #[test]
+    fn a_later_rename_of_my_renamed_folder_is_not_a_lost_rename() {
+        // y renamed notes to b; x, having seen that, later renamed b to c.
+        let p = World::writer("y")
+            .rename("notes", "b", 10, "y")
+            .record("b", present(10, "y"))
+            .rename("b", "c", 30, "x")
+            .record("c", present(30, "x"))
+            .known("b", 10)
+            .disk("b", empty(&[]))
+            .plan();
+        assert_eq!(pairs(&p.disk_moves), vec![("b", "c")]);
+        assert!(p.notices.is_empty(), "{:?}", p.notices);
+    }
+
+    #[test]
+    fn a_new_folder_at_a_moved_away_name_is_a_create_once_the_index_exists() {
+        let p = World::writer("z")
+            .rename("A", "B", 20, "x")
+            .record("B", present(20, "x"))
+            .known("B", 20)
+            .disk("B", empty(&[]))
+            .disk("A", empty(&[]))
+            .plan();
+        assert!(p.disk_moves.is_empty(), "{:?}", p.disk_moves);
+        assert_eq!(published(&p), vec![("A", rec(FolderState::Present, NOW))]);
+    }
+
+    #[test]
+    fn on_upgrade_a_folder_deleted_elsewhere_is_removed_not_brought_back() {
+        let p = World::writer("z")
+            .first_pass()
+            .record("notes", deleted(10, "x"))
+            .disk("notes", empty(&[]))
+            .plan();
+        assert!(p.publish.is_empty(), "{:?}", p.publish);
+        assert_eq!(paths(&p.remove_if_empty), vec!["notes"]);
+        assert!(p.know.is_empty());
+
+        // Once the index exists, a folder made at that name is the user's create.
+        let p = World::writer("z")
+            .record("notes", deleted(10, "x"))
+            .disk("notes", empty(&[]))
+            .plan();
+        assert_eq!(
+            published(&p),
+            vec![("notes", rec(FolderState::Present, NOW))]
+        );
+    }
+
+    #[test]
+    fn a_folder_an_owner_ignores_is_never_created() {
+        let p = World::reader("r")
+            .ignore("build")
+            .record("build", present(10, "x"))
+            .record("build/out", present(10, "x"))
+            .plan();
+        assert!(p.create.is_empty(), "{:?}", p.create);
+        assert!(p.know.is_empty());
     }
 }

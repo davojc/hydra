@@ -2290,3 +2290,66 @@ async fn a_file_made_under_the_old_name_after_the_rename_stays_there() {
     o.shutdown().await;
     w.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rename_done_on_disk_before_a_crash_is_taken_up_not_published_again() {
+    let (mut o, mut w) = synced_pair("notes/a.md").await;
+    o.rename("notes", "docs");
+    o.reconcile().await;
+    w.hears_moves(1).await;
+    // The writer's pass renamed the folder on disk and stopped before saving its index: the index
+    // it starts with still has `notes`.
+    w.rename("notes", "docs");
+    w.reconcile().await;
+    w.reconcile().await;
+    let roster = w.roster().await;
+    let me = w.node.author();
+    assert_eq!(w.node.moves(&roster).await.unwrap().len(), 1);
+    let records = w.node.folder_records(&roster).await.unwrap();
+    let mine: Vec<_> = records
+        .iter()
+        .flat_map(|(p, vs)| vs.iter().map(move |v| (p, v)))
+        .filter(|(_, v)| v.author == me)
+        .filter(|(p, _)| p.as_str() == "notes")
+        .collect();
+    assert!(mine.is_empty(), "{mine:?}");
+    let entries = w.node.file_entries(&roster).await.unwrap();
+    let mine: Vec<_> = entries
+        .iter()
+        .flat_map(|(p, h)| h.entries.iter().map(move |e| (p, e)))
+        .filter(|(_, e)| e.author == me)
+        .collect();
+    assert!(mine.is_empty(), "{mine:?}");
+    assert_eq!(w.read("docs/a.md").as_deref(), Some("one"));
+    assert!(!w.is_dir("notes"));
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_clashing_file_that_doesnt_sync_stays_where_it_was() {
+    let (mut o, mut w) = synced_pair("notes/a.md").await;
+    cut_off(&o, &w);
+    w.write("docs/b.md", "b");
+    w.write("docs/Thumbs.db", "docs'");
+    w.write("notes/Thumbs.db", "notes'");
+    w.reconcile().await;
+    o.rename("notes", "docs");
+    o.reconcile().await;
+    reconnect(&o, &w).await;
+    w.settle("the folders merged on the writer", |s| {
+        s.read("docs/a.md").as_deref() == Some("one")
+    })
+    .await;
+    w.reconcile().await;
+    assert_eq!(w.read("docs/Thumbs.db").as_deref(), Some("docs'"));
+    assert_eq!(w.read("notes/Thumbs.db").as_deref(), Some("notes'"));
+    let mut names: Vec<String> = std::fs::read_dir(w.path("docs"))
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["Thumbs.db", "a.md", "b.md"]);
+    o.shutdown().await;
+    w.shutdown().await;
+}

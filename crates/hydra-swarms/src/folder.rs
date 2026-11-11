@@ -42,6 +42,15 @@ const INDEX_FILE: &str = "index.json";
 /// path can start with `/`, so it never meets a file's key, and an older hydra reading the file
 /// skips it as it skips any key that isn't a safe path.
 const FOLDERS_KEY: &str = "/folders";
+
+/// The folder index as kept under `FOLDERS_KEY`. An older hydra reads every value in the file as
+/// a file entry before it skips keys that aren't paths, so the folders sit one level down, under
+/// a name that is no field of a file entry. At the top, a folder named `base` or `seen` would be
+/// read as that field, fail, and have the older hydra call the whole index damaged.
+#[derive(Serialize, Deserialize)]
+struct FolderIndex {
+    known: BTreeMap<String, KnownFolder>,
+}
 /// Ends the name a folder is given for a moment while its name changes only by case, on a disk
 /// that won't take that change directly. The scan treats it as any folder: if hydra stops part
 /// way, the folder is seen as renamed to this name, never as its files deleted.
@@ -604,7 +613,9 @@ impl Folder {
     ) -> anyhow::Result<(LayoutPass, BTreeMap<RelPath, FileHistory>)> {
         let records = node.folder_records(roster).await?;
         let mut log = node.moves(roster).await?;
-        let mut history = mapped(raw, &Moves::from_moves(&log), syncs);
+        let moves = Moves::from_moves(&log);
+        self.take_up_moves_done(&moves, &scan.folders);
+        let mut history = mapped(raw, &moves, syncs);
         let live_files: BTreeSet<RelPath> = history
             .iter()
             .filter(|(_, h)| newest(&h.entries).is_some_and(|e| e.hash.is_some()))
@@ -673,7 +684,7 @@ impl Folder {
                 pass.waiting.push((from, to));
                 continue;
             }
-            match self.move_folder(&from, &to, machine, tz) {
+            match self.move_folder(&from, &to, rules, (machine, tz)) {
                 Ok(clashes) => {
                     self.settle_move(scan, &history, &from, &to, clashes);
                     pass.done.push((from, to));
@@ -697,6 +708,39 @@ impl Folder {
             }
         }
         Ok((pass, history))
+    }
+
+    /// Takes up renames already carried out on disk that the folder index doesn't show: a pass
+    /// that renamed a folder and stopped before saving leaves the index with the old name and the
+    /// disk with the new one. Read as they stand, the plan would take that as a rename made here
+    /// and publish it again, dated now, pulling in work someone made at the old name since, or as
+    /// a delete of the old name and its files. A known folder gone from disk whose move in force
+    /// lands on a folder that is on disk is that move, done.
+    fn take_up_moves_done(&mut self, moves: &Moves, disk: &BTreeMap<RelPath, DiskFolder>) {
+        let Some(folders) = self.folders.as_mut() else {
+            return;
+        };
+        let on_disk: HashMap<String, &RelPath> = disk.keys().map(|p| (fold(p), p)).collect();
+        let mut done: Vec<(RelPath, RelPath)> = folders
+            .iter()
+            .filter(|(k, _)| !disk.contains_key(*k))
+            .filter_map(|(k, kf)| {
+                // Only the moves newer than what this machine last agreed on for it.
+                let t = moves.map(k, kf.applied_at.saturating_add(1));
+                let d = on_disk.get(&fold(&t))?;
+                (fold(&t) != fold(k)).then(|| (k.clone(), (*d).clone()))
+            })
+            .collect();
+        // Deepest first, so a subfolder renamed on its own isn't carried along by its parent.
+        done.sort_by_key(|(k, _)| std::cmp::Reverse(k.as_str().matches('/').count()));
+        for (k, d) in done {
+            if let Some(folders) = self.folders.as_mut()
+                && let Some(v) = folders.remove(&k)
+            {
+                folders.entry(d.clone()).or_insert(v);
+            }
+            self.rebase_index(&k, &d, &BTreeSet::new());
+        }
     }
 
     /// The folder layout's part of a pass after the file pass: removes the folders the swarm
@@ -886,7 +930,7 @@ impl Folder {
     }
 
     /// Renames the folder `from` to `to` on disk, with everything in it. When another folder is
-    /// already at `to`, the two merge (spec §5.2): each thing in `from` moves in, and a file
+    /// already at `to`, the two merge (spec §5.2): each thing in `from` moves in, and a synced file
     /// meeting a file of the same name goes in under a conflict-copy name, so nothing is
     /// overwritten or deleted. Gives those files, as (path before, copy). On an error `from` is
     /// as it was, or, part way through a merge, holds what hadn't moved yet; the next pass
@@ -895,8 +939,8 @@ impl Folder {
         &self,
         from: &RelPath,
         to: &RelPath,
-        machine: &str,
-        tz: &TimeZone,
+        rules: &SyncRules,
+        (machine, tz): (&str, &TimeZone),
     ) -> anyhow::Result<Vec<(RelPath, RelPath)>> {
         let src = self
             .folder_at(from)?
@@ -907,7 +951,7 @@ impl Folder {
         let mut clashes = Vec::new();
         match other_entry(&dst, &src)? {
             Some(there) if fs::symlink_metadata(&there).is_ok_and(|m| m.is_dir()) => {
-                self.merge(&src, &there, (from, to), (machine, tz), &mut clashes)?;
+                self.merge(&src, &there, (from, to), rules, (machine, tz), &mut clashes)?;
             }
             Some(_) => bail!("something other than a folder is at {}", to.as_str()),
             None => rename_dir(&src, &dst)?,
@@ -921,6 +965,7 @@ impl Folder {
         src: &Path,
         dst: &Path,
         (from, to): (&RelPath, &RelPath),
+        rules: &SyncRules,
         (machine, tz): (&str, &TimeZone),
         clashes: &mut Vec<(RelPath, RelPath)>,
     ) -> anyhow::Result<()> {
@@ -943,8 +988,8 @@ impl Folder {
             };
             let there_is_dir = fs::symlink_metadata(&there).is_ok_and(|m| m.is_dir());
             if kind.is_dir() && there_is_dir {
-                self.merge(&s, &there, (&old, &new), (machine, tz), clashes)?;
-            } else if kind.is_file() {
+                self.merge(&s, &there, (&old, &new), rules, (machine, tz), clashes)?;
+            } else if kind.is_file() && rules.file_syncs(&new) {
                 let bytes = fs::read(&s).with_context(|| format!("reading {}", s.display()))?;
                 // Named for the version it holds, as a conflict copy taken from the swarm is, so
                 // machines merging the same folders name it the same.
@@ -962,8 +1007,9 @@ impl Folder {
                 fs::rename(&s, &path).with_context(|| format!("moving {}", s.display()))?;
                 clashes.push((old, copy));
             }
-            // Anything else (a folder meeting a file, a link) stays where it is, and so does
-            // the old folder holding it.
+            // Anything else stays where it is, and so does the old folder holding it: a folder
+            // meeting a file, a link, and a file that doesn't sync, which hydra never renames
+            // (spec §6).
         }
         // Empty now, unless something had to stay.
         let _ = fs::remove_dir(src);
@@ -1826,8 +1872,12 @@ impl Folder {
             index.insert(p.as_str().to_string(), serde_json::to_value(e)?);
         }
         if let Some(folders) = &self.folders {
-            let folders: BTreeMap<&str, &KnownFolder> =
-                folders.iter().map(|(p, k)| (p.as_str(), k)).collect();
+            let folders = FolderIndex {
+                known: folders
+                    .iter()
+                    .map(|(p, k)| (p.as_str().to_string(), k.clone()))
+                    .collect(),
+            };
             index.insert(FOLDERS_KEY.to_string(), serde_json::to_value(folders)?);
         }
         let bytes = serde_json::to_vec_pretty(&index)?;
@@ -2084,8 +2134,9 @@ fn mapped(
 }
 
 /// What is at `dst` other than the folder `src` itself, as the disk spells it: an entry of that
-/// exact name, or else one differing only by case, which a disk that ignores case takes as the
-/// same name.
+/// exact name, or else, on a disk that ignores case, one differing only by case. On a disk that
+/// minds case such a folder is another folder, and merging into it would leave the files in it
+/// under a spelling the index doesn't have, to be read as deleted.
 fn other_entry(dst: &Path, src: &Path) -> anyhow::Result<Option<PathBuf>> {
     let (Some(dir), Some(name)) = (dst.parent(), dst.file_name()) else {
         return Ok(None);
@@ -2106,10 +2157,21 @@ fn other_entry(dst: &Path, src: &Path) -> anyhow::Result<Option<PathBuf>> {
             }
         })
     };
-    let found = entries
-        .iter()
-        .find(|p| named(p, false))
-        .or_else(|| entries.iter().find(|p| named(p, true)));
+    // Whether the disk takes `dst` as `p`: it finds something under the name as given, and it is
+    // `p` itself.
+    let same_name = |p: &&PathBuf| {
+        fs::symlink_metadata(dst).is_ok()
+            && match (fs::canonicalize(dst), fs::canonicalize(p)) {
+                (Ok(a), Ok(b)) => a == b,
+                _ => true,
+            }
+    };
+    let found = entries.iter().find(|p| named(p, false)).or_else(|| {
+        entries
+            .iter()
+            .find(|p| named(p, true))
+            .filter(|p| same_name(p))
+    });
     // The folder itself, spelled differently: a change of case, not another folder.
     let itself = |p: &PathBuf| {
         p == src
@@ -2204,10 +2266,11 @@ fn load_index(
         serde_json::from_slice(&bytes).with_context(damaged)?;
     let folders = match raw.remove(FOLDERS_KEY) {
         Some(v) => {
-            let map: BTreeMap<String, KnownFolder> =
-                serde_json::from_value(v).with_context(damaged)?;
+            let folders: FolderIndex = serde_json::from_value(v).with_context(damaged)?;
             Some(
-                map.into_iter()
+                folders
+                    .known
+                    .into_iter()
                     .filter_map(|(p, k)| Some((safe_rel_path(&p)?, k)))
                     .collect(),
             )
@@ -2493,5 +2556,85 @@ mod tests {
         let (files, folders) = load_index(&file).unwrap();
         assert_eq!(files[&rel("notes/a.md")].base, Some(base));
         assert_eq!(folders.unwrap()[&rel("notes")].applied_at, 5);
+    }
+
+    #[test]
+    fn a_folder_named_like_an_index_field_leaves_the_index_readable_by_an_older_hydra() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(INDEX_FILE);
+        let mut f = Folder::new(dir.path().join("root"), dir.path().to_path_buf(), false).unwrap();
+        let names = ["base", "from", "held", "seen", "published"];
+        f.folders = Some(
+            names
+                .iter()
+                .map(|n| {
+                    let k = KnownFolder {
+                        applied_at: 7,
+                        notified_at: 0,
+                    };
+                    (rel(n), k)
+                })
+                .collect(),
+        );
+        f.save().unwrap();
+        // How an older hydra reads it: every key, whatever it is, as a file entry.
+        let older: Result<BTreeMap<String, Entry>, _> =
+            serde_json::from_slice(&fs::read(&file).unwrap());
+        assert!(older.is_ok(), "{older:?}");
+        let (_, folders) = load_index(&file).unwrap();
+        let folders = folders.unwrap();
+        for n in names {
+            assert_eq!(folders[&rel(n)].applied_at, 7);
+        }
+    }
+
+    /// Makes `dir` mind case where the disk allows it (Windows, per folder). Elsewhere it already
+    /// does (Linux) or can't (macOS), and the test checks whichever it is.
+    fn mind_case(dir: &Path) {
+        if cfg!(windows) {
+            let _ = std::process::Command::new("fsutil")
+                .args(["file", "setCaseSensitiveInfo"])
+                .arg(dir)
+                .arg("enable")
+                .output();
+        }
+    }
+
+    #[test]
+    fn a_folder_differing_only_by_case_is_another_folder_on_a_disk_that_minds_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        mind_case(&root);
+        fs::create_dir(root.join("Docs")).unwrap();
+        fs::create_dir(root.join("x")).unwrap();
+        let found = other_entry(&root.join("docs"), &root.join("x")).unwrap();
+        if root.join("docs").exists() {
+            // The disk ignores case: `docs` is `Docs`.
+            assert_eq!(found, Some(root.join("Docs")));
+        } else {
+            assert_eq!(found, None, "Docs is another folder here, not docs");
+            // And the exact name wins over one differing by case.
+            fs::create_dir(root.join("docs")).unwrap();
+            let found = other_entry(&root.join("docs"), &root.join("x")).unwrap();
+            assert_eq!(found, Some(root.join("docs")));
+        }
+    }
+
+    #[test]
+    fn a_folder_differing_only_by_case_is_the_same_folder_on_a_disk_that_ignores_case() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("Docs")).unwrap();
+        fs::create_dir(dir.path().join("x")).unwrap();
+        let found = other_entry(&dir.path().join("docs"), &dir.path().join("x")).unwrap();
+        let expected = dir
+            .path()
+            .join("docs")
+            .exists()
+            .then(|| dir.path().join("Docs"));
+        assert_eq!(found, expected);
+        // A change of case of the folder itself is never another folder.
+        let found = other_entry(&dir.path().join("docs"), &dir.path().join("Docs")).unwrap();
+        assert_eq!(found, None);
     }
 }

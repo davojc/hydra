@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::node::{FolderRecord, FolderState, FolderVersion};
+use crate::node::{FolderRecord, FolderState, FolderVersion, MoveRecord, MoveVersion};
 use crate::paths::{RelPath, safe_rel_path};
 
 /// `p` folded for comparing folder paths the way `folder.rs` compares file paths, so `Notes` and
@@ -90,7 +90,7 @@ struct Move {
     machine: String,
 }
 
-/// A `MovedTo` record as its author wrote it.
+/// A move as its author wrote it in the move log.
 struct Written {
     from: RelPath,
     to: RelPath,
@@ -106,22 +106,20 @@ pub struct Moves {
 }
 
 impl Moves {
-    /// Every author's `MovedTo` counts, not only the newest record at a path. A later rename of
-    /// the same folder then moves on from where the earlier one put it, so both sides' work ends
-    /// in the later name, and a folder made later under the old name doesn't undo the rename.
-    pub fn from_records(records: &BTreeMap<RelPath, Vec<FolderVersion>>) -> Moves {
-        let mut written: Vec<Written> = records
+    /// Built from the move log, where no move is ever overwritten, so every move counts, not only
+    /// the newest record at a path. A later rename of the same folder then moves on from where
+    /// the earlier one put it, so both sides' work ends in the later name, and a folder made
+    /// later under the old name doesn't undo the rename.
+    pub fn from_moves(log: &[MoveVersion]) -> Moves {
+        let mut written: Vec<Written> = log
             .iter()
-            .flat_map(|(from, versions)| {
-                versions.iter().filter_map(move |v| match &v.record.state {
-                    FolderState::MovedTo { to } => Some(Written {
-                        from: from.clone(),
-                        to: safe_rel_path(to)?,
-                        at: v.record.at,
-                        author: v.author.clone(),
-                        machine: v.machine.clone(),
-                    }),
-                    _ => None,
+            .filter_map(|v| {
+                Some(Written {
+                    from: safe_rel_path(&v.record.from)?,
+                    to: safe_rel_path(&v.record.to)?,
+                    at: v.record.at,
+                    author: v.author.clone(),
+                    machine: v.machine.clone(),
                 })
             })
             .collect();
@@ -286,6 +284,8 @@ pub struct LayoutInput<'a> {
     /// Folders scanned now, those under a dot folder left out.
     pub disk: &'a BTreeMap<RelPath, DiskFolder>,
     pub records: &'a BTreeMap<RelPath, Vec<FolderVersion>>,
+    /// The move log (`SwarmNode::moves`).
+    pub moves: &'a [MoveVersion],
     /// Synced file paths after `Moves::map`, tombstones left out.
     pub live_files: &'a BTreeSet<RelPath>,
     pub writer: bool,
@@ -297,6 +297,8 @@ pub struct LayoutInput<'a> {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct LayoutPlan {
     pub publish: Vec<(RelPath, FolderRecord)>,
+    /// Moves to add to the move log, one per rename made here.
+    pub publish_moves: Vec<MoveRecord>,
     /// Renames made here: the index and disk names follow.
     pub detected_moves: Vec<(RelPath, RelPath)>,
     /// Incoming renames to carry out on disk, in order; each source is the folder's path once
@@ -326,6 +328,18 @@ pub enum LayoutNotice {
     },
     MyDeleteKept {
         path: RelPath,
+    },
+    /// On the machine that deleted `path`: someone else's rename kept it, at `to`.
+    MyDeleteLostToRename {
+        path: RelPath,
+        to: RelPath,
+        by_machine: String,
+    },
+    /// On the machine that renamed a folder to `to`: someone else deleted it under its old name,
+    /// after the rename, so the delete didn't reach it.
+    MyRenameSurvivedDelete {
+        to: RelPath,
+        by_machine: String,
     },
 }
 
@@ -457,12 +471,13 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
         known,
         disk,
         records,
+        moves: log,
         live_files,
         writer,
         now,
         newest_file_at,
     } = *input;
-    let moves = Moves::from_records(records);
+    let moves = Moves::from_moves(log);
     let words = newest_words(records, &moves);
     let live = live_below(&words, live_files);
     let word = |p: &RelPath| words.get(&fold(p.as_str()));
@@ -487,14 +502,13 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
             .any(|i| below(p.as_str(), i.as_str()).is_some())
     };
     let renamed_by_me = |p: &RelPath, before: u64| {
-        records.values().flatten().any(|v| {
-            v.author == me
-                && v.record.at < before
-                && matches!(&v.record.state, FolderState::MovedTo { to } if fold(to) == fold(p.as_str()))
+        log.iter().any(|v| {
+            v.author == me && v.record.at < before && fold(&v.record.to) == fold(p.as_str())
         })
     };
 
     let mut publish: Vec<(RelPath, FolderRecord)> = Vec::new();
+    let mut publish_moves: Vec<MoveRecord> = Vec::new();
     let mut detected_moves: Vec<(RelPath, RelPath)> = Vec::new();
     let mut create: BTreeSet<RelPath> = BTreeSet::new();
     let mut remove_if_empty: Vec<RelPath> = Vec::new();
@@ -518,8 +532,52 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
             placed.insert(k, moves.place(k, kf.applied_at, true));
         }
     }
-    let targets: BTreeMap<&RelPath, RelPath> =
-        placed.iter().map(|(k, (t, _))| (*k, t.clone())).collect();
+    let folded =
+        |names: &BTreeSet<String>| -> BTreeSet<String> { names.iter().map(|n| fold(n)).collect() };
+    // The folder's last-synced contents, by name: the synced files directly in it, and the
+    // known folders directly in it.
+    let last_files = |k: &RelPath| -> BTreeSet<String> {
+        live_files
+            .iter()
+            .filter_map(|f| below(f.as_str(), k.as_str()))
+            .filter(|rest| !rest.is_empty() && !rest.contains('/'))
+            .map(fold)
+            .collect()
+    };
+    let last_subfolders = |k: &RelPath| -> BTreeSet<String> {
+        known
+            .keys()
+            .filter_map(|c| below(c.as_str(), k.as_str()))
+            .filter(|rest| !rest.is_empty() && !rest.contains('/'))
+            .map(fold)
+            .collect()
+    };
+    let same = |k: &RelPath, d: &RelPath| {
+        let now_there = &disk[d];
+        folded(&now_there.synced_files) == last_files(k)
+            && folded(&now_there.subfolders) == last_subfolders(k)
+    };
+
+    // A folder on disk the index doesn't have, at a path a move in force took away, with no
+    // synced file there newer than the move, is the old folder: it follows the move rather than
+    // bringing the old name back (a machine that upgrades, or catches up, after the rename). One
+    // that is this writer's own rename, found this scan, is left to the rename check.
+    let mut followers: BTreeMap<&RelPath, (RelPath, Option<&Move>)> = BTreeMap::new();
+    for d in disk.keys() {
+        if known.contains_key(d) || is_ignored(d) || (writer && missing.iter().any(|k| same(k, d)))
+        {
+            continue;
+        }
+        let (t, last) = moves.place(d, newest_file_at(d).unwrap_or(0), false);
+        if t != *d {
+            followers.insert(d, (t, last));
+        }
+    }
+    let targets: BTreeMap<&RelPath, RelPath> = placed
+        .iter()
+        .chain(&followers)
+        .map(|(k, (t, _))| (*k, t.clone()))
+        .collect();
     let disk_moves = order_disk_moves(&targets);
     handled.extend(targets.values().map(|t| fold(t.as_str())));
     let incoming: HashSet<String> = targets
@@ -572,6 +630,36 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
             }
             _ => {}
         }
+        // Someone else deleted the folder under its old name after this machine renamed it, so
+        // the delete stopped at the old name: the renamer is told, once.
+        let late_delete = log
+            .iter()
+            .filter(|m| m.author == me)
+            .filter(|m| {
+                safe_rel_path(&m.record.to).is_some_and(|to| {
+                    fold(moves.map(&to, m.record.at).as_str()) == fold(t.as_str())
+                })
+            })
+            .flat_map(|m| {
+                records
+                    .iter()
+                    .filter(move |(p, _)| fold(p.as_str()) == fold(&m.record.from))
+                    .flat_map(|(_, versions)| versions)
+                    .filter(move |v| {
+                        matches!(v.record.state, FolderState::Deleted)
+                            && v.author != me
+                            && v.record.at > m.record.at
+                    })
+            })
+            .filter(|v| v.record.at > applied)
+            .max_by_key(|v| v.record.at);
+        if let Some(v) = late_delete {
+            notices.push(LayoutNotice::MyRenameSurvivedDelete {
+                to: t.clone(),
+                by_machine: v.machine.clone(),
+            });
+            applied_now = applied_now.max(v.record.at);
+        }
         if t != *k || applied_now != applied {
             know.insert(t.clone(), applied_now);
         }
@@ -585,35 +673,12 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
         let candidates: Vec<&RelPath> = disk
             .keys()
             .filter(|d| {
-                !known.contains_key(*d) && !is_ignored(d) && !incoming.contains(&fold(d.as_str()))
+                !known.contains_key(*d)
+                    && !followers.contains_key(*d)
+                    && !is_ignored(d)
+                    && !incoming.contains(&fold(d.as_str()))
             })
             .collect();
-        let folded = |names: &BTreeSet<String>| -> BTreeSet<String> {
-            names.iter().map(|n| fold(n)).collect()
-        };
-        // The folder's last-synced contents, by name: the synced files directly in it, and the
-        // known folders directly in it.
-        let last_files = |k: &RelPath| -> BTreeSet<String> {
-            live_files
-                .iter()
-                .filter_map(|f| below(f.as_str(), k.as_str()))
-                .filter(|rest| !rest.is_empty() && !rest.contains('/'))
-                .map(fold)
-                .collect()
-        };
-        let last_subfolders = |k: &RelPath| -> BTreeSet<String> {
-            known
-                .keys()
-                .filter_map(|c| below(c.as_str(), k.as_str()))
-                .filter(|rest| !rest.is_empty() && !rest.contains('/'))
-                .map(fold)
-                .collect()
-        };
-        let same = |k: &RelPath, d: &RelPath| {
-            let now_there = &disk[d];
-            folded(&now_there.synced_files) == last_files(k)
-                && folded(&now_there.subfolders) == last_subfolders(k)
-        };
         let mut carried_along: HashSet<&RelPath> = HashSet::new();
         for k in &missing {
             forget.insert((*k).clone());
@@ -652,6 +717,11 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
                         },
                     ));
                     publish.push((d.clone(), present_at(now)));
+                    publish_moves.push(MoveRecord {
+                        from: k.as_str().to_string(),
+                        to: d.as_str().to_string(),
+                        at: now,
+                    });
                     detected_moves.push(((*k).clone(), d.clone()));
                     know.insert(d.clone(), now);
                     claimed.insert(d.clone());
@@ -694,6 +764,12 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
     let mut joined: HashSet<String> = HashSet::new();
     for d in disk.keys() {
         if in_layout(d) || is_ignored(d) {
+            continue;
+        }
+        if let Some((t, last)) = followers.get(d) {
+            let at = word(t).map_or(0, |w| w.at).max(last.map_or(0, |m| m.at));
+            joined.insert(fold(t.as_str()));
+            know.insert(t.clone(), at);
             continue;
         }
         let f = after(&disk_moves, d);
@@ -745,6 +821,26 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
         {
             continue;
         }
+        // This machine deleted the folder under an old name, and someone else's rename kept it.
+        for m in log.iter().filter(|m| m.author != me) {
+            let lands_here = safe_rel_path(&m.record.to)
+                .is_some_and(|to| fold(moves.map(&to, m.record.at).as_str()) == folded);
+            let deleted_by_me = records
+                .iter()
+                .filter(|(q, _)| fold(q.as_str()) == fold(&m.record.from))
+                .flat_map(|(_, versions)| versions)
+                .any(|v| v.author == me && matches!(v.record.state, FolderState::Deleted));
+            if lands_here
+                && deleted_by_me
+                && let Some(from) = safe_rel_path(&m.record.from)
+            {
+                notices.push(LayoutNotice::MyDeleteLostToRename {
+                    path: from,
+                    to: p.clone(),
+                    by_machine: m.machine.clone(),
+                });
+            }
+        }
         know.insert(p.clone(), w.at);
         create.insert(p);
     }
@@ -753,6 +849,7 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
     remove_if_empty.sort_by(|a, b| depth(b).cmp(&depth(a)).then_with(|| a.cmp(b)));
     LayoutPlan {
         publish,
+        publish_moves,
         detected_moves,
         disk_moves,
         create: create.into_iter().collect(),
@@ -779,6 +876,7 @@ fn present_at(at: u64) -> FolderRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::node::{MoveRecord, MoveVersion};
 
     const NOW: u64 = 1_000_000;
 
@@ -808,6 +906,18 @@ mod tests {
 
     fn moved(to: &str, at: u64, author: &str) -> FolderVersion {
         version(FolderState::MovedTo { to: to.into() }, at, author)
+    }
+
+    fn move_by(from: &str, to: &str, at: u64, author: &str) -> MoveVersion {
+        MoveVersion {
+            record: MoveRecord {
+                from: from.into(),
+                to: to.into(),
+                at,
+            },
+            author: author.into(),
+            machine: machine(author),
+        }
     }
 
     fn rec(state: FolderState, at: u64) -> FolderRecord {
@@ -845,6 +955,7 @@ mod tests {
         known: BTreeMap<RelPath, KnownFolder>,
         disk: BTreeMap<RelPath, DiskFolder>,
         records: BTreeMap<RelPath, Vec<FolderVersion>>,
+        moves: Vec<MoveVersion>,
         files: BTreeMap<RelPath, u64>,
     }
 
@@ -856,6 +967,7 @@ mod tests {
                 known: BTreeMap::new(),
                 disk: BTreeMap::new(),
                 records: BTreeMap::new(),
+                moves: Vec::new(),
                 files: BTreeMap::new(),
             }
         }
@@ -884,6 +996,13 @@ mod tests {
             self
         }
 
+        /// A rename as its author writes it: `MovedTo` at the old path, and the move in the log.
+        fn rename(self, from: &str, to: &str, at: u64, author: &str) -> World {
+            let mut w = self.record(from, moved(to, at, author));
+            w.moves.push(move_by(from, to, at, author));
+            w
+        }
+
         /// A live synced file, with the time of its newest entry.
         fn file(mut self, p: &str, at: u64) -> World {
             self.files.insert(rel(p), at);
@@ -905,6 +1024,7 @@ mod tests {
                 known: &self.known,
                 disk: &self.disk,
                 records: &self.records,
+                moves: &self.moves,
                 live_files: &live,
                 writer: self.writer,
                 now: NOW,
@@ -1004,6 +1124,14 @@ mod tests {
             ]
         );
         assert_eq!(pairs(&p.detected_moves), vec![("notes", "docs")]);
+        assert_eq!(
+            p.publish_moves,
+            vec![MoveRecord {
+                from: "notes".into(),
+                to: "docs".into(),
+                at: NOW
+            }]
+        );
         assert_eq!(paths(&p.forget), vec!["notes", "notes/sub"]);
         assert_eq!(known_paths(&p), vec!["docs", "docs/sub"]);
         assert!(p.remove_if_empty.is_empty() && p.create.is_empty());
@@ -1036,7 +1164,7 @@ mod tests {
     fn an_incoming_rename_moves_the_folder_on_disk() {
         let p = World::writer("z")
             .known("notes", 10)
-            .record("notes", moved("docs", 20, "x"))
+            .rename("notes", "docs", 20, "x")
             .record("docs", present(20, "x"))
             .file("docs/a.md", 5)
             .disk("notes", holding(&["a.md"], &[]))
@@ -1049,8 +1177,8 @@ mod tests {
 
     fn two_renames(me: &str) -> World {
         World::writer(me)
-            .record("notes", moved("b", 10, "y"))
-            .record("notes", moved("a", 20, "x"))
+            .rename("notes", "b", 10, "y")
+            .rename("notes", "a", 20, "x")
             .record("b", present(10, "y"))
             .record("a", present(20, "x"))
             .file("a/n.md", 5)
@@ -1092,18 +1220,18 @@ mod tests {
     fn a_parent_and_a_child_rename_both_apply_in_either_order() {
         let orders = [
             World::writer("z")
-                .record("notes", moved("docs", 10, "x"))
+                .rename("notes", "docs", 10, "x")
                 .record("docs", present(10, "x"))
-                .record("notes/bob", moved("notes/robert", 20, "y"))
+                .rename("notes/bob", "notes/robert", 20, "y")
                 .record("notes/robert", present(20, "y")),
             World::writer("z")
-                .record("notes/bob", moved("notes/robert", 10, "y"))
+                .rename("notes/bob", "notes/robert", 10, "y")
                 .record("notes/robert", present(10, "y"))
-                .record("notes", moved("docs", 20, "x"))
+                .rename("notes", "docs", 20, "x")
                 .record("docs", present(20, "x")),
         ];
         for w in orders {
-            let moves = Moves::from_records(&w.records);
+            let moves = Moves::from_moves(&w.moves);
             assert_eq!(
                 moves.map(&rel("notes/bob/x.md"), 5),
                 rel("docs/robert/x.md")
@@ -1126,11 +1254,11 @@ mod tests {
     fn crossed_moves_end_without_a_loop_and_the_later_wins() {
         // x moved A into B; y, not having seen that, later moved B into A.
         let w = World::writer("x")
-            .record("A", moved("B/A", 10, "x"))
+            .rename("A", "B/A", 10, "x")
             .record("B/A", present(10, "x"))
-            .record("B", moved("A/B", 20, "y"))
+            .rename("B", "A/B", 20, "y")
             .record("A/B", present(20, "y"));
-        let moves = Moves::from_records(&w.records);
+        let moves = Moves::from_moves(&w.moves);
         // The later move stands: B is inside A.
         assert_eq!(moves.map(&rel("B/y.md"), 5), rel("A/B/y.md"));
         // The earlier one is undone: A is back where it was, and so is what was put in it.
@@ -1151,8 +1279,8 @@ mod tests {
 
     #[test]
     fn map_moves_an_older_entry_and_leaves_a_newer_one() {
-        let w = World::writer("z").record("notes", moved("docs", 20, "x"));
-        let moves = Moves::from_records(&w.records);
+        let w = World::writer("z").rename("notes", "docs", 20, "x");
+        let moves = Moves::from_moves(&w.moves);
         assert_eq!(moves.map(&rel("notes/a.md"), 10), rel("docs/a.md"));
         assert_eq!(moves.map(&rel("notes/a.md"), 20), rel("docs/a.md"));
         assert_eq!(moves.map(&rel("notes/a.md"), 30), rel("notes/a.md"));
@@ -1168,7 +1296,7 @@ mod tests {
             let p = World::writer("z")
                 .known("notes", 5)
                 .record("notes", deleted(delete_at, "y"))
-                .record("notes", moved("docs", 20, "x"))
+                .rename("notes", "docs", 20, "x")
                 .record("docs", present(20, "x"))
                 .disk("notes", empty(&[]))
                 .plan();
@@ -1339,9 +1467,9 @@ mod tests {
     #[test]
     fn a_rename_back_to_the_old_name_is_a_move_not_a_move_onto_itself() {
         let w = World::writer("z")
-            .record("notes", moved("docs", 10, "x"))
-            .record("docs", moved("notes", 20, "y"));
-        let moves = Moves::from_records(&w.records);
+            .rename("notes", "docs", 10, "x")
+            .rename("docs", "notes", 20, "y");
+        let moves = Moves::from_moves(&w.moves);
         assert_eq!(moves.map(&rel("notes/a.md"), 5), rel("notes/a.md"));
         assert_eq!(moves.map(&rel("docs/b.md"), 15), rel("notes/b.md"));
     }
@@ -1362,5 +1490,88 @@ mod tests {
                 ("c", rec(FolderState::Present, NOW)),
             ]
         );
+    }
+    #[test]
+    fn a_move_outlives_its_author_making_a_new_folder_at_the_old_name() {
+        // x renamed A to B, then made a new A: x's Present at A replaced its MovedTo there.
+        let mut w = World::writer("z")
+            .record("A", present(30, "x"))
+            .record("B", present(20, "x"));
+        w.moves.push(move_by("A", "B", 20, "x"));
+        let moves = Moves::from_moves(&w.moves);
+        assert_eq!(moves.map(&rel("A/old.md"), 10), rel("B/old.md"));
+        assert_eq!(moves.map(&rel("A/new.md"), 40), rel("A/new.md"));
+    }
+
+    #[test]
+    fn a_folder_found_at_a_moved_away_name_follows_the_move() {
+        // On upgrade: no index, A still on disk with its old files, and A has moved to B.
+        let p = World::writer("z")
+            .rename("A", "B", 20, "x")
+            .record("B", present(20, "x"))
+            .file("B/old.md", 10)
+            .disk("A", holding(&["old.md"], &[]))
+            .plan();
+        assert_eq!(pairs(&p.disk_moves), vec![("A", "B")]);
+        assert!(p.publish.is_empty() && p.create.is_empty());
+        assert_eq!(known_paths(&p), vec!["B"]);
+
+        // A file there newer than the move means A was made again after it: it stays.
+        let p = World::writer("z")
+            .rename("A", "B", 20, "x")
+            .record("B", present(20, "x"))
+            .file("A/new.md", 30)
+            .disk("A", holding(&["new.md"], &[]))
+            .disk("B", empty(&[]))
+            .plan();
+        assert!(p.disk_moves.is_empty());
+    }
+
+    #[test]
+    fn a_delete_that_loses_to_a_rename_tells_the_deleter() {
+        // y deleted notes; x renamed it to docs, before the delete or after.
+        for delete_at in [10, 30] {
+            let p = World::writer("y")
+                .record("notes", deleted(delete_at, "y"))
+                .rename("notes", "docs", 20, "x")
+                .record("docs", present(20, "x"))
+                .plan();
+            assert_eq!(paths(&p.create), vec!["docs"], "{delete_at}");
+            assert_eq!(
+                p.notices,
+                vec![LayoutNotice::MyDeleteLostToRename {
+                    path: rel("notes"),
+                    to: rel("docs"),
+                    by_machine: machine("x"),
+                }],
+                "{delete_at}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rename_that_survives_a_delete_tells_the_renamer_once() {
+        let w = World::writer("x")
+            .rename("notes", "docs", 20, "x")
+            .record("docs", present(20, "x"))
+            .record("notes", deleted(30, "y"))
+            .disk("docs", empty(&[]));
+        let p = w.known("docs", 20).plan();
+        assert_eq!(
+            p.notices,
+            vec![LayoutNotice::MyRenameSurvivedDelete {
+                to: rel("docs"),
+                by_machine: machine("y"),
+            }]
+        );
+        assert_eq!(p.know, vec![(rel("docs"), KnownFolder { applied_at: 30 })]);
+        assert!(p.remove_if_empty.is_empty());
+
+        let w = World::writer("x")
+            .rename("notes", "docs", 20, "x")
+            .record("docs", present(20, "x"))
+            .record("notes", deleted(30, "y"))
+            .disk("docs", empty(&[]));
+        assert_eq!(w.known("docs", 30).plan(), LayoutPlan::default());
     }
 }

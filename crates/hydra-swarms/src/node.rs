@@ -35,9 +35,9 @@ use crate::decide::Remote;
 use crate::ids::{PersonId, PersonKey};
 use crate::invites::{Hydra, Invites};
 use crate::paths::{
-    CLAIMS_PREFIX, FILES_PREFIX, FOLDERS_PREFIX, LOG_PREFIX, MAX_FILE_BYTES, PARENTS_PREFIX,
-    RelPath, file_key, folder_key, log_key, parent_key, path_of_folder_key, path_of_key,
-    path_of_parent_key, safe_rel_path,
+    CLAIMS_PREFIX, FILES_PREFIX, FOLDERS_PREFIX, LOG_PREFIX, MAX_FILE_BYTES, MOVES_PREFIX,
+    PARENTS_PREFIX, RelPath, file_key, folder_key, log_key, move_key, parent_key,
+    path_of_folder_key, path_of_key, path_of_parent_key, safe_rel_path,
 };
 use crate::roster::{
     Change, Kept, KeptAuthor, KeptEntry, MAX_CHANGE_BYTES, Machine, Member, Role, Roster,
@@ -90,6 +90,34 @@ pub struct FolderVersion {
     pub record: FolderRecord,
     pub author: String,
     pub machine: String,
+}
+
+/// A folder moved from one path to another, kept under its own key in the move log so no later
+/// record by the same author can overwrite it.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct MoveRecord {
+    pub from: String,
+    pub to: String,
+    pub at: u64,
+}
+
+/// A move with who made it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct MoveVersion {
+    pub record: MoveRecord,
+    pub author: String,
+    pub machine: String,
+}
+
+/// The name of the machine `author` writes for, current or retired.
+fn machine_of(roster: &Roster, author: &str) -> String {
+    match roster.member_by_author(author) {
+        Some(m) => m.machines.iter().find(|m| m.author == author),
+        None => None,
+    }
+    .map(|m| m.name.clone())
+    .or_else(|| roster.retired.get(author).map(|r| r.machine.clone()))
+    .unwrap_or_default()
 }
 
 /// Whether a folder record from `author` counts: a current writer's, or a former one's as claims'
@@ -788,6 +816,60 @@ impl SwarmNode {
         Ok(())
     }
 
+    /// Adds a move to the move log, under a key of its own.
+    pub async fn put_move(&self, m: &MoveRecord) -> anyhow::Result<()> {
+        let core = &self.core;
+        core.ensure_writable()?;
+        let bytes = serde_json::to_vec(m)?;
+        anyhow::ensure!(
+            bytes.len() as u64 <= MAX_RECORD_BYTES,
+            "a move record is too big"
+        );
+        // The author is in the hash too, so two machines' identical moves stay two entries.
+        let mut named = bytes.clone();
+        named.extend_from_slice(core.author.to_string().as_bytes());
+        let id = Hash::new(&named).to_hex().to_string();
+        core.doc
+            .set_bytes(core.author, move_key(&id), bytes)
+            .await?;
+        Ok(())
+    }
+
+    /// Every counting author's moves, in no particular order. Records that don't parse, are over
+    /// the size cap, name a path that isn't safe, or move a folder onto itself are left out.
+    pub async fn moves(&self, roster: &Roster) -> anyhow::Result<Vec<MoveVersion>> {
+        let mut out = Vec::new();
+        let query = Query::key_prefix(MOVES_PREFIX).build();
+        for e in self.core.entries(query).await? {
+            if e.content_len() > MAX_RECORD_BYTES {
+                continue;
+            }
+            let author = e.author().to_string();
+            if !folder_author_counts(roster, &author) {
+                continue;
+            }
+            let Some(bytes) = self.read_blob(e.content_hash()).await? else {
+                continue;
+            };
+            let Ok(record) = serde_json::from_slice::<MoveRecord>(&bytes) else {
+                continue;
+            };
+            if safe_rel_path(&record.from).is_none()
+                || safe_rel_path(&record.to).is_none()
+                || record.from == record.to
+            {
+                continue;
+            }
+            let machine = machine_of(roster, &author);
+            out.push(MoveVersion {
+                record,
+                author,
+                machine,
+            });
+        }
+        Ok(out)
+    }
+
     /// Per folder, every counting author's newest record, oldest first by `(at, author)`. Keys
     /// that aren't safe paths, records that don't parse or are over the size cap, and a move
     /// to a path that isn't safe are left out.
@@ -819,13 +901,7 @@ impl SwarmNode {
             {
                 continue;
             }
-            let machine = match roster.member_by_author(&author) {
-                Some(m) => m.machines.iter().find(|m| m.author == author),
-                None => None,
-            }
-            .map(|m| m.name.clone())
-            .or_else(|| roster.retired.get(&author).map(|r| r.machine.clone()))
-            .unwrap_or_default();
+            let machine = machine_of(roster, &author);
             out.entry(path).or_default().push(FolderVersion {
                 record,
                 author,

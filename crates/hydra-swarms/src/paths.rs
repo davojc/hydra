@@ -17,6 +17,9 @@ pub const PARENTS_PREFIX: &[u8] = b"parents/";
 /// Where each author records what it knows of each folder: there, gone, or moved. Older hydras
 /// never read under here, so a swarm with these records still syncs for them.
 pub const FOLDERS_PREFIX: &[u8] = b"folders/";
+/// Every move of a folder, one key per move, never overwritten: an author's later word on the
+/// old path replaces its `MovedTo` under `folders/`, but must not undo the move.
+pub const MOVES_PREFIX: &[u8] = b"moves/";
 /// Claims, done marks and releases, by context. Folder sync never reads under here.
 pub const CLAIMS_PREFIX: &[u8] = b"claims/";
 
@@ -177,6 +180,15 @@ pub fn folder_key(p: &RelPath) -> Vec<u8> {
 
 pub fn path_of_folder_key(key: &[u8]) -> Option<RelPath> {
     path_under(FOLDERS_PREFIX, key)
+}
+
+/// A move's key. `id` names the move (a hash of what it says and who said it), so two moves
+/// never share a key. The closing zero keeps one id from starting another's key.
+pub fn move_key(id: &str) -> Vec<u8> {
+    let mut k = MOVES_PREFIX.to_vec();
+    k.extend_from_slice(id.as_bytes());
+    k.push(0);
+    k
 }
 
 /// Sorts by time, then signature, so the log reads in the order the roster folds it.
@@ -384,6 +396,20 @@ mod tests {
         assert!(path_of_folder_key(&parent_key(&a)).is_none());
         assert!(path_of_key(&folder_key(&a)).is_none());
         assert!(path_of_parent_key(&folder_key(&a)).is_none());
+    }
+
+    #[test]
+    fn move_keys_stay_apart_from_each_other_and_from_other_keys() {
+        let a = move_key("ab");
+        assert_eq!(a, b"moves/ab ");
+        assert!(a.starts_with(MOVES_PREFIX));
+        assert!(!move_key("abc").starts_with(&a));
+        let p = rel("ab");
+        for other in [file_key(&p), folder_key(&p), parent_key(&p)] {
+            assert!(!a.starts_with(&other) && !other.starts_with(&a));
+            assert!(!other.starts_with(MOVES_PREFIX));
+        }
+        assert!(!a.starts_with(FOLDERS_PREFIX) && !a.starts_with(CLAIMS_PREFIX));
     }
 
     #[test]

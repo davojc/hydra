@@ -7,7 +7,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use hydra_swarms::ids::{PersonId, PersonKey};
 use hydra_swarms::invites::{INVITE_LIFETIME, InviteCode, Invites, redeem_at};
-use hydra_swarms::node::{FolderRecord, FolderState, NodeConfig, NodeEvent, SwarmNode};
+use hydra_swarms::node::{FolderRecord, FolderState, MoveRecord, NodeConfig, NodeEvent, SwarmNode};
 use hydra_swarms::paths::{RelPath, safe_rel_path};
 use hydra_swarms::roster::{Change, Machine, Member, Role, Roster, SignedChange};
 use iroh_docs::{Author, Capability};
@@ -262,6 +262,42 @@ async fn folder_records_from_a_writer_reach_the_other_machine() {
     assert_eq!(notes[0].author, o.node.author());
     assert_eq!(notes[0].machine, "olive-pc");
     assert_eq!(got[&rel("old")][0].record, moved);
+    o.node.shutdown().await;
+    w.node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_move_an_author_makes_reaches_the_other_machine() {
+    let o = create_owner().await;
+    let cap = o.node.capability(Role::Writer).await.unwrap();
+    let w = join(&o, "wren", Some(Role::Writer), cap).await;
+    connect(&o.node, &w.node).await;
+    let r = roster_with(&w.node, 2).await;
+
+    // Two moves of the same folder by one author: neither overwrites the other.
+    let first = MoveRecord {
+        from: "notes".into(),
+        to: "docs".into(),
+        at: 5,
+    };
+    let second = MoveRecord {
+        from: "notes".into(),
+        to: "papers".into(),
+        at: 9,
+    };
+    o.node.put_move(&first).await.unwrap();
+    o.node.put_move(&second).await.unwrap();
+
+    let mut got = eventually("both moves on the writer", || async {
+        let moves = w.node.moves(&r).await.unwrap();
+        (moves.len() == 2).then_some(moves)
+    })
+    .await;
+    got.sort_by_key(|m| m.record.at);
+    assert_eq!(got[0].record, first);
+    assert_eq!(got[1].record, second);
+    assert_eq!(got[0].author, o.node.author());
+    assert_eq!(got[0].machine, "olive-pc");
     o.node.shutdown().await;
     w.node.shutdown().await;
 }

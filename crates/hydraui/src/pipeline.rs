@@ -109,12 +109,12 @@ impl WaitingSettings {
     /// How it reads in Pipeline settings.
     pub fn text(&self) -> String {
         if self.look_every == 0 {
-            return "While a stage waits, it doesn't look again: it waits to be told.".into();
+            return "While a step waits, it doesn't look again: it waits to be told.".into();
         }
         let who = if self.needs_you {
-            "While a stage waits, on you, its author or product,"
+            "While a step waits, on you, its author or product,"
         } else {
-            "While a stage waits on its author or product,"
+            "While a step waits on its author or product,"
         };
         let every = match self.look_every {
             1 => "every minute".to_string(),
@@ -951,82 +951,141 @@ impl From<&Pipeline> for Edit {
     }
 }
 
-/// What keeps `edit` from being saved, as the design's save bar says it.
-pub fn validate(edit: &Edit) -> Result<(), &'static str> {
-    if edit.name.trim().is_empty() {
-        return Err("Give the orchestrator a name");
+/// The part of Pipeline settings a problem is in, so the page can take you to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Part {
+    Name,
+    /// Where work comes from.
+    Source,
+    /// The steps as a whole (none yet).
+    Steps,
+    /// One step, by its place from 0.
+    Step(usize),
+    Advanced,
+}
+
+impl Part {
+    /// How the page names it, e.g. "Step 2".
+    pub fn label(&self) -> String {
+        match self {
+            Part::Name => "Name".into(),
+            Part::Source => "Where work comes from".into(),
+            Part::Steps => "Steps".into(),
+            Part::Step(i) => format!("Step {}", i + 1),
+            Part::Advanced => "Advanced settings".into(),
+        }
     }
-    for j in edit.stages.iter().filter_map(|s| s.jev.as_ref()) {
-        if let Some(e) = crate::jev_stage::problem(j) {
-            return Err(e);
+}
+
+/// Everything that keeps `edit` from being saved, in page order within each part, each with
+/// where it is: the setup checklist lists them all, the save bar the first.
+pub fn problems(edit: &Edit) -> Vec<(Part, &'static str)> {
+    let mut out = Vec::new();
+    if edit.name.trim().is_empty() {
+        out.push((Part::Name, "Give the pipeline a name"));
+    }
+    for (i, s) in edit.stages.iter().enumerate() {
+        if let Some(e) = s.jev.as_ref().and_then(crate::jev_stage::problem) {
+            out.push((Part::Step(i), e));
         }
     }
     if let Some(m) = &edit.mail {
         if crate::schedule::parse(&m.check).is_err() {
-            return Err("Write when to check mail as days and a time, e.g. weekdays 09:00");
+            out.push((
+                Part::Source,
+                "Write when to check mail as days and a time, e.g. weekdays 09:00",
+            ));
         }
         if !(1..=30).contains(&m.look_back_days) {
-            return Err("Look back 1 to 30 days");
+            out.push((Part::Source, "Look back 1 to 30 days"));
         }
     }
     if edit.stages.is_empty() {
-        return Err("Add at least one stage");
+        out.push((Part::Steps, "Add at least one step"));
     }
-    if edit.stages.iter().any(|s| s.title.trim().is_empty()) {
-        return Err("Every stage needs a name");
+    for (i, s) in edit.stages.iter().enumerate() {
+        if s.title.trim().is_empty() {
+            out.push((Part::Step(i), "Name this step"));
+        }
     }
     if let Some(l) = &edit.linear {
         if l.team.trim().is_empty() {
-            return Err("Name the Linear team, e.g. INTH");
+            out.push((Part::Source, "Name the Linear team, e.g. INTH"));
         }
         if [&l.pick, &l.claim, &l.passed]
             .iter()
             .any(|s| s.trim().is_empty())
         {
-            return Err("Name the Linear states");
+            out.push((Part::Source, "Name the Linear states"));
         }
         if l.every_minutes == 0 {
-            return Err("Check Linear every minute or more");
+            out.push((Part::Source, "Check Linear every minute or more"));
         }
     }
     if !(1..=MAX_RUNS_AT_ONCE).contains(&edit.runs_at_once) {
-        return Err("Run 1 to 6 tickets at once");
+        out.push((Part::Advanced, "Run 1 to 6 tickets at once"));
     }
     if let Some(sl) = &edit.slack {
         if edit.linear.is_some() {
-            return Err("Take work from Linear or Slack, not both");
+            out.push((Part::Source, "Take work from Linear or Slack, not both"));
         }
         if !is_channel_id(sl.channel.trim()) {
-            return Err("Give the Slack channel's id, e.g. C0C217CER6G");
+            out.push((
+                Part::Source,
+                "Give the Slack channel's id, e.g. C0C217CER6G",
+            ));
         }
         if sl.every_minutes == 0 {
-            return Err("Check Slack every minute or more");
+            out.push((Part::Source, "Check Slack every minute or more"));
         }
         if sl.lookback_hours == 0 {
-            return Err("Look back at least an hour in Slack");
+            out.push((Part::Source, "Look back at least an hour in Slack"));
         }
         if sl.reaction.trim().trim_matches(':').is_empty() {
-            return Err("Name the reaction that marks a message taken, e.g. eyes");
+            out.push((
+                Part::Source,
+                "Name the reaction that marks a message taken, e.g. eyes",
+            ));
         }
         let done = sl.done_reaction.trim().trim_matches(':');
         if done.eq_ignore_ascii_case(sl.reaction.trim().trim_matches(':')) {
-            return Err("The done reaction must differ from the one that marks a message taken");
+            out.push((
+                Part::Source,
+                "The done reaction must differ from the one that marks a message taken",
+            ));
         }
     }
     if edit.mail.is_some()
         && (edit.linear.is_some() || edit.slack.is_some() || edit.schedule.is_some())
     {
-        return Err("Take work from one source: this pipeline takes it from [mail]");
+        out.push((
+            Part::Source,
+            "Take work from one source: this pipeline takes it from [mail]",
+        ));
     }
     if let Some(sc) = &edit.schedule {
         if edit.linear.is_some() || edit.slack.is_some() {
-            return Err("Take work from one source: Linear, Slack or a schedule");
+            out.push((
+                Part::Source,
+                "Take work from one source: Linear, Slack or a schedule",
+            ));
         }
         if crate::schedule::parse(&sc.every).is_err() {
-            return Err("Write the schedule as days and a time, e.g. mon 18:00");
+            out.push((
+                Part::Source,
+                "Write the schedule as days and a time, e.g. mon 18:00",
+            ));
         }
     }
-    Ok(())
+    out
+}
+
+/// What keeps `edit` from being saved, as the design's save bar says it: the first problem.
+pub fn validate(edit: &Edit) -> Result<(), &'static str> {
+    match problems(edit).first() {
+        Some((_, why)) => Err(why),
+        None => Ok(()),
+    }
 }
 
 /// An id for a new stage titled `title`: its words in lowercase joined by `-`, numbered when
@@ -1845,7 +1904,7 @@ mod tests {
         );
         assert_eq!(
             w.text(),
-            "While a stage waits on its author or product, it looks again every 5 minutes until \
+            "While a step waits on its author or product, it looks again every 5 minutes until \
              they answer. While it waits on you, it doesn't look."
         );
         let w = parse(&format!(
@@ -1859,7 +1918,7 @@ mod tests {
         );
         assert_eq!(
             w.text(),
-            "While a stage waits, on you, its author or product, it looks again every 10 minutes \
+            "While a step waits, on you, its author or product, it looks again every 10 minutes \
              for up to 8 hours, then it stops looking, and a session waiting on you closes."
         );
         let off = parse(&format!(
@@ -1869,7 +1928,7 @@ mod tests {
         .waiting;
         assert_eq!(
             off.text(),
-            "While a stage waits, it doesn't look again: it waits to be told."
+            "While a step waits, it doesn't look again: it waits to be told."
         );
         for bad in [
             "[waiting]\nlook_every = 1441\n",
@@ -2919,12 +2978,32 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
         let mut edit = edit_of(&parse(COMMENTED).unwrap());
         assert_eq!(validate(&edit), Ok(()));
         edit.stages[1].title = " ".into();
-        assert_eq!(validate(&edit), Err("Every stage needs a name"));
+        assert_eq!(validate(&edit), Err("Name this step"));
         edit.name = "".into();
-        assert_eq!(validate(&edit), Err("Give the orchestrator a name"));
+        assert_eq!(validate(&edit), Err("Give the pipeline a name"));
         edit.name = "x".into();
         edit.stages.clear();
-        assert_eq!(validate(&edit), Err("Add at least one stage"));
+        assert_eq!(validate(&edit), Err("Add at least one step"));
+    }
+
+    #[test]
+    fn problems_lists_every_one_with_where_it_is() {
+        let mut edit = edit_of(&parse(COMMENTED).unwrap());
+        assert!(problems(&edit).is_empty());
+        edit.name = " ".into();
+        edit.stages[1].title = "".into();
+        edit.runs_at_once = 0;
+        assert_eq!(
+            problems(&edit),
+            [
+                (Part::Name, "Give the pipeline a name"),
+                (Part::Step(1), "Name this step"),
+                (Part::Advanced, "Run 1 to 6 tickets at once"),
+            ]
+        );
+        assert_eq!(Part::Step(1).label(), "Step 2");
+        edit.stages.clear();
+        assert!(problems(&edit).contains(&(Part::Steps, "Add at least one step")));
     }
 
     #[test]

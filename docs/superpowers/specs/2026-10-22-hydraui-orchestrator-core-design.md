@@ -1314,3 +1314,19 @@ keep_checking = { every = 10, for = 8 }   # minutes, hours
   - **Any person's choice** ends the checking.
 - **Pipeline settings.** Each Claude step has a **Below its bar** row under its prompt: **Ask me** or **Keep checking**; every 5 min, 10 min, 30 min or 1 hour; for 1, 4 or 8 hours or 1 day. A line reads it back in words. A Jev step has no session, so it can't keep checking.
 - **Also fixed:** the orchestrator's note for a stage waiting on its author said "every 5 minutes" whatever the pipeline set. It now says the pipeline's `look_every`.
+
+## 63. Pipeline settings for a first-time user (added 2026-11-11)
+
+Pipeline settings had grown into one long form. Rows of chips sat under every prompt, the waiting rules sat in the middle of the page, and nothing said what was left to do. The page is now read top to bottom as the pipeline runs, and it says what's next.
+
+- **What's left to set up.** A checklist sits under the title. It lists everything that keeps the pipeline from being saved, each with where it is ("Step 2: Name this step"), and a **Go to** button that unfolds that part and scrolls to it. With nothing left, one quiet line reads "Set up and ready to run". `pipeline::problems` lists them all, each with its `Part`. `validate` is its first, and the save bar names the part too.
+- **Starts when.** The source is one card that reads as a sentence, from `settings_words::source`: "A pull request is posted in #pull-requests", then "Checks every 1 minute, looking back 1 day". **Change** unfolds it to the **Where work comes from** dropdown and the fields most people set. The rest sits under **More options**: Linear's states and timing, Slack's timing and reactions, the schedule's environment, mail's search, swarm and environment. Its timings (check every, look back) are dropdowns. A card that needs setting up has an amber edge and is unfolded when the page opens.
+- **Steps as cards.**
+  - **Folded,** a step shows its number, its name, its kind (**Claude** or **Sort (Jev)**), the first line of its instructions, and what's set under More options ("keeps checking · 95% sure · team skills").
+  - **Unfolded,** it shows its name and **What should this step do?**, with buttons to insert `{ticket}`, `{pr}` and `{handoff}` where the cursor is.
+  - **More options** holds **If it isn't sure enough** (Stop and ask me, or Keep checking, §62), **Check again every** and **For up to**, **Sure enough at** (its own pass mark), **Skill** and **Works in**, all as dropdowns, and a sentence that reads them back.
+  - **Move up**, **Move down** and **Remove step** sit in its **⋯** menu.
+  - A one-step pipeline opens with its step unfolded, a new step is added unfolded and scrolled to, and a step with a problem opens unfolded.
+- **Add a step.** One button offers a Claude step ("does the work, like a review or a fix") or a Sort step ("Jev picks a category").
+- **Advanced settings,** folded, holds **While a step waits** (§60, as dropdowns), **Tickets at once**, the **Default pass mark**, **Branch name** and **Product questions**.
+- **Words.** The page says *step* throughout, and *sure enough* for the bar.

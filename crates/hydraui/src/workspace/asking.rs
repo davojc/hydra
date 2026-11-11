@@ -136,14 +136,17 @@ impl Workspace {
                     let RunState::NeedsYou(why) = &r.state else {
                         return None;
                     };
-                    let w = r.pipeline.waiting;
-                    if !w.needs_you || w.look_every == 0 || r.fix_after.is_some() {
-                        return None;
-                    }
                     let si = r
                         .stages
                         .iter()
                         .position(|s| s.status == crate::runs::StageStatus::Stopped)?;
+                    // A step that keeps checking looks on its own timetable (core spec §62).
+                    let w = r.pipeline.stages[si]
+                        .keep
+                        .map_or(r.pipeline.waiting, |k| k.waiting());
+                    if !w.needs_you || w.look_every == 0 || r.fix_after.is_some() {
+                        return None;
+                    }
                     let a = r.stages[si].latest()?;
                     let token = a.session.clone()?;
                     let what = a
@@ -204,9 +207,79 @@ impl Workspace {
                 }
             }
         }
+        woke |= self.keep_tick(now, cx);
         if woke {
             self.send_wakes(window, cx);
         }
+    }
+
+    /// Steps below their bar that keep checking (core spec §62): each one's session is told to
+    /// look again on its step's timetable; when its hours are up it stops and the run asks you.
+    /// Whether it woke one.
+    fn keep_tick(&mut self, now: SystemTime, cx: &mut Context<Self>) -> bool {
+        let Some(sv) = server::get() else {
+            return false;
+        };
+        // (run, stage, session token, timetable, latest score, bar)
+        let checking: Vec<(String, String, crate::pipeline::KeepChecking, u8, u8)> = {
+            let reg = server::lock(sv.registry());
+            reg.runs
+                .all()
+                .filter_map(|r| {
+                    let si = r.rechecking?;
+                    let keep = r.pipeline.stages.get(si)?.keep?;
+                    let a = r.stages.get(si)?.latest()?;
+                    let score = a.rating.as_ref().map_or(0, |x| x.score);
+                    Some((
+                        r.id.clone(),
+                        a.session.clone()?,
+                        keep,
+                        score,
+                        r.pipeline.bar_for(si),
+                    ))
+                })
+                .collect()
+        };
+        let ids: std::collections::HashSet<String> =
+            checking.iter().map(|(id, ..)| id.clone()).collect();
+        self.keep_looks.retain(|id, _| ids.contains(id));
+        let mut woke = false;
+        for (run, token, keep, score, bar) in checking {
+            let entry = self.keep_looks.entry(run.clone()).or_insert((now, None));
+            match crate::waiting::look(&keep.waiting(), entry.0, entry.1, now) {
+                crate::waiting::Look::NotYet => {}
+                crate::waiting::Look::Now => {
+                    entry.1 = Some(now);
+                    let pane = self
+                        .panes
+                        .iter()
+                        .find(|(_, v)| v.read(cx).mcp_token() == Some(token.as_str()))
+                        .map(|(id, _)| *id);
+                    if let Some(pane) = pane {
+                        crate::action_log::write(format!(
+                            "run {run}: below its bar, it looks again"
+                        ));
+                        self.queue_wake(
+                            pane,
+                            run.clone(),
+                            crate::waiting::keep_checking_prompt(score, bar),
+                        );
+                        woke = true;
+                    }
+                }
+                crate::waiting::Look::Over => {
+                    self.keep_looks.remove(&run);
+                    let changes = server::lock(sv.registry()).runs.stop_checking(&run);
+                    crate::action_log::write(format!(
+                        "run {run}: it kept checking for {} hours: it asks you now",
+                        keep.hours
+                    ));
+                    tell(changes);
+                    cx.notify();
+                }
+            }
+        }
+        woke
     }
 
     /// **Check now**: the waiting session looks in its thread at once, then every 5 minutes

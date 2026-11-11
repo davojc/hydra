@@ -18,6 +18,8 @@ pub enum CardState {
     Waiting,
     /// A stage asked a person to check something by hand; it didn't fail.
     Checking,
+    /// A step below its bar that keeps checking (core spec §62): at work, not stopped.
+    Rechecking,
     Paused,
     Done,
     Stopped,
@@ -31,6 +33,7 @@ impl CardState {
             CardState::NeedsYou => "Needs you",
             CardState::Asking => "Asked product",
             CardState::Waiting => "Waiting on author",
+            CardState::Rechecking => "Checking again",
             CardState::Checking => "Check it",
             CardState::Paused => "Paused",
             CardState::Done => "Done",
@@ -134,6 +137,7 @@ pub fn card(run: &Run) -> Card {
         RunState::NeedsYou(_) if run.stages.iter().any(wants_check) => CardState::Checking,
         RunState::NeedsYou(_) => CardState::NeedsYou,
         RunState::Running if run.paused => CardState::Paused,
+        RunState::Running if run.rechecking.is_some() => CardState::Rechecking,
         RunState::Running => CardState::Working,
     };
     let current = run
@@ -167,6 +171,7 @@ pub fn card(run: &Run) -> Card {
     let paused_for = match state {
         CardState::Asking => " · paused for product",
         CardState::Waiting => " · waiting on the author",
+        CardState::Rechecking => " · below its bar, checking again",
         _ => "",
     };
     Card {
@@ -197,7 +202,7 @@ pub fn group_card(runs: &[&Card]) -> Card {
     let rank = |s: CardState| match s {
         CardState::NeedsYou => 0,
         CardState::Asking | CardState::Checking => 1,
-        CardState::Waiting => 3,
+        CardState::Waiting | CardState::Rechecking => 3,
         CardState::Working => 2,
         CardState::Paused => 3,
         CardState::Stopped => 4,
@@ -211,6 +216,7 @@ pub fn group_card(runs: &[&Card]) -> Card {
                 | CardState::NeedsYou
                 | CardState::Asking
                 | CardState::Waiting
+                | CardState::Rechecking
                 | CardState::Checking
                 | CardState::Paused
         )
@@ -371,6 +377,38 @@ pub fn meter(week_used: Option<f64>, floor: u8) -> Option<Meter> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_step_checking_again_reads_as_at_work_not_needing_you() {
+        let p = {
+            let mut p = crate::pipeline::parse(
+                "name = \"Review\"\n[[stage]]\nid = \"a\"\ntitle = \"Review PR\"\n\
+                 keep_checking = { every = 10, for = 8 }\n",
+            )
+            .unwrap();
+            p.file = "review".into();
+            p
+        };
+        let mut runs = crate::runs::Runs::default();
+        let id = runs.start_run("orch", p, "INTH-9", "x").unwrap().id.clone();
+        let s = runs.begin("orch", &id, "a", "", 30).unwrap();
+        runs.link(&id, s.stage, "t1", "1. Review PR");
+        let below = crate::rating::from_args(&serde_json::json!({"outcome": "done", "score": 40,
+            "summary": "s", "evidence": [{"kind": "note", "detail": "d"}],
+            "reasons": [{"side": "for", "text": "r"}]}))
+        .unwrap();
+        runs.report("t1", below).unwrap();
+        let c = card(runs.run(&id).unwrap());
+        assert_eq!(
+            (c.state, c.state.word()),
+            (CardState::Rechecking, "Checking again")
+        );
+        assert!(
+            c.line.ends_with("below its bar, checking again"),
+            "{}",
+            c.line
+        );
+    }
     #[test]
     fn only_states_worth_a_glance_get_a_pill() {
         use super::CardState::*;

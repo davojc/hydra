@@ -42,6 +42,8 @@ struct DraftStage {
     prompt: Entity<TextareaState>,
     /// A Jev stage's question: shown, not edited here.
     jev: Option<JevDraft>,
+    /// Keeps checking below its bar (core spec §62).
+    keep: Option<pipeline::KeepChecking>,
 }
 
 /// A Jev step being edited (email triage spec §4): its question, its categories as rows, the
@@ -278,6 +280,7 @@ impl SettingsDraft {
                     bar: s.own.then(|| slider_value(&s.bar, cx)),
                     prompt: s.prompt.read(cx).value().to_string(),
                     jev: s.jev.as_ref().map(|j| j.edit(cx)),
+                    keep: s.keep,
                 })
                 .collect(),
         }
@@ -667,6 +670,7 @@ impl Workspace {
             own: s.bar.is_some(),
             prompt,
             jev,
+            keep: s.keep,
         }
     }
 
@@ -962,6 +966,7 @@ impl Workspace {
                         instructions: String::new(),
                         options: [("".to_string(), "".to_string())].into(),
                     }),
+                    keep: None,
                 }
             } else {
                 EditStage {
@@ -972,6 +977,7 @@ impl Workspace {
                     bar: None,
                     prompt: String::new(),
                     jev: None,
+                    keep: None,
                 }
             },
             default,
@@ -1412,6 +1418,7 @@ impl Workspace {
                                 .when(s.jev.is_none(), |d| {
                                     d.child(text(11.5, theme::TEXT_MUTED).child("Prompt"))
                                         .child(Textarea::new(&s.prompt))
+                                        .child(keep_row(orch, key, s.keep, cx))
                                 })
                                 .when_some(s.jev.as_ref(), |d, j| {
                                     let label = |t: &'static str| text(11.5, theme::TEXT_MUTED).child(t);
@@ -1875,6 +1882,113 @@ impl Workspace {
             );
         body.into_any_element()
     }
+}
+
+/// A Claude step's **Below its bar** row (core spec §62): stop and ask you, or keep checking
+/// on a timetable before asking.
+fn keep_row(
+    orch: PaneId,
+    key: u64,
+    keep: Option<pipeline::KeepChecking>,
+    cx: &mut Context<Workspace>,
+) -> gpui::AnyElement {
+    fn set(
+        orch: PaneId,
+        key: u64,
+        id: String,
+        label: String,
+        on: bool,
+        to: Option<pipeline::KeepChecking>,
+        cx: &mut Context<Workspace>,
+    ) -> Button {
+        let b = Button::new(SharedString::from(id))
+            .label(label)
+            .xsmall()
+            .on_click(cx.listener(move |ws, _, _, cx| {
+                ws.with_draft(orch, cx, |d| {
+                    if let Some(s) = d.stages.iter_mut().find(|s| s.key == key) {
+                        s.keep = to;
+                    }
+                })
+            }));
+        if on { b.primary() } else { b.ghost() }
+    }
+    let mut row = h_flex()
+        .gap_1()
+        .flex_wrap()
+        .items_center()
+        .child(text(11.5, theme::TEXT_MUTED).mr_1().child("Below its bar"))
+        .child(set(
+            orch,
+            key,
+            format!("keep-off-{orch}-{key}"),
+            "Ask me".into(),
+            keep.is_none(),
+            None,
+            cx,
+        ))
+        .child(set(
+            orch,
+            key,
+            format!("keep-on-{orch}-{key}"),
+            "Keep checking".into(),
+            keep.is_some(),
+            Some(keep.unwrap_or(pipeline::KeepChecking {
+                every: 10,
+                hours: 8,
+            })),
+            cx,
+        ));
+    if let Some(k) = keep {
+        row = row.child(text(11.5, theme::TEXT_MUTED).mx_1().child("every"));
+        for m in [5, 10, 30, 60] {
+            row = row.child(set(
+                orch,
+                key,
+                format!("keep-every-{orch}-{key}-{m}"),
+                if m == 60 {
+                    "1 hour".into()
+                } else {
+                    format!("{m} min")
+                },
+                k.every == m,
+                Some(pipeline::KeepChecking { every: m, ..k }),
+                cx,
+            ));
+        }
+        row = row.child(text(11.5, theme::TEXT_MUTED).mx_1().child("for"));
+        for h in [1, 4, 8, 24] {
+            row = row.child(set(
+                orch,
+                key,
+                format!("keep-for-{orch}-{key}-{h}"),
+                match h {
+                    1 => "1 hour".into(),
+                    24 => "1 day".into(),
+                    n => format!("{n} hours"),
+                },
+                k.hours == h,
+                Some(pipeline::KeepChecking { hours: h, ..k }),
+                cx,
+            ));
+        }
+    }
+    v_flex()
+        .gap_1()
+        .pt_1()
+        .child(row)
+        .child(
+            text(11.5, theme::TEXT_MUTED)
+                .whitespace_normal()
+                .child(match keep {
+                    Some(k) => format!(
+                        "{} A person still decides at once when the step says one must act.",
+                        k.text()
+                    ),
+                    None => "Below its bar, it stops and asks you.".to_string(),
+                }),
+        )
+        .into_any_element()
 }
 
 /// **While a stage waits** (core spec §60): how often its session looks again, for how long,

@@ -276,6 +276,9 @@ pub struct Workspace {
     /// Runs waiting on you that look again (core spec §60): when the wait began, the last
     /// look, and whether looking is over.
     wait_looks: HashMap<String, (std::time::SystemTime, Option<std::time::SystemTime>, bool)>,
+    /// Steps below their bar that keep checking (core spec §62): when it began and the last
+    /// look, by run.
+    keep_looks: HashMap<String, (std::time::SystemTime, Option<std::time::SystemTime>)>,
     /// When open runs about pull requests were last checked on GitHub, and whether a check is
     /// out (a merged or closed one ends its run).
     pr_checked: Option<std::time::Instant>,
@@ -576,6 +579,7 @@ impl Workspace {
             wake_tries: HashMap::new(),
             ask_checks: HashMap::new(),
             wait_looks: HashMap::new(),
+            keep_looks: HashMap::new(),
             pr_checked: None,
             pr_checking: false,
             linear_watch: HashMap::new(),

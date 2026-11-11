@@ -71,6 +71,17 @@ pub fn needs_you_prompt(waiting_for: &str) -> String {
     )
 }
 
+/// What a step that keeps checking (core spec §62) is told each time it looks again.
+pub fn keep_checking_prompt(score: u8, bar: u8) -> String {
+    format!(
+        "Your stage reported {score}, under its bar of {bar}, and keeps checking. Look again at \
+         what it depends on, as your prompt describes it (a pull request, a ticket, an \
+         environment, a thread). If something changed, do what your stage needs again and call \
+         stage_report. If nothing changed, say so in one line and end your turn without \
+         reporting: you'll be asked to look again."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +123,16 @@ mod tests {
         // Never looks.
         assert_eq!(look(&every(0, 0), t0, None, t0 + min(600)), Look::NotYet);
         assert_eq!(next_in(&s, t0, Some(t0 + min(5)), t0 + min(7)), 3);
+    }
+
+    #[test]
+    fn a_step_keeping_checking_is_told_its_score_and_not_to_report_for_nothing() {
+        let p = keep_checking_prompt(40, 95);
+        assert!(
+            p.contains("40") && p.contains("95") && p.contains("stage_report"),
+            "{p}"
+        );
+        assert!(p.contains("without reporting"), "{p}");
     }
 
     #[test]

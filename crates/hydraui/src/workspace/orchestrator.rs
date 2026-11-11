@@ -106,6 +106,7 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
     let mut settled = None;
     let (mut retrying, mut run_resumed, mut resumed) = (None, false, false);
     let (mut reopened, mut rescoring) = (None, None);
+    let mut rechecking = None;
     let (mut asked, mut answered) = (None, None);
     for c in changes.iter().filter(|c| &c.run == id) {
         match (&c.what, c.stage) {
@@ -118,6 +119,7 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
             (Decided::Retrying, Some(i)) => retrying = Some(i),
             (Decided::Reopened, Some(i)) => reopened = Some(i),
             (Decided::Rescoring, Some(i)) => rescoring = Some(i),
+            (Decided::Rechecking(_), Some(i)) => rechecking = Some(i),
             (Decided::RunResumed, _) => run_resumed = true,
             (Decided::Resumed, _) => resumed = true,
             (Decided::Asked(q), Some(i)) => asked = Some((i, q)),
@@ -146,6 +148,14 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
             "Run {id} needs a person: {why}. Tell the user why and wait: nothing you can call \
              moves it on."
         )
+    } else if let Some(i) = rechecking {
+        let every = run.pipeline.stages[i].keep.map_or(0, |k| k.every);
+        format!(
+            "Run {id}: stage {} reported below its bar and keeps checking: hydraui has its \
+             session look again every {every} minutes. Do nothing meanwhile, and don't start the \
+             next stage: hydraui tells you when it passes or needs a person.",
+            stage(i)
+        )
     } else if let Some((i, question)) = asked {
         let author = run
             .asking
@@ -154,9 +164,10 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
         if author {
             format!(
                 "Run {id}: stage {} waits on the pull request's author: {question} Do nothing \
-                 meanwhile: hydraui has the stage look again every 5 minutes and tells you when \
+                 meanwhile: hydraui has the stage look again every {} minutes and tells you when \
                  it moves on.",
-                stage(i)
+                stage(i),
+                run.pipeline.waiting.look_every
             )
         } else {
             format!(
@@ -2129,7 +2140,7 @@ pub(super) fn pill_colors(state: CardState, accent: u32) -> (gpui::Hsla, gpui::H
         CardState::Working | CardState::Done => (color(accent), color(accent).opacity(0.16)),
         CardState::Ready | CardState::Stopped => pair(theme::TEXT_SECONDARY, theme::RAISED),
         // Someone else's move: calm, not a call for the user.
-        CardState::Waiting => (color(accent), color(accent).opacity(0.16)),
+        CardState::Waiting | CardState::Rechecking => (color(accent), color(accent).opacity(0.16)),
         CardState::NeedsYou => pair(theme::RED, theme::RED_TINT),
         CardState::Asking | CardState::Checking | CardState::Paused => {
             pair(theme::AMBER, theme::AMBER_TINT)

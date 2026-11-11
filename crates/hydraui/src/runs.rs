@@ -199,6 +199,9 @@ pub struct Run {
     /// A stage waiting on a person whose session was woken to look again (core spec §60): it
     /// may report once more, and that report counts.
     pub looking: Option<usize>,
+    /// A stage below its bar that keeps checking (core spec §62): still running, looking again
+    /// on its step's timetable until it passes or its hours run out.
+    pub rechecking: Option<usize>,
     /// What it's about, as a link: the pull request a Slack-triggered run reviews (`{pr}`).
     pub link: Option<String>,
 }
@@ -244,6 +247,9 @@ pub enum Decided {
     Reopened,
     /// A person worked on this stopped stage in its own session and asked it to score again.
     Rescoring,
+    /// It reported below its bar, and its step keeps checking (core spec §62): it stays at
+    /// work, its session told to look again on the step's timetable.
+    Rechecking(String),
     /// A stage asked a person to check something by hand, and they say it works: it passes,
     /// with their note.
     Checked(String),
@@ -541,6 +547,7 @@ impl Runs {
             asking: None,
             fix_after: None,
             looking: None,
+            rechecking: None,
             link: None,
         });
         Ok(self.runs.last().expect("just pushed"))
@@ -903,9 +910,25 @@ impl Runs {
             }
         };
         r.looking = None;
+        r.rechecking = None;
+        // Below its bar, with nothing a person must do: a step that keeps checking stays at
+        // work and looks again later (core spec §62).
+        let keep = !passed
+            && r.fix_after.is_none()
+            && r.pipeline.stages[si].keep.is_some()
+            && rating.outcome == crate::rating::Outcome::Done
+            && rating.ask.trim().is_empty();
         let s = &mut r.stages[si];
         if let Some(a) = s.attempts.last_mut() {
             a.rating = Some(rating);
+        }
+        if keep {
+            r.rechecking = Some(si);
+            return Ok(vec![Change {
+                run: r.id.clone(),
+                stage: Some(si),
+                what: Decided::Rechecking(why),
+            }]);
         }
         let run = r.id.clone();
         // A person's send-back waited for this report: the run goes back whatever it says.
@@ -1271,6 +1294,7 @@ impl Runs {
         };
         // A person acting ends any look in progress: its report wouldn't count.
         self.runs[ri].looking = None;
+        self.runs[ri].rechecking = None;
         let r = &self.runs[ri];
         let waiting = r
             .stages
@@ -1606,6 +1630,40 @@ impl Runs {
             });
         }
         Ok(changes)
+    }
+
+    /// A step that kept checking ran out of time (core spec §62): it stops at its gate, as a
+    /// step that doesn't keep checking would have, and the run asks you. Nothing when it
+    /// isn't checking.
+    pub fn stop_checking(&mut self, run: &str) -> Vec<Change> {
+        let Some(ri) = self.index(run) else {
+            return Vec::new();
+        };
+        let r = &mut self.runs[ri];
+        let Some(si) = r.rechecking.take() else {
+            return Vec::new();
+        };
+        if r.stages[si].status != StageStatus::Running {
+            return Vec::new();
+        }
+        let spec = &r.pipeline.stages[si];
+        let hours = spec.keep.map_or(0, |k| k.hours);
+        let bar = r.pipeline.bar_for(si);
+        let why = match r.stages[si].rating() {
+            Some(x) => format!(
+                "stage {}: {}, bar {bar}. It kept checking for {hours} hours. {}",
+                spec.id, x.score, x.summary
+            ),
+            None => format!("stage {}: it kept checking for {hours} hours", spec.id),
+        };
+        r.stages[si].status = StageStatus::Stopped;
+        let mut changes = vec![Change {
+            run: r.id.clone(),
+            stage: Some(si),
+            what: Decided::Stopped(why.clone()),
+        }];
+        changes.extend(self.needs_you(ri, why));
+        changes
     }
 
     /// A stage waiting on a person is woken to look again (core spec §60): it stays waiting,
@@ -2289,6 +2347,83 @@ mod tests {
         let id = b_stopped(&mut runs);
         runs.person(&id, Choice::Stop).unwrap();
         assert_eq!(waiting_session(runs.run(&id).unwrap()), None);
+    }
+
+    /// A run whose stage `a` keeps checking below its bar, then `b`.
+    fn keeping(runs: &mut Runs) -> String {
+        let mut p = pipeline(&["a", "b"]);
+        p.stages[0].keep = Some(crate::pipeline::KeepChecking {
+            every: 10,
+            hours: 8,
+        });
+        let id = runs.start_run("orch", p, "INTH-1", "x").unwrap().id.clone();
+        started(runs, &id, "a", "t1");
+        runs.skill_used("t1", "qa");
+        id
+    }
+
+    #[test]
+    fn a_step_that_keeps_checking_stays_at_work_below_its_bar() {
+        let mut runs = Runs::default();
+        let id = keeping(&mut runs);
+        let changes = runs.report("t1", rated(40)).unwrap();
+        assert!(
+            changes
+                .iter()
+                .any(|c| matches!(&c.what, Decided::Rechecking(why) if why.contains("40"))),
+            "{changes:?}"
+        );
+        let r = runs.run(&id).unwrap();
+        assert_eq!(r.state, RunState::Running);
+        assert_eq!(r.rechecking, Some(0));
+        assert_eq!(status(&runs, &id, 0), StageStatus::Running);
+        // Still short when it looks again: still at work, its new report kept.
+        runs.report("t1", rated(60)).unwrap();
+        assert_eq!(runs.run(&id).unwrap().stages[0].rating().unwrap().score, 60);
+        assert_eq!(runs.run(&id).unwrap().state, RunState::Running);
+        // Now it clears the bar: it passes and the run goes on.
+        let changes = runs.report("t1", rated(90)).unwrap();
+        assert!(changes.iter().any(|c| c.what == Decided::Passed));
+        assert_eq!(runs.run(&id).unwrap().rechecking, None);
+        assert!(runs.begin("orch", &id, "b", "", 30).is_ok());
+    }
+
+    #[test]
+    fn a_step_that_keeps_checking_asks_you_when_its_time_is_up_or_a_person_must_act() {
+        let mut runs = Runs::default();
+        let id = keeping(&mut runs);
+        runs.report("t1", rated(40)).unwrap();
+        let changes = runs.stop_checking(&id);
+        assert!(
+            changes
+                .iter()
+                .any(|c| matches!(c.what, Decided::Stopped(_)))
+        );
+        let RunState::NeedsYou(why) = &runs.run(&id).unwrap().state else {
+            panic!("asks you");
+        };
+        assert!(why.contains("kept checking for 8 hours"), "{why}");
+        assert_eq!(status(&runs, &id, 0), StageStatus::Stopped);
+        assert!(runs.stop_checking(&id).is_empty(), "only once");
+
+        // A person must act (it says what): you're asked at once.
+        let mut runs = Runs::default();
+        let id = keeping(&mut runs);
+        let mut held = rated(40);
+        held.ask = "Approve PR #5 on GitHub as a code owner".into();
+        runs.report("t1", held).unwrap();
+        assert!(matches!(
+            runs.run(&id).unwrap().state,
+            RunState::NeedsYou(_)
+        ));
+        assert_eq!(runs.run(&id).unwrap().rechecking, None);
+
+        // A person stopping it while it checks ends the checking.
+        let mut runs = Runs::default();
+        let id = keeping(&mut runs);
+        runs.report("t1", rated(40)).unwrap();
+        runs.person(&id, Choice::Stop).unwrap();
+        assert_eq!(runs.run(&id).unwrap().rechecking, None);
     }
 
     #[test]

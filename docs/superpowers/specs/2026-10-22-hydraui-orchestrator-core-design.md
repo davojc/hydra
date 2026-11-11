@@ -1290,3 +1290,27 @@ A ticket that needs you stays in the sidebar under its orchestrator, but the ses
   - The stage stays where it is and the run still needs you. The new terminal becomes the stage's session (`Runs::relink`), so looking again (§60), **Score again** and its next report all still count.
   - When it can't resume (no logged session, or the orchestrator is closed), a notice says so and points to **Re-run with a note**.
 - **Stop this ticket.** It sits in the Pipeline tab's bar, beside **End pipeline**, for whichever ticket is shown while it's open, whatever its state. It's the same as the sidebar's old ×: it stops the ticket and closes its sessions. It left the needs-you panel's **More** menu. Right-clicking an orchestrator still offers it too.
+
+## 62. A step that keeps checking (added 2026-11-11)
+
+A prompt can't keep a stage open. "Keep checking until it's ready to approve" in a review prompt changed nothing: once the session reported below its bar, the stage stopped and the run needed you. Even with §60's "While it waits on you → Look again", the run showed Needs you while it looked. So keeping on is a setting of the step, and the prompt needn't mention polling.
+
+```toml
+[[stage]]
+id = "review"
+title = "Review PR"
+keep_checking = { every = 10, for = 8 }   # minutes, hours
+```
+
+- **Below its bar.** A report from a step that keeps checking, *done* but under its bar, with no `ask` (nothing a person must do), doesn't stop it.
+  - The stage stays running, its report is kept as the latest, and `Run.rechecking` names it. The run log notes `checking again`.
+  - The orchestrator is told the stage keeps checking: do nothing, and don't start the next stage.
+  - The card reads **Checking again** (`… · below its bar, checking again`) in the pipeline's colour, not Needs you.
+- **Its looks.** Every `every` minutes, its session is told: "Your stage reported N, under its bar of B, and keeps checking. Look again at what it depends on…; if something changed, do what your stage needs again and call stage_report; if nothing changed, end your turn without reporting." Its next report counts at once. At the bar, it passes and the run goes on. Under it, it keeps checking.
+- **When it asks you.**
+  - **Its `for` hours run out** (`Runs::stop_checking`): it stops at its gate and the run needs you, "stage review: 40, bar 95. It kept checking for 8 hours. …".
+  - **A report with an `ask`,** such as a red-zone approval only a person can give: it needs you at once (§59). It still looks again on the step's timetable, in place of the pipeline's §60 setting.
+  - **Blocked and check-by-hand reports** go to you as before.
+  - **Any person's choice** ends the checking.
+- **Pipeline settings.** Each Claude step has a **Below its bar** row under its prompt: **Ask me** or **Keep checking**; every 5 min, 10 min, 30 min or 1 hour; for 1, 4 or 8 hours or 1 day. A line reads it back in words. A Jev step has no session, so it can't keep checking.
+- **Also fixed:** the orchestrator's note for a stage waiting on its author said "every 5 minutes" whatever the pipeline set. It now says the pipeline's `look_every`.

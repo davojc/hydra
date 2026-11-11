@@ -244,6 +244,42 @@ pub struct Stage {
     pub prompt: String,
     /// `kind = "jev"`: Jev answers it, no Claude session (email triage spec §4).
     pub jev: Option<crate::jev_stage::JevStage>,
+    /// Below its bar it keeps checking instead of stopping (core spec §62).
+    pub keep: Option<KeepChecking>,
+}
+
+/// A step's `keep_checking = { every, for }` (core spec §62): a report below its bar doesn't
+/// stop it; its session looks again every `every` minutes for up to `hours`, then it asks you.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KeepChecking {
+    pub every: u32,
+    pub hours: u32,
+}
+
+impl KeepChecking {
+    pub fn text(&self) -> String {
+        format!(
+            "Below its bar, it keeps checking every {} for up to {} before it asks you.",
+            match self.every {
+                1 => "minute".to_string(),
+                n => format!("{n} minutes"),
+            },
+            match self.hours {
+                1 => "1 hour".to_string(),
+                n => format!("{n} hours"),
+            }
+        )
+    }
+
+    /// As the waiting timetable (§60) the looks follow.
+    pub fn waiting(&self) -> WaitingSettings {
+        WaitingSettings {
+            look_every: self.every,
+            look_for: self.hours,
+            needs_you: true,
+            then: WaitThen::Stop,
+        }
+    }
 }
 
 /// The ready-made ways to write product questions, as Pipeline settings offers them: a label
@@ -633,6 +669,15 @@ struct FileStage {
     instructions: Option<String>,
     #[serde(default)]
     options: BTreeMap<String, String>,
+    keep_checking: Option<FileKeep>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileKeep {
+    every: i64,
+    #[serde(rename = "for")]
+    hours: i64,
 }
 
 /// The prompt of a stage that has none (§2): a stage added in Pipeline settings. Its skill comes
@@ -728,6 +773,27 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
                 ));
             }
         };
+        let keep = match s.keep_checking {
+            None => None,
+            Some(_) if jev.is_some() => {
+                return Err(format!(
+                    "stage {}: a Jev stage has no session to keep checking",
+                    s.id
+                ));
+            }
+            Some(k) => {
+                if !(1..=1440).contains(&k.every) || !(1..=168).contains(&k.hours) {
+                    return Err(format!(
+                        "stage {}: keep_checking every is 1 to 1440 minutes, for is 1 to 168 hours",
+                        s.id
+                    ));
+                }
+                Some(KeepChecking {
+                    every: k.every as u32,
+                    hours: k.hours as u32,
+                })
+            }
+        };
         let prompt = s.prompt.unwrap_or_else(|| default_prompt(&s.title));
         let folder = s
             .folder
@@ -742,6 +808,7 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
             worktree: s.worktree,
             prompt,
             jev,
+            keep,
         });
     }
     Ok(Pipeline {
@@ -844,6 +911,8 @@ pub struct EditStage {
     pub prompt: String,
     /// A Jev stage's question, kept as the file has it: the settings show it, not edit it.
     pub jev: Option<crate::jev_stage::JevStage>,
+    /// Keeps checking below its bar (§62); `None` stops and asks you.
+    pub keep: Option<KeepChecking>,
 }
 
 impl From<&Pipeline> for Edit {
@@ -864,6 +933,7 @@ impl From<&Pipeline> for Edit {
                     bar: s.bar,
                     prompt: s.prompt.clone(),
                     jev: s.jev.clone(),
+                    keep: s.keep,
                 })
                 .collect(),
             linear: p.linear.clone(),
@@ -1302,6 +1372,17 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
                 }
             }
         }
+        match s.keep.filter(|_| s.jev.is_none()) {
+            Some(k) => {
+                let mut t = toml_edit::InlineTable::new();
+                t.insert("every", i64::from(k.every).into());
+                t.insert("for", i64::from(k.hours).into());
+                table["keep_checking"] = value(t);
+            }
+            None => {
+                table.remove("keep_checking");
+            }
+        }
         // A stage's own tables ([stage.options]) go with it, right after it.
         let at = 1_000 + stages.len() * 10;
         table.set_position(at);
@@ -1644,6 +1725,7 @@ mod tests {
                     instructions: "What do they ask?".into(),
                     options,
                 }),
+                keep: None,
             },
         );
         assert_eq!(validate(&edit), Ok(()));
@@ -2315,6 +2397,50 @@ mod tests {
     }
 
     #[test]
+    fn a_step_keeps_checking_when_set_and_says_so() {
+        let base = "name = \"P\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n";
+        assert_eq!(parse(base).unwrap().stages[0].keep, None);
+        let p = parse(&format!(
+            "{base}keep_checking = {{ every = 10, for = 8 }}\n"
+        ))
+        .unwrap();
+        let k = p.stages[0].keep.unwrap();
+        assert_eq!((k.every, k.hours), (10, 8));
+        assert_eq!(
+            k.text(),
+            "Below its bar, it keeps checking every 10 minutes for up to 8 hours before it asks \
+             you."
+        );
+        for bad in [
+            "keep_checking = { every = 0, for = 8 }\n",
+            "keep_checking = { every = 10, for = 0 }\n",
+            "keep_checking = { every = 10, for = 200 }\n",
+            "keep_checking = { every = 10 }\n",
+        ] {
+            assert!(parse(&format!("{base}{bad}")).is_err(), "{bad}");
+        }
+        // A Jev step has no session to keep checking.
+        let jev = "name = \"P\"\n[[stage]]\nid = \"c\"\ntitle = \"C\"\nkind = \"jev\"\n\
+                   instructions = \"Q\"\nkeep_checking = { every = 5, for = 1 }\n\
+                   [stage.options]\na = \"A\"\nb = \"B\"\n";
+        assert!(parse(jev).unwrap_err().contains("keep"));
+
+        // Settings save it, and take it off again.
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(folder(d.path()).join("p.toml"), base).unwrap();
+        let mut edit = edit_of(&load(d.path(), "p").unwrap());
+        edit.stages[0].keep = Some(KeepChecking { every: 5, hours: 4 });
+        save(d.path(), "p", &edit).unwrap();
+        let k = load(d.path(), "p").unwrap().stages[0].keep.unwrap();
+        assert_eq!((k.every, k.hours), (5, 4));
+        edit.stages[0].keep = None;
+        save(d.path(), "p", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("p.toml")).unwrap();
+        assert!(!text.contains("keep_checking"), "{text}");
+    }
+
+    #[test]
     fn a_jev_stage_is_read_with_its_question() {
         let p = parse(
             r#"
@@ -2690,6 +2816,7 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
                 bar: Some(90),
                 prompt: String::new(),
                 jev: None,
+                keep: None,
             });
         }
         save(d.path(), "tickets", &edit).unwrap();
@@ -2771,6 +2898,7 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
             bar: None,
             prompt: "test {ticket} against {feature_env}".into(),
             jev: None,
+            keep: None,
         });
         save(d.path(), "tickets", &edit).unwrap();
         let p = load(d.path(), "tickets").unwrap();

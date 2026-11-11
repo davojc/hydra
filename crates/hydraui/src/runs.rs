@@ -866,6 +866,12 @@ impl Runs {
         let id = r.pipeline.stages[si].id.clone();
         let passed = passes(&rating, bar);
         let why = match rating.outcome {
+            // What the person must do leads, wherever the reason is shown.
+            _ if !passed && !rating.ask.is_empty() => format!(
+                "{} (stage {id}: {}, bar {bar})",
+                rating.ask.trim_end_matches('.'),
+                rating.score
+            ),
             crate::rating::Outcome::Blocked => format!("stage {id} is blocked: {}", rating.summary),
             crate::rating::Outcome::Check => {
                 format!("stage {id} needs a person to check: {}", rating.check)
@@ -1307,9 +1313,13 @@ impl Runs {
             return Err(format!("run {} has nothing left to do", r.id));
         };
         let s = &mut r.stages[si];
+        // A stage that asked a person to check something by hand, or that held back on purpose
+        // and said what a person must do (`ask`), passes once they say they did it.
         let asked = s.status == StageStatus::Stopped
-            && s.rating()
-                .is_some_and(|x| x.outcome == crate::rating::Outcome::Check);
+            && s.rating().is_some_and(|x| {
+                x.outcome == crate::rating::Outcome::Check
+                    || (x.outcome == crate::rating::Outcome::Done && !x.ask.is_empty())
+            });
         if !asked {
             return Err(
                 "only a stage that asked a person to check something by hand can pass this way"
@@ -2174,6 +2184,29 @@ mod tests {
         let changes = runs.person(&id, checked("")).unwrap();
         assert!(changes.iter().any(|c| c.what == Decided::RunFinished));
         assert_eq!(runs.run(&id).unwrap().state, RunState::Finished);
+    }
+
+    #[test]
+    fn a_stage_held_back_for_a_person_says_what_and_passes_once_they_have() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b"]);
+        started(&mut runs, &id, "a", "t1");
+        runs.skill_used("t1", "qa");
+        let mut held = rated(40);
+        held.ask = "Approve PR #5 on GitHub as a code owner".into();
+        runs.report("t1", held).unwrap();
+        let RunState::NeedsYou(why) = &runs.run(&id).unwrap().state else {
+            panic!("waits for a person");
+        };
+        // What it needs leads, so every place that shows the reason says it first.
+        assert!(
+            why.starts_with("Approve PR #5 on GitHub as a code owner"),
+            "{why}"
+        );
+        assert!(why.contains("40") && why.contains("bar"), "{why}");
+        runs.person(&id, checked("Approved on GitHub")).unwrap();
+        assert_eq!(status(&runs, &id, 0), StageStatus::Passed);
+        assert_eq!(runs.run(&id).unwrap().state, RunState::Running);
     }
 
     #[test]

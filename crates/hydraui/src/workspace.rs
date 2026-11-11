@@ -273,6 +273,9 @@ pub struct Workspace {
     wake_tries: HashMap<PaneId, u8>,
     /// When each run waiting on product last had its stage look in the Slack thread.
     ask_checks: HashMap<String, std::time::SystemTime>,
+    /// Runs waiting on you that look again (core spec §60): when the wait began, the last
+    /// look, and whether looking is over.
+    wait_looks: HashMap<String, (std::time::SystemTime, Option<std::time::SystemTime>, bool)>,
     /// When open runs about pull requests were last checked on GitHub, and whether a check is
     /// out (a merged or closed one ends its run).
     pr_checked: Option<std::time::Instant>,
@@ -410,6 +413,7 @@ impl Workspace {
                         ws.projects_tick(window, cx);
                         // A stage waiting on product looks in its Slack thread.
                         ws.asking_tick(window, cx);
+                        ws.waiting_tick(window, cx);
                         // A wake-up that didn't take is sent again.
                         ws.recheck_wakes(window, cx);
                         // Orchestrators idle for hours are parked to resume later.
@@ -571,6 +575,7 @@ impl Workspace {
             sent_wakes: HashMap::new(),
             wake_tries: HashMap::new(),
             ask_checks: HashMap::new(),
+            wait_looks: HashMap::new(),
             pr_checked: None,
             pr_checking: false,
             linear_watch: HashMap::new(),

@@ -196,6 +196,9 @@ pub struct Run {
     pub asking: Option<Ask>,
     /// A send-back queued until the stage at work reports.
     pub fix_after: Option<Fix>,
+    /// A stage waiting on a person whose session was woken to look again (core spec §60): it
+    /// may report once more, and that report counts.
+    pub looking: Option<usize>,
     /// What it's about, as a link: the pull request a Slack-triggered run reviews (`{pr}`).
     pub link: Option<String>,
 }
@@ -523,6 +526,7 @@ impl Runs {
             week_used: None,
             asking: None,
             fix_after: None,
+            looking: None,
             link: None,
         });
         Ok(self.runs.last().expect("just pushed"))
@@ -830,7 +834,8 @@ impl Runs {
             return Err("only a running stage's own session reports".into());
         };
         let r = &mut self.runs[ri];
-        if r.stages[si].status != StageStatus::Running {
+        let relooked = r.stages[si].status == StageStatus::Stopped && r.looking == Some(si);
+        if r.stages[si].status != StageStatus::Running && !relooked {
             return Err("this stage has already reported, or isn't running".into());
         }
         // The skill the pipeline set must have been used by this session (§4).
@@ -883,6 +888,7 @@ impl Runs {
                 )
             }
         };
+        r.looking = None;
         let s = &mut r.stages[si];
         if let Some(a) = s.attempts.last_mut() {
             a.rating = Some(rating);
@@ -921,6 +927,14 @@ impl Runs {
                     stage: None,
                     what: Decided::RunFinished,
                 });
+            } else if relooked {
+                // It waited on a person and passed on its own: the run goes on.
+                r.state = RunState::Running;
+                changes.push(Change {
+                    run,
+                    stage: None,
+                    what: Decided::RunResumed,
+                });
             }
             Ok(changes)
         } else {
@@ -940,8 +954,11 @@ impl Runs {
     /// resumed or stopped (core spec §52). A set-aside run's stages closing change nothing.
     pub fn session_gone(&mut self, token: &str) -> Vec<Change> {
         let mut changes = Vec::new();
+        // A run that has ended (its pull request merged, say) closing its stage's session is
+        // hydraui's doing, not a failure.
         if let Some((ri, si)) = self.stage_of(token)
             && self.runs[ri].orchestrator != crate::run_resume::REPLAYED
+            && self.runs[ri].state.open()
             && self.runs[ri].stages[si].status.busy()
         {
             changes.extend(self.fail_stage(ri, si, "its session ended without reporting"));
@@ -1238,6 +1255,8 @@ impl Runs {
         let Some(ri) = self.index(run) else {
             return Err(format!("no run {run}"));
         };
+        // A person acting ends any look in progress: its report wouldn't count.
+        self.runs[ri].looking = None;
         let r = &self.runs[ri];
         let waiting = r
             .stages
@@ -1573,6 +1592,24 @@ impl Runs {
             });
         }
         Ok(changes)
+    }
+
+    /// A stage waiting on a person is woken to look again (core spec §60): it stays waiting,
+    /// and its session may report once more. Refused unless the run waits on a person at that
+    /// stage and its session is known.
+    pub fn look_again(&mut self, run: &str, stage: usize) -> Result<(), String> {
+        let ri = self.index(run).ok_or_else(|| format!("no run {run}"))?;
+        let r = &mut self.runs[ri];
+        if !matches!(r.state, RunState::NeedsYou(_)) || r.fix_after.is_some() {
+            return Err(format!("run {run} isn't waiting for you"));
+        }
+        let s = r.stages.get(stage).ok_or("no such stage")?;
+        if s.status != StageStatus::Stopped || s.latest().and_then(|a| a.session.as_ref()).is_none()
+        {
+            return Err("only a stopped stage with its session can look again".into());
+        }
+        r.looking = Some(stage);
+        Ok(())
     }
 
     /// A person's **Score again**: the stopped stage's own session, which they worked in since
@@ -2207,6 +2244,62 @@ mod tests {
         runs.person(&id, checked("Approved on GitHub")).unwrap();
         assert_eq!(status(&runs, &id, 0), StageStatus::Passed);
         assert_eq!(runs.run(&id).unwrap().state, RunState::Running);
+    }
+
+    #[test]
+    fn a_run_ended_by_its_merged_pr_doesnt_fail_its_closing_stage() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b"]);
+        started(&mut runs, &id, "a", "t1");
+        runs.settle(&id, "its pull request was merged").unwrap();
+        // hydraui closes the stage's session: nothing to retry, nothing to tell.
+        assert!(runs.session_gone("t1").is_empty());
+        assert_eq!(runs.run(&id).unwrap().state, RunState::Finished);
+    }
+
+    #[test]
+    fn a_stage_waiting_on_you_may_look_again_and_report_anew() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b"]);
+        started(&mut runs, &id, "a", "t1");
+        runs.skill_used("t1", "qa");
+        runs.report("t1", rated(40)).unwrap();
+        assert!(matches!(
+            runs.run(&id).unwrap().state,
+            RunState::NeedsYou(_)
+        ));
+        // A report out of turn is refused, as before.
+        assert!(runs.report("t1", rated(90)).is_err());
+        // Woken to look: still waiting on you while it looks.
+        runs.look_again(&id, 0).unwrap();
+        assert!(matches!(
+            runs.run(&id).unwrap().state,
+            RunState::NeedsYou(_)
+        ));
+        assert_eq!(status(&runs, &id, 0), StageStatus::Stopped);
+        // Still short: a fresh reason, still waiting.
+        runs.report("t1", rated(60)).unwrap();
+        let RunState::NeedsYou(why) = &runs.run(&id).unwrap().state else {
+            panic!("still waits");
+        };
+        assert!(why.contains("60"), "{why}");
+        assert!(runs.report("t1", rated(90)).is_err(), "one report per look");
+        // Something changed: it passes on its own and the run goes on.
+        runs.look_again(&id, 0).unwrap();
+        let changes = runs.report("t1", rated(90)).unwrap();
+        assert!(changes.iter().any(|c| c.what == Decided::Passed));
+        assert!(changes.iter().any(|c| c.what == Decided::RunResumed));
+        assert_eq!(runs.run(&id).unwrap().state, RunState::Running);
+        assert!(runs.begin("orch", &id, "b", "", 30).is_ok());
+        // Nothing waits now: no look.
+        assert!(runs.look_again(&id, 0).is_err());
+
+        // A person acting while a look is out: its late report doesn't count.
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        runs.look_again(&id, 1).unwrap();
+        runs.person(&id, Choice::Stop).unwrap();
+        assert!(runs.report("t2", rated(90)).is_err());
     }
 
     #[test]

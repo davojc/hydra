@@ -348,6 +348,86 @@ fn read_thread(v: &serde_json::Value) -> Option<Thread> {
     })
 }
 
+/// One message of a thread, as a triage run reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message {
+    pub from: String,
+    pub to: String,
+    pub date: String,
+    pub subject: String,
+    /// Its plain-text body, or Gmail's snippet when it has none.
+    pub body: String,
+    /// The names of its attachments.
+    pub attachments: Vec<String>,
+}
+
+/// The plain text of a `format=full` payload: its own `text/plain` body, else its parts'.
+fn plain_text(payload: &serde_json::Value) -> Option<String> {
+    use base64::Engine;
+    if payload["mimeType"].as_str() == Some("text/plain")
+        && let Some(data) = payload["body"]["data"].as_str()
+    {
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(data.trim_end_matches('='))
+            .ok()?;
+        return Some(String::from_utf8_lossy(&bytes).trim().to_string());
+    }
+    payload["parts"].as_array()?.iter().find_map(plain_text)
+}
+
+/// The file names of a payload's attachments, its parts' included.
+fn attachments(payload: &serde_json::Value, out: &mut Vec<String>) {
+    if let Some(name) = payload["filename"].as_str().filter(|n| !n.is_empty()) {
+        out.push(name.to_string());
+    }
+    for part in payload["parts"].as_array().into_iter().flatten() {
+        attachments(part, out);
+    }
+}
+
+/// Every message of thread `id`, oldest first.
+pub fn thread_messages(ep: &Endpoints, access: &str, id: &str) -> Result<Vec<Message>, String> {
+    let v = api_get(
+        ep,
+        access,
+        &format!("users/me/threads/{}?format=full", enc(id)),
+    )?;
+    let messages = v["messages"]
+        .as_array()
+        .ok_or_else(|| format!("thread {id} came back unreadable"))?;
+    Ok(messages
+        .iter()
+        .map(|m| {
+            let header = |name: &str| {
+                m["payload"]["headers"]
+                    .as_array()
+                    .and_then(|hs| {
+                        hs.iter().find(|h| {
+                            h["name"]
+                                .as_str()
+                                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+                        })
+                    })
+                    .and_then(|h| h["value"].as_str())
+                    .unwrap_or("")
+                    .to_string()
+            };
+            let mut files = Vec::new();
+            attachments(&m["payload"], &mut files);
+            Message {
+                from: header("From"),
+                to: header("To"),
+                date: header("Date"),
+                subject: header("Subject"),
+                body: plain_text(&m["payload"])
+                    .filter(|b| !b.is_empty())
+                    .unwrap_or_else(|| m["snippet"].as_str().unwrap_or("").to_string()),
+                attachments: files,
+            }
+        })
+        .collect())
+}
+
 /// Up to `max` threads matching Gmail search `query`, newest first.
 pub fn list_threads(
     ep: &Endpoints,
@@ -689,6 +769,57 @@ mod tests {
             1,
         );
         assert!(list_threads(&ep, "a", "in:inbox", 5).unwrap().is_empty());
+    }
+
+    fn b64(s: &str) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::URL_SAFE.encode(s)
+    }
+
+    #[test]
+    fn a_threads_messages_come_with_their_plain_text() {
+        let full = serde_json::json!({
+            "id": "t1",
+            "messages": [
+                {"snippet": "Hi, how do I", "payload": {
+                    "mimeType": "multipart/alternative",
+                    "headers": [
+                        {"name": "From", "value": "Ann <ann@acme.com>"},
+                        {"name": "To", "value": "integrations@iov42.com"},
+                        {"name": "Subject", "value": "Sharing"},
+                        {"name": "Date", "value": "Mon, 9 Nov 2026 10:00:00 +0000"}
+                    ],
+                    "parts": [
+                        {"mimeType": "text/plain", "body": {"data": b64("Hi, how do I share a record? é")}},
+                        {"mimeType": "text/html", "body": {"data": b64("<p>Hi</p>")}},
+                        {"mimeType": "application/pdf", "filename": "log.pdf", "body": {"attachmentId": "a1"}}
+                    ]
+                }},
+                {"snippet": "Only a snippet", "payload": {
+                    "mimeType": "text/html",
+                    "headers": [{"name": "From", "value": "integrations@iov42.com"}],
+                    "body": {"data": b64("<p>Thanks</p>")}
+                }}
+            ]
+        })
+        .to_string();
+        let (ep, seen) = fake(vec![("/gmail/v1/users/me/threads/t1", 200, full)], 1);
+        let got = thread_messages(&ep, "ya29.a", "t1").unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            got[0],
+            Message {
+                from: "Ann <ann@acme.com>".into(),
+                to: "integrations@iov42.com".into(),
+                date: "Mon, 9 Nov 2026 10:00:00 +0000".into(),
+                subject: "Sharing".into(),
+                body: "Hi, how do I share a record? é".into(),
+                attachments: vec!["log.pdf".into()],
+            }
+        );
+        // No plain text: Gmail's snippet.
+        assert_eq!(got[1].body, "Only a snippet");
+        assert!(seen.recv().unwrap().url.contains("format=full"));
     }
 
     #[test]

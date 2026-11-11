@@ -196,6 +196,7 @@ impl SettingsDraft {
             linear: self.linear.edit(cx),
             slack: self.slack.edit(cx),
             schedule: self.schedule.edit(cx),
+            mail: self.saved.mail.clone(),
             autostart: self.saved.autostart.clone(),
             product_channel: Some(self.product.read(cx).value().trim().to_string())
                 .filter(|c| !c.is_empty()),

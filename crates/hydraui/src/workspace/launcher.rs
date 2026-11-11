@@ -131,6 +131,7 @@ impl Workspace {
                     ws.check_gmail(env, w, cx)
                 });
             }
+            Action::CheckMailNow => self.mail_tick(true, window, cx),
             Action::EditPipelines => {
                 let root = self.hydra.paths.root().to_path_buf();
                 if let Err(e) = crate::pipeline::ensure_example(&root) {

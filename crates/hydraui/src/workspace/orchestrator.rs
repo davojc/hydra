@@ -30,7 +30,7 @@ pub(super) type Lane = (Run, Card, Vec<PaneId>);
 pub fn orchestrator_prompt(pipeline: &str, from_linear: bool) -> String {
     let ticket = if from_linear {
         "Tickets reach you from hydraui, which picks them (from Linear, pull requests posted in \
-         Slack, or the pipeline's schedule) and sends you one, or from me. Don't ask me for one: say you're ready and \
+         Slack, the pipeline's schedule, or its mailbox) and sends you one, or from me. Don't ask me for one: say you're ready and \
          wait."
     } else {
         "Ask me which ticket to run."
@@ -331,8 +331,8 @@ impl Workspace {
         // A Jev stage opens no terminal: Jev answers it (email triage spec §4).
         let jev =
             server::get().and_then(|sv| crate::jev_stage::of(&server::lock(sv.registry()), &s));
-        if let Some((stage, bar)) = jev {
-            return self.run_jev_stage(s, stage, bar, window, cx);
+        if let Some((stage, bar, ticket)) = jev {
+            return self.run_jev_stage(s, stage, bar, ticket, window, cx);
         }
         // The skill set in the pipeline must be one its session can use (§4): checked where
         // the session will look, before anything opens.

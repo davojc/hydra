@@ -112,10 +112,21 @@ pub fn run_folder(hydra_root: &Path, run: &str) -> PathBuf {
     crate::run_log::file_for(hydra_root, run).with_extension("")
 }
 
-/// The text Jev is asked about: the stage's input file in the run's folder, cut to
-/// `MAX_INPUT` characters.
-pub fn input_text(hydra_root: &Path, run: &str, stage: &JevStage) -> Result<String, String> {
-    let path = run_folder(hydra_root, run).join(&stage.input);
+/// The text Jev is asked about: the stage's input file in the run's folder, or else in the
+/// folder a `[mail]` look kept its ticket's thread in, cut to `MAX_INPUT` characters.
+pub fn input_text(
+    hydra_root: &Path,
+    run: &str,
+    ticket: &str,
+    stage: &JevStage,
+) -> Result<String, String> {
+    let own = run_folder(hydra_root, run).join(&stage.input);
+    let mailed = crate::mail_watch::thread_folder(hydra_root, ticket).join(&stage.input);
+    let path = if own.exists() || !mailed.exists() {
+        own
+    } else {
+        mailed
+    };
     let text = std::fs::read_to_string(&path).map_err(|e| {
         format!(
             "the run has no {} for Jev to read ({}): {e}",
@@ -178,14 +189,14 @@ pub fn failed(why: &str) -> Value {
     })
 }
 
-/// Starting stage `s`'s Jev question and bar, when it's a Jev stage.
+/// Starting stage `s`'s Jev question, bar and run's ticket, when it's a Jev stage.
 pub fn of(
     reg: &crate::mcp::registry::Registry,
     s: &crate::runs::StartStage,
-) -> Option<(JevStage, u8)> {
+) -> Option<(JevStage, u8, String)> {
     let r = reg.runs.run(&s.run)?;
     let j = r.pipeline.stages.get(s.stage)?.jev.clone()?;
-    Some((j, r.pipeline.bar_for(s.stage)))
+    Some((j, r.pipeline.bar_for(s.stage), r.ticket.clone()))
 }
 
 /// Files `args` as starting stage `s`'s report: it takes the place of a session, under a token
@@ -273,19 +284,19 @@ mod tests {
     fn the_input_is_read_from_the_runs_folder_and_cut() {
         let home = tempfile::tempdir().unwrap();
         let s = email_stage();
-        let missing = input_text(home.path(), "CS-SYNC-1", &s).unwrap_err();
+        let missing = input_text(home.path(), "CS-SYNC-1", "CS-SYNC", &s).unwrap_err();
         assert!(missing.contains("email.md"), "{missing}");
         let dir = run_folder(home.path(), "CS-SYNC-1");
         assert!(dir.ends_with("hydraui/runs/CS-SYNC-1"));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("email.md"), "  How do I share?  \n").unwrap();
         assert_eq!(
-            input_text(home.path(), "CS-SYNC-1", &s).unwrap(),
+            input_text(home.path(), "CS-SYNC-1", "CS-SYNC", &s).unwrap(),
             "How do I share?"
         );
         std::fs::write(dir.join("email.md"), "é".repeat(MAX_INPUT + 10)).unwrap();
         assert_eq!(
-            input_text(home.path(), "CS-SYNC-1", &s)
+            input_text(home.path(), "CS-SYNC-1", "CS-SYNC", &s)
                 .unwrap()
                 .chars()
                 .count(),
@@ -293,9 +304,17 @@ mod tests {
         );
         std::fs::write(dir.join("email.md"), " \n").unwrap();
         assert!(
-            input_text(home.path(), "CS-SYNC-1", &s)
+            input_text(home.path(), "CS-SYNC-1", "CS-SYNC", &s)
                 .unwrap_err()
                 .contains("empty")
+        );
+        // A mail run's thread is kept by its ticket, before the run has an id.
+        let mailed = crate::mail_watch::thread_folder(home.path(), "MAIL-18C2");
+        std::fs::create_dir_all(&mailed).unwrap();
+        std::fs::write(mailed.join("email.md"), "# Sharing").unwrap();
+        assert_eq!(
+            input_text(home.path(), "MAIL-18C2-1", "MAIL-18C2", &s).unwrap(),
+            "# Sharing"
         );
     }
 
@@ -399,8 +418,11 @@ mod tests {
         };
         let sure = start("MAIL-1");
         let unsure = start("MAIL-2");
-        let (j, bar) = of(&reg, &sure).unwrap();
-        assert_eq!((j.input.as_str(), bar), ("email.md", 70));
+        let (j, bar, ticket) = of(&reg, &sure).unwrap();
+        assert_eq!(
+            (j.input.as_str(), bar, ticket.as_str()),
+            ("email.md", 70, "MAIL-1")
+        );
 
         let event = file(&mut reg, &sure, &report(&verdict("how_to", 0.86), "m")).unwrap();
         assert!(matches!(event, Some(McpEvent::RunChanged(_))));

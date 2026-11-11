@@ -17,6 +17,7 @@ impl Workspace {
         s: StartStage,
         stage: JevStage,
         bar: u8,
+        ticket: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -33,7 +34,7 @@ impl Workspace {
                         let key = JevKey::app()
                             .get()?
                             .ok_or("no Jev API key: set it with Set Jev API key…")?;
-                        let text = jev_stage::input_text(&root, &s.run, &stage)?;
+                        let text = jev_stage::input_text(&root, &s.run, &ticket, &stage)?;
                         crate::jev::ask(JEV_URL, &key, &text, &settings).map_err(|f| {
                             if let Some(body) = &f.body {
                                 crate::action_log::write(format!("jev: {} {body}", f.reason));

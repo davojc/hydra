@@ -109,12 +109,12 @@ impl WaitingSettings {
     /// How it reads in Pipeline settings.
     pub fn text(&self) -> String {
         if self.look_every == 0 {
-            return "While a step waits, it doesn't look again: it waits to be told.".into();
+            return "While a stage waits, it doesn't look again: it waits to be told.".into();
         }
         let who = if self.needs_you {
-            "While a step waits, on you, its author or product,"
+            "While a stage waits, on you, its author or product,"
         } else {
-            "While a step waits on its author or product,"
+            "While a stage waits on its author or product,"
         };
         let every = match self.look_every {
             1 => "every minute".to_string(),
@@ -479,13 +479,21 @@ pub const MAX_RUNS_AT_ONCE: u8 = 6;
 
 /// The colours Pipeline settings offers, by name: distinct from each other and from the card's
 /// state colours' meanings, and readable on the dark sidebar.
-pub const COLORS: [(&str, u32); 8] = [
+pub const COLORS: [(&str, u32); 16] = [
     ("Teal", 0x3fbfa6),
+    ("Cyan", 0x4fc3dc),
     ("Blue", 0x5b9cf0),
+    ("Indigo", 0x7480e8),
     ("Violet", 0x9b7cf0),
+    ("Purple", 0xc07ce8),
     ("Pink", 0xe27bb8),
+    ("Rose", 0xe87c95),
+    ("Red", 0xe06666),
+    ("Coral", 0xf0806a),
     ("Orange", 0xe8935a),
+    ("Amber", 0xe8b14a),
     ("Yellow", 0xd8c35a),
+    ("Lime", 0xa8c94a),
     ("Green", 0x7cc46a),
     ("Slate", 0x8fa1b3),
 ];
@@ -970,8 +978,8 @@ impl Part {
         match self {
             Part::Name => "Name".into(),
             Part::Source => "Where work comes from".into(),
-            Part::Steps => "Steps".into(),
-            Part::Step(i) => format!("Step {}", i + 1),
+            Part::Steps => "Stages".into(),
+            Part::Step(i) => format!("Stage {}", i + 1),
             Part::Advanced => "Advanced settings".into(),
         }
     }
@@ -1001,11 +1009,11 @@ pub fn problems(edit: &Edit) -> Vec<(Part, &'static str)> {
         }
     }
     if edit.stages.is_empty() {
-        out.push((Part::Steps, "Add at least one step"));
+        out.push((Part::Steps, "Add at least one stage"));
     }
     for (i, s) in edit.stages.iter().enumerate() {
         if s.title.trim().is_empty() {
-            out.push((Part::Step(i), "Name this step"));
+            out.push((Part::Step(i), "Name this stage"));
         }
     }
     if let Some(l) = &edit.linear {
@@ -1904,7 +1912,7 @@ mod tests {
         );
         assert_eq!(
             w.text(),
-            "While a step waits on its author or product, it looks again every 5 minutes until \
+            "While a stage waits on its author or product, it looks again every 5 minutes until \
              they answer. While it waits on you, it doesn't look."
         );
         let w = parse(&format!(
@@ -1918,7 +1926,7 @@ mod tests {
         );
         assert_eq!(
             w.text(),
-            "While a step waits, on you, its author or product, it looks again every 10 minutes \
+            "While a stage waits, on you, its author or product, it looks again every 10 minutes \
              for up to 8 hours, then it stops looking, and a session waiting on you closes."
         );
         let off = parse(&format!(
@@ -1928,7 +1936,7 @@ mod tests {
         .waiting;
         assert_eq!(
             off.text(),
-            "While a step waits, it doesn't look again: it waits to be told."
+            "While a stage waits, it doesn't look again: it waits to be told."
         );
         for bad in [
             "[waiting]\nlook_every = 1441\n",
@@ -2169,7 +2177,7 @@ mod tests {
         std::fs::create_dir_all(folder(d.path())).unwrap();
         std::fs::write(folder(d.path()).join("prs.toml"), format!("# mine\n{base}")).unwrap();
         let mut edit = Edit::from(&load(d.path(), "prs").unwrap());
-        edit.color = Some(COLORS[2].1);
+        edit.color = Some(COLORS[4].1);
         save(d.path(), "prs", &edit).unwrap();
         let text = std::fs::read_to_string(folder(d.path()).join("prs.toml")).unwrap();
         assert!(text.contains("color = \"#9b7cf0\""), "{text}");
@@ -2978,12 +2986,25 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
         let mut edit = edit_of(&parse(COMMENTED).unwrap());
         assert_eq!(validate(&edit), Ok(()));
         edit.stages[1].title = " ".into();
-        assert_eq!(validate(&edit), Err("Name this step"));
+        assert_eq!(validate(&edit), Err("Name this stage"));
         edit.name = "".into();
         assert_eq!(validate(&edit), Err("Give the pipeline a name"));
         edit.name = "x".into();
         edit.stages.clear();
-        assert_eq!(validate(&edit), Err("Add at least one step"));
+        assert_eq!(validate(&edit), Err("Add at least one stage"));
+    }
+
+    #[test]
+    fn every_colour_choice_is_its_own() {
+        let hexes: std::collections::BTreeSet<u32> = COLORS.iter().map(|(_, h)| *h).collect();
+        let names: std::collections::BTreeSet<&str> = COLORS.iter().map(|(n, _)| *n).collect();
+        assert_eq!((hexes.len(), names.len()), (COLORS.len(), COLORS.len()));
+        // Pipelines saved with the first eight keep their colour.
+        for old in [
+            0x3fbfa6, 0x5b9cf0, 0x9b7cf0, 0xe27bb8, 0xe8935a, 0xd8c35a, 0x7cc46a, 0x8fa1b3,
+        ] {
+            assert!(hexes.contains(&old), "{old:06x}");
+        }
     }
 
     #[test]
@@ -2997,13 +3018,13 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
             problems(&edit),
             [
                 (Part::Name, "Give the pipeline a name"),
-                (Part::Step(1), "Name this step"),
+                (Part::Step(1), "Name this stage"),
                 (Part::Advanced, "Run 1 to 6 tickets at once"),
             ]
         );
-        assert_eq!(Part::Step(1).label(), "Step 2");
+        assert_eq!(Part::Step(1).label(), "Stage 2");
         edit.stages.clear();
-        assert!(problems(&edit).contains(&(Part::Steps, "Add at least one step")));
+        assert!(problems(&edit).contains(&(Part::Steps, "Add at least one stage")));
     }
 
     #[test]

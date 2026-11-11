@@ -50,6 +50,22 @@ fn card(id: SharedString, edge: Option<u32>) -> gpui::Stateful<gpui::Div> {
         .border_color(edge.map_or(color(0x1f2524), |e| color(e).opacity(0.6)))
 }
 
+/// A section's heading, with a line under it saying what the section is for.
+fn heading(title: &str, about: &str) -> gpui::Div {
+    v_flex()
+        .gap(px(2.))
+        .child(
+            text(16., theme::TEXT)
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(title.to_string()),
+        )
+        .child(
+            text(12.5, theme::TEXT_MUTED)
+                .whitespace_normal()
+                .child(about.to_string()),
+        )
+}
+
 /// A label on the left, its control on the right.
 fn field(label: &str, control: impl IntoElement) -> gpui::Div {
     h_flex()
@@ -224,7 +240,6 @@ impl Workspace {
         let dirty = edit != draft.saved;
         let problems = pipeline::problems(&edit);
         let router_on = self.router_state(orch, cx).is_some_and(|(_, _, ok)| ok);
-        let section = |title: &str| text(11., theme::TEXT_MUTED).child(title.to_uppercase());
 
         let mut page = v_flex()
             .id(SharedString::from(format!("settings-{orch}")))
@@ -263,22 +278,33 @@ impl Workspace {
             // 2. Its name and colour.
             .child(
                 v_flex()
-                    .gap_2()
-                    .child(section("Name"))
+                    .gap(px(10.))
+                    .child(heading(
+                        "Name",
+                        "What it's called in the sidebar, and its colour.",
+                    ))
                     .child(div().max_w(px(480.)).child(Input::new(&draft.name)))
                     .child(color_swatches(orch, draft.color, cx)),
             )
             // 3. What starts a run.
-            .child(self.render_source_card(orch, draft, &edit, &problems, cx))
+            .child(
+                v_flex()
+                    .gap(px(10.))
+                    .child(heading(
+                        "Trigger",
+                        "What starts a run: a ticket, a pull request, an email, a time of day, \
+                         or you.",
+                    ))
+                    .child(self.render_source_card(orch, draft, &edit, &problems, cx)),
+            )
             // 4. The steps' heading.
             .child(
                 v_flex()
-                    .gap_2()
-                    .child(section_tip(
-                        "Steps",
-                        "Steps run top to bottom. A step moves on when it's sure enough of its \
-                         work; otherwise it asks you. In instructions, {ticket} is the ticket, \
-                         {pr} the pull request link, {handoff} what the step before handed over.",
+                    .gap(px(10.))
+                    .child(heading(
+                        "Stages",
+                        "What happens to each run, top to bottom. A stage moves on when it's sure \
+                         enough of its work; otherwise it asks you.",
                     ))
                     .children(self.render_router_note(orch, cx)),
             );
@@ -307,7 +333,7 @@ impl Workspace {
                     Some((part, why)) => (format!("{}: {why}", part.label()), theme::RED),
                     None => (
                         format!(
-                            "Unsaved changes · {count} step{}",
+                            "Unsaved changes · {count} stage{}",
                             if count == 1 { "" } else { "s" }
                         ),
                         theme::TEXT_SECONDARY,
@@ -619,7 +645,7 @@ impl Workspace {
             open,
             "Advanced settings",
             Some(
-                "While a step waits · Tickets at once · Default pass mark · Branch · Product \
+                "While a stage waits · Tickets at once · Default pass mark · Branch · Product \
                  questions"
                     .into(),
             ),
@@ -668,7 +694,7 @@ impl Workspace {
                         .gap_2()
                         .child(section_tip(
                             "Default pass mark",
-                            "How sure a step must be of its work to move on. A step can set its \
+                            "How sure a stage must be of its work to move on. A stage can set its \
                              own under More options.",
                         ))
                         .child(
@@ -684,13 +710,13 @@ impl Workspace {
                         .gap_2()
                         .child(section_tip(
                             "Branch name",
-                            "The branch every step must use, e.g. {ticket}. Empty: any branch.",
+                            "The branch every stage must use, e.g. {ticket}. Empty: any branch.",
                         ))
                         .child(div().max_w(px(480.)).child(Input::new(&draft.branch))),
                 )
                 .child(self.render_product_settings(orch, draft, cx))
                 .child(text(12., theme::TEXT_MUTED).child(format!(
-                    "A step that fails is retried up to {MAX_ATTEMPTS} times. Steps pause below \
+                    "A stage that fails is retried up to {MAX_ATTEMPTS} times. Stages pause below \
                      {floor}% of the Claude week."
                 ))),
         );
@@ -798,14 +824,14 @@ fn step_card(
             .into_any_element()
     } else {
         div()
-            .id(SharedString::from(format!("step-title-{orch}-{key}")))
+            .id(SharedString::from(format!("stage-title-{orch}-{key}")))
             .flex_1()
             .cursor_pointer()
             .child(
                 text(14., theme::TEXT)
                     .font_weight(FontWeight::MEDIUM)
                     .child(if es.title.trim().is_empty() {
-                        "Untitled step".to_string()
+                        "Untitled stage".to_string()
                     } else {
                         es.title.clone()
                     }),
@@ -817,11 +843,11 @@ fn step_card(
     };
     let menu = {
         let ws = ws.clone();
-        Button::new(SharedString::from(format!("step-menu-{orch}-{key}")))
+        Button::new(SharedString::from(format!("stage-menu-{orch}-{key}")))
             .label("⋯")
             .ghost()
             .xsmall()
-            .tooltip("Move or remove this step")
+            .tooltip("Move or remove this stage")
             .dropdown_menu(move |menu, _, _| {
                 let (up, down, gone) = (ws.clone(), ws.clone(), ws.clone());
                 menu.item(PopupMenuItem::new("Move up").disabled(i == 0).on_click(
@@ -841,7 +867,7 @@ fn step_card(
                         }),
                 )
                 .item(
-                    PopupMenuItem::new("Remove step")
+                    PopupMenuItem::new("Remove stage")
                         .disabled(count == 1)
                         .on_click(move |_, _, cx| {
                             gone.update(cx, |ws, cx| {
@@ -865,14 +891,14 @@ fn step_card(
         })
         .child(menu)
         .child(
-            Button::new(SharedString::from(format!("step-fold-{orch}-{key}")))
+            Button::new(SharedString::from(format!("stage-fold-{orch}-{key}")))
                 .label(if s.open { "▾" } else { "▸" })
                 .ghost()
                 .xsmall()
                 .tooltip(if s.open {
-                    "Fold this step"
+                    "Fold this stage"
                 } else {
-                    "Open this step"
+                    "Open this stage"
                 })
                 .on_click(cx.listener(move |ws, _, _, cx| {
                     ws.with_stage(orch, key, cx, |s| s.open = !s.open)
@@ -937,10 +963,10 @@ fn step_card(
             let inserts = [
                 ("{ticket}", "The ticket"),
                 ("{pr}", "The pull request link"),
-                ("{handoff}", "What the step before handed over"),
+                ("{handoff}", "What the stage before handed over"),
             ];
             body = body
-                .child(label("What should this step do?"))
+                .child(label("What should this stage do?"))
                 .child(Textarea::new(&s.prompt))
                 .child(
                     h_flex()
@@ -965,7 +991,7 @@ fn step_card(
                         .child(
                             text(11.5, theme::TEXT_MUTED)
                                 .ml_2()
-                                .child("Empty: the default instructions for the step's name."),
+                                .child("Empty: the default instructions for the stage's name."),
                         ),
                 );
             let keep = s.keep;
@@ -1037,10 +1063,10 @@ fn step_card(
                             router_on,
                         ))
                         .tooltip(if router_on {
-                            "The skill this step must use before it reports. The team skills \
+                            "The skill this stage must use before it reports. The team skills \
                              router adds the skills its changes need."
                         } else {
-                            "The skill this step must use before it reports"
+                            "The skill this stage must use before it reports"
                         })
                         .dropdown_caret(true)
                         .outline()
@@ -1064,7 +1090,7 @@ fn step_card(
                                 .dropdown_caret(true)
                                 .outline()
                                 .small()
-                                .tooltip("The folder this step's session starts in")
+                                .tooltip("The folder this stage's session starts in")
                                 .on_click(cx.listener(move |ws, _, window, cx| {
                                     ws.pick_folder(orch, key, window, cx)
                                 })),
@@ -1140,8 +1166,8 @@ fn step_card(
                 .child(input_field("Reads the file", &j.input))
                 .child(input_field("Model", &j.model))
                 .child(text(12., theme::TEXT_MUTED).whitespace_normal().child(format!(
-                    "Jev's confidence is the step's score: below {bar}% a person decides. The \
-                     next step reads the category in its brief."
+                    "Jev's confidence is the stage's score: below {bar}% a person decides. The \
+                     next stage reads the category in its brief."
                 )));
         }
     }
@@ -1151,7 +1177,7 @@ fn step_card(
     body = body
         .child(
             fold(
-                SharedString::from(format!("step-more-{orch}-{key}")),
+                SharedString::from(format!("stage-more-{orch}-{key}")),
                 s.more,
                 "More options",
                 Some(words::options(es, default_bar, router_on)),
@@ -1173,19 +1199,19 @@ fn add_step(orch: PaneId, cx: &mut Context<Workspace>) -> AnyElement {
         .gap_1()
         .child(
             Button::new(SharedString::from(format!("settings-add-{orch}")))
-                .label("+ Add a step")
+                .label("+ Add a stage")
                 .outline()
                 .w_full()
                 .dropdown_menu(move |menu, _, _| {
                     let (a, b) = (ws.clone(), ws.clone());
                     menu.item(
-                        PopupMenuItem::new("Claude step: does the work, like a review or a fix")
+                        PopupMenuItem::new("Claude stage: does the work, like a review or a fix")
                             .on_click(move |_, window, cx| {
                                 a.update(cx, |ws, cx| ws.add_stage(orch, false, window, cx))
                             }),
                     )
                     .item(
-                        PopupMenuItem::new("Sort step: Jev picks a category, e.g. for an email")
+                        PopupMenuItem::new("Sort stage: Jev picks a category, e.g. for an email")
                             .on_click(move |_, window, cx| {
                                 b.update(cx, |ws, cx| ws.add_stage(orch, true, window, cx))
                             }),
@@ -1219,8 +1245,8 @@ fn waiting(orch: PaneId, w: pipeline::WaitingSettings, ws: Entity<Workspace>) ->
     let mut section = v_flex()
         .gap_2()
         .child(section_tip(
-            "While a step waits",
-            "The same for every pipeline. A step waits on you, on a pull request's author, or \
+            "While a stage waits",
+            "The same for every pipeline. A stage waits on you, on a pull request's author, or \
              on product. Its session stays open; on this timetable hydraui tells it to look \
              again, and if something changed it reports again.",
         ))

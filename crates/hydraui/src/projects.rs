@@ -1242,7 +1242,80 @@ pub fn ticket_workspace(
         let path = folder.join(folder_name(&r.clone)?);
         worktree_at(hydra, env, &r.clone, &branch, r.base.as_deref(), &path)?;
     }
+    for clash in link_repo_skills(&folder) {
+        crate::action_log::write(format!("projects: {}: {clash}", folder.display()));
+    }
     Ok((folder, branch))
+}
+
+/// Links each repo's own skills (`<repo>/.claude/skills/<name>`) into `folder/.claude/skills`,
+/// so a session started in a folder of several repos' worktrees has them as skills: Claude
+/// Code only registers a project's skills from the folder it starts in. Names stay as they
+/// are, so the skill router counts them. When two repos have a skill of the same name the
+/// first keeps it; each such clash, or a link that couldn't be made, comes back to be logged.
+pub fn link_repo_skills(folder: &Path) -> Vec<String> {
+    let mut said = Vec::new();
+    let into = folder.join(".claude").join("skills");
+    let mut repos: Vec<PathBuf> = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && p.file_name().is_some_and(|n| n != ".claude"))
+        .collect();
+    repos.sort();
+    for repo in repos {
+        let skills = repo.join(".claude").join("skills");
+        let mut found: Vec<PathBuf> = std::fs::read_dir(&skills)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.join("SKILL.md").is_file())
+            .collect();
+        found.sort();
+        for skill in found {
+            let Some(name) = skill.file_name() else {
+                continue;
+            };
+            let link = into.join(name);
+            if link.exists() {
+                // Ours from before, or another repo's of the same name.
+                let same = std::fs::canonicalize(&link).ok() == std::fs::canonicalize(&skill).ok();
+                if !same {
+                    said.push(format!(
+                        "skill {} is in more than one repo: {} keeps it",
+                        name.to_string_lossy(),
+                        std::fs::read_link(&link)
+                            .ok()
+                            .and_then(|t| t.ancestors().nth(3).map(Path::to_path_buf))
+                            .and_then(|r| r.file_name().map(|n| n.to_string_lossy().into_owned()))
+                            .unwrap_or_else(|| "the first".into())
+                    ));
+                }
+                continue;
+            }
+            if let Err(e) = std::fs::create_dir_all(&into).and_then(|_| link_dir(&skill, &link)) {
+                said.push(format!(
+                    "couldn't link skill {}: {e}",
+                    name.to_string_lossy()
+                ));
+            }
+        }
+    }
+    said
+}
+
+#[cfg(unix)]
+fn link_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+/// Windows lets only some users make links: when it can't, the session reads the skill's files
+/// itself, as it did before.
+#[cfg(windows)]
+fn link_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
 }
 
 fn folder_name(clone: &Path) -> Result<String, String> {
@@ -2114,6 +2187,38 @@ pub fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_of_repos_has_each_repos_skills() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().join("pg-tickets").join("pg-3-share");
+        let skill = |repo: &str, name: &str| {
+            let dir = folder.join(repo).join(".claude").join("skills").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\n---\n{repo}"),
+            )
+            .unwrap();
+        };
+        skill("version2-frontend", "angular-developer");
+        skill("version2-frontend", "i18n");
+        skill("version2-backend", "backend-dev");
+        skill("version2-backend", "i18n");
+        // Not a skill: no SKILL.md.
+        std::fs::create_dir_all(folder.join("version2-backend/.claude/skills/notes")).unwrap();
+        let clashes = link_repo_skills(&folder);
+        let linked = folder.join(".claude").join("skills");
+        for name in ["angular-developer", "backend-dev", "i18n"] {
+            assert!(linked.join(name).join("SKILL.md").is_file(), "{name}");
+        }
+        assert!(!linked.join("notes").exists());
+        // Both repos have i18n: one keeps it, and the clash is said.
+        assert_eq!(clashes.len(), 1, "{clashes:?}");
+        assert!(clashes[0].contains("i18n"), "{clashes:?}");
+        // Linking again changes nothing and says nothing new.
+        assert!(link_repo_skills(&folder).iter().all(|c| c.contains("i18n")));
+    }
 
     #[test]
     fn work_settings_are_kept_per_project_on_this_machine() {

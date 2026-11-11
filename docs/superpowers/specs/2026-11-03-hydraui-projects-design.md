@@ -816,3 +816,13 @@ on_fail = "dev"            # optional: the earlier work stage a failure goes bac
 - **Project settings.** A **Stages** card lists them in order, with each one's kind, where a failure goes, its wording and its skill.
   - **Preview** shows exactly what a session is told, for a ticket at that stage or an example. A work stage's preview also shows its fix prompt.
   - The lead has **Edit…**, ↑ and ↓, **Remove**, **+ Work stage**, **+ Check stage** and **Back to the defaults**. Changes go out with the plan for review, like any other change to the project.
+
+### 14.9 A ticket worked across repos sees each repo's skills (added 2026-11-11)
+
+A ticket that names no repo is worked in `<project>-tickets/<branch>/`, a folder holding a worktree of each of the project's code repos (§14.5). Claude Code only registers a project's skills from the folder a session starts in. So a repo's own skills, such as `version2-frontend/.claude/skills/angular-developer`, were "Unknown skill" there. The session read their files instead, which the skill router doesn't count as loaded.
+
+Now, whenever that folder is set up, each repo's `.claude/skills/<name>` that has a `SKILL.md` is linked into the folder's own `.claude/skills/<name>`, keeping its name, so the session has them as skills.
+
+- **Two repos with a skill of the same name:** the first, by folder name, keeps it, and the clash is written to hydraui.log.
+- **On Windows,** a link that can't be made is logged, and the session reads the files as before.
+- **A ticket that names its repo** already starts in that repo's worktree, so it's unaffected.

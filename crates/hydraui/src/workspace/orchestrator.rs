@@ -554,6 +554,85 @@ impl Workspace {
         cx.notify();
     }
 
+    /// **Resume session** on a run waiting on you whose stage's terminal is gone: its stage's
+    /// last conversation reopens with `claude --resume`, in its folder, for the person to talk
+    /// to. The stage stays where it was; the new terminal is its session now (`Runs::relink`),
+    /// so a look, Score again or its next report still count.
+    pub(super) fn resume_stage_session(
+        &mut self,
+        run: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = "Resume session";
+        let Some(sv) = server::get() else {
+            return;
+        };
+        let (r, root) = {
+            let reg = server::lock(sv.registry());
+            (reg.runs.run(run).cloned(), reg.hydra_root.clone())
+        };
+        let (Some(r), Some(root)) = (r, root) else {
+            return;
+        };
+        let Some((stage, _)) = crate::runs::waiting_session(&r) else {
+            window.push_note(
+                Note::info("This ticket isn't waiting on you any more.").title(title),
+                cx,
+            );
+            return;
+        };
+        let Some(attempt) = r.stages[stage].latest().cloned() else {
+            return;
+        };
+        let (folder, claude) = crate::run_resume::logged_session(&root, run, &attempt.label);
+        let env = self.panes.values().find_map(|v| {
+            let v = v.read(cx);
+            (v.mcp_token() == Some(r.orchestrator.as_str())).then(|| v.request.env.clone())
+        });
+        let (Some(env), Some(dir), Some(claude)) = (env, folder.filter(|d| d.is_dir()), claude)
+        else {
+            window.push_note(
+                Note::warning(
+                    "Its conversation can't be reopened: the run's log doesn't have it, or its \
+                     orchestrator is closed. Use Re-run with a note to start the stage afresh.",
+                )
+                .title(title),
+                cx,
+            );
+            return;
+        };
+        let shell = self.shell();
+        let mut request = PaneRequest::new(&env, dir.clone(), shell);
+        let mut argv = r.pipeline.stage_claude();
+        argv.extend(["--resume".into(), claude]);
+        request.command = Some(command_line(shell, &argv));
+        let name = attempt.session_name.clone().unwrap_or_else(|| {
+            crate::runs::session_name(stage, &r.pipeline.stages[stage].title, 0)
+        });
+        let Some(id) = self.open_terminal_beside(&env, request, window, cx) else {
+            window.push_note(Note::error("Its terminal didn't open.").title(title), cx);
+            return;
+        };
+        let Some(view) = self.panes.get(&id).cloned() else {
+            return;
+        };
+        view.update(cx, |v, cx| v.set_name(Some(name.clone()), cx));
+        if let Some(token) = view.read(cx).mcp_token().map(str::to_string) {
+            server::lock(sv.registry())
+                .runs
+                .relink(run, stage, &token, &name);
+        }
+        note_run(
+            run,
+            "session resumed",
+            serde_json::json!({"stage": r.pipeline.stages[stage].id, "label": attempt.label}),
+        );
+        crate::action_log::write(format!("run {run}: {name} resumed by a person"));
+        self.show_terminal(id, window, cx);
+        cx.notify();
+    }
+
     /// Reopens stage `stage` of `run`'s own conversation after a person sent the run back to it
     /// (Go back): `claude --resume` of its last attempt's session in its folder, with their
     /// note, linked as the new attempt. Without a logged session it fails, and the orchestrator
@@ -1934,6 +2013,40 @@ impl Workspace {
                                 .child(c.state.word()),
                         )
                     })
+                    // Waiting on you: its stage's session, shown or reopened.
+                    .children(crate::runs::waiting_session(run).map(|(_, token)| {
+                        let pane = self
+                            .panes
+                            .iter()
+                            .find(|(_, v)| v.read(cx).mcp_token() == Some(token.as_str()))
+                            .map(|(id, _)| *id);
+                        let run_id = run.id.clone();
+                        Button::new(SharedString::from(format!(
+                            "lane-session-{orchestrator}-{}",
+                            run.id
+                        )))
+                        .label(if pane.is_some() {
+                            "Open session"
+                        } else {
+                            "Resume session"
+                        })
+                        .ghost()
+                        .xsmall()
+                        .tooltip(if pane.is_some() {
+                            "Show the session that stopped here"
+                        } else {
+                            "Its terminal closed: reopen its conversation where it left off"
+                        })
+                        .on_click(cx.listener(
+                            move |ws, _, window, cx| {
+                                cx.stop_propagation();
+                                match pane {
+                                    Some(p) => ws.show_terminal(p, window, cx),
+                                    None => ws.resume_stage_session(&run_id, window, cx),
+                                }
+                            },
+                        ))
+                    }))
                     .child({
                         let (run_id, label) = (run.id.clone(), stop_title);
                         Button::new(SharedString::from(format!(

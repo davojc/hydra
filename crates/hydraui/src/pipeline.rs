@@ -42,6 +42,8 @@ pub struct Pipeline {
     /// How many tickets it runs at once (`runs_at_once`, 1 to `MAX_RUNS_AT_ONCE`): each has
     /// its own orchestrator and card, and the trigger hands work to whichever is free.
     pub runs_at_once: u8,
+    /// What a waiting stage's session does while it waits (`[waiting]`, core spec §60).
+    pub waiting: WaitingSettings,
     /// Its accent on the card and the frame round its sessions (`color = "#rrggbb"`), so
     /// pipelines are told apart at a glance; `None`: the default teal.
     pub color: Option<u32>,
@@ -66,6 +68,76 @@ pub struct ScheduleSettings {
 impl ScheduleSettings {
     pub fn when(&self) -> Option<crate::schedule::When> {
         crate::schedule::parse(&self.every).ok()
+    }
+}
+
+/// What a stage's session does while its stage waits (`[waiting]`, core spec §60): on a person
+/// (needs you), on a pull request's author, or on product. One rule for every pipeline, shown in
+/// Pipeline settings; left out, it's what hydraui always did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WaitingSettings {
+    /// Minutes between looks; 0 never looks.
+    pub look_every: u32,
+    /// Hours it keeps looking; 0 until someone acts.
+    pub look_for: u32,
+    /// Also looks while a stage waits on you, not only on its author or product.
+    pub needs_you: bool,
+    /// When `look_for` runs out.
+    pub then: WaitThen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitThen {
+    /// It stops looking; the stage waits as it is.
+    Stop,
+    /// Its session closes too; Re-run opens a new one.
+    Close,
+}
+
+impl Default for WaitingSettings {
+    fn default() -> Self {
+        Self {
+            look_every: 5,
+            look_for: 0,
+            needs_you: false,
+            then: WaitThen::Stop,
+        }
+    }
+}
+
+impl WaitingSettings {
+    /// How it reads in Pipeline settings.
+    pub fn text(&self) -> String {
+        if self.look_every == 0 {
+            return "While a stage waits, it doesn't look again: it waits to be told.".into();
+        }
+        let who = if self.needs_you {
+            "While a stage waits, on you, its author or product,"
+        } else {
+            "While a stage waits on its author or product,"
+        };
+        let every = match self.look_every {
+            1 => "every minute".to_string(),
+            n => format!("every {n} minutes"),
+        };
+        let until = match (self.look_for, self.then) {
+            (0, _) if self.needs_you => " until someone acts.".to_string(),
+            (0, _) => " until they answer.".to_string(),
+            (h, then) => format!(
+                " for up to {h} hour{}, then {}.",
+                if h == 1 { "" } else { "s" },
+                match then {
+                    WaitThen::Stop => "it stops looking",
+                    WaitThen::Close => "it stops looking, and a session waiting on you closes",
+                }
+            ),
+        };
+        let you = if self.needs_you {
+            ""
+        } else {
+            " While it waits on you, it doesn't look."
+        };
+        format!("{who} it looks again {every}{until}{you}")
     }
 }
 
@@ -269,6 +341,42 @@ struct File {
     mail: Option<FileMail>,
     color: Option<String>,
     runs_at_once: Option<u8>,
+    waiting: Option<FileWaiting>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileWaiting {
+    look_every: Option<i64>,
+    look_for: Option<i64>,
+    needs_you: Option<bool>,
+    then: Option<String>,
+}
+
+/// The `[waiting]` table, checked: up to a day between looks, up to 30 days of looking.
+fn waiting_settings(f: FileWaiting) -> Result<WaitingSettings, String> {
+    let d = WaitingSettings::default();
+    let within = |v: Option<i64>, max: i64, what: &str, default: u32| -> Result<u32, String> {
+        match v {
+            None => Ok(default),
+            Some(n) if (0..=max).contains(&n) => Ok(n as u32),
+            Some(n) => Err(format!("[waiting] {what} {n} must be from 0 to {max}")),
+        }
+    };
+    Ok(WaitingSettings {
+        look_every: within(f.look_every, 1440, "look_every", d.look_every)?,
+        look_for: within(f.look_for, 720, "look_for", d.look_for)?,
+        needs_you: f.needs_you.unwrap_or(d.needs_you),
+        then: match f.then.as_deref().map(str::trim) {
+            None | Some("stop") => WaitThen::Stop,
+            Some("close") => WaitThen::Close,
+            Some(other) => {
+                return Err(format!(
+                    "[waiting] then {other:?} must be \"stop\" or \"close\""
+                ));
+            }
+        },
+    })
 }
 
 #[derive(Deserialize)]
@@ -678,6 +786,11 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
         schedule: file.schedule.map(schedule_settings).transpose()?,
         mail: file.mail.map(mail_settings).transpose()?,
         color: file.color.as_deref().map(parse_color).transpose()?,
+        waiting: file
+            .waiting
+            .map(waiting_settings)
+            .transpose()?
+            .unwrap_or_default(),
         runs_at_once: match file.runs_at_once.unwrap_or(1) {
             n @ 1..=MAX_RUNS_AT_ONCE => n,
             n => {
@@ -713,6 +826,8 @@ pub struct Edit {
     /// `[mail]`, kept as the file has it: Pipeline settings doesn't edit it yet.
     pub mail: Option<MailSettings>,
     pub runs_at_once: u8,
+    /// What a waiting stage's session does while it waits (`[waiting]`, core spec §60).
+    pub waiting: WaitingSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -761,6 +876,7 @@ impl From<&Pipeline> for Edit {
             schedule: p.schedule.clone(),
             mail: p.mail.clone(),
             runs_at_once: p.runs_at_once,
+            waiting: p.waiting,
         }
     }
 }
@@ -1027,6 +1143,20 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
         None => {
             doc.remove("schedule");
         }
+    }
+    if edit.waiting == WaitingSettings::default() {
+        doc.remove("waiting");
+    } else {
+        let w = edit.waiting;
+        let mut t = Table::new();
+        t["look_every"] = value(i64::from(w.look_every));
+        t["look_for"] = value(i64::from(w.look_for));
+        t["needs_you"] = value(w.needs_you);
+        t["then"] = value(match w.then {
+            WaitThen::Stop => "stop",
+            WaitThen::Close => "close",
+        });
+        doc["waiting"] = Item::Table(t);
     }
     if edit.runs_at_once > 1 {
         doc["runs_at_once"] = value(i64::from(edit.runs_at_once));
@@ -1358,6 +1488,67 @@ What the previous stage handed over: {handoff}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn waiting_is_as_today_unless_set_and_saved_only_when_changed() {
+        let base = "name = \"P\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n";
+        let w = parse(base).unwrap().waiting;
+        assert_eq!(w, WaitingSettings::default());
+        assert_eq!(
+            (w.look_every, w.look_for, w.needs_you, w.then),
+            (5, 0, false, WaitThen::Stop)
+        );
+        assert_eq!(
+            w.text(),
+            "While a stage waits on its author or product, it looks again every 5 minutes until \
+             they answer. While it waits on you, it doesn't look."
+        );
+        let w = parse(&format!(
+            "{base}[waiting]\nlook_every = 10\nlook_for = 8\nneeds_you = true\nthen = \"close\"\n"
+        ))
+        .unwrap()
+        .waiting;
+        assert_eq!(
+            (w.look_every, w.look_for, w.needs_you, w.then),
+            (10, 8, true, WaitThen::Close)
+        );
+        assert_eq!(
+            w.text(),
+            "While a stage waits, on you, its author or product, it looks again every 10 minutes \
+             for up to 8 hours, then it stops looking, and a session waiting on you closes."
+        );
+        let off = parse(&format!(
+            "{base}[waiting]\nlook_every = 0\nneeds_you = true\n"
+        ))
+        .unwrap()
+        .waiting;
+        assert_eq!(
+            off.text(),
+            "While a stage waits, it doesn't look again: it waits to be told."
+        );
+        for bad in [
+            "[waiting]\nlook_every = 1441\n",
+            "[waiting]\nlook_for = 721\n",
+            "[waiting]\nthen = \"explode\"\n",
+            "[waiting]\nlook_every = -1\n",
+        ] {
+            assert!(parse(&format!("{base}{bad}")).is_err(), "{bad}");
+        }
+
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(folder(d.path()).join("p.toml"), base).unwrap();
+        let mut edit = edit_of(&load(d.path(), "p").unwrap());
+        edit.waiting.needs_you = true;
+        edit.waiting.look_for = 4;
+        save(d.path(), "p", &edit).unwrap();
+        let back = load(d.path(), "p").unwrap().waiting;
+        assert!(back.needs_you && back.look_for == 4 && back.look_every == 5);
+        edit.waiting = WaitingSettings::default();
+        save(d.path(), "p", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("p.toml")).unwrap();
+        assert!(!text.contains("[waiting]"), "{text}");
+    }
+
     #[test]
     fn runs_at_once_is_one_unless_set_and_saved_only_above_one() {
         let base = "name = \"PRs\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n";

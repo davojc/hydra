@@ -79,6 +79,7 @@ pub mod tasks_project;
 pub mod term_paths;
 pub mod updater;
 pub mod version;
+pub mod waiting;
 pub mod window_layout;
 pub mod workspace;
 pub mod worktrees;

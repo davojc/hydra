@@ -61,6 +61,8 @@ pub(super) struct SettingsDraft {
     color: Option<u32>,
     /// Tickets run at once, each with its own orchestrator.
     runs: u8,
+    /// What a waiting stage's session does (core spec §60).
+    waiting: pipeline::WaitingSettings,
     /// The Advanced part is unfolded.
     advanced: bool,
     bar: Entity<SliderState>,
@@ -205,6 +207,7 @@ impl SettingsDraft {
             product_asks: self.product_asks,
             color: self.color,
             runs_at_once: self.runs,
+            waiting: self.waiting,
             bar: slider_value(&self.bar, cx),
             stages: self
                 .stages
@@ -459,6 +462,7 @@ impl Workspace {
             product_asks: saved.product_asks,
             color: saved.color,
             runs: saved.runs_at_once,
+            waiting: saved.waiting,
             advanced: false,
             bar,
             stages: Vec::new(),
@@ -1317,7 +1321,9 @@ impl Workspace {
                                             })),
                                     ),
                             )
-                            // 4. Everything else, folded away: how it asks product first.
+                            // 4. While a stage waits: one rule for every pipeline, in sight.
+                            .child(waiting_section(orch, draft.waiting, cx))
+                            // 5. Everything else, folded away: how it asks product first.
                             .child(
                                 div()
                                     .id(SharedString::from(format!("settings-advanced-{orch}")))
@@ -1547,6 +1553,141 @@ impl Workspace {
             );
         body.into_any_element()
     }
+}
+
+/// **While a stage waits** (core spec §60): how often its session looks again, for how long,
+/// whether it also looks while waiting on you, and what happens when it's done; read back in
+/// words, with what the session is told.
+fn waiting_section(
+    orch: PaneId,
+    w: pipeline::WaitingSettings,
+    cx: &mut Context<Workspace>,
+) -> gpui::AnyElement {
+    fn chips(
+        id: &str,
+        orch: PaneId,
+        options: &[(u32, &str)],
+        chosen: u32,
+        cx: &mut Context<Workspace>,
+        set: fn(&mut pipeline::WaitingSettings, u32),
+    ) -> gpui::AnyElement {
+        let mut all: Vec<(u32, String)> =
+            options.iter().map(|(v, l)| (*v, l.to_string())).collect();
+        // A value set in the file that isn't a choice shows as one too.
+        if !all.iter().any(|(v, _)| *v == chosen) {
+            all.push((chosen, chosen.to_string()));
+        }
+        h_flex()
+            .gap_1()
+            .flex_wrap()
+            .children(all.into_iter().map(|(v, label)| {
+                let b = Button::new(SharedString::from(format!("{id}-{orch}-{v}")))
+                    .label(label)
+                    .small()
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        ws.with_draft(orch, cx, |d| set(&mut d.waiting, v))
+                    }));
+                if v == chosen { b.primary() } else { b.ghost() }
+            }))
+            .into_any_element()
+    }
+    let row = |label: &str, control: gpui::AnyElement| {
+        h_flex()
+            .gap_3()
+            .items_center()
+            .child(
+                text(12.5, theme::TEXT_SECONDARY)
+                    .w(px(170.))
+                    .flex_none()
+                    .child(label.to_string()),
+            )
+            .child(control)
+    };
+    let every = chips(
+        "waiting-every",
+        orch,
+        &[
+            (0, "Off"),
+            (5, "5 min"),
+            (15, "15 min"),
+            (30, "30 min"),
+            (60, "1 hour"),
+        ],
+        w.look_every,
+        cx,
+        |w, v| w.look_every = v,
+    );
+    let mut section = v_flex()
+        .gap_2()
+        .child(section_tip(
+            "While a stage waits",
+            "The same for every pipeline. A stage waits on you (it needs you), on a pull \
+             request's author, or on product. Its session stays open; on this timetable hydraui \
+             tells it to look again at what its stage depends on, and if something changed it \
+             reports again: a report that clears the bar moves the run on by itself.",
+        ))
+        .child(row("Look again every", every));
+    if w.look_every > 0 {
+        let looking_for = chips(
+            "waiting-for",
+            orch,
+            &[
+                (0, "Until someone acts"),
+                (1, "1 hour"),
+                (4, "4 hours"),
+                (8, "8 hours"),
+                (24, "1 day"),
+            ],
+            w.look_for,
+            cx,
+            |w, v| w.look_for = v,
+        );
+        let you = chips(
+            "waiting-you",
+            orch,
+            &[(1, "Look again"), (0, "Don't look")],
+            u32::from(w.needs_you),
+            cx,
+            |w, v| w.needs_you = v == 1,
+        );
+        section = section
+            .child(row("Keep looking for", looking_for))
+            .child(row("While it waits on you", you));
+        if w.look_for > 0 {
+            let then = chips(
+                "waiting-then",
+                orch,
+                &[(0, "Stop looking"), (1, "Close its session")],
+                u32::from(w.then == pipeline::WaitThen::Close),
+                cx,
+                |w, v| {
+                    w.then = if v == 1 {
+                        pipeline::WaitThen::Close
+                    } else {
+                        pipeline::WaitThen::Stop
+                    }
+                },
+            );
+            section = section.child(row("When it's done looking", then));
+        }
+    }
+    section
+        .child(text(12.5, theme::TEXT).whitespace_normal().child(w.text()))
+        .when(w.look_every > 0 && w.needs_you, |d| {
+            d.child(
+                text(11.5, theme::TEXT_MUTED)
+                    .whitespace_normal()
+                    .child(format!(
+                        "Each look, a session waiting on you is told: \"{}\"",
+                        crate::waiting::needs_you_prompt("<what it needs from you>")
+                    )),
+            )
+        })
+        .child(text(11.5, theme::TEXT_MUTED).whitespace_normal().child(
+            "A run about a pull request also ends by itself when that pull request is merged \
+             or closed.",
+        ))
+        .into_any_element()
 }
 
 /// The Runs at once row: 1 to `pipeline::MAX_RUNS_AT_ONCE`, the chosen one filled.

@@ -1250,3 +1250,33 @@ A run waiting for a person used to show everything its stage reported, all at th
   - **More:** Score again, Re-run with a note, Go back to an earlier stage and Stop this ticket.
   - **Details,** folded by default: "88% (bar 95%), 4 reasons, 6 pieces of evidence". Unfolded, it shows the full check steps and pictures, then the whole report with its reasons, must-address marks and evidence.
 - **A person passes a stage held back for them.** `Choice::Checked` passes a stage that asked for a check by hand, as before. It now also passes a below-bar *done* report that gave an `ask`: the stage held back on purpose and said what a person must do. A below-bar report without an ask still can't be passed by a person. Its gate holds until it's re-run, sent back or stopped.
+
+## 60. While a stage waits (added 2026-11-11)
+
+A stage that ends needing a person used to stop dead. Its session was never asked to look at its pull request again, whatever its prompt said about polling. Waiting on an author or product looked again every 5 minutes, a rule in the code that nobody could see or change. Now one visible setting covers every pipeline:
+
+```toml
+[waiting]
+look_every = 5        # minutes between looks; 0 never looks. 5 when left out
+look_for = 0          # hours to keep looking; 0 until someone acts
+needs_you = false     # also look while a stage waits on you. Off when left out
+then = "stop"         # when look_for runs out: "stop" looking, or "close" a session waiting on you
+```
+
+Left out, it's exactly what hydraui did before: author and product waits looked every 5 minutes, and stages waiting on you didn't look. Saving the defaults writes no `[waiting]`.
+
+- **Waiting on its author or product** (`stage_ask`). The session is told to look in its thread or pull request on this timetable. **Check now** still looks at once. The card's "next check in N min" follows the timetable.
+- **Waiting on you (needs you), with `needs_you = true`.**
+  - The stopped stage stays stopped and the run still needs you.
+  - Every `look_every` minutes its session is woken with one standard instruction: "You're waiting on a person: <the report's ask, else the reason>. Look again at what your stage depends on, as your prompt describes it. If something changed that settles it, do what your stage needs again and call stage_report: that report counts. If nothing changed, say so in one line and end your turn without reporting."
+  - `Runs::look_again` allows that one extra report. A report that clears the bar passes the stage and resumes the run by itself. One that doesn't updates what the run needs.
+  - Any person's choice (pass, re-run, go back, stop) cancels a look in progress, so a late report from it doesn't count.
+- **Limits.** `look_for` hours count from when the wait began, as hydraui saw it, so a restart starts the count again. When they run out, looking stops. With `then = "close"`, a session waiting on you also closes; a stopped stage's session closing isn't a failure, and **Re-run** opens a new one. A stage waiting on its author or product only stops looking: it's still running, and closing it would count as a failure.
+- **Pipeline settings.** **While a stage waits** sits on the main page, not under Advanced, with chips:
+  - **Look again every:** Off, 5 min, 15 min, 30 min, 1 hour.
+  - **Keep looking for:** Until someone acts, 1, 4, 8 hours, 1 day.
+  - **While it waits on you:** Look again, Don't look.
+  - **When it's done looking:** Stop looking, Close its session.
+
+  A value set in the file that isn't a chip shows as one. Under the chips, the setting reads back in words, then comes the exact instruction a session waiting on you gets. A line also states the other standing rule: "A run about a pull request also ends by itself when that pull request is merged or closed."
+- **Fixed with it.** When a run was ended because its pull request was merged, hydraui closed its stage's session and then counted that as "its session ended without reporting". It told the orchestrator to start the stage again. A session closing on a run that has ended now changes nothing.

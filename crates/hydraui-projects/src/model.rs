@@ -35,6 +35,10 @@ pub struct ProjectFile {
     /// Why the lead turned down the last spec change, so it isn't proposed again.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub spec_note: String,
+    /// How the project's tickets are worked, in order: `[[stage]]` (spec §14.8). None means
+    /// the default stages, `stages::defaults()`.
+    #[serde(default, rename = "stage", skip_serializing_if = "Vec::is_empty")]
+    pub stages: Vec<crate::stages::Stage>,
     /// Keys hydra doesn't know, kept on a rewrite.
     #[serde(flatten)]
     pub extra: toml::Table,
@@ -75,6 +79,15 @@ impl Default for Sync {
 }
 
 impl ProjectFile {
+    /// Its stages: the `[[stage]]`s it sets, or the defaults.
+    pub fn stages(&self) -> Vec<crate::stages::Stage> {
+        if self.stages.is_empty() {
+            crate::stages::defaults()
+        } else {
+            self.stages.clone()
+        }
+    }
+
     /// Whether `login` is the lead or a member.
     pub fn is_on(&self, login: &str) -> bool {
         self.lead.eq_ignore_ascii_case(login)
@@ -189,6 +202,13 @@ pub struct TicketMeta {
     /// The testing session's summary.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub check_note: String,
+    /// The stage it's at while in progress or testing: a `[[stage]]` id (spec §14.8). Empty
+    /// means the first stage of that kind, as tickets were before stages.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stage: String,
+    /// The check stages it has passed since its work last changed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub passed: Vec<String>,
     /// How many times testing has failed: each failure goes back to a work session to fix,
     /// until the run stops for a person (spec §14.5).
     #[serde(default, skip_serializing_if = "is_zero")]

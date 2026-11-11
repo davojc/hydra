@@ -19,7 +19,7 @@ use hydra_core::name::EnvName;
 use hydraui_projects::progress::{Counts, is_late, milestone_counts, today};
 use hydraui_projects::{
     Decision, Milestone, MilestoneStatus, Project, ProjectStatus, Review, Ticket, TicketKind,
-    TicketStatus, repo,
+    TicketStatus, repo, stages,
 };
 
 use super::Workspace;
@@ -3516,7 +3516,10 @@ impl Workspace {
         let inputs: Vec<(&'static str, FieldBox)> = fields
             .into_iter()
             .map(|(label, placeholder, initial)| {
-                let input = if matches!(label, "Points" | "Description" | "Requirements") {
+                let input = if matches!(
+                    label,
+                    "Points" | "Description" | "Requirements" | "Prompt" | "Fix prompt"
+                ) {
                     FieldBox::Lines(cx.new(|cx| {
                         TextareaState::new(window, cx)
                             .auto_grow(3, 14)
@@ -5423,6 +5426,61 @@ impl Workspace {
                 theme::AMBER_TINT,
             ));
         }
+        let skipped = pj::skipped_checks(p, id);
+        if !skipped.is_empty() {
+            let n = skipped.len();
+            let (env_b, slug_b, mid) = (env.to_string(), p.slug.clone(), id.to_string());
+            head = head.child(
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(notice(
+                        &format!(
+                            "{n} done ticket{} skipped a check, such as one added after {} \
+                             finished: {}.",
+                            if n == 1 { "" } else { "s" },
+                            if n == 1 { "it" } else { "they" },
+                            skipped.join(", ")
+                        ),
+                        theme::AMBER,
+                        theme::AMBER_TINT,
+                    ))
+                    .child(
+                        Button::new("send-back-skipped")
+                            .label(if n == 1 { "Check it" } else { "Check them" })
+                            .small()
+                            .primary()
+                            .tooltip(
+                                "Moves them back to the check they skipped; the milestone's run \
+                                 checks them",
+                            )
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                let (env, slug, mid) = (env_b.clone(), slug_b.clone(), mid.clone());
+                                let sent = std::cell::RefCell::new(Vec::new());
+                                let ok = ws.edit_project(
+                                    &env,
+                                    &slug,
+                                    |dir, p, _| {
+                                        *sent.borrow_mut() = pj::send_back_skipped(dir, p, &mid)?;
+                                        Ok(())
+                                    },
+                                    window,
+                                    cx,
+                                );
+                                if ok.is_ok() {
+                                    window.push_note(
+                                        Note::success(format!(
+                                            "Sent back to be checked: {}. Start the milestone's \
+                                             run to check them, then send the change.",
+                                            sent.borrow().join(", ")
+                                        )),
+                                        cx,
+                                    );
+                                }
+                            })),
+                    ),
+            );
+        }
         if rejected > 0 {
             head = head.child(
                 div()
@@ -5441,11 +5499,16 @@ impl Workspace {
             );
         }
         let mut board = h_flex().gap_3().items_start();
-        for status in TicketStatus::BOARD {
+        let all_stages = p.file.stages();
+        for (label, status, stage) in board_columns(&all_stages) {
             let tickets: Vec<&Ticket> = p
                 .tickets
                 .iter()
                 .filter(|t| t.meta.milestone == id && t.meta.status == status)
+                .filter(|t| {
+                    stage.is_none()
+                        || stages::current(&all_stages, &t.meta).map(|s| &s.id) == stage.as_ref()
+                })
                 .filter(|t| show_rejected || t.meta.review != Review::Rejected)
                 .collect();
             let mut column = v_flex()
@@ -5465,7 +5528,7 @@ impl Workspace {
                                 .rounded_full()
                                 .bg(color(status_colour(status))),
                         )
-                        .child(div().text_sm().child(status.label()))
+                        .child(div().text_sm().child(label))
                         .child(
                             div()
                                 .text_xs()
@@ -5660,10 +5723,10 @@ impl Workspace {
                                     .child(match t.meta.finished_at {
                                         Some(at) => format!(
                                             "{} · {} ago",
-                                            t.meta.status.label(),
+                                            status_text(p, &t.meta),
                                             pj::age(&at, now)
                                         ),
-                                        None => t.meta.status.label().to_string(),
+                                        None => status_text(p, &t.meta),
                                     }),
                             ),
                     )
@@ -5807,7 +5870,7 @@ impl Workspace {
                         .text_color(color(theme::TEXT_MUTED))
                         .child(t.id.clone())
                         .child(pill(
-                            t.meta.status.label(),
+                            &status_text(p, &t.meta),
                             status_colour(t.meta.status),
                             theme::SURFACE,
                         ))
@@ -6463,37 +6526,58 @@ impl Workspace {
             );
         }
         let ticket = t.clone();
+        let all_stages = p.file.stages();
+        let here = stages::current(&all_stages, &t.meta).map(|s| s.id.clone());
+        let project = p.clone();
         card.context_menu(move |menu, _, _| {
             let mut menu = menu;
-            for status in [
-                TicketStatus::Todo,
-                TicketStatus::InProgress,
-                TicketStatus::Testing,
+            // Todo, each stage, In review, Done, Dropped: a stage reruns from there (§14.8).
+            let mut targets: Vec<(String, Result<String, TicketStatus>)> =
+                vec![("Todo".into(), Err(TicketStatus::Todo))];
+            targets.extend(
+                all_stages
+                    .iter()
+                    .map(|s| (s.title.clone(), Ok(s.id.clone()))),
+            );
+            for st in [
                 TicketStatus::InReview,
                 TicketStatus::Done,
                 TicketStatus::Dropped,
             ] {
-                if status == ticket.meta.status {
+                targets.push((st.label().to_string(), Err(st)));
+            }
+            for (label, to) in targets {
+                let current = match &to {
+                    Ok(id) => here.as_ref() == Some(id),
+                    Err(st) => *st == ticket.meta.status,
+                };
+                if current {
                     continue;
                 }
-                let (ws, env, slug, t) =
-                    (ws.clone(), env_s.clone(), slug_s.clone(), ticket.clone());
-                menu = menu.item(
-                    PopupMenuItem::new(format!("Move to {}", status.label())).on_click(
-                        move |_, window, cx| {
-                            ws.update(cx, |ws, cx| {
-                                let t = t.clone();
-                                let _ = ws.edit_project(
-                                    &env,
-                                    &slug,
-                                    |dir, _, _| pj::move_ticket(dir, &t, status),
-                                    window,
-                                    cx,
-                                );
-                            })
-                        },
-                    ),
+                let (ws, env, slug, t, p) = (
+                    ws.clone(),
+                    env_s.clone(),
+                    slug_s.clone(),
+                    ticket.clone(),
+                    project.clone(),
                 );
+                menu = menu.item(PopupMenuItem::new(format!("Move to {label}")).on_click(
+                    move |_, window, cx| {
+                        ws.update(cx, |ws, cx| {
+                            let (t, to, p) = (t.clone(), to.clone(), p.clone());
+                            let _ = ws.edit_project(
+                                &env,
+                                &slug,
+                                move |dir, _, _| match &to {
+                                    Ok(stage) => pj::move_to_stage(dir, &p, &t, stage),
+                                    Err(status) => pj::move_ticket(dir, &t, *status),
+                                },
+                                window,
+                                cx,
+                            );
+                        })
+                    },
+                ));
             }
             let (ws2, env2, slug2, t2) =
                 (ws.clone(), env_s.clone(), slug_s.clone(), ticket.clone());
@@ -6637,6 +6721,310 @@ impl Workspace {
             ));
         }
         out.into_any_element()
+    }
+
+    /// The project's stages (spec §14.8), in order, as Pipeline settings shows a pipeline's:
+    /// each with what its sessions are told. The lead changes them; they go out with the plan.
+    fn stages_card(&self, env: &str, p: &Project, lead: bool, cx: &mut Context<Self>) -> gpui::Div {
+        let all = p.file.stages();
+        let mut card = settings_card(
+            "Stages",
+            "How every ticket is worked, in order, like a pipeline's stages: work stages make \
+             the change and open pull requests, check stages pass or fail them. Shared through \
+             the projects repo. hydraui always adds how a session finishes (ticket_report, \
+             ticket_checked), so the run knows when to move on.",
+        );
+        if p.file.stages.is_empty() {
+            card = card.child(
+                div()
+                    .pb_2()
+                    .text_xs()
+                    .text_color(color(theme::TEXT_MUTED))
+                    .child(
+                        "The defaults: hydraui's own wording, kept up to date until you change it.",
+                    ),
+            );
+        }
+        for (i, st) in all.iter().enumerate() {
+            let kind = match st.kind {
+                stages::StageKind::Work => "Work".to_string(),
+                stages::StageKind::Check => {
+                    let back = all[..i]
+                        .iter()
+                        .rev()
+                        .find(|w| {
+                            w.kind == stages::StageKind::Work
+                                && (st.on_fail.is_empty() || w.id == st.on_fail)
+                        })
+                        .map_or("work".to_string(), |w| w.title.clone());
+                    format!("Check · a failure goes back to {back}")
+                }
+            };
+            let detail = format!(
+                "{kind} · {} · {}",
+                if st.prompt.trim().is_empty() {
+                    "default wording"
+                } else {
+                    "own wording"
+                },
+                if st.skill.is_empty() {
+                    "each engineer's skill".to_string()
+                } else {
+                    format!("skill {}", st.skill)
+                }
+            );
+            let mut actions = h_flex().gap_1();
+            let (proj, stage_p) = (p.clone(), st.clone());
+            actions = actions.child(
+                Button::new(SharedString::from(format!("stage-preview-{i}")))
+                    .label("Preview")
+                    .ghost()
+                    .small()
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.stage_preview(&proj, &stage_p, window, cx);
+                    })),
+            );
+            if lead {
+                let edit = |id: String,
+                            label: &'static str,
+                            change: StageChange,
+                            cx: &mut Context<Self>| {
+                    let (env, slug, base) = (env.to_string(), p.slug.clone(), all.clone());
+                    let change = std::rc::Rc::new(change);
+                    Button::new(SharedString::from(id))
+                        .label(label)
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            let mut new = base.clone();
+                            match change(&mut new) {
+                                Ok(()) => {
+                                    let _ = ws.edit_project(
+                                        &env,
+                                        &slug,
+                                        |dir, _, _| pj::save_stages(dir, &new),
+                                        window,
+                                        cx,
+                                    );
+                                }
+                                Err(e) => window.push_note(Note::warning(e), cx),
+                            }
+                        }))
+                };
+                let (env_e, slug_e, base_e) = (env.to_string(), p.slug.clone(), all.clone());
+                actions = actions.child(
+                    Button::new(SharedString::from(format!("stage-edit-{i}")))
+                        .label("Edit…")
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.edit_stage_dialog(&env_e, &slug_e, &base_e, i, window, cx)
+                        })),
+                );
+                if i > 0 {
+                    actions = actions.child(edit(
+                        format!("stage-up-{i}"),
+                        "↑",
+                        Box::new(move |v| {
+                            v.swap(i - 1, i);
+                            Ok(())
+                        }),
+                        cx,
+                    ));
+                }
+                if i + 1 < all.len() {
+                    actions = actions.child(edit(
+                        format!("stage-down-{i}"),
+                        "↓",
+                        Box::new(move |v| {
+                            v.swap(i, i + 1);
+                            Ok(())
+                        }),
+                        cx,
+                    ));
+                }
+                actions = actions.child(edit(
+                    format!("stage-remove-{i}"),
+                    "Remove",
+                    Box::new(move |v| {
+                        v.remove(i);
+                        Ok(())
+                    }),
+                    cx,
+                ));
+            }
+            card = card.child(setting_row(
+                &format!("{}. {}", i + 1, st.title),
+                &st.id,
+                div()
+                    .text_xs()
+                    .text_color(color(theme::TEXT_SECONDARY))
+                    .whitespace_normal()
+                    .child(detail),
+                Some(actions),
+            ));
+        }
+        if lead {
+            let mut adds = h_flex().gap_2().py_3();
+            for (label, kind) in [
+                ("+ Work stage", stages::StageKind::Work),
+                ("+ Check stage", stages::StageKind::Check),
+            ] {
+                let (env_a, slug_a, base) = (env.to_string(), p.slug.clone(), all.clone());
+                adds = adds.child(
+                    Button::new(SharedString::from(format!("stage-add-{label}")))
+                        .label(label)
+                        .small()
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            let mut new = base.clone();
+                            new.push(new_stage(&base, kind));
+                            let at = new.len() - 1;
+                            ws.edit_stage_dialog(&env_a, &slug_a, &new, at, window, cx)
+                        })),
+                );
+            }
+            if !p.file.stages.is_empty() {
+                let (env_r, slug_r) = (env.to_string(), p.slug.clone());
+                adds = adds.child(
+                    Button::new("stage-reset")
+                        .label("Back to the defaults")
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            let _ = ws.edit_project(
+                                &env_r,
+                                &slug_r,
+                                |dir, _, _| pj::save_stages(dir, &stages::defaults()),
+                                window,
+                                cx,
+                            );
+                        })),
+                );
+            }
+            card = card.child(adds);
+        }
+        card
+    }
+
+    /// The edit dialog for stage `i` of `all` (a new one is already pushed on): its title,
+    /// skill, where a failure goes, and its prompts, the defaults shown to change.
+    fn edit_stage_dialog(
+        &mut self,
+        env: &str,
+        slug: &str,
+        all: &[stages::Stage],
+        i: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let st = all[i].clone();
+        let mut fields = vec![
+            ("Title", "e.g. Security review", st.title.clone()),
+            (
+                "Skill",
+                "a skill's name every session of this stage loads; empty for each engineer's",
+                st.skill.clone(),
+            ),
+        ];
+        if st.kind == stages::StageKind::Check {
+            fields.push((
+                "On failure, back to",
+                "a work stage's id before it; empty for the nearest",
+                st.on_fail.clone(),
+            ));
+        }
+        fields.push(("Prompt", "", st.prompt_text().to_string()));
+        if st.kind == stages::StageKind::Work {
+            fields.push(("Fix prompt", "", st.fix_text().to_string()));
+        }
+        let (env, slug, all) = (env.to_string(), slug.to_string(), all.to_vec());
+        self.fields_dialog(
+            format!(
+                "{} stage · placeholders: {}",
+                match st.kind {
+                    stages::StageKind::Work => "Work",
+                    stages::StageKind::Check => "Check",
+                },
+                stages::PLACEHOLDERS
+                    .iter()
+                    .map(|(k, _)| *k)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+            fields,
+            move |ws, values, window, cx| {
+                let mut new = all.clone();
+                new[i] = stage_edited(&new[i], &values);
+                if let Some(e) = stages::problem(&new) {
+                    return Err(e);
+                }
+                ws.edit_project(
+                    &env,
+                    &slug,
+                    |dir, _, _| pj::save_stages(dir, &new),
+                    window,
+                    cx,
+                )
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// What a session at `stage` would be told, for a ticket of the project: one at that stage
+    /// if any, else an example. Read only, with Copy.
+    fn stage_preview(
+        &mut self,
+        p: &Project,
+        stage: &stages::Stage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let t = preview_ticket(p, stage);
+        let branch = if t.meta.branch.is_empty() {
+            format!("{}-example", t.id.to_lowercase())
+        } else {
+            t.meta.branch.clone()
+        };
+        let mut text = stage_prompt(p, &t, stage, &branch, None, false);
+        if stage.kind == stages::StageKind::Work {
+            let mut failed = t.clone();
+            if failed.meta.check_note.is_empty() {
+                failed.meta.check_note = "(what the check said)".into();
+            }
+            text.push_str(&format!(
+                "\n\n— After a check fails, it's told instead —\n\n{}",
+                stage_prompt(p, &failed, stage, &branch, None, true)
+            ));
+        }
+        let title = format!("{} · as told for {}", stage.title, t.id);
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let copy = text.clone();
+            dialog
+                .title(title.clone())
+                .w(px(720.))
+                .child(
+                    div()
+                        .id("stage-preview-text")
+                        .max_h(px(520.))
+                        .overflow_y_scroll()
+                        .text_sm()
+                        .whitespace_normal()
+                        .children(
+                            text.split('\n')
+                                .map(|l| div().min_h(px(16.)).child(l.to_string())),
+                        ),
+                )
+                .footer(
+                    h_flex().justify_end().child(
+                        Button::new("stage-preview-copy").label("Copy").on_click(
+                            move |_, _, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone()))
+                            },
+                        ),
+                    ),
+                )
+        });
     }
 
     fn project_settings_page(&self, env: &str, slug: &str, cx: &mut Context<Self>) -> AnyElement {
@@ -6984,6 +7372,7 @@ impl Workspace {
             })
             .child(project)
             .child(work)
+            .child(self.stages_card(env, p, lead, cx))
             .child(mine)
             .into_any_element()
     }
@@ -7413,15 +7802,52 @@ fn start_prompt(p: &Project, guide: &str) -> String {
     )
 }
 
-/// A work session's prompt (spec §14.5): one ticket, in its worktree, following `skill`.
-/// A ticket that names no repo is worked in a folder holding a worktree of each of the
-/// project's repos: Claude finds out which the work needs and changes those.
+/// The stage a work session on `t` is at: its own, or the project's first work stage.
+fn work_stage(p: &Project, t: &Ticket) -> stages::Stage {
+    let all = p.file.stages();
+    stages::current(&all, &t.meta)
+        .filter(|s| s.kind == stages::StageKind::Work)
+        .or_else(|| all.iter().find(|s| s.kind == stages::StageKind::Work))
+        .cloned()
+        .unwrap_or_else(|| stages::defaults().remove(0))
+}
+
+/// The stage a check session on `t` is at: its own while testing, or the first check stage.
+fn check_stage(p: &Project, t: &Ticket) -> stages::Stage {
+    let all = p.file.stages();
+    stages::current(&all, &t.meta)
+        .filter(|s| s.kind == stages::StageKind::Check)
+        .or_else(|| all.iter().find(|s| s.kind == stages::StageKind::Check))
+        .cloned()
+        .unwrap_or_else(|| stages::defaults().remove(1))
+}
+
+/// A work session's prompt: its stage's, or after a failed check, its stage's fix prompt.
 fn work_prompt(p: &Project, t: &Ticket, branch: &str, skill: Option<&Path>) -> String {
-    if t.meta.check == "failed" && !t.meta.prs.is_empty() {
-        return fix_prompt(p, t, branch, skill);
-    }
-    let (place, ship) = if t.meta.repo.is_empty() {
-        (
+    let fix = t.meta.check == "failed" && !t.meta.prs.is_empty();
+    stage_prompt(p, t, &work_stage(p, t), branch, skill, fix)
+}
+
+/// A check session's prompt (spec §14.5): its stage's, on the ticket's pull requests.
+fn check_prompt(p: &Project, t: &Ticket, skill: Option<&Path>) -> String {
+    stage_prompt(p, t, &check_stage(p, t), &t.meta.branch, skill, false)
+}
+
+/// What a session at `stage` is told about ticket `t` (spec §14.8): the stage's own words,
+/// placeholders filled, then how it finishes, which a project can't change since hydraui
+/// moves the milestone on by it. `fix` is a work stage's prompt after a check failed.
+fn stage_prompt(
+    p: &Project,
+    t: &Ticket,
+    stage: &stages::Stage,
+    branch: &str,
+    skill: Option<&Path>,
+    fix: bool,
+) -> String {
+    let anywhere = t.meta.repo.is_empty();
+    let check = stage.kind == stages::StageKind::Check;
+    let place = if !check && !fix {
+        if anywhere {
             format!(
                 "in a folder holding a worktree of each of the project's code repos ({}), one \
                  subfolder per repo, all on branch {branch}. The ticket doesn't say which repo \
@@ -7429,99 +7855,110 @@ fn work_prompt(p: &Project, t: &Ticket, branch: &str, skill: Option<&Path>) -> S
                  repos it needs, more than one if it spans them. Each repo's own CLAUDE.md and \
                  skills apply inside it.",
                 p.file.repos.join(", ")
-            ),
-            "In each repo you change, commit the work on this branch, push it and open a pull \
-             request (gh pr create) with {id} in its title; leave the repos you don't need \
-             untouched.",
+            )
+        } else {
+            format!("in a worktree of {} on branch {branch}.", t.meta.repo)
+        }
+    } else if anywhere {
+        format!(
+            "in this folder's worktrees, one subfolder per code repo{}",
+            if check { "" } else { "," }
         )
     } else {
-        (
-            format!("in a worktree of {} on branch {branch}.", t.meta.repo),
-            "Do the work here, commit it on this branch, push it and open a pull request (gh pr \
-             create) with {id} in its title.",
-        )
+        "in this worktree".to_string()
+    };
+    let what = if check {
+        "testing skill"
+    } else {
+        "skill for this work"
+    };
+    let skills = if stage.skill.trim().is_empty() {
+        follow(skill.map(Skill::Folder), what)
+    } else {
+        follow(Some(Skill::Named(stage.skill.trim())), what)
+    };
+    let prs = t.meta.prs.join(", ");
+    let failed = if t.meta.check_note.is_empty() {
+        "see the ticket's Check section"
+    } else {
+        &t.meta.check_note
+    };
+    let template = if fix {
+        stage.fix_text()
+    } else {
+        stage.prompt_text()
+    };
+    let body = stages::render(
+        template,
+        &[
+            ("{id}", &t.id),
+            ("{title}", &t.meta.title),
+            ("{project}", &p.file.name),
+            ("{stage}", &stage.title),
+            ("{branch}", branch),
+            ("{place}", &place),
+            ("{prs}", &prs),
+            ("{what_failed}", failed),
+            ("{skills}", &skills),
+        ],
+    );
+    format!("{}\n{}", body.trim_end(), finish(t, check, fix))
+}
+
+/// How a session finishes: the report tools hydraui moves the milestone on by. Always added
+/// after a stage's own prompt.
+fn finish(t: &Ticket, check: bool, fix: bool) -> String {
+    const ASK: &str = "If you need a decision, ask it with ticket_ask, never in this terminal: \
+         it shows in hydraui and the answer comes back to you here.";
+    if check {
+        return format!(
+            "Finish with ticket_checked: passed, or not with exactly what's wrong and how to \
+             reproduce it, since a work session reads that to fix it before it's checked \
+             again. {ASK}"
+        );
+    }
+    if fix {
+        return "Commit and push to this branch, so the same pull requests update; open no new \
+             ones. Then call ticket_report with the same pull request URL(s) and a short \
+             summary of the fix: hydraui checks it again. If a failure isn't this ticket's to \
+             fix, or needs a decision, ask with ticket_ask, never in this terminal; anything \
+             only a person can do goes in ticket_report's for_a_person."
+            .to_string();
+    }
+    let ship = if t.meta.repo.is_empty() {
+        "In each repo you change, commit the work on this branch, push it and open a pull \
+         request (gh pr create) with {id} in its title; leave the repos you don't need \
+         untouched."
+    } else {
+        "Do the work here, commit it on this branch, push it and open a pull request (gh pr \
+         create) with {id} in its title."
     };
     format!(
-        "You're doing ticket {id} \"{title}\" of the project \"{name}\", {place} {follow} \
-         Then call ticket_show: the ticket, its milestone and where the project's spec is.\n\
-         {ship} Finish by calling ticket_report with the pull request URL(s) and a short \
+        "{} Finish by calling ticket_report with the pull request URL(s) and a short \
          summary. If the ticket needs no code change (an investigation, a check, a write-up), \
          open no pull request: call ticket_report with none and your findings as the summary, \
-         which is what the lead reads. Anything left that only a person can do (create a feature \
-         flag, set a secret, ask another team, run something by hand) goes in ticket_report's \
-         for_a_person, one task each, so it lands on the milestone as theirs rather than buried \
-         in your summary. Either way hydraui then closes this session and moves on to the milestone's next \
-         ticket. If you need a decision, ask it with ticket_ask, never in this terminal: it \
-         shows in hydraui and the answer comes back to you here.",
-        id = t.id,
-        title = t.meta.title,
-        name = p.file.name,
-        ship = ship.replace("{id}", &t.id),
-        follow = follow(skill, "skill for this work"),
+         which is what the lead reads. Anything left that only a person can do (create a \
+         feature flag, set a secret, ask another team, run something by hand) goes in \
+         ticket_report's for_a_person, one task each, so it lands on the milestone as theirs \
+         rather than buried in your summary. Either way hydraui then closes this session and \
+         moves on to the milestone's next ticket. {ASK}",
+        ship.replace("{id}", &t.id)
     )
 }
 
-/// A work session's prompt after testing failed (spec §14.5): fix what failed on the ticket's
-/// own pull requests, then report them again to be tested again.
-fn fix_prompt(p: &Project, t: &Ticket, branch: &str, skill: Option<&Path>) -> String {
-    format!(
-        "Ticket {id} \"{title}\" of the project \"{name}\" failed testing. Its pull \
-         request(s) {prs} are checked out {place} on branch {branch}. {follow} Call \
-         ticket_show for what the ticket asks; its Check section has the whole report.\n\
-         What failed: {note}\n\
-         Fix that within the ticket's scope: commit and push to this branch, so the same pull \
-         requests update; open no new ones. Then call ticket_report with the same pull \
-         request URL(s) and a short summary of the fix: hydraui tests it again. If a failure \
-         isn't this ticket's to fix, or needs a decision, ask with ticket_ask, never in this \
-         terminal; anything only a person can do goes in ticket_report's for_a_person.",
-        id = t.id,
-        title = t.meta.title,
-        name = p.file.name,
-        prs = t.meta.prs.join(", "),
-        place = if t.meta.repo.is_empty() {
-            "in this folder's worktrees, one subfolder per code repo,"
-        } else {
-            "in this worktree"
-        },
-        note = if t.meta.check_note.is_empty() {
-            "see the ticket's Check section"
-        } else {
-            &t.meta.check_note
-        },
-        follow = follow(skill, "skill for this work"),
-    )
-}
-
-/// A testing session's prompt (spec §14.5): check one ticket's pull requests with `skill`.
-fn check_prompt(p: &Project, t: &Ticket, skill: Option<&Path>) -> String {
-    format!(
-        "You're checking ticket {id} \"{title}\" of the project \"{name}\": its pull \
-         request(s) {prs}, checked out {place}. {follow} Call ticket_show for what \
-         the ticket asks and how to tell it's done.\n\
-         Check that the work does what the ticket says and passes the checks its skills call \
-         for. You may \
-         fix small problems within the ticket's scope: commit and push them to this branch. \
-         Finish with ticket_checked: passed, or not with exactly what's wrong and how to \
-         reproduce it, since a work session reads that to fix it before testing again. If \
-         you need a decision, ask it with ticket_ask.",
-        id = t.id,
-        title = t.meta.title,
-        name = p.file.name,
-        prs = t.meta.prs.join(", "),
-        place = if t.meta.repo.is_empty() {
-            "in this folder's worktrees, one subfolder per code repo"
-        } else {
-            "in this worktree"
-        },
-        follow = follow(skill, "testing skill"),
-    )
+/// The skill a stage's session loads: one shared by name in the project's stages, or the
+/// folder an engineer chose on their Mac.
+#[derive(Clone, Copy)]
+enum Skill<'a> {
+    Named(&'a str),
+    Folder(&'a Path),
 }
 
 /// The prompt's lines on which skills to follow (spec §14.5): the team's skills for every
 /// area the ticket touches, loaded before any change, since the skill router blocks changes
 /// until they are; the repo's own CLAUDE.md and skills, which win over a chosen skill on how
 /// the repo works; and the chosen skill, loaded by name so the router counts it.
-fn follow(skill: Option<&Path>, what: &str) -> String {
+fn follow(skill: Option<Skill>, what: &str) -> String {
     const REPO_OWN: &str = "the repo's own CLAUDE.md and its skills in .claude/skills";
     const TEAM: &str = "Before changing any file, load every skill the work needs, all at \
          once: those for each area the ticket touches, as the skill router's reminder at the \
@@ -7533,7 +7970,12 @@ fn follow(skill: Option<&Path>, what: &str) -> String {
         None => format!(
             "Follow {REPO_OWN}: read the CLAUDE.md files and use the skills that fit the work."
         ),
-        Some(s) => {
+        Some(Skill::Named(name)) => format!(
+            "First load the {what}: the {name} skill with the Skill tool. Follow it along with \
+             {REPO_OWN}; where they disagree on how this repo is built or tested, the repo's own \
+             win."
+        ),
+        Some(Skill::Folder(s)) => {
             let name = pj::skill_name(s).unwrap_or_else(|| "chosen".to_string());
             format!(
                 "First load the {what}: the {name} skill with the Skill tool, or if you don't \
@@ -7762,6 +8204,99 @@ fn status_word(s: ProjectStatus) -> &'static str {
     }
 }
 
+/// A change to the stages a Stages card button makes.
+type StageChange = Box<dyn Fn(&mut Vec<stages::Stage>) -> Result<(), String>>;
+
+/// A new stage of `kind` for the end of `all`, with an id no stage has.
+fn new_stage(all: &[stages::Stage], kind: stages::StageKind) -> stages::Stage {
+    let (base, title) = match kind {
+        stages::StageKind::Work => ("work", "New work stage"),
+        stages::StageKind::Check => ("check", "New check"),
+    };
+    let id = (1..)
+        .map(|n| {
+            if n == 1 {
+                base.to_string()
+            } else {
+                format!("{base}-{n}")
+            }
+        })
+        .find(|id| all.iter().all(|s| &s.id != id))
+        .unwrap_or_default();
+    stages::Stage {
+        id,
+        title: title.into(),
+        kind,
+        ..Default::default()
+    }
+}
+
+/// `st` as the edit dialog left it: values in the order it asked (title, skill, a check's
+/// on-failure stage, prompt, a work stage's fix prompt). A prompt left as the default is
+/// stored empty by `save_stages`.
+fn stage_edited(st: &stages::Stage, values: &[String]) -> stages::Stage {
+    let mut out = st.clone();
+    let mut v = values.iter().map(|s| s.trim().to_string());
+    out.title = v.next().unwrap_or_default();
+    out.skill = v
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches('/')
+        .to_string();
+    if st.kind == stages::StageKind::Check {
+        out.on_fail = v.next().unwrap_or_default();
+    }
+    out.prompt = v.next().unwrap_or_default();
+    if st.kind == stages::StageKind::Work {
+        out.fix_prompt = v.next().unwrap_or_default();
+    }
+    out
+}
+
+/// The ticket a stage's preview is told about: the project's first one at that stage, else
+/// its first with pull requests, else an example.
+fn preview_ticket(p: &Project, stage: &stages::Stage) -> Ticket {
+    let all = p.file.stages();
+    p.tickets
+        .iter()
+        .filter(|t| !t.meta.person)
+        .find(|t| stages::current(&all, &t.meta).is_some_and(|s| s.id == stage.id))
+        .or_else(|| p.tickets.iter().find(|t| !t.meta.prs.is_empty()))
+        .cloned()
+        .unwrap_or_else(|| Ticket {
+            id: format!("{}-0", p.file.key),
+            meta: hydraui_projects::TicketMeta {
+                title: "An example ticket".into(),
+                repo: p.file.repos.first().cloned().unwrap_or_default(),
+                prs: vec!["https://github.com/owner/repo/pull/1".into()],
+                ..Default::default()
+            },
+            body: String::new(),
+        })
+}
+
+/// Where a ticket is, as people read it: its stage's title while in progress or testing,
+/// else its status.
+fn status_text(p: &Project, t: &hydraui_projects::TicketMeta) -> String {
+    stages::current(&p.file.stages(), t)
+        .filter(|_| matches!(t.status, TicketStatus::InProgress | TicketStatus::Testing))
+        .map_or_else(|| t.status.label().to_string(), |s| s.title.clone())
+}
+
+/// The board's columns (spec §14.8): Todo, a column per stage, In review and Done. Each is its
+/// label, the status of its tickets and, for a stage, the stage's id.
+fn board_columns(all: &[stages::Stage]) -> Vec<(String, TicketStatus, Option<String>)> {
+    let fixed = |s: TicketStatus| (s.label().to_string(), s, None);
+    let mut out = vec![fixed(TicketStatus::Todo)];
+    out.extend(
+        all.iter()
+            .map(|s| (s.title.clone(), stages::status_of(s), Some(s.id.clone()))),
+    );
+    out.push(fixed(TicketStatus::InReview));
+    out.push(fixed(TicketStatus::Done));
+    out
+}
+
 fn status_colour(s: TicketStatus) -> u32 {
     match s {
         TicketStatus::Todo => theme::BORDER_STRONG,
@@ -7915,6 +8450,120 @@ mod tests {
     }
 
     #[test]
+    fn a_new_stage_gets_a_free_id_and_edits_land_in_order() {
+        let all = stages::defaults();
+        let c = new_stage(&all, stages::StageKind::Check);
+        assert_eq!((c.id.as_str(), c.kind), ("check", stages::StageKind::Check));
+        let mut more = all.clone();
+        more.push(c.clone());
+        assert_eq!(new_stage(&more, stages::StageKind::Check).id, "check-2");
+        assert_eq!(new_stage(&all, stages::StageKind::Work).id, "work");
+
+        let v = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let e = stage_edited(&c, &v(&[" Security ", "/qa-skill", "dev", "Check {id}"]));
+        assert_eq!(
+            (
+                e.title.as_str(),
+                e.skill.as_str(),
+                e.on_fail.as_str(),
+                e.prompt.as_str()
+            ),
+            ("Security", "qa-skill", "dev", "Check {id}")
+        );
+        let w = stage_edited(&all[0], &v(&["Build", "", "Do {id}", "Fix {id}"]));
+        assert_eq!(
+            (
+                w.title.as_str(),
+                w.prompt.as_str(),
+                w.fix_prompt.as_str(),
+                w.on_fail.as_str()
+            ),
+            ("Build", "Do {id}", "Fix {id}", "")
+        );
+    }
+
+    #[test]
+    fn the_board_has_a_column_per_stage() {
+        let mut all = stages::defaults();
+        all.push(stages::Stage {
+            id: "security".into(),
+            title: "Security review".into(),
+            kind: stages::StageKind::Check,
+            ..Default::default()
+        });
+        let cols: Vec<(String, TicketStatus, Option<String>)> = board_columns(&all);
+        let labels: Vec<&str> = cols.iter().map(|c| c.0.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Todo",
+                "Development",
+                "Testing",
+                "Security review",
+                "In review",
+                "Done"
+            ]
+        );
+        assert_eq!(cols[3].1, TicketStatus::Testing);
+        assert_eq!(cols[3].2.as_deref(), Some("security"));
+        assert_eq!(cols[4].2, None);
+    }
+
+    #[test]
+    fn a_projects_stages_give_their_own_words_and_keep_the_finish() {
+        let mut p: Project = Project {
+            slug: "pg".into(),
+            file: toml::from_str("name = \"Product Groups\"\nkey = \"PG\"\nlead = \"me\"").unwrap(),
+            spec: String::new(),
+            milestones: vec![],
+            tickets: vec![],
+            decisions: vec![],
+            meetings: vec![],
+            files: vec![],
+            links: vec![],
+            progress: vec![],
+        };
+        p.file.stages = stages::defaults();
+        p.file.stages[0].prompt = "Build {id} ({title}) {place} {skills}".into();
+        p.file.stages[0].skill = "angular".into();
+        p.file.stages.push(stages::Stage {
+            id: "security".into(),
+            title: "Security review".into(),
+            kind: stages::StageKind::Check,
+            ..Default::default()
+        });
+        let mut t = Ticket {
+            id: "PG-3".into(),
+            meta: hydraui_projects::TicketMeta {
+                title: "Share dialog".into(),
+                repo: "iov42/fe".into(),
+                prs: vec!["https://github.com/iov42/fe/pull/7".into()],
+                ..Default::default()
+            },
+            body: String::new(),
+        };
+        let w = work_prompt(&p, &t, "pg-3", Some(Path::new("/skills/mine")));
+        assert!(
+            w.starts_with("Build PG-3 (Share dialog) in a worktree of iov42/fe on branch pg-3."),
+            "{w}"
+        );
+        // The stage's shared skill wins over the engineer's own choice.
+        assert!(w.contains("the angular skill with the Skill tool") && !w.contains("/skills/mine"));
+        // The finish is always added.
+        assert!(
+            w.contains("ticket_report") && w.contains("PG-3 in its title"),
+            "{w}"
+        );
+        t.meta.status = TicketStatus::Testing;
+        t.meta.stage = "security".into();
+        let c = check_prompt(&p, &t, None);
+        assert!(
+            c.contains("(Security review)") && c.contains("ticket_checked"),
+            "{c}"
+        );
+    }
+
+    #[test]
     fn prompts_name_the_ticket_and_the_report() {
         let p: Project = Project {
             slug: "pg".into(),
@@ -8019,7 +8668,7 @@ mod tests {
         failed.meta.check_note = "Two stepper tests fail.".into();
         let fix = work_prompt(&p, &failed, "pg-3-share-dialog", None);
         assert!(
-            fix.contains("failed testing")
+            fix.contains("failed a check")
                 && fix.contains("Two stepper tests fail.")
                 && fix.contains("https://github.com/iov42/fe/pull/7")
                 && fix.contains("ticket_report")

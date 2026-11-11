@@ -4,6 +4,7 @@ pub mod front_matter;
 pub mod model;
 pub mod progress;
 pub mod repo;
+pub mod stages;
 
 use std::path::Path;
 

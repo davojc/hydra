@@ -138,6 +138,11 @@ pub enum Change {
     /// An owner sets the `.swarmignore` patterns every machine applies.
     SetIgnore {
         text: String,
+        /// The hex hash of the text the author's `.swarmignore` held as agreed when they changed
+        /// it, None when it held none: what this change was made on top of, so a machine whose
+        /// own change it replaced without having seen can keep that one as a conflict copy.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replaces: Option<String>,
     },
     /// An owner sets the rules for claims in the context `name`.
     SetClaimContext {
@@ -233,6 +238,9 @@ pub struct IgnoreSetting {
     pub text: String,
     pub at: u64,
     pub by: PersonId,
+    /// As `Change::SetIgnore`'s `replaces`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -597,7 +605,7 @@ impl Roster {
                     self.types = normalise_types(types);
                 }
             }
-            Change::SetIgnore { text } => {
+            Change::SetIgnore { text, replaces } => {
                 // Changes fold in (time, signature) order, so the later one normally lands last;
                 // comparing anyway keeps the winner the same if the order ever differs.
                 let newer = self
@@ -609,6 +617,7 @@ impl Roster {
                         text: text.clone(),
                         at: c.at,
                         by: c.by,
+                        replaces: replaces.clone(),
                     });
                 }
             }
@@ -1149,12 +1158,20 @@ mod tests {
             &o,
             &[
                 genesis(&o),
-                sign(&o, 2, Change::SetIgnore { text: text.clone() }),
+                sign(
+                    &o,
+                    2,
+                    Change::SetIgnore {
+                        text: text.clone(),
+                        replaces: Some("ab12".into()),
+                    },
+                ),
             ],
         )
         .unwrap();
         let set = r.ignore.unwrap();
         assert_eq!((set.text, set.at, set.by), (text, 2, o.id()));
+        assert_eq!(set.replaces.as_deref(), Some("ab12"));
     }
 
     #[test]
@@ -1166,7 +1183,14 @@ mod tests {
             &[
                 genesis(&o),
                 add(&o, 2, &w, "wren", Role::Writer),
-                sign(&w, 3, Change::SetIgnore { text: "x".into() }),
+                sign(
+                    &w,
+                    3,
+                    Change::SetIgnore {
+                        text: "x".into(),
+                        replaces: None,
+                    },
+                ),
             ],
         )
         .unwrap();
@@ -1176,7 +1200,16 @@ mod tests {
     #[test]
     fn the_later_ignore_change_wins() {
         let o = PersonKey::generate();
-        let set = |at, text: &str| sign(&o, at, Change::SetIgnore { text: text.into() });
+        let set = |at, text: &str| {
+            sign(
+                &o,
+                at,
+                Change::SetIgnore {
+                    text: text.into(),
+                    replaces: None,
+                },
+            )
+        };
         let log = [genesis(&o), set(2, "first"), set(3, "second")];
         assert_eq!(fold(&o, &log).unwrap().ignore.unwrap().text, "second");
         // The same either way round.
@@ -1192,8 +1225,22 @@ mod tests {
             &o,
             &[
                 genesis(&o),
-                sign(&o, 2, Change::SetIgnore { text: "ok".into() }),
-                sign(&o, 3, Change::SetIgnore { text: big }),
+                sign(
+                    &o,
+                    2,
+                    Change::SetIgnore {
+                        text: "ok".into(),
+                        replaces: None,
+                    },
+                ),
+                sign(
+                    &o,
+                    3,
+                    Change::SetIgnore {
+                        text: big,
+                        replaces: None,
+                    },
+                ),
             ],
         )
         .unwrap();
@@ -2395,5 +2442,24 @@ mod tests {
         );
         let m = serde_json::to_string(&machine("x")).unwrap();
         assert_eq!(m, r#"{"endpoint":"ep-x","name":"x-pc","author":"au-x"}"#);
+    }
+}
+
+#[cfg(test)]
+mod ignore_wire {
+    use super::*;
+
+    #[test]
+    fn a_set_ignore_without_replaces_reads_and_writes_as_before() {
+        let old = r#"{"type":"set_ignore","text":"build/"}"#;
+        let c: Change = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            c,
+            Change::SetIgnore {
+                text: "build/".into(),
+                replaces: None
+            }
+        );
+        assert_eq!(serde_json::to_string(&c).unwrap(), old);
     }
 }

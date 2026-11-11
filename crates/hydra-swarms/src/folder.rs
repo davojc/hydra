@@ -82,9 +82,13 @@ pub enum FolderEvent {
     /// One path couldn't be brought in step; the others carried on.
     Error(String),
     /// The text an owner saved in `.swarmignore` on this machine (empty when they emptied or
-    /// deleted it), for the service to sign into the roster as `Change::SetIgnore`. It travels
-    /// through the roster rather than as a file entry so that only an owner's version counts.
-    PublishIgnore(String),
+    /// deleted it), for the service to sign into the roster as `Change::SetIgnore`, with
+    /// `replaces`, the hex hash of the text it was made on top of. It travels through the roster
+    /// rather than as a file entry so that only an owner's version counts.
+    PublishIgnore {
+        text: String,
+        replaces: Option<String>,
+    },
 }
 
 /// A file's size and modification time when it was last hashed, so an unchanged file isn't read
@@ -129,6 +133,24 @@ struct Entry {
     held: Option<Held>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     seen: Option<Seen>,
+    /// `.swarmignore` only: the text this machine last handed out for the roster, until the
+    /// roster moves on to another, so a newer owner's change made without having seen it can be
+    /// told from one made on top of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    published: Option<Published>,
+}
+
+impl Entry {
+    /// Whether anything about the path is worth keeping in the index.
+    fn worth_keeping(&self) -> bool {
+        self.base.is_some() || self.held.is_some() || self.published.is_some()
+    }
+}
+
+/// A `.swarmignore` text handed out for the roster, by hash: None when it was emptied.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+struct Published {
+    hash: Option<Hash>,
 }
 
 /// An allowed file in the folder. `hash` is None for an empty file.
@@ -418,8 +440,7 @@ impl Folder {
                 }
             }
         }
-        self.index
-            .retain(|_, e| e.base.is_some() || e.held.is_some());
+        self.index.retain(|_, e| e.worth_keeping());
         self.too_big = scan.too_big;
         self.copies = scan
             .files
@@ -536,6 +557,7 @@ impl Folder {
             entry.held = None;
             entry.base = None;
             entry.from = None;
+            entry.published = None;
             return self.save();
         }
         let types = types(node).await?;
@@ -632,6 +654,7 @@ impl Folder {
         if let Some(entry) = self.index.get_mut(&p) {
             entry.base = None;
             entry.from = None;
+            entry.published = None;
         }
         self.tidy(&p);
         self.save()
@@ -823,7 +846,39 @@ impl Folder {
         };
         let remote = ignore_remote(roster);
         let owner = roster.role_of(&me.person) == Some(Role::Owner) && node.can_write();
+        let theirs_text = roster
+            .ignore
+            .as_ref()
+            .map(|i| Bytes::from(i.text.clone()))
+            .unwrap_or_default();
+        let theirs = remote.as_ref().map(|r| (r.machine.clone(), r.at));
         let mut entry = self.index.get(&p).cloned().unwrap_or_default();
+        // The roster has moved on from what this machine published. If the newer owner's change
+        // wasn't made on top of it and the file still holds it, theirs keeps the name and ours is
+        // kept as a conflict copy, which never syncs. Otherwise it is an ordinary later edit.
+        if let (Some(sent), Some(r)) = (entry.published, remote.as_ref())
+            && r.hash != sent.hash
+        {
+            let replaces = roster.ignore.as_ref().and_then(|i| i.replaces.clone());
+            let unseen = replaces != sent.hash.map(|h| h.to_hex());
+            if let Some(mine) = mine.as_ref().filter(|_| unseen && local.hash == sent.hash) {
+                if !self.as_scanned(&p, scanned)? {
+                    return Ok(None);
+                }
+                let name = conflict_name(&p, machine, timestamp(local.modified), tz);
+                let copy = self.free_copy_name(&name, Hash::new(mine), &BTreeMap::new())?;
+                self.write(&copy, mine)?;
+                match r.hash {
+                    Some(_) => self.write(&p, &theirs_text)?,
+                    None => self.remove(&p)?,
+                }
+                self.took_ignore(&p, Some(r));
+                events.push(FolderEvent::NewConflict { path: p, copy });
+                return Ok(theirs);
+            }
+            entry.published = None;
+            self.entry(&p).published = None;
+        }
         // Made an owner since the edit was held: it goes through like any other.
         if owner && entry.held == Some(Held::ReaderEdit) {
             entry.held = None;
@@ -839,12 +894,6 @@ impl Folder {
             entry.held,
             tz,
         );
-        let theirs_text = roster
-            .ignore
-            .as_ref()
-            .map(|i| Bytes::from(i.text.clone()))
-            .unwrap_or_default();
-        let theirs = remote.as_ref().map(|r| (r.machine.clone(), r.at));
         match action {
             Action::Nothing => {
                 if let Some(r) = remote.as_ref().filter(|r| r.hash == local.hash) {
@@ -875,10 +924,14 @@ impl Folder {
                 let Some(text) = ignore_text(mine.as_ref(), events) else {
                     return Ok(None);
                 };
-                events.push(FolderEvent::PublishIgnore(text));
+                events.push(FolderEvent::PublishIgnore {
+                    text,
+                    replaces: entry.base.map(|h| h.to_hex()),
+                });
                 let entry = self.entry(&p);
                 entry.base = local.hash;
                 entry.from = None;
+                entry.published = Some(Published { hash: local.hash });
                 Ok(Some((machine.to_string(), now_micros())))
             }
             Action::Hold(held) => {
@@ -912,10 +965,15 @@ impl Folder {
                 };
                 let copy = self.free_copy_name(&copy, Hash::new(&theirs_text), &BTreeMap::new())?;
                 self.write(&copy, &theirs_text)?;
-                events.push(FolderEvent::PublishIgnore(text));
+                // Made on top of theirs, which is kept as the copy.
+                events.push(FolderEvent::PublishIgnore {
+                    text,
+                    replaces: remote.as_ref().and_then(|r| r.hash).map(|h| h.to_hex()),
+                });
                 let entry = self.entry(&p);
                 entry.base = local.hash;
                 entry.from = None;
+                entry.published = Some(Published { hash: local.hash });
                 events.push(FolderEvent::NewConflict { path: p, copy });
                 Ok(Some((machine.to_string(), now_micros())))
             }
@@ -924,6 +982,7 @@ impl Folder {
 
     /// Records the roster's `.swarmignore` as the version this folder now has.
     fn took_ignore(&mut self, p: &RelPath, remote: Option<&Remote>) {
+        self.entry(p).published = None;
         match remote {
             Some(r) => self.took(p, r),
             None => {
@@ -1138,11 +1197,7 @@ impl Folder {
 
     /// Forgets `p` once nothing about it is worth keeping.
     fn tidy(&mut self, p: &RelPath) {
-        if self
-            .index
-            .get(p)
-            .is_some_and(|e| e.base.is_none() && e.held.is_none())
-        {
+        if self.index.get(p).is_some_and(|e| !e.worth_keeping()) {
             self.index.remove(p);
         }
     }

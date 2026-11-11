@@ -93,10 +93,13 @@ impl Side {
             .expect("reconcile");
         // What the service does with an owner's `.swarmignore`: sign it into the roster.
         for e in &events {
-            if let FolderEvent::PublishIgnore(text) = e {
+            if let FolderEvent::PublishIgnore { text, replaces } = e {
                 let set = SignedChange::sign(
                     &self.node.id(),
-                    Change::SetIgnore { text: text.clone() },
+                    Change::SetIgnore {
+                        text: text.clone(),
+                        replaces: replaces.clone(),
+                    },
                     &self.key,
                     now(),
                 );
@@ -1661,7 +1664,7 @@ async fn a_writers_swarmignore_edit_is_held_and_has_no_effect() {
     assert!(
         !events
             .iter()
-            .any(|e| matches!(e, FolderEvent::PublishIgnore(_))),
+            .any(|e| matches!(e, FolderEvent::PublishIgnore { .. })),
         "{events:?}"
     );
     assert_eq!(w.folder.attention(), vec![held]);
@@ -1728,4 +1731,63 @@ async fn a_writers_file_entry_for_swarmignore_reaches_no_folder_without_one() {
     assert_eq!(o.remote_hash("x.md").await, Some(Some(hash("two"))));
     o.shutdown().await;
     w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_owners_editing_swarmignore_at_once_keep_both_versions() {
+    let mut o = owner().await;
+    let mut p = joiner(&o, "pat", Role::Owner).await;
+    o.write("x.md", "one");
+    o.reconcile().await;
+    p.settle("x.md on pat's", |s| s.read("x.md").is_some())
+        .await;
+    cut_off(&o, &p);
+    o.write(".swarmignore", "olive/\n");
+    o.reconcile().await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    p.write(".swarmignore", "pat/\n");
+    p.reconcile().await;
+    reconnect(&o, &p).await;
+    // Pat's is the later change, so it keeps the name; olive's is kept as a copy on olive's.
+    for side in [&mut o, &mut p] {
+        side.settle("pat's .swarmignore everywhere", |s| {
+            s.read(".swarmignore").as_deref() == Some("pat/\n")
+        })
+        .await;
+    }
+    for side in [&mut o, &mut p] {
+        side.reconcile().await;
+        assert_eq!(side.read(".swarmignore").as_deref(), Some("pat/\n"));
+        let ignore = side.roster().await.ignore.map(|i| i.text);
+        assert_eq!(ignore.as_deref(), Some("pat/\n"));
+    }
+    assert_eq!(ignore_copies(&o), vec!["olive/\n".to_string()]);
+    assert!(ignore_copies(&p).is_empty());
+    o.shutdown().await;
+    p.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_owners_later_edit_on_top_of_anothers_makes_no_copy() {
+    let mut o = owner().await;
+    let mut p = joiner(&o, "pat", Role::Owner).await;
+    o.write(".swarmignore", "olive/\n");
+    o.reconcile().await;
+    p.settle("olive's .swarmignore on pat's", |s| {
+        s.read(".swarmignore").as_deref() == Some("olive/\n")
+    })
+    .await;
+    p.write(".swarmignore", "pat/\n");
+    p.reconcile().await;
+    o.settle("pat's .swarmignore on olive's", |s| {
+        s.read(".swarmignore").as_deref() == Some("pat/\n")
+    })
+    .await;
+    for side in [&mut o, &mut p] {
+        side.reconcile().await;
+        assert!(ignore_copies(side).is_empty());
+        assert_eq!(side.read(".swarmignore").as_deref(), Some("pat/\n"));
+    }
+    o.shutdown().await;
+    p.shutdown().await;
 }

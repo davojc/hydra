@@ -2048,10 +2048,13 @@ impl Worker {
                     errors.insert(format!("{}: {text}", self.name));
                     continue;
                 }
-                FolderEvent::PublishIgnore(text) => {
+                FolderEvent::PublishIgnore { text, replaces } => {
                     let only = format!("Only owners can change what {} syncs.", self.name);
                     // Each error already names the swarm.
-                    if let Err(e) = self.owner_change(Change::SetIgnore { text }, only).await {
+                    if let Err(e) = self
+                        .owner_change(Change::SetIgnore { text, replaces }, only)
+                        .await
+                    {
                         errors.insert(e);
                         // Otherwise the next pass takes the edit as published and puts the
                         // roster's text over it.

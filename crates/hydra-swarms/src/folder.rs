@@ -370,8 +370,17 @@ impl Folder {
                 .iter()
                 .filter_map(|(p, e)| Some((self.disk_names.get(p).unwrap_or(p).clone(), e.seen?)))
                 .collect();
+            // Held files stay on this machine only, so they don't make a folder count (spec
+            // §5.3): a folder deleted elsewhere that keeps only a held edit stays here, out of
+            // the layout, rather than coming back for everyone.
+            let held: HashSet<RelPath> = self
+                .index
+                .iter()
+                .filter(|(_, e)| e.held.is_some())
+                .map(|(p, _)| self.disk_names.get(p).unwrap_or(p).clone())
+                .collect();
             let rules = rules.clone();
-            tokio::task::spawn_blocking(move || scan(&root, &rules, &seen)).await??
+            tokio::task::spawn_blocking(move || scan(&root, &rules, &seen, &held)).await??
         };
         // Ruling P1: a `files/.swarmignore` entry is never read, since any writer can put one
         // there and the file must count only as an owner set it in the roster.
@@ -2095,7 +2104,9 @@ async fn swarm_history(
 /// `raw` with each entry, and its author's parent record, at the path it belongs at now that the
 /// folder moves are applied (`Moves::map`), keeping only paths that `syncs`. A path an entry was
 /// made at before a rename reached its author is read at the renamed path, so work done under
-/// the old name lands in the renamed folder as the same file.
+/// the old name lands in the renamed folder as the same file. An edit (or delete) of a version
+/// that was there before a rename follows it whatever its own time (`moved_as_of`): only a file
+/// with no earlier version is judged by its time.
 fn mapped(
     raw: &BTreeMap<RelPath, FileHistory>,
     moves: &Moves,
@@ -2104,7 +2115,7 @@ fn mapped(
     let mut out: BTreeMap<RelPath, FileHistory> = BTreeMap::new();
     for (p, h) in raw {
         for e in &h.entries {
-            out.entry(moves.map(p, e.at))
+            out.entry(moves.map(p, moved_as_of(e, h)))
                 .or_default()
                 .entries
                 .push(e.clone());
@@ -2112,13 +2123,11 @@ fn mapped(
         // A parent record goes where its author's entry went. One whose entry hasn't arrived yet
         // follows every move, as the oldest entry would.
         for (author, r) in &h.records {
-            let at = h
-                .entries
-                .iter()
-                .filter(|e| &e.author == author)
-                .map(|e| e.at)
-                .max()
-                .unwrap_or(0);
+            let theirs = || h.entries.iter().filter(|e| &e.author == author);
+            let at = theirs()
+                .find(|e| e.hash == r.hash)
+                .or_else(|| theirs().max_by_key(|e| e.at))
+                .map_or(0, |e| moved_as_of(e, h));
             out.entry(moves.map(p, at))
                 .or_default()
                 .records
@@ -2131,6 +2140,28 @@ fn mapped(
             .sort_by(|a, b| (a.at, &a.author).cmp(&(b.at, &b.author)));
     }
     out
+}
+
+/// The time an entry is placed by among folder moves (`Moves::map`): its own, or, when it was
+/// made on top of a version another entry for the same path still holds, that entry's time if
+/// older. An edit of a file that was there before a rename is work on that file, and follows
+/// the rename even when made, by the clock, after it by someone who hadn't seen it.
+fn moved_as_of(e: &Remote, h: &FileHistory) -> u64 {
+    let Some((_, r)) = h
+        .records
+        .iter()
+        .find(|(a, r)| *a == e.author && r.hash == e.hash)
+    else {
+        return e.at;
+    };
+    let earlier: HashSet<Hash> = r.parent.iter().chain(&r.ancestors).copied().collect();
+    h.entries
+        .iter()
+        .filter(|o| o.hash.is_some_and(|x| earlier.contains(&x)))
+        .map(|o| o.at)
+        .chain([e.at])
+        .min()
+        .unwrap_or(e.at)
 }
 
 /// What is at `dst` other than the folder `src` itself, as the disk spells it: an entry of that
@@ -2310,7 +2341,12 @@ fn write_via_temp(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 /// Every file under `root` that syncs, never following links or junctions, and never going into
 /// a folder none of whose files can sync (one starting with a dot, or one `.swarmignore` takes
 /// out). The root `.swarmignore` is read on its own, for the pass to sync through the roster.
-fn scan(root: &Path, rules: &SyncRules, seen: &HashMap<RelPath, Seen>) -> io::Result<Scan> {
+fn scan(
+    root: &Path,
+    rules: &SyncRules,
+    seen: &HashMap<RelPath, Seen>,
+    held: &HashSet<RelPath>,
+) -> io::Result<Scan> {
     let mut out = Scan::default();
     // Folders holding something other than folders the scan went into, so not empty.
     let mut cluttered: BTreeSet<RelPath> = BTreeSet::new();
@@ -2374,7 +2410,9 @@ fn scan(root: &Path, rules: &SyncRules, seen: &HashMap<RelPath, Seen>) -> io::Re
             if !rules.file_syncs(&p) {
                 continue;
             }
-            synced(&mut out, &name);
+            if !held.contains(&p) {
+                synced(&mut out, &name);
+            }
             let Ok(meta) = entry.metadata() else {
                 out.unreadable.insert(p);
                 continue;

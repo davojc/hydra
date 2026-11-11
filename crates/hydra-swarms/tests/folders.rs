@@ -2353,3 +2353,95 @@ async fn a_clashing_file_that_doesnt_sync_stays_where_it_was() {
     o.shutdown().await;
     w.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_edit_made_offline_after_two_renames_lands_at_the_newest_name() {
+    let (mut o, mut w) = synced_pair("a/x.md").await;
+    cut_off(&o, &w);
+    o.rename("a", "b");
+    o.reconcile().await;
+    // Dated after the first rename, but an edit of a file that was there before it.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    w.write("a/x.md", "edit");
+    w.reconcile().await;
+    o.rename("b", "c");
+    o.reconcile().await;
+    reconnect(&o, &w).await;
+    o.settle("the edit at the newest name on the owner", |s| {
+        s.read("c/x.md").as_deref() == Some("edit")
+    })
+    .await;
+    w.settle("the newest name on the writer", |s| {
+        s.read("c/x.md").as_deref() == Some("edit") && s.top_names() == vec!["c".to_string()]
+    })
+    .await;
+    for side in [&mut o, &mut w] {
+        side.reconcile().await;
+        assert_eq!(side.top_names(), vec!["c".to_string()]);
+        assert!(copies_of(side, "c/x.md").is_empty());
+    }
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_edit_made_offline_after_a_rename_lands_in_the_renamed_folder() {
+    let (mut o, mut w) = synced_pair("notes/a.md").await;
+    cut_off(&o, &w);
+    o.rename("notes", "docs");
+    o.reconcile().await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    w.write("notes/a.md", "edit");
+    w.reconcile().await;
+    reconnect(&o, &w).await;
+    o.settle("the edit in the renamed folder on the owner", |s| {
+        s.read("docs/a.md").as_deref() == Some("edit")
+    })
+    .await;
+    w.settle("the renamed folder on the writer", |s| {
+        s.read("docs/a.md").as_deref() == Some("edit") && s.top_names() == vec!["docs".to_string()]
+    })
+    .await;
+    for side in [&mut o, &mut w] {
+        side.reconcile().await;
+        assert_eq!(side.top_names(), vec!["docs".to_string()]);
+        assert!(copies_of(side, "docs/a.md").is_empty());
+    }
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_file_doesnt_bring_a_deleted_folder_back() {
+    let (mut o, mut w) = synced_pair("notes/a.md").await;
+    o.remove_tree("notes");
+    o.reconcile().await;
+    // An edit not yet shared when the delete arrives: held on the writer's machine.
+    w.write("notes/a.md", "edit");
+    w.hears("notes/a.md", None).await;
+    eventually("the owner's folder delete on the writer", || async {
+        let roster = w.roster().await;
+        let records = w.node.folder_records(&roster).await.unwrap();
+        records.contains_key(&rel("notes")).then_some(())
+    })
+    .await;
+    for _ in 0..3 {
+        w.reconcile().await;
+        o.reconcile().await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    o.reconcile().await;
+    assert!(!o.is_dir("notes"));
+    assert_eq!(w.read("notes/a.md").as_deref(), Some("edit"));
+    let roster = o.roster().await;
+    let records = o.node.folder_records(&roster).await.unwrap();
+    let present: Vec<_> = records
+        .get(&rel("notes"))
+        .into_iter()
+        .flatten()
+        .filter(|v| v.author == w.node.author())
+        .collect();
+    assert!(present.is_empty(), "{present:?}");
+    o.shutdown().await;
+    w.shutdown().await;
+}

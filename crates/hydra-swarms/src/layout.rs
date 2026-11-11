@@ -167,10 +167,10 @@ impl Moves {
         self.place(p, at, false).0
     }
 
-    /// Where something at `p` as of `at` is now, and the last move that took it there. With
+    /// Where something at `p` as of `at` is now, and the moves that took it there, in order. With
     /// `strict`, a move at exactly `at` counts as already seen, as for a folder this machine
     /// agreed at `at`.
-    fn place(&self, p: &RelPath, at: u64, strict: bool) -> (RelPath, Option<&Move>) {
+    fn place(&self, p: &RelPath, at: u64, strict: bool) -> (RelPath, Vec<&Move>) {
         // The move's own folder, recorded at the move's time under the name its author wrote,
         // starts where the move landed, and only later moves act on it.
         let start = self
@@ -186,7 +186,7 @@ impl Moves {
             ),
             None => (p.clone(), 0),
         };
-        let mut last = None;
+        let mut chain = Vec::new();
         for m in self.list.iter().skip(skip) {
             let applies = if strict { m.at > at } else { m.at >= at };
             if !applies {
@@ -194,10 +194,10 @@ impl Moves {
             }
             if let Some(q) = rebase(&p, &m.from, &m.to) {
                 p = q;
-                last = Some(m);
+                chain.push(m);
             }
         }
-        (p, last)
+        (p, chain)
     }
 }
 
@@ -541,7 +541,7 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
     let mut handled: HashSet<String> = known.keys().map(|k| fold(k.as_str())).collect();
 
     // Known folders still on disk: where each belongs now.
-    let mut placed: BTreeMap<&RelPath, (RelPath, Option<&Move>)> = BTreeMap::new();
+    let mut placed: BTreeMap<&RelPath, (RelPath, Vec<&Move>)> = BTreeMap::new();
     let mut missing: Vec<&RelPath> = Vec::new();
     for (k, kf) in known {
         if !disk.contains_key(k) {
@@ -585,15 +585,15 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
     // rather than bringing the old name back for everyone. One that is this writer's own rename,
     // found this scan, is left to the rename check. Once the index exists, such a folder is one
     // the person made, and §5.2 says a newer folder at the old name stands.
-    let mut followers: BTreeMap<&RelPath, (RelPath, Option<&Move>)> = BTreeMap::new();
+    let mut followers: BTreeMap<&RelPath, (RelPath, Vec<&Move>)> = BTreeMap::new();
     for d in disk.keys().filter(|_| first_pass) {
         if known.contains_key(d) || is_ignored(d) || (writer && missing.iter().any(|k| same(k, d)))
         {
             continue;
         }
-        let (t, last) = moves.place(d, newest_file_at(d).unwrap_or(0), false);
+        let (t, chain) = moves.place(d, newest_file_at(d).unwrap_or(0), false);
         if t != *d {
-            followers.insert(d, (t, last));
+            followers.insert(d, (t, chain));
         }
     }
     // A known folder whose move would take it somewhere the rules keep out of the layout isn't
@@ -619,18 +619,17 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
         .map(|(_, t)| fold(t.as_str()))
         .collect();
 
-    for (k, (t, last)) in &placed {
+    for (k, (t, chain)) in &placed {
         let applied = known[*k].applied_at;
         let notified = known[*k].notified_at;
         let mut applied_now = applied;
         if t != *k {
             forget.insert((*k).clone());
             told.insert(t.clone(), notified);
-            applied_now = applied.max(last.map_or(0, |m| m.at));
-            if let Some(m) = last
-                && m.author != me
-                && lost_to(k, m)
-            {
+            applied_now = applied.max(chain.last().map_or(0, |m| m.at));
+            // Any move along the way may be the one that beat mine; a later rename of the
+            // winner's folder doesn't change who that was.
+            if let Some(m) = chain.iter().find(|m| m.author != me && lost_to(k, m)) {
                 notices.push(LayoutNotice::RenameLost {
                     mine: (*k).clone(),
                     kept: t.clone(),
@@ -760,6 +759,8 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
                     });
                     detected_moves.push(((*k).clone(), d.clone()));
                     know.insert(d.clone(), now);
+                    // What its person has been told stays with the folder under its new name.
+                    told.insert(d.clone(), known[*k].notified_at);
                     claimed.insert(d.clone());
                     renames.push(((*k).clone(), d.clone()));
                 }
@@ -803,8 +804,10 @@ pub fn plan(input: &LayoutInput) -> LayoutPlan {
         if in_layout(d) || is_ignored(d) {
             continue;
         }
-        if let Some((t, last)) = followers.get(d) {
-            let at = word(t).map_or(0, |w| w.at).max(last.map_or(0, |m| m.at));
+        if let Some((t, chain)) = followers.get(d) {
+            let at = word(t)
+                .map_or(0, |w| w.at)
+                .max(chain.last().map_or(0, |m| m.at));
             joined.insert(fold(t.as_str()));
             know.insert(t.clone(), at);
             continue;
@@ -1746,5 +1749,63 @@ mod tests {
             .plan();
         assert!(p.create.is_empty(), "{:?}", p.create);
         assert!(p.know.is_empty());
+    }
+    #[test]
+    fn a_lost_rename_is_told_even_when_the_winner_was_renamed_again() {
+        // y and x renamed notes at once and x won; later w renamed x's folder on.
+        let p = World::writer("y")
+            .rename("notes", "b", 10, "y")
+            .record("b", present(10, "y"))
+            .rename("notes", "a", 20, "x")
+            .record("a", present(20, "x"))
+            .rename("a", "c", 30, "w")
+            .record("c", present(30, "w"))
+            .known("b", 10)
+            .disk("b", empty(&[]))
+            .plan();
+        assert_eq!(pairs(&p.disk_moves), vec![("b", "c")]);
+        assert_eq!(
+            p.notices,
+            vec![LayoutNotice::RenameLost {
+                mine: rel("b"),
+                kept: rel("c"),
+                by_machine: machine("x"),
+            }]
+        );
+    }
+
+    #[test]
+    fn renaming_a_folder_here_keeps_what_its_person_was_told() {
+        // x renamed notes to docs, y deleted notes after, and x was told. Now x renames docs to e.
+        let w = || {
+            World::writer("x")
+                .rename("notes", "docs", 20, "x")
+                .record("notes", deleted(30, "y"))
+        };
+        let p = w()
+            .record("docs", present(20, "x"))
+            .known_told("docs", 20, 30)
+            .disk("e", empty(&[]))
+            .plan();
+        assert_eq!(pairs(&p.detected_moves), vec![("docs", "e")]);
+        assert_eq!(
+            p.know,
+            vec![(
+                rel("e"),
+                KnownFolder {
+                    applied_at: NOW,
+                    notified_at: 30
+                }
+            )]
+        );
+
+        // The next pass, with the rename in the swarm: nothing is told again.
+        let p = w()
+            .rename("docs", "e", NOW, "x")
+            .record("e", present(NOW, "x"))
+            .known_told("e", NOW, 30)
+            .disk("e", empty(&[]))
+            .plan();
+        assert!(p.notices.is_empty(), "{:?}", p.notices);
     }
 }

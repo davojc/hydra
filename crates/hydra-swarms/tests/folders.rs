@@ -86,10 +86,24 @@ impl Side {
             .find(|m| m.person == self.key.id())
             .expect("a member")
             .clone();
-        self.folder
+        let events = self
+            .folder
             .reconcile(&self.node, &roster, &me)
             .await
-            .expect("reconcile")
+            .expect("reconcile");
+        // What the service does with an owner's `.swarmignore`: sign it into the roster.
+        for e in &events {
+            if let FolderEvent::PublishIgnore(text) = e {
+                let set = SignedChange::sign(
+                    &self.node.id(),
+                    Change::SetIgnore { text: text.clone() },
+                    &self.key,
+                    now(),
+                );
+                self.node.write_change(&set).await.expect("set ignore");
+            }
+        }
+        events
     }
 
     /// Reconciles until `done` holds, and gives every event seen on the way.
@@ -1458,4 +1472,199 @@ async fn a_removed_writers_new_file_that_stops_counting_is_flagged_and_kept() {
     for side in [o, w, v] {
         side.shutdown().await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_file_in_a_dot_folder_stays_local() {
+    let mut o = owner().await;
+    let mut w = joiner(&o, "wren", Role::Writer).await;
+    o.write(".github/a.md", "hidden");
+    o.write("a.md", "shown");
+    o.reconcile().await;
+    w.settle("a.md on the writer", |s| {
+        s.read("a.md").as_deref() == Some("shown")
+    })
+    .await;
+    assert!(w.read(".github/a.md").is_none());
+    assert_eq!(o.remote_hash(".github/a.md").await, None);
+    assert!(o.folder.attention().is_empty());
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dot_folder_file_synced_before_upgrade_stays_on_both_and_stops_syncing() {
+    let mut o = owner().await;
+    let mut w = joiner(&o, "wren", Role::Writer).await;
+    // As an older hydra left it: the file shared, and on both machines.
+    o.write(".github/a.md", "one");
+    w.write(".github/a.md", "one");
+    o.node
+        .put_file(&rel(".github/a.md"), Bytes::from_static(b"one"))
+        .await
+        .unwrap();
+    w.hears(".github/a.md", Some(hash("one"))).await;
+    o.reconcile().await;
+    w.reconcile().await;
+    for side in [&o, &w] {
+        assert_eq!(side.read(".github/a.md").as_deref(), Some("one"));
+    }
+
+    o.write(".github/a.md", "two");
+    o.write("b.md", "b");
+    o.reconcile().await;
+    w.hears("b.md", Some(hash("b"))).await;
+    w.reconcile().await;
+    assert_eq!(w.read(".github/a.md").as_deref(), Some("one"));
+    assert_eq!(o.read(".github/a.md").as_deref(), Some("two"));
+    assert_eq!(o.remote_hash(".github/a.md").await, Some(Some(hash("one"))));
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+/// An owner and a writer both holding `drafts/x.md` as "one", after the owner saved `text` as
+/// `.swarmignore` and it reached the writer.
+async fn ignoring(text: &str) -> (Side, Side) {
+    let (mut o, mut w) = synced_pair("drafts/x.md").await;
+    o.write(".swarmignore", text);
+    o.reconcile().await;
+    assert_eq!(
+        o.roster().await.ignore.map(|i| i.text).as_deref(),
+        Some(text)
+    );
+    w.settle("the owner's .swarmignore on the writer", |s| {
+        s.read(".swarmignore").as_deref() == Some(text)
+    })
+    .await;
+    (o, w)
+}
+
+/// With `drafts/` ignored, the owner's edit to `drafts/x.md` stays on the owner, and nothing is
+/// deleted on either machine.
+async fn an_ignored_edit_stays_local(o: &mut Side, w: &mut Side) {
+    o.write("drafts/x.md", "two");
+    o.write("b.md", "b");
+    o.reconcile().await;
+    w.hears("b.md", Some(hash("b"))).await;
+    w.reconcile().await;
+    assert_eq!(o.remote_hash("drafts/x.md").await, Some(Some(hash("one"))));
+    assert_eq!(o.read("drafts/x.md").as_deref(), Some("two"));
+    assert_eq!(w.read("drafts/x.md").as_deref(), Some("one"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_owners_swarmignore_line_stops_matching_files_and_deletes_nothing() {
+    let (mut o, mut w) = ignoring("drafts/\n").await;
+    an_ignored_edit_stays_local(&mut o, &mut w).await;
+    o.reconcile().await;
+    w.reconcile().await;
+    assert_eq!(o.read("drafts/x.md").as_deref(), Some("two"));
+    assert_eq!(w.read("drafts/x.md").as_deref(), Some("one"));
+    assert!(o.folder.attention().is_empty());
+    assert!(w.folder.attention().is_empty());
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn removing_the_line_brings_the_files_back() {
+    let (mut o, mut w) = ignoring("drafts/\n").await;
+    an_ignored_edit_stays_local(&mut o, &mut w).await;
+    o.write(".swarmignore", "");
+    o.reconcile().await;
+    assert_eq!(o.roster().await.ignore.map(|i| i.text).as_deref(), Some(""));
+    o.write("drafts/y.md", "new");
+    o.reconcile().await;
+    w.settle("the drafts on the writer", |s| {
+        s.read("drafts/y.md").as_deref() == Some("new")
+            && s.read("drafts/x.md").as_deref() == Some("two")
+    })
+    .await;
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_writers_swarmignore_edit_is_held_and_has_no_effect() {
+    let (mut o, mut w) = ignoring("drafts/\n").await;
+    w.write(".swarmignore", "other/\n");
+    let events = w.reconcile().await;
+    let held = Attention::ReaderEdit {
+        path: rel(".swarmignore"),
+    };
+    assert!(
+        events.contains(&FolderEvent::Held(held.clone())),
+        "{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, FolderEvent::PublishIgnore(_))),
+        "{events:?}"
+    );
+    assert_eq!(w.folder.attention(), vec![held]);
+
+    o.write("drafts/z.md", "z");
+    o.write("b.md", "b");
+    o.reconcile().await;
+    w.hears("b.md", Some(hash("b"))).await;
+    w.reconcile().await;
+    assert_eq!(o.read(".swarmignore").as_deref(), Some("drafts/\n"));
+    for side in [&o, &w] {
+        let ignore = side.roster().await.ignore.map(|i| i.text);
+        assert_eq!(ignore.as_deref(), Some("drafts/\n"));
+    }
+    assert!(w.read("drafts/z.md").is_none());
+    assert_eq!(w.read("b.md").as_deref(), Some("b"));
+
+    w.folder
+        .use_swarm_version(&w.node, &rel(".swarmignore"))
+        .await
+        .unwrap();
+    assert_eq!(w.read(".swarmignore").as_deref(), Some("drafts/\n"));
+    assert!(w.folder.attention().is_empty());
+    w.reconcile().await;
+    assert!(w.folder.attention().is_empty());
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_writers_file_entry_for_swarmignore_changes_nothing() {
+    let (mut o, w) = ignoring("drafts/\n").await;
+    // Published as an ordinary file, which a writer may do, it would get round the owner-only
+    // rule.
+    w.node
+        .put_file(&rel(".swarmignore"), Bytes::from_static(b"other/\n"))
+        .await
+        .unwrap();
+    o.hears(".swarmignore", Some(hash("other/\n"))).await;
+    o.reconcile().await;
+    o.reconcile().await;
+    assert_eq!(o.read(".swarmignore").as_deref(), Some("drafts/\n"));
+    let ignore = o.roster().await.ignore.map(|i| i.text);
+    assert_eq!(ignore.as_deref(), Some("drafts/\n"));
+    assert!(o.folder.attention().is_empty());
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_writers_file_entry_for_swarmignore_reaches_no_folder_without_one() {
+    let (mut o, w) = synced_pair("x.md").await;
+    w.node
+        .put_file(&rel(".swarmignore"), Bytes::from_static(b"x.md\n"))
+        .await
+        .unwrap();
+    o.hears(".swarmignore", Some(hash("x.md\n"))).await;
+    o.reconcile().await;
+    o.reconcile().await;
+    assert!(o.read(".swarmignore").is_none());
+    assert!(o.roster().await.ignore.is_none());
+    // x.md still syncs.
+    o.write("x.md", "two");
+    o.reconcile().await;
+    assert_eq!(o.remote_hash("x.md").await, Some(Some(hash("two"))));
+    o.shutdown().await;
+    w.shutdown().await;
 }

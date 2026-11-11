@@ -2003,6 +2003,16 @@ impl Worker {
                         path.as_str()
                     )
                 }
+                // A writer's edit is held too, so the reader's notice would be wrong.
+                FolderEvent::Held(Attention::ReaderEdit { path })
+                    if path.as_str() == crate::rules::SWARMIGNORE =>
+                {
+                    format!(
+                        "{}: your change to {} isn't shared. Only owners can change what syncs, so it stopped syncing on this machine.",
+                        self.name,
+                        path.as_str()
+                    )
+                }
                 FolderEvent::Held(Attention::ReaderEdit { path }) => format!(
                     "{}: your change isn't shared. You're a reader, so {} stopped syncing on this machine.",
                     self.name,
@@ -2036,6 +2046,21 @@ impl Worker {
                 }
                 FolderEvent::Error(text) => {
                     errors.insert(format!("{}: {text}", self.name));
+                    continue;
+                }
+                FolderEvent::PublishIgnore(text) => {
+                    let only = format!("Only owners can change what {} syncs.", self.name);
+                    // Each error already names the swarm.
+                    if let Err(e) = self.owner_change(Change::SetIgnore { text }, only).await {
+                        errors.insert(e);
+                        // Otherwise the next pass takes the edit as published and puts the
+                        // roster's text over it.
+                        if let Some(folder) = self.folder.as_mut()
+                            && let Err(e) = folder.ignore_not_published()
+                        {
+                            errors.insert(format!("{}: {e:#}", self.name));
+                        }
+                    }
                     continue;
                 }
                 FolderEvent::Held(_) | FolderEvent::Attention(_) => continue,

@@ -24,7 +24,8 @@ use crate::paths::{
     MAX_FILE_BYTES, RelPath, allowed, conflict_name, conflict_original, is_conflict_copy,
     numbered_copy, rel_from_disk, safe_rel_path,
 };
-use crate::roster::{Member, Role, Roster};
+use crate::roster::{MAX_IGNORE_BYTES, Member, Role, Roster};
+use crate::rules::{SWARMIGNORE, SyncRules};
 
 /// Ends the name of every file hydra writes before renaming it into place. Never a synced type,
 /// and skipped by the scan whatever the type list says.
@@ -80,6 +81,10 @@ pub enum FolderEvent {
     },
     /// One path couldn't be brought in step; the others carried on.
     Error(String),
+    /// The text an owner saved in `.swarmignore` on this machine (empty when they emptied or
+    /// deleted it), for the service to sign into the roster as `Change::SetIgnore`. It travels
+    /// through the roster rather than as a file entry so that only an owner's version counts.
+    PublishIgnore(String),
 }
 
 /// A file's size and modification time when it was last hashed, so an unchanged file isn't read
@@ -132,9 +137,25 @@ struct OnDisk {
     hash: Option<Hash>,
 }
 
+/// The root `.swarmignore` as the scan found it.
+#[derive(Default)]
+enum IgnoreFile {
+    #[default]
+    Absent,
+    Text {
+        bytes: Bytes,
+        /// Unix microseconds.
+        modified: u64,
+    },
+    /// There but not readable this time; left alone until it is.
+    Unreadable,
+}
+
 #[derive(Default)]
 struct Scan {
+    /// Every file that syncs as a file entry. `.swarmignore` is never one of them.
     files: BTreeMap<RelPath, OnDisk>,
+    ignore: IgnoreFile,
     /// Files hashed in this scan.
     seen: BTreeMap<RelPath, Seen>,
     too_big: BTreeSet<RelPath>,
@@ -199,7 +220,10 @@ impl Folder {
         roster: &Roster,
         me: &Member,
     ) -> anyhow::Result<Vec<FolderEvent>> {
-        let types = roster.types.clone();
+        let rules = std::sync::Arc::new(SyncRules::new(
+            &roster.types,
+            roster.ignore.as_ref().map(|i| i.text.as_str()),
+        ));
         let scan = {
             let root = self.root.clone();
             let seen: HashMap<RelPath, Seen> = self
@@ -207,14 +231,17 @@ impl Folder {
                 .iter()
                 .filter_map(|(p, e)| Some((self.disk_names.get(p).unwrap_or(p).clone(), e.seen?)))
                 .collect();
-            let types = types.clone();
-            tokio::task::spawn_blocking(move || scan(&root, &types, &seen)).await??
+            let rules = rules.clone();
+            tokio::task::spawn_blocking(move || scan(&root, &rules, &seen)).await??
         };
+        // Ruling P1: a `files/.swarmignore` entry is never read, since any writer can put one
+        // there and the file must count only as an owner set it in the roster.
+        let syncs = |p: &RelPath| p.as_str() != SWARMIGNORE && rules.file_syncs(p);
         let history: BTreeMap<RelPath, FileHistory> = node
             .file_entries(roster)
             .await?
             .into_iter()
-            .filter(|(p, _)| allowed(p, 0, &types))
+            .filter(|(p, _)| syncs(p))
             .collect();
         // Keys that differ only by case are one file on Windows and macOS. The key whose newest
         // entry is newest owns it; the content of the others is kept as conflict copies of it.
@@ -243,17 +270,33 @@ impl Folder {
             machine: &machine,
         };
 
+        let mut events = Vec::new();
+        let mut last: Option<(String, u64)> = None;
+        match self
+            .sync_ignore(
+                node,
+                roster,
+                me,
+                &scan.ignore,
+                (&author, &machine),
+                &tz,
+                &mut events,
+            )
+            .await
+        {
+            Ok(change) => last = change,
+            Err(e) => events.push(FolderEvent::Error(format!("{SWARMIGNORE}: {e:#}"))),
+        }
         let mut paths: BTreeSet<RelPath> =
             scan.files.keys().chain(remote.keys()).cloned().collect();
-        // Synced paths of a type no longer on the list are left as they are, not deleted.
+        // Synced paths that no longer sync (a type taken off the list, a folder starting with a
+        // dot, a match in `.swarmignore`) are left as they are on every machine, not deleted.
         paths.extend(
             self.index
                 .iter()
-                .filter(|(p, e)| (e.base.is_some() || e.held.is_some()) && allowed(p, 0, &types))
+                .filter(|(p, e)| (e.base.is_some() || e.held.is_some()) && syncs(p))
                 .map(|(p, _)| p.clone()),
         );
-        let mut events = Vec::new();
-        let mut last: Option<(String, u64)> = None;
         for p in paths {
             if scan.too_big.contains(&p) || scan.unreadable.contains(&p) {
                 continue;
@@ -477,6 +520,15 @@ impl Folder {
             bail!("{} isn't waiting to be shared again.", path.as_str());
         }
         can_write(node)?;
+        if path.as_str() == SWARMIGNORE {
+            // With no base, the next pass sees the file as an edit, and an owner's goes out
+            // through the roster rather than as a file entry.
+            let entry = self.entry(path);
+            entry.held = None;
+            entry.base = None;
+            entry.from = None;
+            return self.save();
+        }
         let types = types(node).await?;
         let history = node_history(node).await?;
         let before = self.index.get(path).and_then(|e| e.base);
@@ -523,6 +575,21 @@ impl Folder {
             .roster()
             .await?
             .context("This swarm's member list hasn't arrived yet.")?;
+        if path.as_str() == SWARMIGNORE {
+            // The swarm's version is the owners', from the roster, never a file entry.
+            let remote = ignore_remote(&roster);
+            match remote.as_ref().and_then(|r| r.hash) {
+                Some(_) => {
+                    let text = roster.ignore.as_ref().map_or("", |i| i.text.as_str());
+                    self.write(path, text.as_bytes())?;
+                }
+                None => self.remove(path)?,
+            }
+            self.took_ignore(path, remote.as_ref());
+            self.entry(path).held = None;
+            self.tidy(path);
+            return self.save();
+        }
         let remote = node.files(&roster).await?.remove(path);
         let from = remote.as_ref().map(Source::of);
         let base = match remote.and_then(|r| r.hash) {
@@ -544,6 +611,20 @@ impl Folder {
         entry.from = from;
         entry.held = None;
         self.tidy(path);
+        self.save()
+    }
+
+    /// Undoes what a pass recorded when it handed out `FolderEvent::PublishIgnore`, for when the
+    /// roster change couldn't be made. With no base, the next pass meets the roster's text as an
+    /// edit made alongside this one, so this machine's text is held or kept as a copy, never
+    /// written over.
+    pub fn ignore_not_published(&mut self) -> anyhow::Result<()> {
+        let p = ignore_path();
+        if let Some(entry) = self.index.get_mut(&p) {
+            entry.base = None;
+            entry.from = None;
+        }
+        self.tidy(&p);
         self.save()
     }
 
@@ -698,6 +779,148 @@ impl Folder {
                 self.took_hash(p, hash, remote);
                 events.push(FolderEvent::Restored(p.clone()));
                 Ok(theirs)
+            }
+        }
+    }
+
+    /// Brings `.swarmignore` in step with the roster's, as `decide` would a file whose swarm
+    /// version is the roster's text and whose writers are the owners. An owner's edit goes out as
+    /// `FolderEvent::PublishIgnore`; anyone else's is held. Gives the change applied, as `apply`
+    /// does.
+    #[allow(clippy::too_many_arguments)]
+    async fn sync_ignore(
+        &mut self,
+        node: &SwarmNode,
+        roster: &Roster,
+        me: &Member,
+        on_disk: &IgnoreFile,
+        (author, machine): (&str, &str),
+        tz: &TimeZone,
+        events: &mut Vec<FolderEvent>,
+    ) -> anyhow::Result<Option<(String, u64)>> {
+        let p = ignore_path();
+        let (bytes, modified) = match on_disk {
+            IgnoreFile::Absent => (None, 0),
+            IgnoreFile::Text { bytes, modified } => (Some(bytes.clone()), *modified),
+            IgnoreFile::Unreadable => return Ok(None),
+        };
+        let scanned = bytes.as_ref().map(Hash::new);
+        // An empty `.swarmignore` says the same as none, so emptying it and deleting it are one
+        // change, and neither brings an empty file back.
+        let mine = bytes.filter(|b| !b.is_empty());
+        let local = Local {
+            hash: mine.as_ref().map(Hash::new),
+            modified,
+        };
+        let remote = ignore_remote(roster);
+        let owner = roster.role_of(&me.person) == Some(Role::Owner) && node.can_write();
+        let mut entry = self.index.get(&p).cloned().unwrap_or_default();
+        // Made an owner since the edit was held: it goes through like any other.
+        if owner && entry.held == Some(Held::ReaderEdit) {
+            entry.held = None;
+            self.entry(&p).held = None;
+        }
+        let action = decide(
+            &p,
+            entry.base,
+            &local,
+            remote.as_ref(),
+            (author, machine),
+            owner,
+            entry.held,
+            tz,
+        );
+        let theirs_text = roster
+            .ignore
+            .as_ref()
+            .map(|i| Bytes::from(i.text.clone()))
+            .unwrap_or_default();
+        let theirs = remote.as_ref().map(|r| (r.machine.clone(), r.at));
+        match action {
+            Action::Nothing => {
+                if let Some(r) = remote.as_ref().filter(|r| r.hash == local.hash) {
+                    self.took(&p, r);
+                }
+                Ok(None)
+            }
+            Action::Write(_) | Action::Restore(_) => {
+                if !self.as_scanned(&p, scanned)? {
+                    return Ok(None);
+                }
+                self.write(&p, &theirs_text)?;
+                self.took_ignore(&p, remote.as_ref());
+                if matches!(action, Action::Restore(_)) {
+                    events.push(FolderEvent::Restored(p));
+                }
+                Ok(theirs)
+            }
+            Action::RemoveFile => {
+                if !self.as_scanned(&p, scanned)? {
+                    return Ok(None);
+                }
+                self.remove(&p)?;
+                self.took_ignore(&p, remote.as_ref());
+                Ok(theirs)
+            }
+            Action::Publish => {
+                let Some(text) = ignore_text(mine.as_ref(), events) else {
+                    return Ok(None);
+                };
+                events.push(FolderEvent::PublishIgnore(text));
+                let entry = self.entry(&p);
+                entry.base = local.hash;
+                entry.from = None;
+                Ok(Some((machine.to_string(), now_micros())))
+            }
+            Action::Hold(held) => {
+                self.entry(&p).held = Some(held);
+                events.push(FolderEvent::Held(held_attention(&p, held)));
+                Ok(None)
+            }
+            // Conflict copies stay on this machine: the name has no type, so it never syncs, and
+            // only `.swarmignore` itself has any effect.
+            Action::ConflictKeepRemote {
+                copy_from_local: copy,
+            } => {
+                let Some(mine) = mine else {
+                    return Ok(None);
+                };
+                let copy = self.free_copy_name(&copy, Hash::new(&mine), &BTreeMap::new())?;
+                self.write(&copy, &mine)?;
+                if !self.as_scanned(&p, scanned)? {
+                    return Ok(None);
+                }
+                self.write(&p, &theirs_text)?;
+                self.took_ignore(&p, remote.as_ref());
+                events.push(FolderEvent::NewConflict { path: p, copy });
+                Ok(theirs)
+            }
+            Action::ConflictKeepLocal {
+                copy_from_remote: copy,
+            } => {
+                let Some(text) = ignore_text(mine.as_ref(), events) else {
+                    return Ok(None);
+                };
+                let copy = self.free_copy_name(&copy, Hash::new(&theirs_text), &BTreeMap::new())?;
+                self.write(&copy, &theirs_text)?;
+                events.push(FolderEvent::PublishIgnore(text));
+                let entry = self.entry(&p);
+                entry.base = local.hash;
+                entry.from = None;
+                events.push(FolderEvent::NewConflict { path: p, copy });
+                Ok(Some((machine.to_string(), now_micros())))
+            }
+        }
+    }
+
+    /// Records the roster's `.swarmignore` as the version this folder now has.
+    fn took_ignore(&mut self, p: &RelPath, remote: Option<&Remote>) {
+        match remote {
+            Some(r) => self.took(p, r),
+            None => {
+                let entry = self.entry(p);
+                entry.base = None;
+                entry.from = None;
             }
         }
     }
@@ -896,6 +1119,7 @@ impl Folder {
         }
         out.too_big = scan.too_big.iter().map(key).collect();
         out.unreadable = scan.unreadable.iter().map(key).collect();
+        out.ignore = scan.ignore;
         out
     }
 
@@ -1025,6 +1249,50 @@ impl Folder {
         let bytes = serde_json::to_vec_pretty(&index)?;
         write_via_temp(&self.state.join(INDEX_FILE), &bytes)
     }
+}
+
+fn ignore_path() -> RelPath {
+    safe_rel_path(SWARMIGNORE).expect("a safe path")
+}
+
+/// The roster's `.swarmignore` as the swarm's version of the file: its text's hash (none when
+/// empty, as an empty file says nothing), set when and by whom, from that person's first machine.
+fn ignore_remote(roster: &Roster) -> Option<Remote> {
+    let set = roster.ignore.as_ref()?;
+    let machine = roster
+        .members
+        .iter()
+        .find(|m| m.person == set.by)
+        .and_then(|m| m.machines.first())
+        .map(|m| m.name.clone())
+        .unwrap_or_default();
+    Some(Remote {
+        hash: (!set.text.is_empty()).then(|| Hash::new(&set.text)),
+        at: set.at,
+        author: set.by.to_string(),
+        machine,
+    })
+}
+
+/// The text to publish for `.swarmignore`, empty when it is gone or empty, or None (with the
+/// reason in `events`) when the roster couldn't take it.
+fn ignore_text(bytes: Option<&Bytes>, events: &mut Vec<FolderEvent>) -> Option<String> {
+    let Some(bytes) = bytes else {
+        return Some(String::new());
+    };
+    let problem = if bytes.len() > MAX_IGNORE_BYTES {
+        format!(
+            "{SWARMIGNORE} is over {} KB, so it isn't shared.",
+            MAX_IGNORE_BYTES / 1024
+        )
+    } else {
+        match std::str::from_utf8(bytes) {
+            Ok(text) => return Some(text.to_string()),
+            Err(_) => format!("{SWARMIGNORE} isn't plain text, so it isn't shared."),
+        }
+    };
+    events.push(FolderEvent::Error(problem));
+    None
 }
 
 fn held_attention(p: &RelPath, held: Held) -> Attention {
@@ -1258,8 +1526,10 @@ fn write_via_temp(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     written.with_context(|| format!("writing {}", path.display()))
 }
 
-/// Every allowed file under `root`, never following links or junctions.
-fn scan(root: &Path, types: &[String], seen: &HashMap<RelPath, Seen>) -> io::Result<Scan> {
+/// Every file under `root` that syncs, never following links or junctions, and never going into
+/// a folder none of whose files can sync (one starting with a dot, or one `.swarmignore` takes
+/// out). The root `.swarmignore` is read on its own, for the pass to sync through the roster.
+fn scan(root: &Path, rules: &SyncRules, seen: &HashMap<RelPath, Seen>) -> io::Result<Scan> {
     let mut out = Scan::default();
     let mut dirs = vec![root.to_path_buf()];
     while let Some(dir) = dirs.pop() {
@@ -1271,7 +1541,9 @@ fn scan(root: &Path, types: &[String], seen: &HashMap<RelPath, Seen>) -> io::Res
             }
             let path = entry.path();
             if kind.is_dir() {
-                dirs.push(path);
+                if rel_from_disk(root, &path).is_none_or(|p| rules.folder_may_sync(&p)) {
+                    dirs.push(path);
+                }
                 continue;
             }
             if !kind.is_file() || entry.file_name().to_string_lossy().ends_with(TMP_SUFFIX) {
@@ -1280,7 +1552,11 @@ fn scan(root: &Path, types: &[String], seen: &HashMap<RelPath, Seen>) -> io::Res
             let Some(p) = rel_from_disk(root, &path) else {
                 continue;
             };
-            if !allowed(&p, 0, types) {
+            if p.as_str() == SWARMIGNORE {
+                out.ignore = read_ignore(&path, &entry);
+                continue;
+            }
+            if !rules.file_syncs(&p) {
                 continue;
             }
             let Ok(meta) = entry.metadata() else {
@@ -1324,6 +1600,24 @@ fn scan(root: &Path, types: &[String], seen: &HashMap<RelPath, Seen>) -> io::Res
         }
     }
     Ok(out)
+}
+
+fn read_ignore(path: &Path, entry: &fs::DirEntry) -> IgnoreFile {
+    let Ok(meta) = entry.metadata() else {
+        return IgnoreFile::Unreadable;
+    };
+    // Far past what the roster keeps; never read whole.
+    if meta.len() > MAX_FILE_BYTES {
+        return IgnoreFile::Unreadable;
+    }
+    match fs::read(path) {
+        Ok(bytes) => IgnoreFile::Text {
+            bytes: Bytes::from(bytes),
+            modified: modified(&meta),
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => IgnoreFile::Absent,
+        Err(_) => IgnoreFile::Unreadable,
+    }
 }
 
 /// The watcher's thread: collects changed paths, and once they have been quiet for `DEBOUNCE`

@@ -1,6 +1,7 @@
 //! Pipelines for the orchestrator (spec: docs/superpowers/specs/2026-10-22-hydraui-orchestrator-core-design.md
 //! §2): `<HYDRA_HOME>/hydraui/pipelines/<name>.toml`, its stages, their bars and prompts.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -144,6 +145,8 @@ pub struct Stage {
     /// The stage session's first prompt, before `render` fills it in: the file's, or one made
     /// from the skill and title when it has none (§2).
     pub prompt: String,
+    /// `kind = "jev"`: Jev answers it, no Claude session (email triage spec §4).
+    pub jev: Option<crate::jev_stage::JevStage>,
 }
 
 /// The ready-made ways to write product questions, as Pipeline settings offers them: a label
@@ -448,6 +451,13 @@ struct FileStage {
     #[serde(default)]
     worktree: bool,
     prompt: Option<String>,
+    /// `jev` for a stage Jev answers; a Claude session when left out.
+    kind: Option<String>,
+    input: Option<String>,
+    model: Option<String>,
+    instructions: Option<String>,
+    #[serde(default)]
+    options: BTreeMap<String, String>,
 }
 
 /// The prompt of a stage that has none (§2): a stage added in Pipeline settings. Its skill comes
@@ -504,6 +514,44 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
             .skill
             .map(|k| k.trim().to_string())
             .filter(|k| !k.is_empty());
+        let jev = match s.kind.as_deref().map(str::trim) {
+            Some("jev") => {
+                if skill.is_some() || s.folder.is_some() || s.worktree {
+                    return Err(format!(
+                        "stage {}: a Jev stage has no session, so no skill, folder or worktree",
+                        s.id
+                    ));
+                }
+                Some(crate::jev_stage::JevStage::new(
+                    s.input.clone(),
+                    s.model.clone(),
+                    s.instructions.clone(),
+                    s.options.clone(),
+                    &s.id,
+                )?)
+            }
+            None | Some("" | "claude") => {
+                if s.input.is_some()
+                    || s.model.is_some()
+                    || s.instructions.is_some()
+                    || !s.options.is_empty()
+                {
+                    return Err(format!(
+                        "stage {}: input, model, instructions and options are for a Jev stage: \
+                         add kind = \"jev\"",
+                        s.id
+                    ));
+                }
+                None
+            }
+            Some(other) => {
+                return Err(format!(
+                    "stage {}: kind {other:?} isn't one hydraui knows: leave it out for a Claude \
+                     session, or \"jev\"",
+                    s.id
+                ));
+            }
+        };
         let prompt = s.prompt.unwrap_or_else(|| default_prompt(&s.title));
         let folder = s
             .folder
@@ -517,6 +565,7 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
             folder,
             worktree: s.worktree,
             prompt,
+            jev,
         });
     }
     Ok(Pipeline {
@@ -607,6 +656,8 @@ pub struct EditStage {
     pub bar: Option<u8>,
     /// What its session is asked, before hydraui's note; empty: the default prompt.
     pub prompt: String,
+    /// A Jev stage's question, kept as the file has it: the settings show it, not edit it.
+    pub jev: Option<crate::jev_stage::JevStage>,
 }
 
 impl From<&Pipeline> for Edit {
@@ -626,6 +677,7 @@ impl From<&Pipeline> for Edit {
                     folder: s.folder.clone(),
                     bar: s.bar,
                     prompt: s.prompt.clone(),
+                    jev: s.jev.clone(),
                 })
                 .collect(),
             linear: p.linear.clone(),
@@ -952,8 +1004,11 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
                 table.remove("bar");
             }
         }
-        // An emptied prompt goes back to the default one (§2).
+        // An emptied prompt goes back to the default one (§2). A Jev stage has none.
         match s.prompt.trim() {
+            _ if s.jev.is_some() => {
+                table.remove("prompt");
+            }
             "" => {
                 table.remove("prompt");
             }
@@ -961,7 +1016,14 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
         }
         // Parsed tables are written by their place in the old file: number them afresh so
         // the file follows `edit`'s order.
-        table.set_position(stages.len() + 1_000);
+        // A stage's own tables ([stage.options]) go with it, right after it.
+        let at = 1_000 + stages.len() * 10;
+        table.set_position(at);
+        for (_, item) in table.iter_mut() {
+            if let Some(sub) = item.as_table_mut() {
+                sub.set_position(at + 1);
+            }
+        }
         stages.push(table);
     }
     doc["stage"] = Item::ArrayOfTables(stages);
@@ -1664,6 +1726,87 @@ mod tests {
     }
 
     #[test]
+    fn a_jev_stage_is_read_with_its_question() {
+        let p = parse(
+            r#"
+name = "Integration emails"
+
+[[stage]]
+id = "classify"
+title = "Classify"
+kind = "jev"
+bar = 70
+model = "jev-2026-10"
+instructions = "A customer email. What are they asking for?"
+[stage.options]
+how_to = "Asks how to do something"
+user_error = "An error from how they called it"
+
+[[stage]]
+id = "draft"
+title = "Draft a reply"
+"#,
+        )
+        .unwrap();
+        let j = p.stages[0].jev.as_ref().unwrap();
+        assert_eq!(j.input, "email.md");
+        assert_eq!(j.model.as_deref(), Some("jev-2026-10"));
+        assert_eq!(j.options.len(), 3);
+        assert_eq!(p.bar_for(0), 70);
+        assert!(p.stages[1].jev.is_none());
+    }
+
+    #[test]
+    fn saving_settings_keeps_a_jev_stage_and_writes_it_no_prompt() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(
+            folder(d.path()).join("mail.toml"),
+            "name = \"Mail\"\n[[stage]]\nid = \"classify\"\ntitle = \"Classify\"\n\
+             kind = \"jev\"\ninstructions = \"Q\"\n[stage.options]\na = \"A\"\nb = \"B\"\n\
+             [[stage]]\nid = \"draft\"\ntitle = \"Draft\"\n",
+        )
+        .unwrap();
+        let mut edit = edit_of(&load(d.path(), "mail").unwrap());
+        edit.stages[0].title = "Sort".into();
+        edit.stages[0].bar = Some(75);
+        edit.stages.swap(0, 1);
+        save(d.path(), "mail", &edit).unwrap();
+        let p = load(d.path(), "mail").unwrap();
+        assert_eq!(p.stages[1].title, "Sort");
+        assert_eq!(p.bar_for(1), 75);
+        let j = p.stages[1].jev.as_ref().unwrap();
+        assert_eq!(j.options.len(), 3);
+        let text = std::fs::read_to_string(folder(d.path()).join("mail.toml")).unwrap();
+        assert!(!text.contains("Do the \"Sort\" stage"), "{text}");
+    }
+
+    #[test]
+    fn a_jev_stage_has_no_session_settings() {
+        let jev = |extra: &str| {
+            parse(&format!(
+                "name = \"N\"\n[[stage]]\nid = \"c\"\ntitle = \"C\"\nkind = \"jev\"\n\
+                 instructions = \"Q\"\n{extra}\n[stage.options]\na = \"A\"\nb = \"B\"\n"
+            ))
+        };
+        assert!(jev("").is_ok());
+        for bad in ["skill = \"x\"", "folder = \"~/x\"", "worktree = true"] {
+            let e = jev(bad).unwrap_err();
+            assert!(e.contains("Jev stage"), "{bad}: {e}");
+        }
+        let e = parse("name = \"N\"\n[[stage]]\nid = \"c\"\ntitle = \"C\"\nkind = \"robot\"\n")
+            .unwrap_err();
+        assert!(e.contains("robot"), "{e}");
+        // Jev's settings on a Claude stage are a mistake, not ignored.
+        let e = parse("name = \"N\"\n[[stage]]\nid = \"c\"\ntitle = \"C\"\ninstructions = \"Q\"\n")
+            .unwrap_err();
+        assert!(e.contains("kind = \"jev\""), "{e}");
+        let e = parse("name = \"N\"\n[[stage]]\nid = \"c\"\ntitle = \"C\"\nkind = \"jev\"\n")
+            .unwrap_err();
+        assert!(e.contains("instructions"), "{e}");
+    }
+
+    #[test]
     fn a_stage_without_a_prompt_gets_one_from_its_skill() {
         let p = parse(
             "name = \"t\"\n[[stage]]\nid = \"a\"\ntitle = \"Replicate\"\nskill = \"QA-Skills\"\n\
@@ -1957,6 +2100,7 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
                 folder: None,
                 bar: Some(90),
                 prompt: String::new(),
+                jev: None,
             });
         }
         save(d.path(), "tickets", &edit).unwrap();
@@ -2037,6 +2181,7 @@ bar = 85\nworktree = true\nprompt = \"Fix it.\"\n";
             folder: None,
             bar: None,
             prompt: "test {ticket} against {feature_env}".into(),
+            jev: None,
         });
         save(d.path(), "tickets", &edit).unwrap();
         let p = load(d.path(), "tickets").unwrap();

@@ -91,7 +91,7 @@ const SCORE_AGAIN: &str = "A person has worked on this stage in this session sin
 #[derive(Clone)]
 enum BackTo {
     Passed(String, String),
-    New(crate::runs::NewStage),
+    New(Box<crate::runs::NewStage>),
 }
 
 /// The note a person started an attempt with (Re-run or Go back), under its panel's header.
@@ -659,7 +659,13 @@ impl Workspace {
                     .unwrap_or_default();
                 let mut out = Vec::new();
                 for i in 0..=passed {
-                    out.extend(added.iter().filter(|n| n.at == i).cloned().map(BackTo::New));
+                    out.extend(
+                        added
+                            .iter()
+                            .filter(|n| n.at == i)
+                            .cloned()
+                            .map(|n| BackTo::New(Box::new(n))),
+                    );
                     if i < passed {
                         let spec = &r.pipeline.stages[i];
                         out.push(BackTo::Passed(spec.id.clone(), spec.title.clone()));
@@ -729,7 +735,7 @@ impl Workspace {
                             ws.person_choice(orch, &run, Choice::Back { stage, note }, window, cx)
                         }),
                         BackTo::New(n) => ws.update(cx, |ws, cx| {
-                            ws.back_to_new_stage(orch, &run, n, note, window, cx)
+                            ws.back_to_new_stage(orch, &run, *n, note, window, cx)
                         }),
                     }
                 }

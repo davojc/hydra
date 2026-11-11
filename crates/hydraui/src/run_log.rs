@@ -57,6 +57,7 @@ pub fn stage_added_fields(spec: &crate::pipeline::Stage, after: Option<&str>) ->
         "folder": spec.folder,
         "worktree": spec.worktree,
         "prompt": spec.prompt,
+        "jev": spec.jev,
         "after": after,
     })
 }
@@ -76,6 +77,10 @@ pub fn read_stage_added(e: &Value) -> Option<(crate::pipeline::Stage, Option<Str
             folder: text("folder"),
             worktree: e.get("worktree").and_then(Value::as_bool).unwrap_or(false),
             prompt: text("prompt")?,
+            jev: e
+                .get("jev")
+                .filter(|j| !j.is_null())
+                .and_then(|j| serde_json::from_value(j.clone()).ok()),
         },
         text("after"),
     ))

@@ -1332,3 +1332,4 @@ Pipeline settings had grown into one long form. Rows of chips sat under every pr
 - **Words.** The page says *stage*, as the rest of hydraui does, and *sure enough* for the bar.
 - **Headings.** Name, Trigger and Stages each have a large heading with one line under it saying what the section is for. The team skills note wraps inside the page.
 - **Colours.** There are 16 to pick from: Teal, Cyan, Blue, Indigo, Violet, Purple, Pink, Rose, Red, Coral, Orange, Amber, Yellow, Lime, Green and Slate. The first eight keep their values, so saved pipelines look the same.
+- **Status bar.** It no longer shows the orchestrator's line ("INTH Development · INTH-184 · needs you: …", red when a run needs you). The inbox and its notifications say what needs you now; the bar keeps the environment, accounts, usage, git and folder.

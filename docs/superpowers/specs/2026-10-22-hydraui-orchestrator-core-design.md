@@ -1281,15 +1281,12 @@ Left out, it's exactly what hydraui did before: author and product waits looked 
   A value set in the file that isn't a chip shows as one. Under the chips, the setting reads back in words, then comes the exact instruction a session waiting on you gets. A line also states the other standing rule: "A run about a pull request also ends by itself when that pull request is merged or closed."
 - **Fixed with it.** When a run was ended because its pull request was merged, hydraui closed its stage's session and then counted that as "its session ended without reporting". It told the orchestrator to start the stage again. A session closing on a run that has ended now changes nothing.
 
-## 61. Open or resume a waiting stage's session (added 2026-11-11)
+## 61. Resume a waiting stage's session, and stop a ticket, from its page (added 2026-11-11, revised the same day)
 
-A ticket that needs you stays in the sidebar under its orchestrator, but the session that stopped there was easy to lose. Its terminal could be anywhere, or already closed, and nothing on the ticket led back to it.
+A ticket that needs you stays in the sidebar under its orchestrator, but the session that stopped there was easy to lose. Its terminal could be anywhere, or already closed. The controls for it belong on the ticket's page, not crowding its sidebar row, so the sidebar row now shows only the ticket and its state.
 
-- **The button.** A ticket waiting on you (`Runs::waiting_session`: the run needs you, and its first stopped stage's latest attempt has a session) has a button on its sidebar row:
-  - **Open session** while that session's terminal is open: it shows that terminal.
-  - **Resume session** once it's closed.
-- **Resume session** reopens the stage's last conversation:
+- **Resume session.** The needs-you panel (§59) shows **Step into** while the stopped stage's terminal is open. Once that terminal is gone (`Runs::waiting_session` names the session, and no terminal holds it), **Resume session** takes its place.
   - It runs `claude --resume <its logged Claude session>` in the folder the run's log recorded, with the pipeline's stage settings and no prompt, for you to talk to. The run log notes `session resumed`.
   - The stage stays where it is and the run still needs you. The new terminal becomes the stage's session (`Runs::relink`), so looking again (§60), **Score again** and its next report all still count.
-- **When it can't resume** (no logged session, or the orchestrator is closed), a notice says so and points to **Re-run with a note**.
-- **A ticket you stopped** waits on nobody, so it has no button.
+  - When it can't resume (no logged session, or the orchestrator is closed), a notice says so and points to **Re-run with a note**.
+- **Stop this ticket.** It sits in the Pipeline tab's bar, beside **End pipeline**, for whichever ticket is shown while it's open, whatever its state. It's the same as the sidebar's old ×: it stops the ticket and closes its sessions. It left the needs-you panel's **More** menu. Right-clicking an orchestrator still offers it too.

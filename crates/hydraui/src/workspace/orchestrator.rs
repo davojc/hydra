@@ -1963,7 +1963,6 @@ impl Workspace {
         };
         let id = run.id.clone();
         let title = crate::pipeline_card::ticket_title(&run.ticket, run.link.as_deref());
-        let stop_title = title.clone();
         let prs = crate::linear_watch::pr_links(run);
         // A pull request's own link is its title; a Linear ticket's link and PRs show below.
         let link = (!run.link.as_deref().is_some_and(|l| l.contains("/pull/")))
@@ -2012,63 +2011,6 @@ impl Workspace {
                                 .text_color(fg)
                                 .child(c.state.word()),
                         )
-                    })
-                    // Waiting on you: its stage's session, shown or reopened.
-                    .children(crate::runs::waiting_session(run).map(|(_, token)| {
-                        let pane = self
-                            .panes
-                            .iter()
-                            .find(|(_, v)| v.read(cx).mcp_token() == Some(token.as_str()))
-                            .map(|(id, _)| *id);
-                        let run_id = run.id.clone();
-                        Button::new(SharedString::from(format!(
-                            "lane-session-{orchestrator}-{}",
-                            run.id
-                        )))
-                        .label(if pane.is_some() {
-                            "Open session"
-                        } else {
-                            "Resume session"
-                        })
-                        .ghost()
-                        .xsmall()
-                        .tooltip(if pane.is_some() {
-                            "Show the session that stopped here"
-                        } else {
-                            "Its terminal closed: reopen its conversation where it left off"
-                        })
-                        .on_click(cx.listener(
-                            move |ws, _, window, cx| {
-                                cx.stop_propagation();
-                                match pane {
-                                    Some(p) => ws.show_terminal(p, window, cx),
-                                    None => ws.resume_stage_session(&run_id, window, cx),
-                                }
-                            },
-                        ))
-                    }))
-                    .child({
-                        let (run_id, label) = (run.id.clone(), stop_title);
-                        Button::new(SharedString::from(format!(
-                            "lane-stop-{orchestrator}-{}",
-                            run.id
-                        )))
-                        .label("×")
-                        .ghost()
-                        .xsmall()
-                        .tooltip("Stop this ticket and close its sessions")
-                        .on_click(cx.listener(
-                            move |ws, _, window, cx| {
-                                cx.stop_propagation();
-                                ws.stop_ticket_dialog(
-                                    orchestrator,
-                                    run_id.clone(),
-                                    label.clone(),
-                                    window,
-                                    cx,
-                                )
-                            },
-                        ))
                     }),
             )
             .children(self.render_question(orchestrator, Some(&run.id), cx))

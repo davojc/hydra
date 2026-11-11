@@ -999,6 +999,24 @@ impl Workspace {
             .child(item("history", "History", TabView::History))
             .child(item("settings", "Settings", TabView::Settings))
             .child(div().flex_1())
+            // The ticket shown, while it's open: stopped here, its sessions closed.
+            .children(
+                self.pipeline_snapshot(orch, cx)
+                    .run
+                    .filter(|r| r.state.open())
+                    .map(|r| {
+                        let title =
+                            crate::pipeline_card::ticket_title(&r.ticket, r.link.as_deref());
+                        Button::new(SharedString::from(format!("stop-ticket-{orch}")))
+                            .label("Stop this ticket")
+                            .ghost()
+                            .small()
+                            .tooltip("Stop this ticket and close its sessions")
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                ws.stop_ticket_dialog(orch, r.id.clone(), title.clone(), window, cx)
+                            }))
+                    }),
+            )
             .child(
                 Button::new(SharedString::from(format!("end-pipeline-{orch}")))
                     .label("■  End pipeline")
@@ -1960,6 +1978,18 @@ impl Workspace {
                         })),
                 );
             }
+            // Its terminal is gone: reopen the conversation where it stopped.
+            if !can_step_in && crate::runs::waiting_session(run).is_some() {
+                let resume_run = run_id.clone();
+                actions = actions.child(
+                    Button::new("pipeline-resume-session")
+                        .label("Resume session")
+                        .tooltip("Its terminal closed: reopen its conversation where it left off")
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.resume_stage_session(&resume_run, window, cx)
+                        })),
+                );
+            }
             if let (true, Some(label)) = (can_step_in, label.clone()) {
                 actions = actions.child(
                     Button::new("pipeline-step-in")
@@ -1993,7 +2023,6 @@ impl Workspace {
                         }
                         let (ws1, r1, t1) = (ws.clone(), run_id.clone(), title.clone());
                         let (ws2, r2) = (ws.clone(), run_id.clone());
-                        let ws3 = ws.clone();
                         menu.item(PopupMenuItem::new(rerun_label.clone()).on_click(
                             move |_, window, cx| {
                                 ws1.update(cx, |ws, cx| {
@@ -2001,20 +2030,14 @@ impl Workspace {
                                 })
                             },
                         ))
-                        .item(PopupMenuItem::new("Go back to an earlier stage…").on_click(
-                            move |_, window, cx| {
-                                ws2.update(cx, |ws, cx| {
-                                    ws.back_dialog(orch, r2.clone(), None, window, cx)
-                                })
-                            },
-                        ))
-                        .separator()
                         .item(
-                            PopupMenuItem::new("Stop this ticket").on_click(move |_, _, cx| {
-                                ws3.update(cx, |ws, cx| {
-                                    ws.pipeline_tab_update(orch, cx, |t| t.confirm_stop = true)
-                                })
-                            }),
+                            PopupMenuItem::new("Go back to an earlier stage…").on_click(
+                                move |_, window, cx| {
+                                    ws2.update(cx, |ws, cx| {
+                                        ws.back_dialog(orch, r2.clone(), None, window, cx)
+                                    })
+                                },
+                            ),
                         )
                     }),
             );

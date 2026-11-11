@@ -243,6 +243,15 @@ impl Folder {
             .into_iter()
             .filter(|(p, _)| syncs(p))
             .collect();
+        // A path that has stopped syncing forgets the version it last agreed on (and stays as it
+        // is on disk), so that if it syncs again it comes back as a new file would. Otherwise a
+        // delete or edit made meanwhile would be taken as a change to the swarm's copy.
+        for (p, e) in self.index.iter_mut() {
+            if p.as_str() != SWARMIGNORE && !syncs(p) {
+                e.base = None;
+                e.from = None;
+            }
+        }
         // Keys that differ only by case are one file on Windows and macOS. The key whose newest
         // entry is newest owns it; the content of the others is kept as conflict copies of it.
         let (mut names, shadowed) = case_owners(&history);

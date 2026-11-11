@@ -1536,7 +1536,36 @@ async fn ignoring(text: &str) -> (Side, Side) {
         s.read(".swarmignore").as_deref() == Some(text)
     })
     .await;
+    // A publish that went through is no conflict.
+    o.reconcile().await;
+    assert!(ignore_copies(&o).is_empty());
+    assert_eq!(o.read(".swarmignore").as_deref(), Some(text));
     (o, w)
+}
+
+/// The conflict copies of `.swarmignore` in a folder's root, by content.
+fn ignore_copies(side: &Side) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(&side.root)
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.starts_with(".swarmignore (conflict, "))
+        .filter_map(|n| side.read(&n))
+        .collect();
+    out.sort();
+    out
+}
+
+/// What the conflict copies of `drafts/x.md` in a folder hold.
+fn x_copies(side: &Side) -> Vec<String> {
+    let dir = side.path("drafts");
+    let mut out: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| conflict_original(&rel(&format!("drafts/{n}"))) == Some(rel("drafts/x.md")))
+        .filter_map(|n| side.read(&format!("drafts/{n}")))
+        .collect();
+    out.sort();
+    out
 }
 
 /// With `drafts/` ignored, the owner's edit to `drafts/x.md` stays on the owner, and nothing is
@@ -1577,9 +1606,41 @@ async fn removing_the_line_brings_the_files_back() {
     o.reconcile().await;
     w.settle("the drafts on the writer", |s| {
         s.read("drafts/y.md").as_deref() == Some("new")
-            && s.read("drafts/x.md").as_deref() == Some("two")
     })
     .await;
+    // x.md comes back as a new file would: the owner's "two" and the writer's "one" differ, so
+    // the newer keeps the name and the other is kept as a conflict copy, on both machines.
+    for side in [&mut o, &mut w] {
+        side.settle("both versions of x.md kept", |s| {
+            s.read("drafts/x.md").as_deref() == Some("two")
+                && x_copies(s).contains(&"one".to_string())
+        })
+        .await;
+    }
+    o.shutdown().await;
+    w.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delete_made_while_ignored_is_not_applied_when_the_line_goes() {
+    let (mut o, mut w) = ignoring("drafts/\n").await;
+    o.remove("drafts/x.md");
+    o.reconcile().await;
+    assert_eq!(o.remote_hash("drafts/x.md").await, Some(Some(hash("one"))));
+    o.write(".swarmignore", "");
+    o.reconcile().await;
+    o.reconcile().await;
+    // The swarm's copy comes back to the owner, as a new file would, rather than the delete
+    // going out.
+    assert_eq!(o.remote_hash("drafts/x.md").await, Some(Some(hash("one"))));
+    assert_eq!(o.read("drafts/x.md").as_deref(), Some("one"));
+    w.settle("the line gone on the writer", |s| {
+        s.read(".swarmignore").is_none()
+    })
+    .await;
+    w.reconcile().await;
+    assert_eq!(w.read("drafts/x.md").as_deref(), Some("one"));
+    assert!(x_copies(&w).is_empty());
     o.shutdown().await;
     w.shutdown().await;
 }
@@ -1587,7 +1648,8 @@ async fn removing_the_line_brings_the_files_back() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_writers_swarmignore_edit_is_held_and_has_no_effect() {
     let (mut o, mut w) = ignoring("drafts/\n").await;
-    w.write(".swarmignore", "other/\n");
+    // The held line would take `other/` out on the writer if it had any effect.
+    w.write(".swarmignore", "drafts/\nother/\n");
     let events = w.reconcile().await;
     let held = Attention::ReaderEdit {
         path: rel(".swarmignore"),
@@ -1604,18 +1666,17 @@ async fn a_writers_swarmignore_edit_is_held_and_has_no_effect() {
     );
     assert_eq!(w.folder.attention(), vec![held]);
 
-    o.write("drafts/z.md", "z");
-    o.write("b.md", "b");
+    o.write("other/q.md", "q");
     o.reconcile().await;
-    w.hears("b.md", Some(hash("b"))).await;
-    w.reconcile().await;
+    w.settle("other/q.md on the writer", |s| {
+        s.read("other/q.md").as_deref() == Some("q")
+    })
+    .await;
     assert_eq!(o.read(".swarmignore").as_deref(), Some("drafts/\n"));
     for side in [&o, &w] {
         let ignore = side.roster().await.ignore.map(|i| i.text);
         assert_eq!(ignore.as_deref(), Some("drafts/\n"));
     }
-    assert!(w.read("drafts/z.md").is_none());
-    assert_eq!(w.read("b.md").as_deref(), Some("b"));
 
     w.folder
         .use_swarm_version(&w.node, &rel(".swarmignore"))

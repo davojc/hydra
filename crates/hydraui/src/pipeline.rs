@@ -81,6 +81,9 @@ pub struct MailSettings {
     pub query: String,
     /// The environment its orchestrator runs in, as `[schedule]`'s.
     pub env: Option<String>,
+    /// The swarm, by name, whose folder shows the team who has which thread (spec §5). The
+    /// Gmail labels decide either way.
+    pub swarm: Option<String>,
 }
 
 impl MailSettings {
@@ -282,6 +285,7 @@ struct FileMail {
     look_back_days: Option<i64>,
     query: Option<String>,
     env: Option<String>,
+    swarm: Option<String>,
 }
 
 /// The `[mail]` table, checked.
@@ -305,6 +309,10 @@ fn mail_settings(f: FileMail) -> Result<MailSettings, String> {
             .env
             .map(|e| e.trim().to_string())
             .filter(|e| !e.is_empty()),
+        swarm: f
+            .swarm
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
     })
 }
 
@@ -1396,14 +1404,24 @@ mod tests {
         assert_eq!(m.when().unwrap().text(), "Weekdays at 09:00");
         assert!(p.has_trigger());
         let m = parse(&format!(
-            "{base}[mail]\ncheck = \"mon 09:00\"\nlook_back_days = 3\nquery = \"to:integrations@iov42.com\"\nenv = \"iov42\"\n"
+            "{base}[mail]\ncheck = \"mon 09:00\"\nlook_back_days = 3\nquery = \"to:integrations@iov42.com\"\nenv = \"iov42\"\nswarm = \"integrations\"\n"
         ))
         .unwrap()
         .mail
         .unwrap();
         assert_eq!(
-            (m.look_back_days, m.query.as_str(), m.env.as_deref()),
-            (3, "to:integrations@iov42.com", Some("iov42"))
+            (
+                m.look_back_days,
+                m.query.as_str(),
+                m.env.as_deref(),
+                m.swarm.as_deref()
+            ),
+            (
+                3,
+                "to:integrations@iov42.com",
+                Some("iov42"),
+                Some("integrations")
+            )
         );
         for bad in [
             "[mail]\ncheck = \"mon 6pm\"\n",

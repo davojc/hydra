@@ -35,6 +35,10 @@ pub struct MailState {
     pub seen: BTreeSet<String>,
     #[serde(default)]
     pub queue: VecDeque<Mailed>,
+    /// Threads this person claimed, by thread id, with their run's ticket: released when the
+    /// run ends (spec §5).
+    #[serde(default)]
+    pub held: std::collections::BTreeMap<String, String>,
 }
 
 /// The Gmail search for a look: the pipeline's query, the last `look_back_days`, and nothing
@@ -161,6 +165,7 @@ mod tests {
             look_back_days: 7,
             query: "in:inbox".into(),
             env: None,
+            swarm: None,
         }
     }
 
@@ -280,6 +285,7 @@ mod tests {
             subject: "S".into(),
             from: "F".into(),
         });
+        s.held.insert("t1".into(), "MAIL-T1".into());
         save(home.path(), "mail", &s).unwrap();
         assert_eq!(load(home.path(), "mail"), s);
     }

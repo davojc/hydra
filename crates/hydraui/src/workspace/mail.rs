@@ -52,6 +52,7 @@ impl Workspace {
                 self.start_mail_look(&p, &m, now, window, cx);
             }
             self.start_next_mail(&p, &m, window, cx);
+            self.release_mail(&p, &m, window, cx);
         }
         if now && !any {
             window.push_note(
@@ -105,6 +106,41 @@ impl Workspace {
             );
             return;
         };
+        // Claims carry who made them (spec §5): the name the swarms know you by.
+        let Some(me) = self
+            .ui
+            .peer_name
+            .as_deref()
+            .map(crate::mail_claim::slug)
+            .filter(|s| !s.is_empty())
+        else {
+            window.push_note(
+                Note::warning(
+                    "Set peer_name in hydraui's config.toml to your name: claims on emails \
+                     say who has them.",
+                )
+                .title(title),
+                cx,
+            );
+            return;
+        };
+        let swarm = match &m.swarm {
+            None => None,
+            Some(name) => match self.mail_swarm_folder(name) {
+                Some(f) => Some(f),
+                None => {
+                    window.push_note(
+                        Note::error(format!(
+                            "[mail] swarm = \"{name}\", but this machine isn't in a swarm \
+                             by that name."
+                        ))
+                        .title(title),
+                        cx,
+                    );
+                    return;
+                }
+            },
+        };
         let root = self.hydra.paths.root().to_path_buf();
         let file = p.file.clone();
         let seen = mail_watch::load(&root, &file).seen;
@@ -118,25 +154,36 @@ impl Workspace {
                 .background_spawn(async move {
                     let ep = Endpoints::google();
                     let access = gmail::refresh(&ep, &client, &hydra.gmail_sign_in(&env)?)?;
-                    let me = gmail::profile(&ep, &access)?;
+                    let address = gmail::profile(&ep, &access)?;
                     let threads =
                         gmail::list_threads(&ep, &access, &search, mail_watch::MAX_THREADS)?;
-                    let mut out = Vec::new();
-                    for t in mail_watch::fresh(&threads, &me, &seen) {
-                        let messages = gmail::thread_messages(&ep, &access, &t.id)?;
-                        let ticket = mail_watch::ticket(&t.id);
-                        let dir = mail_watch::thread_folder(&root, &ticket);
+                    let fresh: Vec<Mailed> = mail_watch::fresh(&threads, &address, &seen)
+                        .into_iter()
+                        .map(|t| Mailed {
+                            thread: t.id.clone(),
+                            ticket: mail_watch::ticket(&t.id),
+                            subject: t.subject.clone(),
+                            from: t.from.clone(),
+                        })
+                        .collect();
+                    // One person per email (spec §5): only threads this person keeps run.
+                    let claimed = crate::mail_claim::claim(
+                        &ep,
+                        &access,
+                        &me,
+                        swarm.as_deref(),
+                        fresh,
+                        &crate::action_log::now,
+                        crate::mail_claim::SETTLE,
+                    )?;
+                    for m in &claimed.kept {
+                        let messages = gmail::thread_messages(&ep, &access, &m.thread)?;
+                        let dir = mail_watch::thread_folder(&root, &m.ticket);
                         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
                         std::fs::write(dir.join("email.md"), mail_watch::email_md(&messages))
                             .map_err(|e| e.to_string())?;
-                        out.push(Mailed {
-                            thread: t.id.clone(),
-                            ticket,
-                            subject: t.subject.clone(),
-                            from: t.from.clone(),
-                        });
                     }
-                    Ok::<_, String>((me, out))
+                    Ok::<_, String>((address, claimed))
                 })
                 .await;
             let _ = this.update_in(cx, |ws, window, cx| {
@@ -151,14 +198,14 @@ impl Workspace {
         p: &Pipeline,
         m: &MailSettings,
         by_hand: bool,
-        found: Result<(String, Vec<Mailed>), String>,
+        found: Result<(String, crate::mail_claim::Claimed), String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.mail_looking.remove(&p.file);
         let days = m.look_back_days;
         let root = self.hydra.paths.root().to_path_buf();
-        let (me, new) = match found {
+        let (me, claimed) = match found {
             Ok(f) => f,
             Err(e) => {
                 crate::action_log::write(format!("mail {}: look failed: {e}", p.file));
@@ -170,10 +217,20 @@ impl Workspace {
             }
         };
         let mut state = mail_watch::load(&root, &p.file);
-        let new: Vec<Mailed> = new
+        // Someone else's are never this person's to take.
+        for (m, who) in claimed.theirs.iter().chain(&claimed.lost) {
+            state.seen.insert(m.thread.clone());
+            crate::action_log::write(format!("mail {}: {} is {who}'s", p.file, m.ticket));
+        }
+        let others = claimed.theirs.len() + claimed.lost.len();
+        let new: Vec<Mailed> = claimed
+            .kept
             .into_iter()
             .filter(|m| state.seen.insert(m.thread.clone()))
             .collect();
+        for m in &new {
+            state.held.insert(m.thread.clone(), m.ticket.clone());
+        }
         state.queue.extend(new.iter().cloned());
         if let Err(e) = mail_watch::save(&root, &p.file, &state) {
             crate::action_log::write(format!("mail {}: can't keep what it took: {e}", p.file));
@@ -187,11 +244,19 @@ impl Workspace {
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
+        let others = if others == 0 {
+            String::new()
+        } else {
+            format!(
+                " {others} more {} someone else's.",
+                if others == 1 { "is" } else { "are" }
+            )
+        };
         if !new.is_empty() {
             window.push_note(
                 Note::info(format!(
-                    "{} new email{} in {me} from the last {days} days: {}. The orchestrator \
-                     starts them one at a time.",
+                    "Claimed {} new email{} in {me} from the last {days} days: {}. The \
+                     orchestrator starts them one at a time.{others}",
                     new.len(),
                     if new.len() == 1 { "" } else { "s" },
                     new.iter()
@@ -206,7 +271,7 @@ impl Workspace {
             window.push_note(
                 Note::info(format!(
                     "Nothing new in {me} from the last {days} days: every thread is taken, \
-                     claimed, done or answered."
+                     claimed, done or answered.{others}"
                 ))
                 .title(p.name.clone()),
                 cx,
@@ -214,6 +279,109 @@ impl Workspace {
         }
         self.start_next_mail(p, m, window, cx);
         cx.notify();
+    }
+
+    /// The folder of the swarm called `name` on this machine.
+    fn mail_swarm_folder(&self, name: &str) -> Option<std::path::PathBuf> {
+        self.swarms
+            .iter()
+            .find(|s| !s.removed && s.name.eq_ignore_ascii_case(name))
+            .map(|s| s.folder.clone())
+    }
+
+    /// Claims whose runs have ended are let go (spec §5): a finished one marked done, a
+    /// stopped one freed for someone else. Off the UI thread; one release at a time per
+    /// pipeline.
+    fn release_mail(
+        &mut self,
+        p: &Pipeline,
+        m: &MailSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.mail_releasing.contains(&p.file) {
+            return;
+        }
+        let root = self.hydra.paths.root().to_path_buf();
+        let held = mail_watch::load(&root, &p.file).held;
+        if held.is_empty() {
+            return;
+        }
+        let history = crate::run_history::read(&root, &[]);
+        let ended: Vec<(String, bool)> = held
+            .iter()
+            .filter_map(|(thread, ticket)| {
+                let e = history
+                    .iter()
+                    .rfind(|e| e.ticket.eq_ignore_ascii_case(ticket) && e.ended)?;
+                // Still running under a newer attempt: not yet.
+                let open = history
+                    .iter()
+                    .any(|o| o.ticket.eq_ignore_ascii_case(ticket) && !o.ended);
+                (!open).then(|| {
+                    (
+                        thread.clone(),
+                        e.outcome == crate::run_history::Outcome::Done,
+                    )
+                })
+            })
+            .collect();
+        if ended.is_empty() {
+            return;
+        }
+        let (Some(client), Some(env), Some(me)) = (
+            self.ui.gmail_client(),
+            self.mail_env(p, m, cx),
+            self.ui.peer_name.as_deref().map(crate::mail_claim::slug),
+        ) else {
+            return;
+        };
+        let swarm = m.swarm.as_deref().and_then(|n| self.mail_swarm_folder(n));
+        let hydra = self.hydra.clone();
+        let file = p.file.clone();
+        self.mail_releasing.insert(file.clone());
+        cx.spawn_in(window, async move |this, cx| {
+            let done = cx
+                .background_spawn(async move {
+                    let ep = Endpoints::google();
+                    let access = gmail::refresh(&ep, &client, &hydra.gmail_sign_in(&env)?)?;
+                    let mut released = Vec::new();
+                    for (thread, finished) in ended {
+                        crate::mail_claim::release(
+                            &ep,
+                            &access,
+                            &me,
+                            swarm.as_deref(),
+                            &thread,
+                            finished,
+                        )?;
+                        released.push((thread, finished));
+                    }
+                    Ok::<_, String>(released)
+                })
+                .await;
+            let _ = this.update_in(cx, |ws, _, _| {
+                ws.mail_releasing.remove(&file);
+                let root = ws.hydra.paths.root().to_path_buf();
+                match done {
+                    Ok(released) => {
+                        let mut state = mail_watch::load(&root, &file);
+                        for (thread, finished) in &released {
+                            state.held.remove(thread);
+                            crate::action_log::write(format!(
+                                "mail {file}: let go of {thread} ({})",
+                                if *finished { "done" } else { "freed" }
+                            ));
+                        }
+                        if let Err(e) = mail_watch::save(&root, &file, &state) {
+                            crate::action_log::write(format!("mail {file}: {e}"));
+                        }
+                    }
+                    Err(e) => crate::action_log::write(format!("mail {file}: can't let go: {e}")),
+                }
+            });
+        })
+        .detach();
     }
 
     /// The next waiting thread to an orchestrator with room, once the one handed over before

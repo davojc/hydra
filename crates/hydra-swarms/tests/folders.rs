@@ -2445,3 +2445,41 @@ async fn a_held_file_doesnt_bring_a_deleted_folder_back() {
     o.shutdown().await;
     w.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn edits_made_offline_to_the_writers_own_file_follow_a_rename() {
+    let mut o = owner().await;
+    let mut w = joiner(&o, "wren", Role::Writer).await;
+    // The writer's own file: the owner never writes an entry for it.
+    w.write("a/x.md", "one");
+    w.reconcile().await;
+    o.settle("the writer's file on the owner", |s| {
+        s.read("a/x.md").as_deref() == Some("one")
+    })
+    .await;
+    cut_off(&o, &w);
+    o.rename("a", "b");
+    o.reconcile().await;
+    // Dated after the rename, each made on top of the last, each replacing the writer's entry.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    w.write("a/x.md", "two");
+    w.reconcile().await;
+    w.write("a/x.md", "three");
+    w.reconcile().await;
+    reconnect(&o, &w).await;
+    o.settle("the latest edit in the renamed folder on the owner", |s| {
+        s.read("b/x.md").as_deref() == Some("three")
+    })
+    .await;
+    w.settle("the renamed folder on the writer", |s| {
+        s.read("b/x.md").as_deref() == Some("three") && s.top_names() == vec!["b".to_string()]
+    })
+    .await;
+    for side in [&mut o, &mut w] {
+        side.reconcile().await;
+        assert_eq!(side.top_names(), vec!["b".to_string()]);
+        assert!(copies_of(side, "b/x.md").is_empty());
+    }
+    o.shutdown().await;
+    w.shutdown().await;
+}

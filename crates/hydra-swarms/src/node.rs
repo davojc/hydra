@@ -57,13 +57,19 @@ const FETCHES_AT_ONCE: usize = 4;
 /// What one author's file entry for a path was made from, so other machines can tell an edit
 /// made on top of theirs from one made at the same time. `hash` is the entry's (None for a
 /// delete), `parent` the version it was made from (None for a new file), and `ancestors`
-/// `parent` and the versions before it, as far as the author knew them.
+/// `parent` and the versions before it, as far as the author knew them. `since` is when the
+/// oldest of those versions was there at this key, as far as its entries showed when this one
+/// was made (None for a new file, and from older hydras), so a later edit of a file that was
+/// there before a folder rename follows the rename even after every entry holding that version
+/// has been replaced.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ParentRecord {
     pub hash: Option<Hash>,
     pub parent: Option<Hash>,
     #[serde(default)]
     pub ancestors: Vec<Hash>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<u64>,
 }
 
 /// What an author says of a folder. `Deleted` and `MovedTo` are kept as records, not removed, so

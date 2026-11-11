@@ -301,9 +301,43 @@ impl LayoutPass {
 struct Pass<'a> {
     node: &'a SwarmNode,
     history: &'a BTreeMap<RelPath, FileHistory>,
+    /// The entries per key as the swarm holds them, before folder moves are applied.
+    raw: &'a BTreeMap<RelPath, FileHistory>,
     /// The newest entry per path.
     remote: &'a BTreeMap<RelPath, Remote>,
     machine: &'a str,
+}
+
+impl Pass<'_> {
+    fn at(&self, p: &RelPath) -> PathHistory<'_> {
+        PathHistory {
+            mapped: self.history.get(p),
+            raw: self.raw.get(p),
+        }
+    }
+}
+
+/// One path's history: at the path, with folder moves applied (`mapped`), and at that very key
+/// as the swarm holds it (`raw`).
+#[derive(Clone, Copy, Default)]
+struct PathHistory<'a> {
+    mapped: Option<&'a FileHistory>,
+    raw: Option<&'a FileHistory>,
+}
+
+/// Every path's history, as `PathHistory` holds one path's.
+struct Histories {
+    raw: BTreeMap<RelPath, FileHistory>,
+    mapped: BTreeMap<RelPath, FileHistory>,
+}
+
+impl Histories {
+    fn of(&self, p: &RelPath) -> PathHistory<'_> {
+        PathHistory {
+            mapped: self.mapped.get(p),
+            raw: self.raw.get(p),
+        }
+    }
 }
 
 type ApplyHook = Box<dyn FnMut(&RelPath) + Send + Sync>;
@@ -435,6 +469,7 @@ impl Folder {
         let pass = Pass {
             node,
             history: &history,
+            raw: &raw,
             remote: &remote,
             machine: &machine,
         };
@@ -1061,7 +1096,7 @@ impl Folder {
         can_write(node)?;
         let history = node_history(node).await?;
         let base = self.index.get(copy).and_then(|e| e.base);
-        self.publish(node, history.get(copy), copy, None, &Vec::from_iter(base))
+        self.publish(node, history.of(copy), copy, None, &Vec::from_iter(base))
             .await?;
         self.drop_copy(copy)
     }
@@ -1093,12 +1128,12 @@ impl Folder {
             .chain([hash])
             .collect();
         self.write(path, &bytes)?;
-        self.publish(node, history.get(path), path, Some((bytes, hash)), &heads)
+        self.publish(node, history.of(path), path, Some((bytes, hash)), &heads)
             .await?;
         let copy_base = self.index.get(copy).and_then(|e| e.base);
         self.publish(
             node,
-            history.get(copy),
+            history.of(copy),
             copy,
             None,
             &Vec::from_iter(copy_base),
@@ -1135,7 +1170,7 @@ impl Folder {
                 let hash = Hash::new(&bytes);
                 self.publish(
                     node,
-                    history.get(path),
+                    history.of(path),
                     path,
                     Some((bytes, hash)),
                     &Vec::from_iter(before),
@@ -1255,7 +1290,7 @@ impl Folder {
     ) -> anyhow::Result<Option<(String, u64)>> {
         let node = pass.node;
         let remote = pass.remote.get(p);
-        let history = pass.history.get(p);
+        let history = pass.at(p);
         let theirs = remote.map(|r| (r.machine.clone(), r.at));
         let mine = Some((pass.machine.to_string(), now_micros()));
         match action {
@@ -1318,7 +1353,7 @@ impl Folder {
                 // The local edit is safe in its copy before the name takes the remote's.
                 let copy = self.free_copy_name(&copy, mine_hash, pass.remote)?;
                 self.write(&copy, &mine_bytes)?;
-                let copy_history = pass.history.get(&copy);
+                let copy_history = pass.at(&copy);
                 self.publish(
                     node,
                     copy_history,
@@ -1349,7 +1384,7 @@ impl Folder {
                 };
                 let copy = self.free_copy_name(&copy, theirs_hash, pass.remote)?;
                 self.write(&copy, &theirs_bytes)?;
-                let copy_history = pass.history.get(&copy);
+                let copy_history = pass.at(&copy);
                 self.publish(
                     node,
                     copy_history,
@@ -1566,16 +1601,18 @@ impl Folder {
     async fn publish(
         &mut self,
         node: &SwarmNode,
-        history: Option<&FileHistory>,
+        history: PathHistory<'_>,
         p: &RelPath,
         content: Option<(Bytes, Hash)>,
         heads: &[Hash],
     ) -> anyhow::Result<()> {
         let hash = content.as_ref().map(|(_, h)| *h);
+        let ancestors = lineage(heads, history.mapped);
         let record = ParentRecord {
             hash,
             parent: heads.first().copied(),
-            ancestors: lineage(heads, history),
+            since: since(&ancestors, history.raw),
+            ancestors,
         };
         node.put_parent(p, &record).await?;
         match content {
@@ -1635,7 +1672,7 @@ impl Folder {
         let copy = self.free_copy_name(&name, hash, pass.remote)?;
         self.write(&copy, &bytes)?;
         if share {
-            let copy_history = pass.history.get(&copy);
+            let copy_history = pass.at(&copy);
             self.publish(pass.node, copy_history, &copy, Some((bytes, hash)), &[])
                 .await?;
         }
@@ -2084,12 +2121,36 @@ fn unseen_edits(history: &FileHistory) -> Option<Vec<&Remote>> {
     )
 }
 
-async fn node_history(node: &SwarmNode) -> anyhow::Result<BTreeMap<RelPath, FileHistory>> {
+async fn node_history(node: &SwarmNode) -> anyhow::Result<Histories> {
     let roster = node
         .roster()
         .await?
         .context("This swarm's member list hasn't arrived yet.")?;
-    swarm_history(node, &roster).await
+    let raw = node.file_entries(&roster).await?;
+    let moves = Moves::from_moves(&node.moves(&roster).await?);
+    let mapped = mapped(&raw, &moves, &|_| true);
+    Ok(Histories { raw, mapped })
+}
+
+/// When the oldest version a new entry is made on top of (`lineage`) was there at this key, as
+/// its entries there still show: an entry holding one of those versions, or the `since` that
+/// entry's author carried forward from versions no entry holds any more. Only this key counts,
+/// never another path's times. None for a new file.
+fn since(lineage: &[Hash], raw: Option<&FileHistory>) -> Option<u64> {
+    let raw = raw?;
+    let earlier: HashSet<Hash> = lineage.iter().copied().collect();
+    raw.entries
+        .iter()
+        .filter(|e| e.hash.is_some_and(|h| earlier.contains(&h)))
+        .map(|e| {
+            let carried = raw
+                .records
+                .iter()
+                .find(|(a, r)| *a == e.author && r.hash == e.hash)
+                .and_then(|(_, r)| r.since);
+            carried.map_or(e.at, |s| s.min(e.at))
+        })
+        .min()
 }
 
 /// Every counting entry per path, at the path the folder moves put it.
@@ -2144,8 +2205,9 @@ fn mapped(
 
 /// The time an entry is placed by among folder moves (`Moves::map`): its own, or, when it was
 /// made on top of a version another entry for the same path still holds, that entry's time if
-/// older. An edit of a file that was there before a rename is work on that file, and follows
-/// the rename even when made, by the clock, after it by someone who hadn't seen it.
+/// older, or the `since` its author's record carries when no entry holds that version any more.
+/// An edit of a file that was there before a rename is work on that file, and follows the
+/// rename even when made, by the clock, after it by someone who hadn't seen it.
 fn moved_as_of(e: &Remote, h: &FileHistory) -> u64 {
     let Some((_, r)) = h
         .records
@@ -2160,6 +2222,7 @@ fn moved_as_of(e: &Remote, h: &FileHistory) -> u64 {
         .filter(|o| o.hash.is_some_and(|x| earlier.contains(&x)))
         .map(|o| o.at)
         .chain([e.at])
+        .chain(r.since)
         .min()
         .unwrap_or(e.at)
 }

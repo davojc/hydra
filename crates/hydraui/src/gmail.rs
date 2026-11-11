@@ -313,6 +313,103 @@ fn api_get(ep: &Endpoints, access: &str, path: &str) -> Result<serde_json::Value
     json(r)
 }
 
+fn api_post(
+    ep: &Endpoints,
+    access: &str,
+    path: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let r = agent()
+        .post(&format!("{}/{path}", ep.api))
+        .set("Authorization", &format!("Bearer {access}"))
+        .set("Content-Type", "application/json")
+        .send_string(&body.to_string())
+        .map_err(failed)?;
+    json(r)
+}
+
+/// The mailbox's labels, as (id, name).
+pub fn labels(ep: &Endpoints, access: &str) -> Result<Vec<(String, String)>, String> {
+    let v = api_get(ep, access, "users/me/labels")?;
+    Ok(v["labels"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|l| {
+            Some((
+                l["id"].as_str()?.to_string(),
+                l["name"].as_str()?.to_string(),
+            ))
+        })
+        .collect())
+}
+
+/// Label `name`'s id, made when the mailbox hasn't got it. `known` is `labels`' answer, and
+/// gains the new one.
+pub fn label_id(
+    ep: &Endpoints,
+    access: &str,
+    name: &str,
+    known: &mut Vec<(String, String)>,
+) -> Result<String, String> {
+    if let Some((id, _)) = known.iter().find(|(_, n)| n == name) {
+        return Ok(id.clone());
+    }
+    let v = api_post(
+        ep,
+        access,
+        "users/me/labels",
+        &serde_json::json!({
+            "name": name,
+            "labelListVisibility": "labelShow",
+            "messageListVisibility": "show",
+        }),
+    )?;
+    let id = v["id"]
+        .as_str()
+        .ok_or_else(|| format!("Google made no label {name}"))?
+        .to_string();
+    known.push((id.clone(), name.to_string()));
+    Ok(id)
+}
+
+/// The ids of the labels on any message of thread `id`.
+pub fn thread_label_ids(ep: &Endpoints, access: &str, id: &str) -> Result<Vec<String>, String> {
+    let v = api_get(
+        ep,
+        access,
+        &format!("users/me/threads/{}?format=minimal", enc(id)),
+    )?;
+    let mut out: Vec<String> = Vec::new();
+    for m in v["messages"].as_array().into_iter().flatten() {
+        for l in m["labelIds"].as_array().into_iter().flatten() {
+            if let Some(l) = l.as_str()
+                && !out.iter().any(|o| o == l)
+            {
+                out.push(l.to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Adds and removes labels (by id) on every message of thread `id`.
+pub fn modify_thread(
+    ep: &Endpoints,
+    access: &str,
+    id: &str,
+    add: &[String],
+    remove: &[String],
+) -> Result<(), String> {
+    api_post(
+        ep,
+        access,
+        &format!("users/me/threads/{}/modify", enc(id)),
+        &serde_json::json!({"addLabelIds": add, "removeLabelIds": remove}),
+    )
+    .map(|_| ())
+}
+
 /// The signed-in mailbox's address.
 pub fn profile(ep: &Endpoints, access: &str) -> Result<String, String> {
     api_get(ep, access, "users/me/profile")?["emailAddress"]
@@ -464,9 +561,74 @@ pub fn list_threads(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod testing {
+    //! A fake Google for tests, on a local port.
+    use super::Endpoints;
     use std::sync::mpsc;
+
+    /// A request the fake Google saw.
+    #[derive(Debug)]
+    pub struct Seen {
+        pub method: String,
+        pub url: String,
+        pub auth: Option<String>,
+        pub body: String,
+    }
+
+    /// A fake Google answering each request with the first `(path prefix, status, body)` that
+    /// fits, for `n` requests; what it saw comes back on the channel. A route with a later one
+    /// for the same prefix is used once, so a path can answer differently the next time.
+    pub fn fake(
+        mut routes: Vec<(&'static str, u16, String)>,
+        n: usize,
+    ) -> (Endpoints, mpsc::Receiver<Seen>) {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", server.server_addr().to_ip().unwrap());
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for _ in 0..n {
+                let Ok(mut req) = server.recv() else { return };
+                let mut body = String::new();
+                let _ = req.as_reader().read_to_string(&mut body);
+                let auth = req
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("Authorization"))
+                    .map(|h| h.value.to_string());
+                let url = req.url().to_string();
+                let hit = routes.iter().position(|(p, _, _)| url.starts_with(p));
+                let (status, reply) = hit.map_or((404, String::new()), |i| {
+                    let (p, s, b) = routes[i].clone();
+                    if routes[i + 1..].iter().any(|(q, _, _)| *q == p) {
+                        routes.remove(i);
+                    }
+                    (s, b)
+                });
+                let _ = tx.send(Seen {
+                    method: req.method().to_string(),
+                    url,
+                    auth,
+                    body,
+                });
+                let _ =
+                    req.respond(tiny_http::Response::from_string(reply).with_status_code(status));
+            }
+        });
+        (
+            Endpoints {
+                auth: format!("{base}/auth"),
+                token: format!("{base}/token"),
+                api: format!("{base}/gmail/v1"),
+            },
+            rx,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::fake;
+    use super::*;
 
     #[test]
     fn the_challenge_is_s256_base64url() {
@@ -563,59 +725,6 @@ mod tests {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let err = receive(&server, "n1", Duration::from_millis(50)).unwrap_err();
         assert!(err.contains("didn't come back"), "{err}");
-    }
-
-    /// A request the fake Google saw.
-    #[derive(Debug)]
-    struct Seen {
-        method: String,
-        url: String,
-        auth: Option<String>,
-        body: String,
-    }
-
-    /// A fake Google answering each request with the first `(path prefix, status, body)` that
-    /// fits, for `n` requests; what it saw comes back on the channel.
-    fn fake(
-        routes: Vec<(&'static str, u16, String)>,
-        n: usize,
-    ) -> (Endpoints, mpsc::Receiver<Seen>) {
-        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-        let base = format!("http://{}", server.server_addr().to_ip().unwrap());
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            for _ in 0..n {
-                let Ok(mut req) = server.recv() else { return };
-                let mut body = String::new();
-                let _ = req.as_reader().read_to_string(&mut body);
-                let auth = req
-                    .headers()
-                    .iter()
-                    .find(|h| h.field.equiv("Authorization"))
-                    .map(|h| h.value.to_string());
-                let url = req.url().to_string();
-                let (status, reply) = routes
-                    .iter()
-                    .find(|(p, _, _)| url.starts_with(p))
-                    .map_or((404, String::new()), |(_, s, b)| (*s, b.clone()));
-                let _ = tx.send(Seen {
-                    method: req.method().to_string(),
-                    url,
-                    auth,
-                    body,
-                });
-                let _ =
-                    req.respond(tiny_http::Response::from_string(reply).with_status_code(status));
-            }
-        });
-        (
-            Endpoints {
-                auth: format!("{base}/auth"),
-                token: format!("{base}/token"),
-                api: format!("{base}/gmail/v1"),
-            },
-            rx,
-        )
     }
 
     fn client() -> Client {
@@ -820,6 +929,85 @@ mod tests {
         // No plain text: Gmail's snippet.
         assert_eq!(got[1].body, "Only a snippet");
         assert!(seen.recv().unwrap().url.contains("format=full"));
+    }
+
+    #[test]
+    fn labels_are_listed_made_when_missing_and_read_off_a_thread() {
+        let (ep, seen) = fake(
+            vec![
+                (
+                    "/gmail/v1/users/me/labels",
+                    200,
+                    r#"{"labels":[{"id":"INBOX","name":"INBOX"},{"id":"Label_1","name":"hydra/claimed"}]}"#
+                        .into(),
+                ),
+            ],
+            1,
+        );
+        let mut known = labels(&ep, "a").unwrap();
+        assert_eq!(
+            known[1],
+            ("Label_1".to_string(), "hydra/claimed".to_string())
+        );
+        assert_eq!(seen.recv().unwrap().method, "GET");
+        // Known: no call.
+        assert_eq!(
+            label_id(&ep, "a", "hydra/claimed", &mut known).unwrap(),
+            "Label_1"
+        );
+
+        let (ep, seen) = fake(
+            vec![(
+                "/gmail/v1/users/me/labels",
+                200,
+                r#"{"id":"Label_2","name":"hydra/claimed/jordan"}"#.into(),
+            )],
+            1,
+        );
+        assert_eq!(
+            label_id(&ep, "a", "hydra/claimed/jordan", &mut known).unwrap(),
+            "Label_2"
+        );
+        assert_eq!(known.len(), 3);
+        let made = seen.recv().unwrap();
+        assert_eq!(made.method, "POST");
+        assert!(
+            made.body.contains("\"name\":\"hydra/claimed/jordan\""),
+            "{}",
+            made.body
+        );
+
+        let (ep, seen) = fake(
+            vec![(
+                "/gmail/v1/users/me/threads/t1",
+                200,
+                r#"{"id":"t1","messages":[{"labelIds":["INBOX","Label_1"]},{"labelIds":["Label_2","Label_1"]}]}"#
+                    .into(),
+            )],
+            1,
+        );
+        let mut ids = thread_label_ids(&ep, "a", "t1").unwrap();
+        ids.sort();
+        assert_eq!(ids, ["INBOX", "Label_1", "Label_2"]);
+        assert!(seen.recv().unwrap().url.contains("format=minimal"));
+    }
+
+    #[test]
+    fn a_threads_labels_are_changed_in_one_call() {
+        let (ep, seen) = fake(
+            vec![(
+                "/gmail/v1/users/me/threads/t1/modify",
+                200,
+                r#"{"id":"t1"}"#.into(),
+            )],
+            1,
+        );
+        modify_thread(&ep, "a", "t1", &["Label_3".into()], &["Label_1".into()]).unwrap();
+        let s = seen.recv().unwrap();
+        assert_eq!(s.method, "POST");
+        let body: serde_json::Value = serde_json::from_str(&s.body).unwrap();
+        assert_eq!(body["addLabelIds"], serde_json::json!(["Label_3"]));
+        assert_eq!(body["removeLabelIds"], serde_json::json!(["Label_1"]));
     }
 
     #[test]

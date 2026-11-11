@@ -301,6 +301,8 @@ pub struct Workspace {
     schedule_checked: Option<std::time::Instant>,
     /// `[mail]` pipelines looking at their mailbox now, by file (email triage spec §3).
     mail_looking: std::collections::HashSet<String>,
+    /// `[mail]` pipelines letting go of claims now, by file.
+    mail_releasing: std::collections::HashSet<String>,
     /// The thread each `[mail]` pipeline last handed over, until it's a run.
     mail_inflight: HashMap<String, (String, std::time::Instant)>,
     /// Runs' tickets as Linear last said, by identifier: the card's SLA and link (phase 2 §5).
@@ -581,6 +583,7 @@ impl Workspace {
             park_checked: None,
             schedule_checked: None,
             mail_looking: Default::default(),
+            mail_releasing: Default::default(),
             mail_inflight: HashMap::new(),
             linear_tickets: HashMap::new(),
             in_flight: Default::default(),

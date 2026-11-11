@@ -32,6 +32,7 @@ pub mod linear;
 pub mod linear_project;
 pub mod linear_watch;
 pub mod link;
+pub mod mail_claim;
 pub mod mail_watch;
 pub mod mcp;
 pub mod open_files;

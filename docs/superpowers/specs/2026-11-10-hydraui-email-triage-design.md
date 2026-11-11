@@ -136,29 +136,35 @@ user_error = "Reports an error caused by how they called or configured it"
   - Editing the options in Pipeline settings (§10, step 6).
   - `{category}` and `{confidence}` as prompt placeholders. They arrive in the handoff instead.
 
-## 5. One person per email: the claim
+## 5. One person per email: the claim (built 2026-11-11)
 
-Swarms sync folders. They are not a lock: a machine sees another's write only once the two have connected. Gmail is online and shared by everyone who can reply, so **the Gmail label is the authority**. The swarm is how hydraui shows the team who has which email, and it lets machines skip a thread early.
+Swarms sync folders. They are not a lock: a machine sees another's write only once the two have connected. Gmail is online and shared by everyone who can reply, so **the Gmail labels are the authority**. The swarm shows the team who has which thread, and covers the moments before a label lands.
 
-Claiming thread T, by person P on machine M:
+- **Who you are.** `peer_name` in hydraui's config, as a slug (`Jordan Miller` → `jordan-miller`). A `[mail]` look won't claim without it.
+- **The swarm.** `[mail] swarm = "integrations"` names it. It's optional: without it, the labels alone decide.
+  - Claim files are `claims/<thread>--<who>.md` in its folder. They're Markdown because every swarm syncs `.md`, and there's one per person, so two claims never conflict.
+  - Each holds who, when, the run's ticket, the subject and the thread id. Never the email.
+- **Two labels per claim.** `hydra/claimed` takes the thread out of everyone's search (`-label:hydra-claimed`): Gmail search treats nested labels as separate. `hydra/claimed/<who>` says whose it is.
 
-1. **Look.** If T has any `hydra/claimed/*` label, or the swarm holds a claim for T by someone else, skip it.
-2. **Announce.** Write `claims/<T>.<P>.json` to the swarm folder. The name differs per person, so two claims never make a sync conflict.
-   - It holds who, the machine, when, the run id and the category once known.
-   - It never holds the email's content.
-3. **Label.** Add `hydra/claimed/<P>` to T.
-4. **Settle.** Wait 20 seconds, then read T's labels again.
-   - If P's is the only claim label, the claim holds.
-   - If there are several, the tie-break is deterministic and every machine computes it the same way: the earliest `at` among the swarm claims each machine can see, then the lowest person id.
-   - The loser removes its label and its claim file. Its run ends as "claimed by <name>", and a notice says so.
-5. **Before the draft.** Read T's labels and its messages again, just before hydraui creates the draft. If the claim isn't P's alone any more, or a reply from our side has appeared since, there's no draft. The run goes to needs you.
-6. **Release.** When the run finishes, P's claim label is replaced by `hydra/done`. When the run is stopped, P's label and file are removed, so someone else can take T.
-   - A parked run (§54) keeps its claim.
-   - A claim older than 48 hours with no run activity shows in History as stale, with Release.
+Claiming the new threads a look found, for person P:
 
-Why it holds when a peer is offline: in step 3, both labels land in Gmail whatever the swarm has synced. Step 4 then sees both on either machine. Step 5 guards the one thing that would hurt, a second reply.
+1. **Look.** A thread with anyone else's `hydra/claimed/<who>` label is theirs. So is one with someone else's swarm claim from the last 10 minutes, since their label may not have landed yet. P's own label means it's P's already, e.g. after a restart. Otherwise it's free.
+2. **Claim.** For a free thread, write P's claim file and add both labels.
+3. **Settle.** Wait 20 seconds once for the whole look, then read every claimed thread's labels again.
+   - P alone keeps it.
+   - With rivals, the earliest swarm claim wins; a claim this machine hasn't seen counts as latest. A tie goes to the lowest name, so every machine picks the same winner.
+   - The loser takes its own label and claim file off. The winner's labels stay.
+4. **Only threads P keeps** get their `email.md` written, and are queued and run. The rest are noted as someone else's ("2 more are someone else's") and never taken.
+5. **Release.** Every 30 seconds, a thread P holds whose run has ended, with no newer attempt open, is let go. Its claim file goes either way.
+   - A finished run swaps both claim labels for `hydra/done`.
+   - A stopped run takes them off, so the thread is free for someone else. It stays in P's own taken list, so P's hydraui doesn't take it back.
+   - Held threads are kept in the pipeline's `mail/<pipeline>.json`.
 
-What it doesn't stop: someone replying by hand in Gmail while a run works the thread. Step 5 catches that before the draft.
+Why it holds when a peer is offline: in step 2, both labels land in Gmail whatever the swarm has synced, and step 3 then sees both on either machine.
+
+**Not yet:**
+- **The re-check just before a draft (step 5).** It belongs with drafts, which aren't built. It would also catch someone replying by hand in Gmail while a run works the thread.
+- **A History view of teammates' claims.** The swarm files are there for it.
 
 ## 6. The reply: draft only
 
@@ -207,6 +213,6 @@ What it doesn't stop: someone replying by hand in Gmail while a run works the th
 1. The Gmail sign-in, plus a read-only check that lists threads. No runs yet. **Built 2026-11-10:** **Connect Gmail…** and **Check Gmail…** in the launcher.
 2. The `kind = "jev"` stage, with needs-you on low confidence. It can be tested with a fixed `email.md`. **Built 2026-11-11** (§4).
 3. The `[mail]` trigger: one run per thread, plus `email.md`. **Built 2026-11-11**, with `look_back_days` (§3).
-4. Claims: label, swarm file, settle, tie-break and release, with tests for the race using two fake machines and a fake Gmail.
+4. Claims: label, swarm file, settle, tie-break and release, with tests for the race using two fake machines and a fake Gmail. **Built 2026-11-11** (§5).
 5. Drafts from `reply.md` with the step 5 re-check.
 6. Pipeline settings, History and notices.

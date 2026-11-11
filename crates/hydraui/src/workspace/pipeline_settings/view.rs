@@ -324,7 +324,7 @@ impl Workspace {
             ));
         }
         page = page
-            .child(add_step(orch, cx))
+            .child(add_step(orch, draft.adding, cx))
             .child(self.render_advanced(orch, draft, &edit, cx));
 
         let save_bar =
@@ -1192,31 +1192,90 @@ fn step_card(
     c.into_any_element()
 }
 
-/// **Add a step**: a Claude step or a Jev sort step.
-fn add_step(orch: PaneId, cx: &mut Context<Workspace>) -> AnyElement {
-    let ws = cx.entity();
+/// **Add a stage**: a dashed button; clicked, it becomes two tiles to pick the kind of stage,
+/// each with a line on what it's for, and **Cancel**.
+fn add_step(orch: PaneId, adding: bool, cx: &mut Context<Workspace>) -> AnyElement {
+    if !adding {
+        return div()
+            .id(SharedString::from(format!("settings-add-{orch}")))
+            .px(px(14.))
+            .py(px(10.))
+            .rounded(px(10.))
+            .border_1()
+            .border_dashed()
+            .border_color(color(theme::BORDER_STRONG))
+            .hover(|d| {
+                d.border_color(color(theme::TEAL))
+                    .text_color(color(theme::TEAL))
+            })
+            .cursor_pointer()
+            .text_center()
+            .text_size(px(13.5))
+            .text_color(color(theme::TEXT_SECONDARY))
+            .child("+ Add a stage")
+            .on_click(cx.listener(move |ws, _, _, cx| ws.with_draft(orch, cx, |d| d.adding = true)))
+            .into_any_element();
+    }
+    let tile = |id: &str, title: &str, about: &str, jev: bool| {
+        v_flex()
+            .id(SharedString::from(format!("settings-add-{id}-{orch}")))
+            .flex_1()
+            .gap_1()
+            .px(px(16.))
+            .py(px(14.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(color(0x1f2524))
+            .bg(color(0x131616))
+            .hover(|d| d.border_color(color(theme::TEAL)))
+            .cursor_pointer()
+            .child(
+                text(14., theme::TEXT)
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(title.to_string()),
+            )
+            .child(
+                text(12.5, theme::TEXT_MUTED)
+                    .whitespace_normal()
+                    .child(about.to_string()),
+            )
+            .on_click(cx.listener(move |ws, _, window, cx| {
+                ws.with_draft(orch, cx, |d| d.adding = false);
+                ws.add_stage(orch, jev, window, cx)
+            }))
+    };
     v_flex()
-        .gap_1()
+        .gap_2()
         .child(
-            Button::new(SharedString::from(format!("settings-add-{orch}")))
-                .label("+ Add a stage")
-                .outline()
-                .w_full()
-                .dropdown_menu(move |menu, _, _| {
-                    let (a, b) = (ws.clone(), ws.clone());
-                    menu.item(
-                        PopupMenuItem::new("Claude stage: does the work, like a review or a fix")
-                            .on_click(move |_, window, cx| {
-                                a.update(cx, |ws, cx| ws.add_stage(orch, false, window, cx))
-                            }),
-                    )
-                    .item(
-                        PopupMenuItem::new("Sort stage: Jev picks a category, e.g. for an email")
-                            .on_click(move |_, window, cx| {
-                                b.update(cx, |ws, cx| ws.add_stage(orch, true, window, cx))
-                            }),
-                    )
-                }),
+            h_flex()
+                .justify_between()
+                .items_center()
+                .child(text(12.5, theme::TEXT_SECONDARY).child("What kind of stage?"))
+                .child(
+                    Button::new(SharedString::from(format!("settings-add-cancel-{orch}")))
+                        .label("Cancel")
+                        .ghost()
+                        .xsmall()
+                        .on_click(cx.listener(move |ws, _, _, cx| {
+                            ws.with_draft(orch, cx, |d| d.adding = false)
+                        })),
+                ),
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .child(tile(
+                    "claude",
+                    "Claude stage",
+                    "Does the work: reviews a pull request, fixes a ticket, drafts a reply.",
+                    false,
+                ))
+                .child(tile(
+                    "jev",
+                    "Sort with Jev",
+                    "Picks one category, like what an email is about, so the next stage knows.",
+                    true,
+                )),
         )
         .into_any_element()
 }

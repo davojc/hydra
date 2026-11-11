@@ -365,11 +365,21 @@ fn stage_start(
                 "stage started",
                 json!({"stage": stage, "label": s.label}),
             );
-            let text = format!(
-                "Stage {stage} of run {} is starting as {} ({}): its session opens beside the \
-                 user. You'll be told when it reports, or check run_status.",
-                s.run, s.name, s.label
-            );
+            let jev = crate::jev_stage::of(reg, &s).is_some();
+            let text = if jev {
+                format!(
+                    "Stage {stage} of run {} is Jev's ({}): hydraui asks Jev and files its \
+                     answer as the stage's report, no session. You'll be told when it reports, \
+                     or check run_status.",
+                    s.run, s.label
+                )
+            } else {
+                format!(
+                    "Stage {stage} of run {} is starting as {} ({}): its session opens beside \
+                     the user. You'll be told when it reports, or check run_status.",
+                    s.run, s.name, s.label
+                )
+            };
             (Outcome::ok(text), Some(McpEvent::StageStart(s)))
         }
         Err(Refusal { why, changes }) => {

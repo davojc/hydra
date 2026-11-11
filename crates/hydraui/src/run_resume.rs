@@ -516,6 +516,7 @@ mod tests {
             folder: None,
             worktree: true,
             prompt: "Lint {ticket}.".into(),
+            jev: None,
         };
         log.push(line(
             "stage added",

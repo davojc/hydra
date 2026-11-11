@@ -9,6 +9,7 @@ mod finder;
 mod gmail;
 mod history_tab;
 mod inbox_panel;
+mod jev_run;
 mod launcher;
 mod layout_file;
 mod linear;

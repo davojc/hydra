@@ -328,6 +328,12 @@ impl Workspace {
         let Some((env, cwd)) = orchestrator else {
             return stage_failed(&s, "its orchestrator's terminal is gone".into());
         };
+        // A Jev stage opens no terminal: Jev answers it (email triage spec §4).
+        let jev =
+            server::get().and_then(|sv| crate::jev_stage::of(&server::lock(sv.registry()), &s));
+        if let Some((stage, bar)) = jev {
+            return self.run_jev_stage(s, stage, bar, window, cx);
+        }
         // The skill set in the pipeline must be one its session can use (§4): checked where
         // the session will look, before anything opens.
         if let Some(skill) = s.skill.clone() {

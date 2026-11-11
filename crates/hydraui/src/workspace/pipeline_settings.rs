@@ -40,6 +40,8 @@ struct DraftStage {
     own: bool,
     /// What its session is asked, before hydraui's note.
     prompt: Entity<TextareaState>,
+    /// A Jev stage's question: shown, not edited here.
+    jev: Option<crate::jev_stage::JevStage>,
 }
 
 /// The settings being edited for one orchestrator's pipeline file.
@@ -213,6 +215,7 @@ impl SettingsDraft {
                     folder: s.folder.clone(),
                     bar: s.own.then(|| slider_value(&s.bar, cx)),
                     prompt: s.prompt.read(cx).value().to_string(),
+                    jev: s.jev.clone(),
                 })
                 .collect(),
         }
@@ -523,6 +526,7 @@ impl Workspace {
             bar,
             own: s.bar.is_some(),
             prompt,
+            jev: s.jev.clone(),
         }
     }
 
@@ -735,6 +739,7 @@ impl Workspace {
                 folder: None,
                 bar: None,
                 prompt: String::new(),
+                jev: None,
             },
             default,
             window,
@@ -1006,75 +1011,92 @@ impl Workspace {
                                     .min_w(px(120.))
                                     .child(Input::new(&s.title).small()),
                             )
-                            .child(
-                                Button::new(SharedString::from(format!("skill-{key}")))
-                                    .label(crate::setup::stage_skill_label(
-                                        s.skill.as_deref(),
-                                        router_on,
-                                    ))
-                                    .tooltip(if router_on {
-                                        "The skill this step must use before it reports. The \
+                            // A Jev stage has no session: no skill or folder (§4).
+                            .when(s.jev.is_none(), |row| {
+                                row.child(
+                                    Button::new(SharedString::from(format!("skill-{key}")))
+                                        .label(crate::setup::stage_skill_label(
+                                            s.skill.as_deref(),
+                                            router_on,
+                                        ))
+                                        .tooltip(if router_on {
+                                            "The skill this step must use before it reports. The \
                                          team skills router adds the skills its changes need."
-                                    } else {
-                                        "The skill this step must use before it reports"
-                                    })
-                                    .dropdown_caret(true)
-                                    .outline()
-                                    .small()
-                                    .w(px(120.))
-                                    .flex_none()
-                                    .on_click(cx.listener(move |ws, _, window, cx| {
-                                        ws.pick_skill(orch, key, window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new(SharedString::from(format!("folder-{key}")))
-                                    .label(match &s.folder {
-                                        Some(f) => format!(
-                                            "in {}",
-                                            std::path::Path::new(f)
-                                                .file_name()
-                                                .map_or(f.clone(), |n| n
-                                                    .to_string_lossy()
-                                                    .into_owned())
-                                        ),
-                                        None => "Orchestrator's folder".into(),
-                                    })
-                                    .dropdown_caret(true)
-                                    .outline()
-                                    .small()
-                                    .w(px(165.))
-                                    .flex_none()
-                                    .tooltip("The folder this stage's session starts in")
-                                    .on_click(cx.listener(move |ws, _, window, cx| {
-                                        ws.pick_folder(orch, key, window, cx)
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .w(px(24.))
-                                    .flex_none()
-                                    .when(s.folder.is_some(), |slot| {
-                                        slot.child(
-                                            Button::new(SharedString::from(format!(
-                                                "folder-clear-{key}"
-                                            )))
-                                            .label("↺")
-                                            .ghost()
-                                            .xsmall()
-                                            .tooltip("Start in the orchestrator's folder")
-                                            .on_click(cx.listener(move |ws, _, _, cx| {
-                                                ws.with_draft(orch, cx, |d| {
-                                                    if let Some(s) =
-                                                        d.stages.iter_mut().find(|s| s.key == key)
-                                                    {
-                                                        s.folder = None;
-                                                    }
-                                                })
-                                            })),
-                                        )
-                                    }),
-                            )
+                                        } else {
+                                            "The skill this step must use before it reports"
+                                        })
+                                        .dropdown_caret(true)
+                                        .outline()
+                                        .small()
+                                        .w(px(120.))
+                                        .flex_none()
+                                        .on_click(cx.listener(move |ws, _, window, cx| {
+                                            ws.pick_skill(orch, key, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!("folder-{key}")))
+                                        .label(match &s.folder {
+                                            Some(f) => format!(
+                                                "in {}",
+                                                std::path::Path::new(f)
+                                                    .file_name()
+                                                    .map_or(f.clone(), |n| n
+                                                        .to_string_lossy()
+                                                        .into_owned())
+                                            ),
+                                            None => "Orchestrator's folder".into(),
+                                        })
+                                        .dropdown_caret(true)
+                                        .outline()
+                                        .small()
+                                        .w(px(165.))
+                                        .flex_none()
+                                        .tooltip("The folder this stage's session starts in")
+                                        .on_click(cx.listener(move |ws, _, window, cx| {
+                                            ws.pick_folder(orch, key, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(24.))
+                                        .flex_none()
+                                        .when(s.folder.is_some(), |slot| {
+                                            slot.child(
+                                                Button::new(SharedString::from(format!(
+                                                    "folder-clear-{key}"
+                                                )))
+                                                .label("↺")
+                                                .ghost()
+                                                .xsmall()
+                                                .tooltip("Start in the orchestrator's folder")
+                                                .on_click(cx.listener(move |ws, _, _, cx| {
+                                                    ws.with_draft(orch, cx, |d| {
+                                                        if let Some(s) = d
+                                                            .stages
+                                                            .iter_mut()
+                                                            .find(|s| s.key == key)
+                                                        {
+                                                            s.folder = None;
+                                                        }
+                                                    })
+                                                })),
+                                            )
+                                        }),
+                                )
+                            })
+                            .when_some(s.jev.as_ref(), |row, j| {
+                                row.child(
+                                    text(12.5, theme::TEXT_SECONDARY)
+                                        .w(px(120. + 165. + 24. + 20.))
+                                        .flex_none()
+                                        .child(format!(
+                                            "Jev · {} options · reads {}",
+                                            j.options.len(),
+                                            j.input
+                                        )),
+                                )
+                            })
                             .child(div().w(px(120.)).flex_none().child(Slider::new(&s.bar)))
                             .child(
                                 text(
@@ -1119,8 +1141,29 @@ impl Workspace {
                         div().pl(px(24. + 10. + ARROWS_W + 10.)).child(
                             v_flex()
                                 .gap_1()
-                                .child(text(11.5, theme::TEXT_MUTED).child("Prompt"))
-                                .child(Textarea::new(&s.prompt)),
+                                .when(s.jev.is_none(), |d| {
+                                    d.child(text(11.5, theme::TEXT_MUTED).child("Prompt"))
+                                        .child(Textarea::new(&s.prompt))
+                                })
+                                .when_some(s.jev.as_ref(), |d, j| {
+                                    d.child(text(11.5, theme::TEXT_MUTED).child(
+                                        "Jev's question: its confidence is the stage's score, \
+                                             so the bar is how sure it must be. Edit it in the \
+                                             pipeline file (Edit pipelines).",
+                                    ))
+                                    .child(
+                                        text(12.5, theme::TEXT_SECONDARY)
+                                            .whitespace_normal()
+                                            .child(j.instructions.clone()),
+                                    )
+                                    .children(
+                                        j.options.iter().map(|(k, v)| {
+                                            text(12., theme::TEXT_SECONDARY)
+                                                .whitespace_normal()
+                                                .child(format!("• {k}: {v}"))
+                                        }),
+                                    )
+                                }),
                         ),
                     ),
             );

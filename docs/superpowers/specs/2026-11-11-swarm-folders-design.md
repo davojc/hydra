@@ -130,9 +130,12 @@ Renaming a folder and moving it to another place in the swarm are the same thing
   - It ends up in the renamed folder, and never brings the old folder back.
   - This covers a file edited in the old folder, and a file added there, before the rename
     reached that machine.
-  - *My call:* "hadn't seen it" is judged by timestamp. An entry under the old path that is
-    older than the rename follows the rename. A newer one is someone deliberately making a new
-    folder with the old name, and stands.
+  - *My call:* an edit to a file that existed before the rename follows the rename, whatever its
+    timestamp, so an edit made offline after the rename still lands in the renamed folder.
+    For a new file under the old path, "hadn't seen it" is judged by timestamp: one older than
+    the rename follows it, and a newer one is someone deliberately making a new folder with the
+    old name, and stands. (Changed after the final review: judging edits by timestamp too lost
+    exactly the offline edits this rule is for.)
   - *My call:* a rename is never an edit. A file edited under the old name lands in the renamed
     folder as that file, with the edit, not as a conflict copy. Only a real edit on both sides
     is a conflict, by §5's rule.
@@ -200,6 +203,9 @@ Renaming a folder and moving it to another place in the swarm are the same thing
     stays.
   - An older hydra still shares files inside folders starting with `.`; newer ones ignore
     those entries.
+  - *My call, accepted gap:* a rename made on a new hydra reaches older hydras only as the later
+    edits of its files, so in a team on mixed versions the files can end up split between the
+    old and new folder names until everyone upgrades. Teams should upgrade together.
   - Nothing breaks either way.
 - **Folder records live in the swarm document beside file entries,** under their own prefix, so
   the file sync and the claims service never read them as files or claims.

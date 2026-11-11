@@ -1327,7 +1327,7 @@ Pipeline settings had grown into one long form. Rows of chips sat under every pr
   - **More options** holds **If it isn't sure enough** (Stop and ask me, or Keep checking, §62), **Check again every** and **For up to**, **Sure enough at** (its own pass mark), **Skill** and **Works in**, all as dropdowns, and a sentence that reads them back.
   - **Move up**, **Move down** and **Remove step** sit in its **⋯** menu.
   - A one-step pipeline opens with its step unfolded, a new step is added unfolded and scrolled to, and a step with a problem opens unfolded.
-- **Add a step.** One button offers a Claude step ("does the work, like a review or a fix") or a Sort step ("Jev picks a category").
+- **Add a stage.** A dashed button. Clicked, it becomes two tiles, **Claude stage** ("Does the work: reviews a pull request, fixes a ticket, drafts a reply.") and **Sort with Jev** ("Picks one category, like what an email is about, so the next stage knows."), with **Cancel**. Picking one adds it, unfolded.
 - **Advanced settings,** folded, holds **While a step waits** (§60, as dropdowns), **Tickets at once**, the **Default pass mark**, **Branch name** and **Product questions**.
 - **Words.** The page says *stage*, as the rest of hydraui does, and *sure enough* for the bar.
 - **Headings.** Name, Trigger and Stages each have a large heading with one line under it saying what the section is for. The team skills note wraps inside the page.

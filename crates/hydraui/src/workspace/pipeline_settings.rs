@@ -97,6 +97,8 @@ pub(super) struct SettingsDraft {
     /// The source card is unfolded, and its More options (core spec §63).
     source_open: bool,
     source_more: bool,
+    /// **Add a stage** shows its two kinds to pick from.
+    adding: bool,
     /// The page's scroll, so the setup checklist can take you to a part.
     scroll: gpui::ScrollHandle,
     bar: Entity<SliderState>,
@@ -562,6 +564,7 @@ impl Workspace {
             advanced: false,
             source_open: false,
             source_more: false,
+            adding: false,
             scroll: gpui::ScrollHandle::new(),
             bar,
             stages: Vec::new(),

@@ -263,7 +263,12 @@ impl Workspace {
                     .child({
                         let (file, file2) = (draft.file.clone(), draft.file.clone());
                         let in_swarm = self.swarms.iter().any(|s| !s.removed);
-                        h_flex()
+                        // What Export or Share just did, under them for a while (§71).
+                        let said = self.share_said.get(&draft.file).map(|(kind, text, _)| {
+                            let ok = *kind == crate::inbox::Kind::Success;
+                            text_line(ok, text)
+                        });
+                        let buttons = h_flex()
                             .gap_2()
                             .child(
                                 Button::new(SharedString::from(format!("share-swarm-{orch}")))
@@ -296,7 +301,8 @@ impl Workspace {
                                     .on_click(cx.listener(move |ws, _, window, cx| {
                                         ws.export_pipeline(file.clone(), window, cx)
                                     })),
-                            )
+                            );
+                        v_flex().items_end().gap_1().child(buttons).children(said)
                     }),
             )
             // 1. A newer version in its swarm (core spec §70), then what's left to set up.
@@ -935,6 +941,14 @@ fn icon_picker(
                 }))
         }))
         .into_any_element()
+}
+
+/// What Export or Share just did, as a line of text: green with ✓, or red with ! (§71).
+fn text_line(ok: bool, words: &str) -> gpui::Div {
+    text(12., if ok { theme::GREEN } else { theme::RED })
+        .max_w(px(420.))
+        .truncate()
+        .child(format!("{} {words}", if ok { "✓" } else { "!" }))
 }
 
 fn runs_label(n: u8) -> String {

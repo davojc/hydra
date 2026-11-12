@@ -597,7 +597,7 @@ impl Workspace {
             }
             Err(e) => Note::error(e).title("Share to a swarm"),
         };
-        self.confirm(note, window, cx);
+        self.share_said(file, note, window, cx);
     }
 
     /// **Import from a swarm** (core spec §69): the pipelines your swarms share; picking one
@@ -697,6 +697,42 @@ impl Workspace {
         });
     }
 
+    /// Says what Export to share or Share to a swarm did with pipeline `file`: in the inbox, and
+    /// as a line under those buttons in its settings for 15 seconds (core spec §71).
+    fn share_said(&mut self, file: &str, note: Note, window: &mut Window, cx: &mut Context<Self>) {
+        let seq = self
+            .share_said
+            .values()
+            .map(|(_, _, s)| *s)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let short = note
+            .message
+            .split(". ")
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches('.')
+            .to_string();
+        self.share_said
+            .insert(file.to_string(), (note.kind, short, seq));
+        window.push_note(note, cx);
+        let file = file.to_string();
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(15))
+                .await;
+            let _ = this.update(cx, |ws, cx| {
+                if ws.share_said.get(&file).is_some_and(|(_, _, s)| *s == seq) {
+                    ws.share_said.remove(&file);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// Adds `p`, shared in swarm `id` (`swarm`), as a new pipeline that remembers where it came
     /// from, so the owner's later versions are offered (core spec §70); then opens it.
     fn import_from_swarm(
@@ -712,18 +748,17 @@ impl Workspace {
         match crate::pipeline_share::import_shared(&root, p, id, swarm) {
             Ok(name) => {
                 crate::action_log::write(format!("imported pipeline {name} from swarm {swarm}"));
-                self.confirm(
+                window.push_note(
                     Note::success(
                         "Added. Check its folders and skills, then turn its trigger on. When it's \
                          updated in the swarm, you'll be offered the new version.",
                     )
                     .title(format!("Imported {name}")),
-                    window,
                     cx,
                 );
                 self.start_new_pipeline(name, env, window, cx);
             }
-            Err(e) => self.confirm(Note::warning(e).title("Import from a swarm"), window, cx),
+            Err(e) => window.push_note(Note::warning(e).title("Import from a swarm"), cx),
         }
     }
 
@@ -885,14 +920,13 @@ impl Workspace {
                     self.pipeline_settings.remove(&orch);
                     self.open_pipeline_settings(orch, window, cx);
                 }
-                self.confirm(
+                window.push_note(
                     Note::success(format!("{} is up to date with {}.", p.name, u.swarm_name))
                         .title("Pipeline updated"),
-                    window,
                     cx,
                 );
             }
-            Err(e) => self.confirm(Note::error(e).title("Pipeline update"), window, cx),
+            Err(e) => window.push_note(Note::error(e).title("Pipeline update"), cx),
         }
         cx.notify();
     }
@@ -944,15 +978,14 @@ impl Workspace {
         match crate::pipeline::import(&root, text) {
             Ok(name) => {
                 crate::action_log::write(format!("imported pipeline {name} from {from}"));
-                self.confirm(
+                window.push_note(
                     Note::success("Added. Check its folders and skills, then turn its trigger on.")
                         .title(format!("Imported {name}")),
-                    window,
                     cx,
                 );
                 self.start_new_pipeline(name, env, window, cx);
             }
-            Err(e) => self.confirm(Note::warning(e).title("Import pipeline"), window, cx),
+            Err(e) => window.push_note(Note::warning(e).title("Import pipeline"), cx),
         }
     }
 
@@ -1030,7 +1063,7 @@ impl Workspace {
                 _ => return,
             };
             let _ = this.update_in(cx, |ws, window, cx| {
-                ws.confirm(note.title("Export pipeline"), window, cx)
+                ws.share_said(&name, note.title("Export pipeline"), window, cx)
             });
         })
         .detach();

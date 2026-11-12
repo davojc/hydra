@@ -1705,13 +1705,17 @@ impl Workspace {
         tokens
             .iter()
             .filter_map(|(id, token)| {
-                // Several tickets under one orchestrator: one card for them all, and every
-                // ticket's sessions under it.
+                // Tickets under the orchestrator, one or several: the card is the pipeline's, and
+                // each ticket (its name, state and what it waits on) is in its own box under it
+                // with its sessions, so it sits by the session it's about (core spec §76).
                 let open = reg.runs.open_of(token);
-                if open.len() > 1 {
+                if !open.is_empty() {
                     let cards: Vec<Card> = open.iter().map(|r| self.card_now(r)).collect();
                     let mut c = crate::pipeline_card::group_card(&cards.iter().collect::<Vec<_>>());
-                    c.line = format!("{} tickets in progress", open.len());
+                    c.line = match open.len() {
+                        1 => "1 ticket in progress".to_string(),
+                        n => format!("{n} tickets in progress"),
+                    };
                     let panes = std::iter::once(*id)
                         .chain(open.iter().flat_map(|r| {
                             crate::pipeline_card::stage_tokens(r)
@@ -2027,7 +2031,8 @@ impl Workspace {
                             .text_color(color(theme::TEXT_SECONDARY))
                             .child(c.line.clone()),
                     )
-                    .when(c.state.has_pill(), |d| {
+                    // A card with its tickets in boxes below leaves their state to them.
+                    .when(c.state.has_pill() && ticket, |d| {
                         d.child(
                             div()
                                 .flex_none()

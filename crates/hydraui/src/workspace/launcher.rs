@@ -1466,7 +1466,9 @@ fn create_choices(
                     .text_color(color(theme::TEAL)),
             )
             .child(
+                // The rest of the tile's width: without it the text has none and wraps per letter.
                 v_flex()
+                    .flex_1()
                     .min_w_0()
                     .gap(px(2.))
                     .child(

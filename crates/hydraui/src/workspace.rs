@@ -311,6 +311,10 @@ pub struct Workspace {
     mail_releasing: std::collections::HashSet<String>,
     /// The thread each `[mail]` pipeline last handed over, until it's a run.
     mail_inflight: HashMap<String, (String, std::time::Instant)>,
+    /// Pipelines imported from a swarm that has a newer version, by file (core spec §70).
+    pipeline_updates: HashMap<String, crate::pipeline_share::Update>,
+    /// The `<file> <version>` updates already announced, so each is told once.
+    updates_told: std::collections::HashSet<String>,
     /// Runs' tickets as Linear last said, by identifier: the card's SLA and link (phase 2 §5).
     linear_tickets: HashMap<String, crate::linear::Ticket>,
     /// Cards being offered or just sent, so one card never goes to two sessions.
@@ -594,6 +598,8 @@ impl Workspace {
             mail_looking: Default::default(),
             mail_releasing: Default::default(),
             mail_inflight: HashMap::new(),
+            pipeline_updates: HashMap::new(),
+            updates_told: std::collections::HashSet::new(),
             linear_tickets: HashMap::new(),
             in_flight: Default::default(),
             _mcp_pump: mcp_pump,

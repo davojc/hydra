@@ -299,8 +299,50 @@ impl Workspace {
                             )
                     }),
             )
-            // 1. What's left to set up.
-            .child(checklist(orch, &problems, cx))
+            // 1. A newer version in its swarm (core spec §70), then what's left to set up.
+            .child(
+                v_flex()
+                    .gap_2()
+                    .children(self.pipeline_updates.get(&draft.file).map(|u| {
+                        let file = draft.file.clone();
+                        h_flex()
+                            .gap_3()
+                            .items_center()
+                            .px(px(14.))
+                            .py(px(10.))
+                            .rounded(px(10.))
+                            .border_1()
+                            .border_color(color(theme::TEAL).opacity(0.5))
+                            .bg(color(theme::TEAL).opacity(0.06))
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        text(13., theme::TEXT)
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child("A newer version is available"),
+                                    )
+                                    .child(text(12., theme::TEXT_MUTED).whitespace_normal().child(
+                                        format!(
+                                            "{} has an update to this pipeline. Your own \
+                                             settings here are kept.",
+                                            u.swarm_name
+                                        ),
+                                    )),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("update-{orch}")))
+                                    .label("Review update…")
+                                    .primary()
+                                    .small()
+                                    .on_click(cx.listener(move |ws, _, window, cx| {
+                                        ws.update_pipeline_dialog(file.clone(), window, cx)
+                                    })),
+                            )
+                    }))
+                    .child(checklist(orch, &problems, cx)),
+            )
             // 2. Its name and colour.
             .child(
                 v_flex()

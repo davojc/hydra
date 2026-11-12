@@ -608,14 +608,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let found: Vec<(String, crate::pipeline_share::Shared)> = self
+        let found: Vec<(String, String, crate::pipeline_share::Shared)> = self
             .swarms
             .iter()
             .filter(|s| !s.removed)
             .flat_map(|s| {
                 crate::pipeline_share::shared(&s.folder)
                     .into_iter()
-                    .map(|p| (s.name.clone(), p))
+                    .map(|p| (s.id.clone(), s.name.clone(), p))
                     .collect::<Vec<_>>()
             })
             .collect();
@@ -639,10 +639,13 @@ impl Workspace {
                     v_flex()
                         .id("swarm-pipelines")
                         .gap_2()
-                        .children(found.iter().enumerate().map(|(i, (swarm, p))| {
+                        .children(found.iter().enumerate().map(|(i, (id, swarm, p))| {
                             let accent = p.color.unwrap_or(theme::TEAL);
-                            let (workspace, env, text) =
-                                (workspace.clone(), env.clone(), p.text.clone());
+                            let (workspace, env, one) = (
+                                workspace.clone(),
+                                env.clone(),
+                                (id.clone(), swarm.clone(), p.clone()),
+                            );
                             h_flex()
                                 .id(SharedString::from(format!("swarm-pipeline-{i}")))
                                 .gap_3()
@@ -671,9 +674,9 @@ impl Workspace {
                                 .child(div().text_xs().text_color(color(theme::TEAL)).child("Add"))
                                 .on_click(move |_, window, cx| {
                                     window.close_dialog(cx);
-                                    let (env, text) = (env.clone(), text.clone());
+                                    let (env, (id, swarm, p)) = (env.clone(), one.clone());
                                     workspace.update(cx, |ws, cx| {
-                                        ws.import_text(&text, "a swarm", env, window, cx)
+                                        ws.import_from_swarm(&p, &id, &swarm, env, window, cx)
                                     });
                                 })
                         })),
@@ -692,6 +695,238 @@ impl Workspace {
                     .child(body),
             )
         });
+    }
+
+    /// Adds `p`, shared in swarm `id` (`swarm`), as a new pipeline that remembers where it came
+    /// from, so the owner's later versions are offered (core spec §70); then opens it.
+    fn import_from_swarm(
+        &mut self,
+        p: &crate::pipeline_share::Shared,
+        id: &str,
+        swarm: &str,
+        env: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let root = self.hydra.paths.root().to_path_buf();
+        match crate::pipeline_share::import_shared(&root, p, id, swarm) {
+            Ok(name) => {
+                crate::action_log::write(format!("imported pipeline {name} from swarm {swarm}"));
+                window.push_note(
+                    Note::success(
+                        "Added. Check its folders and skills, then turn its trigger on. When it's \
+                         updated in the swarm, you'll be offered the new version.",
+                    )
+                    .title(format!("Imported {name}")),
+                    cx,
+                );
+                self.start_new_pipeline(name, env, window, cx);
+            }
+            Err(e) => window.push_note(Note::warning(e).title("Import from a swarm"), cx),
+        }
+    }
+
+    /// Looks in each imported pipeline's swarm for a newer version (core spec §70), and tells
+    /// of each new one once.
+    pub(super) fn pipeline_updates_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.hydra.paths.root().to_path_buf();
+        let swarms: Vec<(String, std::path::PathBuf, String)> = self
+            .swarms
+            .iter()
+            .filter(|s| !s.removed)
+            .map(|s| (s.id.clone(), s.folder.clone(), s.name.clone()))
+            .collect();
+        let find = |id: &str| {
+            swarms
+                .iter()
+                .find(|(i, _, _)| i == id)
+                .map(|(_, f, n)| (f.clone(), n.clone()))
+        };
+        let mut now = std::collections::HashMap::new();
+        for file in crate::pipeline::names(&root) {
+            let Ok(p) = crate::pipeline::load(&root, &file) else {
+                continue;
+            };
+            if let Some(u) = crate::pipeline_share::newer(&p, find) {
+                if self.updates_told.insert(format!("{file} {}", u.version)) {
+                    window.push_note(
+                        Note::info(format!(
+                            "{} has a newer version in {}. Open its settings to update.",
+                            p.name, u.swarm_name
+                        ))
+                        .title("Pipeline update"),
+                        cx,
+                    );
+                }
+                now.insert(file, u);
+            }
+        }
+        if now != self.pipeline_updates {
+            self.pipeline_updates = now;
+            cx.notify();
+        }
+    }
+
+    /// **Update** (core spec §70): asks first, then takes the swarm's newer version of pipeline
+    /// `file`; **Not now** skips that version.
+    pub(super) fn update_pipeline_dialog(
+        &mut self,
+        file: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(u) = self.pipeline_updates.get(&file).cloned() else {
+            return;
+        };
+        let name = crate::pipeline::load(self.hydra.paths.root(), &file)
+            .map_or_else(|_| file.clone(), |p| p.name);
+        let workspace = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (skip_ws, go_ws) = (workspace.clone(), workspace.clone());
+            let (skip_file, go_file) = (file.clone(), file.clone());
+            let skip_v = u.version.clone();
+            dialog
+                .title(format!("Update {name}?"))
+                .w(px(520.))
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .text_sm()
+                        .child(format!(
+                            "{} has a newer version of this pipeline. Updating takes its \
+                             stages and settings.",
+                            u.swarm_name
+                        ))
+                        .child(
+                            "It keeps what's yours here: its name, whether its trigger is on, \
+                             its schedule and mailbox, and the environment it starts in. Changes \
+                             you made to its stages are replaced. Tickets in progress carry on \
+                             with the stages they started with.",
+                        ),
+                )
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("update-pipeline-skip")
+                                .label("Not now")
+                                .ghost()
+                                .tooltip("Skip this version; you'll be offered the next one")
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let (file, v) = (skip_file.clone(), skip_v.clone());
+                                    skip_ws.update(cx, |ws, cx| {
+                                        ws.skip_pipeline_update(&file, &v, window, cx)
+                                    });
+                                }),
+                        )
+                        .child(
+                            Button::new("update-pipeline-go")
+                                .label("Update")
+                                .primary()
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let file = go_file.clone();
+                                    go_ws
+                                        .update(cx, |ws, cx| ws.update_pipeline(&file, window, cx));
+                                }),
+                        ),
+                )
+        });
+    }
+
+    fn skip_pipeline_update(
+        &mut self,
+        file: &str,
+        version: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match crate::pipeline_share::skip(self.hydra.paths.root(), file, version) {
+            Ok(()) => {
+                self.pipeline_updates.remove(file);
+                cx.notify();
+            }
+            Err(e) => window.push_note(Note::error(e).title("Pipeline update"), cx),
+        }
+    }
+
+    fn update_pipeline(&mut self, file: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(u) = self.pipeline_updates.get(file).cloned() else {
+            return;
+        };
+        let root = self.hydra.paths.root().to_path_buf();
+        let updated = crate::pipeline_share::update(&root, file, &u)
+            .and_then(|()| crate::pipeline::load(&root, file));
+        match updated {
+            Ok(p) => {
+                crate::action_log::write(format!(
+                    "pipeline {file}: updated to version {} from {}",
+                    u.version, u.swarm_name
+                ));
+                // Open tickets take its new look and bars; new stages join as a save's do.
+                if let Some(sv) = crate::mcp::server::get() {
+                    let added = crate::mcp::server::lock(sv.registry())
+                        .runs
+                        .refresh_from_file(file, &p);
+                    crate::run_log::record_added(&root, &added);
+                }
+                self.pipeline_updates.remove(file);
+                // Its settings, if open, show the new version.
+                let open: Vec<crate::envs::PaneId> = self
+                    .pipeline_settings
+                    .iter()
+                    .filter(|(_, d)| d.file() == file)
+                    .map(|(o, _)| *o)
+                    .collect();
+                for orch in open {
+                    self.pipeline_settings.remove(&orch);
+                    self.open_pipeline_settings(orch, window, cx);
+                }
+                window.push_note(
+                    Note::success(format!("{} is up to date with {}.", p.name, u.swarm_name))
+                        .title("Pipeline updated"),
+                    cx,
+                );
+            }
+            Err(e) => window.push_note(Note::error(e).title("Pipeline update"), cx),
+        }
+        cx.notify();
+    }
+
+    /// The **Update available** pill on orchestrator `orch`'s card, when its pipeline has one.
+    pub(super) fn update_pill(
+        &self,
+        orch: crate::envs::PaneId,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let file = self.orchestrators.get(&orch)?.clone();
+        self.pipeline_updates.get(&file)?;
+        Some(
+            div()
+                .id(SharedString::from(format!("update-pill-{orch}")))
+                .flex_none()
+                .px(px(6.))
+                .py(px(1.))
+                .rounded(px(4.))
+                .text_xs()
+                .bg(rgb(crate::orchestrator_theme::TEAL).opacity(0.16))
+                .text_color(rgb(crate::orchestrator_theme::TEAL))
+                .cursor_pointer()
+                .child("Update")
+                .tooltip(|window, cx| {
+                    gpui_component::tooltip::Tooltip::new(
+                        "Its swarm has a newer version of this pipeline",
+                    )
+                    .build(window, cx)
+                })
+                .on_click(cx.listener(move |ws, _, window, cx| {
+                    cx.stop_propagation();
+                    ws.update_pipeline_dialog(file.clone(), window, cx)
+                }))
+                .into_any_element(),
+        )
     }
 
     /// Adds `text` (a pipeline from `from`, a file or a swarm) as a new pipeline, then opens it.

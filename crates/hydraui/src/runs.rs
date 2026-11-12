@@ -1258,7 +1258,10 @@ impl Runs {
             return Err("only a running stage's own session asks".into());
         };
         let r = &mut self.runs[ri];
-        if r.stages[si].status != StageStatus::Running {
+        // A stopped stage that was told to look again may find it waits on someone after all
+        // (geo-tool-109-1: a second review reopened the PR's findings), as it may report.
+        let relooked = r.stages[si].status == StageStatus::Stopped && r.looking == Some(si);
+        if r.stages[si].status != StageStatus::Running && !relooked {
             return Err("this stage isn't running".into());
         }
         if r.asking.is_some() {
@@ -1278,6 +1281,13 @@ impl Runs {
         let question = question.trim();
         if question.is_empty() {
             return Err("the question is empty".into());
+        }
+        if relooked {
+            // At work again: waiting on its answer, as a stage that asked while running is.
+            r.stages[si].status = StageStatus::Running;
+            r.looking = None;
+            r.rechecking = None;
+            r.with_you = None;
         }
         r.asking = Some(Ask {
             stage: si,
@@ -2248,6 +2258,50 @@ mod tests {
         // Approving after all is a report like any other.
         runs.report("s1", rated(95)).unwrap();
         assert_eq!(runs.run(&id).unwrap().state, RunState::Finished);
+    }
+
+    #[test]
+    fn a_stopped_stage_looking_again_can_go_back_to_waiting_on_the_author() {
+        // geo-tool-109-1: stopped for a code owner's approval, the stage looked again, found a
+        // second review that reopened the findings, and asked to wait on Kris. hydraui said
+        // "this stage isn't running", so it reported and the run showed Needs you instead.
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a"]);
+        started(&mut runs, &id, "a", "s1");
+        let mut held = rated(60);
+        held.ask = "Approve it as a code owner".into();
+        runs.report("s1", held).unwrap();
+        assert_eq!(status(&runs, &id, 0), StageStatus::Stopped);
+        let link = Some("https://github.com/iov42/geo-tool/pull/109");
+        // Not looking again: still refused, as before.
+        let e = runs
+            .ask(
+                "s1",
+                "Waiting on Kris",
+                link,
+                SystemTime::now(),
+                Whom::Author,
+            )
+            .unwrap_err();
+        assert!(e.contains("isn't running"), "{e}");
+        runs.look_again(&id, 0).unwrap();
+        runs.ask(
+            "s1",
+            "Waiting on Kris",
+            link,
+            SystemTime::now(),
+            Whom::Author,
+        )
+        .unwrap();
+        let r = runs.run(&id).unwrap();
+        assert!(r.asking.as_ref().is_some_and(|a| a.whom == Whom::Author));
+        assert_eq!(r.looking, None);
+        assert_eq!(status(&runs, &id, 0), StageStatus::Running);
+        assert_eq!(
+            crate::pipeline_card::card(r).state,
+            crate::pipeline_card::CardState::Waiting,
+            "waiting on the author, not on you"
+        );
     }
 
     #[test]

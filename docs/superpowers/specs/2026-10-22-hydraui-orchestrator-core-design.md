@@ -1499,3 +1499,19 @@ A Windows user on 0.6.49 pressed **Connect Slack**, and it seemed to do nothing.
   - while the browser is out: "Finish signing in in your browser.", with **Didn't open? Open it again**, which opens the same sign-in page;
   - if it fails: "Couldn't connect: <why>", in red.
   - Connecting clears it, and the trigger goes back on as before. The notices still go to the bell too.
+
+## 74. A stage looking again can wait on the author again (added 2026-11-12)
+
+geo-tool-109-1 showed the gap.
+
+- The review stage re-reviewed Kris's fix, judged it resolved, and stopped for a code owner's approval (RED zone).
+- Its keep-checking looks (§62) then found a second reviewer's findings that reopened the PR. It requested changes again and asked to wait on Kris.
+- `stage_ask` refused with "this stage isn't running", because the stage was stopped and looking again. So it reported, and the run showed **Needs you** ("Wait for krisrimar-iov42 to fix …"), not **Waiting on author**. Kris's next push would then be looked for only until its keep-checking hours ran out.
+
+**The fix.** A stopped stage that was told to look again (`Run.looking`) may ask, as it may already report. Asking puts it back to work, waiting on its answer, as a stage that asked while running is:
+
+- it goes back to Running;
+- `looking`, `rechecking` and `with_you` clear;
+- the run waits on the author.
+
+A stopped stage that isn't looking again is still refused.

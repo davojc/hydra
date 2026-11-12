@@ -483,7 +483,7 @@ impl Workspace {
 
     /// The question in full, where it was asked, when hydraui next looks for the reply, and
     /// what can be done about it.
-    fn question_dialog(
+    pub(super) fn question_dialog(
         &mut self,
         orch: PaneId,
         run: Option<String>,

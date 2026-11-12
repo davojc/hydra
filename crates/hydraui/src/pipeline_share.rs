@@ -1,10 +1,9 @@
 //! Pipelines shared through a swarm (core spec §69). **Share to a swarm** writes a pipeline into
-//! `<swarm folder>/pipelines/<name>.md`, and teammates add it with **Import from a swarm**.
+//! `<swarm folder>/pipelines/`, and teammates add it with **Import from a swarm**.
 //!
-//! The settings go in a ```toml block inside a `.md` file because `.md` is the one file type
-//! every swarm syncs (a swarm syncs other types only once an owner adds them). Above the block,
-//! a few lines say what the file is. Import also reads a plain `.toml` file in that folder, for
-//! swarms that sync `.toml`.
+//! A swarm that syncs `.toml` gets the pipeline file itself, `<name>.toml`. One that doesn't
+//! (a swarm syncs only `.md` until an owner adds other types) gets `<name>.md`: a few lines
+//! saying what it is, then the settings in a ```toml block. Import reads both.
 
 use std::path::{Path, PathBuf};
 
@@ -36,13 +35,25 @@ pub fn from_md(md: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+/// Whether a swarm whose synced file types are `types` (`.md`, `.toml`, as the roster keeps
+/// them) syncs `.toml` files.
+pub fn syncs_toml(types: &[String]) -> bool {
+    types.iter().any(|t| {
+        t.trim()
+            .trim_start_matches('.')
+            .eq_ignore_ascii_case("toml")
+    })
+}
+
 /// Writes pipeline `name` (exported, so without this machine's `[autostart]`) into the swarm
-/// at `swarm_folder`, making its `pipelines` folder when there's none. Returns the file and
-/// whether it replaced one already there.
+/// at `swarm_folder`, making its `pipelines` folder when there's none: as `<name>.toml` when
+/// the swarm syncs `.toml` (`toml`), else as `<name>.md`. A copy shared earlier in the other
+/// form is removed, so the team sees it once. Returns the file and whether it replaced one.
 pub fn share(
     hydra_root: &Path,
     name: &str,
     swarm_folder: &Path,
+    toml: bool,
 ) -> Result<(PathBuf, bool), String> {
     let text = crate::pipeline::export(hydra_root, name)?;
     let title = crate::pipeline::parse(&text)
@@ -50,10 +61,24 @@ pub fn share(
         .unwrap_or_else(|_| name.to_string());
     let dir = swarm_folder.join(SWARM_DIR);
     std::fs::create_dir_all(&dir).map_err(|e| format!("can't make {}: {e}", dir.display()))?;
-    let file = dir.join(format!("{name}.md"));
-    let replaced = file.exists();
-    std::fs::write(&file, to_md(&title, &text))
-        .map_err(|e| format!("can't write {}: {e}", file.display()))?;
+    let (ext, other, body) = if toml {
+        ("toml", "md", text.clone())
+    } else {
+        ("md", "toml", to_md(&title, &text))
+    };
+    let file = dir.join(format!("{name}.{ext}"));
+    let old = dir.join(format!("{name}.{other}"));
+    // Only a copy that is this pipeline, shared before: never another file of the same name.
+    let old_copy = std::fs::read_to_string(&old).ok().is_some_and(|t| {
+        let t = if other == "md" { from_md(&t) } else { Some(t) };
+        t.and_then(|t| crate::pipeline::parse(&t).ok())
+            .is_some_and(|p| p.name == title)
+    });
+    let replaced = file.exists() || old_copy;
+    std::fs::write(&file, body).map_err(|e| format!("can't write {}: {e}", file.display()))?;
+    if old_copy {
+        std::fs::remove_file(&old).map_err(|e| format!("can't remove {}: {e}", old.display()))?;
+    }
     Ok((file, replaced))
 }
 
@@ -130,10 +155,10 @@ mod tests {
     fn sharing_makes_the_folder_and_teammates_can_import_it() {
         let home = home_with("prs", ONE);
         let swarm = tempfile::tempdir().unwrap();
-        let (file, replaced) = share(home.path(), "prs", swarm.path()).unwrap();
+        let (file, replaced) = share(home.path(), "prs", swarm.path(), false).unwrap();
         assert_eq!(file, swarm.path().join("pipelines").join("prs.md"));
         assert!(!replaced);
-        let (_, replaced) = share(home.path(), "prs", swarm.path()).unwrap();
+        let (_, replaced) = share(home.path(), "prs", swarm.path(), false).unwrap();
         assert!(replaced, "sharing again updates it");
 
         // Another file in the folder that isn't a pipeline, and a plain .toml one.
@@ -161,6 +186,32 @@ mod tests {
     }
 
     #[test]
+    fn a_swarm_that_syncs_toml_gets_the_pipeline_file_itself() {
+        assert!(syncs_toml(&[".md".into(), ".toml".into()]));
+        assert!(syncs_toml(&["TOML".into()]));
+        assert!(!syncs_toml(&[".md".into()]));
+
+        let home = home_with("prs", ONE);
+        let swarm = tempfile::tempdir().unwrap();
+        let dir = swarm.path().join("pipelines");
+        // Shared as .md before the swarm took .toml; now it does.
+        share(home.path(), "prs", swarm.path(), false).unwrap();
+        let (file, replaced) = share(home.path(), "prs", swarm.path(), true).unwrap();
+        assert_eq!(file, dir.join("prs.toml"));
+        assert!(replaced, "it replaces the .md copy");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), ONE);
+        assert!(!dir.join("prs.md").exists(), "the team sees it once");
+        let found = shared(swarm.path());
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "Review PR's");
+
+        // Someone else's note of the same name isn't touched.
+        std::fs::write(dir.join("prs.md"), "# my own notes\n").unwrap();
+        share(home.path(), "prs", swarm.path(), true).unwrap();
+        assert!(dir.join("prs.md").exists());
+    }
+
+    #[test]
     fn a_swarm_without_pipelines_has_none() {
         let swarm = tempfile::tempdir().unwrap();
         assert!(shared(swarm.path()).is_empty());
@@ -170,7 +221,7 @@ mod tests {
     fn sharing_leaves_out_this_machines_autostart() {
         let home = home_with("prs", &format!("{ONE}[autostart]\nenv = \"mine\"\n"));
         let swarm = tempfile::tempdir().unwrap();
-        let (file, _) = share(home.path(), "prs", swarm.path()).unwrap();
+        let (file, _) = share(home.path(), "prs", swarm.path(), false).unwrap();
         let md = std::fs::read_to_string(file).unwrap();
         assert!(!md.contains("autostart"), "{md}");
     }

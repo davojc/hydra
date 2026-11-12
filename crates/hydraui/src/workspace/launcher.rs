@@ -481,7 +481,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let swarms: Vec<(String, std::path::PathBuf, bool)> = self
+        let swarms: Vec<(String, std::path::PathBuf, bool, bool)> = self
             .swarms
             .iter()
             .filter(|s| !s.removed)
@@ -490,6 +490,7 @@ impl Workspace {
                     s.name.clone(),
                     s.folder.clone(),
                     s.my_role != hydra_swarms::Role::Reader,
+                    crate::pipeline_share::syncs_toml(&s.types),
                 )
             })
             .collect();
@@ -499,14 +500,14 @@ impl Workspace {
             let rows = swarms
                 .iter()
                 .enumerate()
-                .map(|(i, (name, folder, writes))| {
+                .map(|(i, (name, folder, writes, toml))| {
                     let (workspace, file, name, folder) = (
                         workspace.clone(),
                         file.clone(),
                         name.clone(),
                         folder.clone(),
                     );
-                    let writes = *writes;
+                    let (writes, toml) = (*writes, *toml);
                     h_flex()
                         .id(SharedString::from(format!("share-swarm-{i}")))
                         .gap_3()
@@ -530,11 +531,19 @@ impl Workspace {
                                 .flex_1()
                                 .min_w_0()
                                 .child(div().text_sm().child(name.clone()))
-                                .child(div().text_xs().text_color(muted).child(if writes {
-                                    "Your team will find it under Import from a swarm"
-                                } else {
-                                    "You can only read this swarm, so you can't share to it"
-                                })),
+                                .child(div().text_xs().text_color(muted).child(
+                                    match (writes, toml) {
+                                        (false, _) => {
+                                            "You can only read this swarm, so you can't share \
+                                             to it"
+                                        }
+                                        (true, true) => "Shared as a .toml file",
+                                        (true, false) => {
+                                            "Shared as a .md note: this swarm doesn't sync \
+                                             .toml files"
+                                        }
+                                    },
+                                )),
                         )
                         .when(writes, |d| {
                             d.on_click(move |_, window, cx| {
@@ -542,7 +551,7 @@ impl Workspace {
                                 let (file, name, folder) =
                                     (file.clone(), name.clone(), folder.clone());
                                 workspace.update(cx, |ws, cx| {
-                                    ws.share_to_swarm(&file, &name, &folder, window, cx)
+                                    ws.share_to_swarm(&file, &name, &folder, toml, window, cx)
                                 });
                             })
                         })
@@ -565,10 +574,11 @@ impl Workspace {
         file: &str,
         swarm: &str,
         folder: &std::path::Path,
+        toml: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let note = match crate::pipeline_share::share(self.hydra.paths.root(), file, folder) {
+        let note = match crate::pipeline_share::share(self.hydra.paths.root(), file, folder, toml) {
             Ok((path, replaced)) => {
                 crate::action_log::write(format!(
                     "shared pipeline {file} to swarm {swarm}: {}",

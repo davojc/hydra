@@ -1418,9 +1418,13 @@ A team in a swarm can share pipelines without sending files around.
 
 - **Share to a swarm.** This button sits beside **Export to share** at the top of Pipeline settings. It's greyed out until you're in a swarm, and its tooltip then says "Join a swarm on the Swarms page to share pipelines with your team".
   - It opens **Share to a swarm**, which lists your swarms. A swarm you can only read is listed but can't be picked ("You can only read this swarm, so you can't share to it"), because a reader's files don't sync.
-  - Picking a swarm writes the pipeline, exported (so without this machine's `[autostart]`), to `<swarm folder>/pipelines/<file>.md`. If that folder doesn't exist yet, it's made.
+  - Picking a swarm writes the pipeline, exported (so without this machine's `[autostart]`), into `<swarm folder>/pipelines/`. If that folder doesn't exist yet, it's made.
+    - **A swarm that syncs `.toml`** (`pipeline_share::syncs_toml` on the swarm's types) gets the pipeline file itself, `<file>.toml`.
+    - **Any other swarm** gets `<file>.md`.
+    - Each swarm's row says which it will be: "Shared as a .toml file", or "Shared as a .md note: this swarm doesn't sync .toml files".
+    - When the form changes (say an owner has since added `.toml`), the copy in the other form is removed, so the team sees it once. It's removed only if it holds this same pipeline.
   - Sharing it again updates the copy. The notification says "Shared to <swarm>" or "Updated its copy in <swarm>", and tells you how your team adds it.
-- **Why `.md`.** A swarm syncs only `.md` until an owner adds other types, so a `.toml` file there would reach no one. The file reads as a note:
+- **Why `.md` for the rest.** A swarm syncs only `.md` until an owner adds other types, so a `.toml` file there would reach no one. The file reads as a note:
   - a heading with the pipeline's name;
   - a line saying how to add it;
   - the settings in a `toml` block.

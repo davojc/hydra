@@ -2156,7 +2156,8 @@ fn create_choices(
 fn tilde(path: &std::path::Path) -> String {
     match dirs::home_dir().and_then(|h| path.strip_prefix(h).ok().map(std::path::Path::to_path_buf))
     {
-        Some(rest) => format!("~/{}", rest.display()),
+        // `~`, then the rest with this system's own separator (`\` on Windows).
+        Some(rest) => format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display()),
         None => path.display().to_string(),
     }
 }
@@ -2166,9 +2167,10 @@ mod tilde_tests {
     #[test]
     fn a_path_under_home_reads_with_a_tilde() {
         let home = dirs::home_dir().unwrap();
+        let sep = std::path::MAIN_SEPARATOR;
         assert_eq!(
             super::tilde(&home.join("Downloads").join("prs.toml")),
-            "~/Downloads/prs.toml"
+            format!("~{sep}Downloads{sep}prs.toml")
         );
         assert_eq!(
             super::tilde(std::path::Path::new("/tmp/x.toml")),

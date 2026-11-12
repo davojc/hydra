@@ -35,8 +35,9 @@ use crate::decide::Remote;
 use crate::ids::{PersonId, PersonKey};
 use crate::invites::{Hydra, Invites};
 use crate::paths::{
-    CLAIMS_PREFIX, FILES_PREFIX, LOG_PREFIX, MAX_FILE_BYTES, PARENTS_PREFIX, RelPath, file_key,
-    log_key, parent_key, path_of_key, path_of_parent_key, safe_rel_path,
+    CLAIMS_PREFIX, FILES_PREFIX, FOLDERS_PREFIX, LOG_PREFIX, MAX_FILE_BYTES, MOVES_PREFIX,
+    PARENTS_PREFIX, RelPath, file_key, folder_key, log_key, move_key, parent_key,
+    path_of_folder_key, path_of_key, path_of_parent_key, safe_rel_path,
 };
 use crate::roster::{
     Change, Kept, KeptAuthor, KeptEntry, MAX_CHANGE_BYTES, Machine, Member, Role, Roster,
@@ -56,13 +57,79 @@ const FETCHES_AT_ONCE: usize = 4;
 /// What one author's file entry for a path was made from, so other machines can tell an edit
 /// made on top of theirs from one made at the same time. `hash` is the entry's (None for a
 /// delete), `parent` the version it was made from (None for a new file), and `ancestors`
-/// `parent` and the versions before it, as far as the author knew them.
+/// `parent` and the versions before it, as far as the author knew them. `since` is when the
+/// oldest of those versions was there at this key, as far as its entries showed when this one
+/// was made (None for a new file, and from older hydras), so a later edit of a file that was
+/// there before a folder rename follows the rename even after every entry holding that version
+/// has been replaced.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ParentRecord {
     pub hash: Option<Hash>,
     pub parent: Option<Hash>,
     #[serde(default)]
     pub ancestors: Vec<Hash>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<u64>,
+}
+
+/// What an author says of a folder. `Deleted` and `MovedTo` are kept as records, not removed, so
+/// a machine that was offline learns the folder went rather than seeing nothing.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum FolderState {
+    Present,
+    Deleted,
+    MovedTo { to: String },
+}
+
+/// One author's newest word on a folder. `at` is unix microseconds the writer chose, not the
+/// entry's timestamp, so it survives the entry being rewritten.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct FolderRecord {
+    pub state: FolderState,
+    pub at: u64,
+}
+
+/// A folder record with who wrote it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct FolderVersion {
+    pub record: FolderRecord,
+    pub author: String,
+    pub machine: String,
+}
+
+/// A folder moved from one path to another, kept under its own key in the move log so no later
+/// record by the same author can overwrite it.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct MoveRecord {
+    pub from: String,
+    pub to: String,
+    pub at: u64,
+}
+
+/// A move with who made it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct MoveVersion {
+    pub record: MoveRecord,
+    pub author: String,
+    pub machine: String,
+}
+
+/// The name of the machine `author` writes for, current or retired.
+fn machine_of(roster: &Roster, author: &str) -> String {
+    match roster.member_by_author(author) {
+        Some(m) => m.machines.iter().find(|m| m.author == author),
+        None => None,
+    }
+    .map(|m| m.name.clone())
+    .or_else(|| roster.retired.get(author).map(|r| r.machine.clone()))
+    .unwrap_or_default()
+}
+
+/// Whether a folder record from `author` counts: a current writer's, or a former one's as claims'
+/// finished keys count, so a folder's history outlasts the machine that wrote it.
+fn folder_author_counts(roster: &Roster, author: &str) -> bool {
+    roster.writes(author) || roster.retired.contains_key(author)
 }
 
 /// Every current writer's entry for one path, and every former writer's as the roster keeps it,
@@ -740,6 +807,119 @@ impl SwarmNode {
         Ok(())
     }
 
+    /// Records this machine's word on folder `p`.
+    pub async fn put_folder(&self, p: &RelPath, record: &FolderRecord) -> anyhow::Result<()> {
+        let core = &self.core;
+        core.ensure_writable()?;
+        let bytes = serde_json::to_vec(record)?;
+        anyhow::ensure!(
+            bytes.len() as u64 <= MAX_RECORD_BYTES,
+            "a folder record is too big"
+        );
+        core.doc
+            .set_bytes(core.author, folder_key(p), bytes)
+            .await?;
+        Ok(())
+    }
+
+    /// Adds a move to the move log, under a key of its own.
+    pub async fn put_move(&self, m: &MoveRecord) -> anyhow::Result<()> {
+        let core = &self.core;
+        core.ensure_writable()?;
+        let bytes = serde_json::to_vec(m)?;
+        anyhow::ensure!(
+            bytes.len() as u64 <= MAX_RECORD_BYTES,
+            "a move record is too big"
+        );
+        // The author is in the hash too, so two machines' identical moves stay two entries.
+        let mut named = bytes.clone();
+        named.extend_from_slice(core.author.to_string().as_bytes());
+        let id = Hash::new(&named).to_hex().to_string();
+        core.doc
+            .set_bytes(core.author, move_key(&id), bytes)
+            .await?;
+        Ok(())
+    }
+
+    /// Every counting author's moves, in no particular order. Records that don't parse, are over
+    /// the size cap, name a path that isn't safe, or move a folder onto itself are left out.
+    pub async fn moves(&self, roster: &Roster) -> anyhow::Result<Vec<MoveVersion>> {
+        let mut out = Vec::new();
+        let query = Query::key_prefix(MOVES_PREFIX).build();
+        for e in self.core.entries(query).await? {
+            if e.content_len() > MAX_RECORD_BYTES {
+                continue;
+            }
+            let author = e.author().to_string();
+            if !folder_author_counts(roster, &author) {
+                continue;
+            }
+            let Some(bytes) = self.read_blob(e.content_hash()).await? else {
+                continue;
+            };
+            let Ok(record) = serde_json::from_slice::<MoveRecord>(&bytes) else {
+                continue;
+            };
+            if safe_rel_path(&record.from).is_none()
+                || safe_rel_path(&record.to).is_none()
+                || record.from == record.to
+            {
+                continue;
+            }
+            let machine = machine_of(roster, &author);
+            out.push(MoveVersion {
+                record,
+                author,
+                machine,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Per folder, every counting author's newest record, oldest first by `(at, author)`. Keys
+    /// that aren't safe paths, records that don't parse or are over the size cap, and a move
+    /// to a path that isn't safe are left out.
+    pub async fn folder_records(
+        &self,
+        roster: &Roster,
+    ) -> anyhow::Result<BTreeMap<RelPath, Vec<FolderVersion>>> {
+        let mut out: BTreeMap<RelPath, Vec<FolderVersion>> = BTreeMap::new();
+        let query = Query::key_prefix(FOLDERS_PREFIX).build();
+        for e in self.core.entries(query).await? {
+            let Some(path) = path_of_folder_key(e.key()) else {
+                continue;
+            };
+            if e.content_len() > MAX_RECORD_BYTES {
+                continue;
+            }
+            let author = e.author().to_string();
+            if !folder_author_counts(roster, &author) {
+                continue;
+            }
+            let Some(bytes) = self.read_blob(e.content_hash()).await? else {
+                continue;
+            };
+            let Ok(record) = serde_json::from_slice::<FolderRecord>(&bytes) else {
+                continue;
+            };
+            if let FolderState::MovedTo { to } = &record.state
+                && safe_rel_path(to).is_none()
+            {
+                continue;
+            }
+            let machine = machine_of(roster, &author);
+            out.entry(path).or_default().push(FolderVersion {
+                record,
+                author,
+                machine,
+            });
+        }
+        for versions in out.values_mut() {
+            versions.sort_by(|a, b| (a.record.at, &a.author).cmp(&(b.record.at, &b.author)));
+        }
+        Ok(out)
+    }
+
     /// Stores `bytes` and points `p`'s key at them.
     pub async fn put_file(&self, p: &RelPath, bytes: Bytes) -> anyhow::Result<Hash> {
         let core = &self.core;
@@ -1100,6 +1280,46 @@ mod tests {
 
     fn hash(n: usize) -> Hash {
         Hash::new(n.to_string())
+    }
+
+    fn member_with(role: Role, author: &str) -> Member {
+        Member {
+            person: PersonKey::generate().id(),
+            name: author.into(),
+            role,
+            machines: vec![Machine {
+                endpoint: String::new(),
+                name: format!("{author}-pc"),
+                author: author.into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn a_folder_record_counts_from_a_writer_or_a_retired_machine_and_no_one_else() {
+        let anchor = PersonKey::generate();
+        // A genesis only counts when its owner is the anchor.
+        let mut owner = member_with(Role::Owner, "owner");
+        owner.person = anchor.id();
+        let genesis = SignedChange::sign(
+            "swarm",
+            Change::Genesis {
+                name: "Notes".into(),
+                owner,
+            },
+            &anchor,
+            1,
+        );
+        let mut roster = Roster::fold("swarm", &anchor.id(), &[genesis]).expect("a roster");
+        roster.members.push(member_with(Role::Writer, "writer"));
+        roster.members.push(member_with(Role::Reader, "reader"));
+        roster.retired.insert("retired".into(), Default::default());
+
+        assert!(folder_author_counts(&roster, "owner"));
+        assert!(folder_author_counts(&roster, "writer"));
+        assert!(folder_author_counts(&roster, "retired"));
+        assert!(!folder_author_counts(&roster, "reader"));
+        assert!(!folder_author_counts(&roster, "stranger"));
     }
 
     #[test]

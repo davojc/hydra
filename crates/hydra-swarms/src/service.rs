@@ -2003,6 +2003,16 @@ impl Worker {
                         path.as_str()
                     )
                 }
+                // A writer's edit is held too, so the reader's notice would be wrong.
+                FolderEvent::Held(Attention::ReaderEdit { path })
+                    if path.as_str() == crate::rules::SWARMIGNORE =>
+                {
+                    format!(
+                        "{}: your change to {} isn't shared. Only owners can change what syncs, so it stopped syncing on this machine.",
+                        self.name,
+                        path.as_str()
+                    )
+                }
                 FolderEvent::Held(Attention::ReaderEdit { path }) => format!(
                     "{}: your change isn't shared. You're a reader, so {} stopped syncing on this machine.",
                     self.name,
@@ -2038,7 +2048,35 @@ impl Worker {
                     errors.insert(format!("{}: {text}", self.name));
                     continue;
                 }
+                FolderEvent::PublishIgnore { text, replaces } => {
+                    let only = format!("Only owners can change what {} syncs.", self.name);
+                    // Each error already names the swarm.
+                    if let Err(e) = self
+                        .owner_change(Change::SetIgnore { text, replaces }, only)
+                        .await
+                    {
+                        errors.insert(e);
+                        // Otherwise the next pass takes the edit as published and puts the
+                        // roster's text over it.
+                        if let Some(folder) = self.folder.as_mut()
+                            && let Err(e) = folder.ignore_not_published()
+                        {
+                            errors.insert(format!("{}: {e:#}", self.name));
+                        }
+                    }
+                    continue;
+                }
                 FolderEvent::Held(_) | FolderEvent::Attention(_) => continue,
+                ev @ (FolderEvent::RenameLost { .. }
+                | FolderEvent::DeleteKeptForWork { .. }
+                | FolderEvent::MyDeleteKept { .. }
+                | FolderEvent::MyDeleteLostToRename { .. }
+                | FolderEvent::MyRenameSurvivedDelete { .. }) => {
+                    match layout_notice(&self.name, &ev) {
+                        Some(text) => text,
+                        None => continue,
+                    }
+                }
             };
             self.shared.toast(&self.ns, text);
         }
@@ -2942,9 +2980,93 @@ fn copy_machine(copy: &RelPath) -> Option<String> {
     Some(machine.to_string())
 }
 
+/// The bell text for a folder rename or delete that didn't go this machine's way, or `None` for
+/// any other event.
+fn layout_notice(swarm: &str, ev: &FolderEvent) -> Option<String> {
+    Some(match ev {
+        FolderEvent::RenameLost {
+            mine,
+            kept,
+            machine,
+        } => format!(
+            "{swarm}: {} was also renamed on {machine}, to {}. That name was later, so it's the one kept.",
+            mine.as_str(),
+            kept.as_str()
+        ),
+        FolderEvent::DeleteKeptForWork { path, machine } => format!(
+            "{swarm}: {} was deleted on {machine}, but it holds work added here, so it was kept.",
+            path.as_str()
+        ),
+        FolderEvent::MyDeleteKept { path } => format!(
+            "{swarm}: you deleted {}, but someone had added to it, so it's back with their work.",
+            path.as_str()
+        ),
+        FolderEvent::MyDeleteLostToRename { path, to, machine } => format!(
+            "{swarm}: you deleted {}, but {machine} had renamed it to {} at about the same time, so it was kept there.",
+            path.as_str(),
+            to.as_str()
+        ),
+        FolderEvent::MyRenameSurvivedDelete { to, machine } => format!(
+            "{swarm}: {machine} deleted the folder you renamed to {to} before your rename reached it, so {to} was kept.",
+            to = to.as_str()
+        ),
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rel(p: &str) -> RelPath {
+        safe_rel_path(p).unwrap()
+    }
+
+    #[test]
+    fn each_folder_layout_notice_has_its_bell_text() {
+        let cases = [
+            (
+                FolderEvent::RenameLost {
+                    mine: rel("notes/robert"),
+                    kept: rel("notes/rob"),
+                    machine: "Olive's laptop".into(),
+                },
+                "Team: notes/robert was also renamed on Olive's laptop, to notes/rob. That name was later, so it's the one kept.",
+            ),
+            (
+                FolderEvent::DeleteKeptForWork {
+                    path: rel("notes/bob"),
+                    machine: "Olive's laptop".into(),
+                },
+                "Team: notes/bob was deleted on Olive's laptop, but it holds work added here, so it was kept.",
+            ),
+            (
+                FolderEvent::MyDeleteKept {
+                    path: rel("notes/bob"),
+                },
+                "Team: you deleted notes/bob, but someone had added to it, so it's back with their work.",
+            ),
+            (
+                FolderEvent::MyDeleteLostToRename {
+                    path: rel("notes"),
+                    to: rel("docs"),
+                    machine: "Olive's laptop".into(),
+                },
+                "Team: you deleted notes, but Olive's laptop had renamed it to docs at about the same time, so it was kept there.",
+            ),
+            (
+                FolderEvent::MyRenameSurvivedDelete {
+                    to: rel("docs"),
+                    machine: "Olive's laptop".into(),
+                },
+                "Team: Olive's laptop deleted the folder you renamed to docs before your rename reached it, so docs was kept.",
+            ),
+        ];
+        for (ev, want) in cases {
+            assert_eq!(layout_notice("Team", &ev).as_deref(), Some(want));
+        }
+        assert_eq!(layout_notice("Team", &FolderEvent::Error("x".into())), None);
+    }
 
     fn noted(hashes: &[Hash]) -> HashSet<Hash> {
         hashes.iter().copied().collect()

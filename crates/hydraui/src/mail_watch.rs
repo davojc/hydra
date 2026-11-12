@@ -292,6 +292,7 @@ mod tests {
             subject: "Sharing".into(),
             body: body.into(),
             attachments: files.iter().map(|f| f.to_string()).collect(),
+            ..Default::default()
         };
         let md = email_md(&[
             m("Ann <ann@acme.com>", "How do I share?", &["log.pdf"]),

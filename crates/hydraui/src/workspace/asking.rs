@@ -21,7 +21,7 @@ use crate::runs::{Ask, Change, Decided, Run, RunState};
 
 impl Workspace {
     /// The pane of the session that asked `run`'s question.
-    fn asking_pane(&self, run: &Run, cx: &App) -> Option<PaneId> {
+    pub(super) fn asking_pane(&self, run: &Run, cx: &App) -> Option<PaneId> {
         let ask = run.asking.as_ref()?;
         let token = run.stages[ask.stage].latest()?.session.clone()?;
         self.panes
@@ -48,6 +48,15 @@ impl Workspace {
                         // Waiting on a pull request's author isn't the user's to act on.
                         if r.asking.as_ref()?.whom == crate::runs::Whom::Author {
                             return None;
+                        }
+                        if r.asking.as_ref()?.whom == crate::runs::Whom::Approval {
+                            return Some((
+                                r.pipeline.name.clone(),
+                                format!(
+                                    "{} has a draft for you to approve in Actions: {question}",
+                                    r.ticket
+                                ),
+                            ));
                         }
                         let at =
                             r.pipeline.product_channel.as_deref().map_or(
@@ -434,8 +443,11 @@ impl Workspace {
         let (_, ask, _) = self.asked(orch, run, cx)?;
         let (tone, tint) = match ask.whom {
             crate::runs::Whom::Author => (color(accent), color(accent).opacity(0.16)),
-            crate::runs::Whom::Product => (color(theme::AMBER), color(theme::AMBER_TINT)),
+            crate::runs::Whom::Product | crate::runs::Whom::Approval => {
+                (color(theme::AMBER), color(theme::AMBER_TINT))
+            }
         };
+        let approval = ask.whom == crate::runs::Whom::Approval;
         let run = run.map(str::to_string);
         let waited = SystemTime::now()
             .duration_since(ask.since)
@@ -473,12 +485,20 @@ impl Workspace {
                                     crate::asking::waited(waited)
                                 )
                             }
+                            crate::runs::Whom::Approval => {
+                                format!("Approve in Actions · {}", crate::asking::waited(waited))
+                            }
                         }),
                 )
                 // Never cut off: the line opens the question.
                 .child(div().flex_none().text_xs().text_color(tone).child("›"))
+                // An approval is answered in Actions, never as a question.
                 .on_click(cx.listener(move |ws, _, window, cx| {
-                    ws.question_dialog(orch, run.clone(), window, cx)
+                    if approval {
+                        ws.open_actions(window, cx)
+                    } else {
+                        ws.question_dialog(orch, run.clone(), window, cx)
+                    }
                 }))
                 .into_any_element(),
         )
@@ -527,6 +547,7 @@ impl Workspace {
                 .title(match ask.whom {
                     crate::runs::Whom::Product => "Waiting for product",
                     crate::runs::Whom::Author => "Waiting on the author",
+                    crate::runs::Whom::Approval => "Waiting for your approval",
                 })
                 .child(
                     v_flex()

@@ -62,6 +62,7 @@ impl Workspace {
         self.projects = None;
         self.history = None;
         self.tickets = None;
+        self.actions = None;
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -133,6 +134,23 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.text_dialog_labelled(title, about, initial, placeholder, "Save", save, window, cx)
+    }
+
+    /// `text_dialog_about`, its button saying `ok` ("Reject", "Ask for the change").
+    #[allow(clippy::too_many_arguments)] // a dialog's parts, each named at the call
+    pub(super) fn text_dialog_labelled(
+        &mut self,
+        title: String,
+        about: Option<&'static str>,
+        initial: String,
+        placeholder: &'static str,
+        ok: &'static str,
+        save: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) -> Result<(), String>
+        + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(placeholder)
@@ -182,7 +200,7 @@ impl Workspace {
                                 .label("Cancel")
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
-                        .child(Button::new("save").label("Save").primary().on_click(
+                        .child(Button::new("save").label(ok).primary().on_click(
                             move |_, window, cx| {
                                 let value = i.read(cx).value().trim().to_string();
                                 match ws.update(cx, |ws, cx| save(ws, value, window, cx)) {

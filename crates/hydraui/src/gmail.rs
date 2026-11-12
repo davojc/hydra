@@ -413,6 +413,28 @@ pub fn modify_thread(
     .map(|_| ())
 }
 
+/// Saves `mime` (a whole RFC 5322 message) as a draft in thread `thread` of the signed-in
+/// mailbox, for a person to send from Gmail; never sends it. Its draft id.
+pub fn create_draft(
+    ep: &Endpoints,
+    access: &str,
+    thread: &str,
+    mime: &str,
+) -> Result<String, String> {
+    use base64::Engine;
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mime.as_bytes());
+    let v = api_post(
+        ep,
+        access,
+        "users/me/drafts",
+        &serde_json::json!({"message": {"raw": raw, "threadId": thread}}),
+    )?;
+    v["id"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| "Gmail saved no draft".to_string())
+}
+
 /// The signed-in mailbox's address.
 pub fn profile(ep: &Endpoints, access: &str) -> Result<String, String> {
     api_get(ep, access, "users/me/profile")?["emailAddress"]
@@ -450,7 +472,7 @@ fn read_thread(v: &serde_json::Value) -> Option<Thread> {
 }
 
 /// One message of a thread, as a triage run reads it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Message {
     pub from: String,
     pub to: String,
@@ -460,6 +482,10 @@ pub struct Message {
     pub body: String,
     /// The names of its attachments.
     pub attachments: Vec<String>,
+    /// Its `Message-ID` header, which a reply names in `In-Reply-To`.
+    pub message_id: String,
+    /// Its `Reply-To` header: where a reply goes, when it has one.
+    pub reply_to: String,
 }
 
 /// The plain text of a `format=full` payload: its own `text/plain` body, else its parts'.
@@ -524,6 +550,8 @@ pub fn thread_messages(ep: &Endpoints, access: &str, id: &str) -> Result<Vec<Mes
                     .filter(|b| !b.is_empty())
                     .unwrap_or_else(|| m["snippet"].as_str().unwrap_or("").to_string()),
                 attachments: files,
+                message_id: header("Message-ID"),
+                reply_to: header("Reply-To"),
             }
         })
         .collect())
@@ -908,7 +936,9 @@ mod tests {
                         {"name": "From", "value": "Ann <ann@acme.com>"},
                         {"name": "To", "value": "integrations@iov42.com"},
                         {"name": "Subject", "value": "Sharing"},
-                        {"name": "Date", "value": "Mon, 9 Nov 2026 10:00:00 +0000"}
+                        {"name": "Date", "value": "Mon, 9 Nov 2026 10:00:00 +0000"},
+                        {"name": "Message-ID", "value": "<m1@acme.com>"},
+                        {"name": "Reply-To", "value": "support@acme.com"}
                     ],
                     "parts": [
                         {"mimeType": "text/plain", "body": {"data": b64("Hi, how do I share a record? é")}},
@@ -936,11 +966,37 @@ mod tests {
                 subject: "Sharing".into(),
                 body: "Hi, how do I share a record? é".into(),
                 attachments: vec!["log.pdf".into()],
+                message_id: "<m1@acme.com>".into(),
+                reply_to: "support@acme.com".into(),
             }
         );
         // No plain text: Gmail's snippet.
         assert_eq!(got[1].body, "Only a snippet");
         assert!(seen.recv().unwrap().url.contains("format=full"));
+    }
+
+    #[test]
+    fn a_draft_is_saved_in_its_thread_not_sent() {
+        let (ep, seen) = fake(
+            vec![(
+                "/gmail/v1/users/me/drafts",
+                200,
+                r#"{"id":"r-7","message":{"id":"m9","threadId":"t1"}}"#.into(),
+            )],
+            1,
+        );
+        let id = create_draft(&ep, "ya29.a", "t1", "To: ann@acme.com\r\n\r\nHi").unwrap();
+        assert_eq!(id, "r-7");
+        let s = seen.recv().unwrap();
+        assert_eq!(s.method, "POST");
+        assert!(s.url.ends_with("/users/me/drafts"), "{}", s.url);
+        let v: serde_json::Value = serde_json::from_str(&s.body).unwrap();
+        assert_eq!(v["message"]["threadId"], "t1");
+        use base64::Engine;
+        let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(v["message"]["raw"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(raw, b"To: ann@acme.com\r\n\r\nHi");
     }
 
     #[test]

@@ -139,6 +139,15 @@ pub fn card(run: &Run) -> Card {
         {
             CardState::Waiting
         }
+        // Approving a draft in Actions is the user's to do.
+        RunState::NeedsYou(_)
+            if run
+                .asking
+                .as_ref()
+                .is_some_and(|a| a.whom == crate::runs::Whom::Approval) =>
+        {
+            CardState::NeedsYou
+        }
         RunState::NeedsYou(_) if run.asking.is_some() => CardState::Asking,
         RunState::NeedsYou(_) if run.stages.iter().any(wants_check) => CardState::Checking,
         RunState::NeedsYou(_) => CardState::NeedsYou,

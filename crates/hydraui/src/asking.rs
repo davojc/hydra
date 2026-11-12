@@ -27,6 +27,11 @@ pub fn check_prompt_for(whom: crate::runs::Whom, question: &str, link: &str) -> 
              you're still waiting, and stop. If nothing is new, say so in one line and stop: \
              you'll be asked again."
         ),
+        // Never looked for: a person answers it in Actions.
+        crate::runs::Whom::Approval => format!(
+            "You're waiting for a person to approve your action ({question}) in Actions. Do \
+             nothing: hydraui tells you when they act."
+        ),
     }
 }
 

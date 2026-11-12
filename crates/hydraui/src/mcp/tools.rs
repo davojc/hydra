@@ -487,6 +487,7 @@ mod tests {
                 "stage_report",
                 "stage_ask",
                 "stage_answer",
+                "action_propose",
                 "plan_show",
                 "plan_set_spec",
                 "plan_propose_milestone",

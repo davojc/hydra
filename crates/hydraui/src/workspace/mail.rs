@@ -64,7 +64,12 @@ impl Workspace {
     }
 
     /// The environment a `[mail]` pipeline runs in, as a scheduled one's (§58).
-    fn mail_env(&self, p: &Pipeline, m: &MailSettings, cx: &gpui::App) -> Option<String> {
+    pub(super) fn mail_env(
+        &self,
+        p: &Pipeline,
+        m: &MailSettings,
+        cx: &gpui::App,
+    ) -> Option<String> {
         let running = self.orchestrators.iter().find_map(|(id, f)| {
             (*f == p.file).then(|| self.panes.get(id).map(|v| v.read(cx).env().to_string()))?
         });

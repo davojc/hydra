@@ -1558,3 +1558,20 @@ A Linear or Slack pipeline's card has a bar filling towards its next look. A sch
 - **A bar.** It fills from the run time before to the next, the same bar a trigger's look uses. It's full, with "starting its run now", while a run is due and not yet started.
 - **Only on the lead card.** With several runs at once, only the card holding the pipeline's trigger shows it.
 - **Wall clock.** The wait is counted on the local wall clock, so across a daylight-saving change that one wait is an hour out.
+
+## 80. Actions: work a person approves (added 2026-11-12)
+
+A stage can draft something a person must approve before it goes anywhere: a reply to a customer's email, first of all. The pipeline's own prompt decides when, for example "draft a reply if you think it's something we can answer, and put it in Actions". Nothing is pipeline-specific: any stage can propose an action.
+
+- **`action_propose`.** A stage session calls it with:
+  - `title`: what to approve, in a line.
+  - `proposal`: the draft itself.
+  - `context`: what it answers. Optional. When the run has an `email.md`, hydraui fills this from the email: its subject, sender and text.
+
+  The stage then waits, as for `stage_ask` (§62). The ticket says "Needs you: approve … in Actions", and the session does nothing until a person acts. If the stage calls it again after **Edit**, that revises the same action, and its revision count goes up.
+- **The Actions button.** It sits beside Projects, History and Tickets, with the number waiting. It opens the **Actions** page: one row per action, newest first, showing the pipeline's icon and colour, the title, the ticket, and how long it has waited. Approved and rejected actions stay listed, with their outcome, for 7 days.
+- **A row opens.** It shows what it answers (an email's subject, sender and text), then the proposed draft in an editable box, then three buttons:
+  - **Approve**: the draft as it stands in the box, edits included. For a run that came from an email (`[mail]`, email triage spec), hydraui saves it as a **Gmail draft reply in that email's thread**. It goes to the sender, with "Re: <subject>", from the connected mailbox. Nothing is sent: a person sends it from Gmail. The stage is told it was approved and saved, and reports done.
+  - **Reject**: asks for an optional reason. The stage is told it was rejected and why, saves nothing, and reports done, naming the rejection.
+  - **Edit**: asks what to change, as a prompt. The stage is told, revises the draft, and calls `action_propose` again. The row shows "Changing…" until the new draft arrives.
+- **Where it's kept.** Each action is kept as `<hydra home>/hydraui/actions/<id>.json`, so a restart keeps them.

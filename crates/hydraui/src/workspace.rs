@@ -2,6 +2,7 @@
 //! the selected environment's shown terminal beside its file pane, the status bar, and the
 //! commands bound to keys.
 mod accounts;
+mod actions_page;
 mod all_tasks;
 mod asking;
 mod busy;
@@ -222,6 +223,8 @@ pub struct Workspace {
     projects: Option<projects_tab::ProjectsTab>,
     /// History (core spec §50), when shown.
     history: Option<history_tab::HistoryTab>,
+    /// Actions (core spec §80), when shown.
+    actions: Option<actions_page::ActionsPage>,
     /// The notifications panel under the bell, while open (core spec §57).
     inbox: Option<inbox_panel::InboxPanel>,
     /// What Export to share or Share to a swarm just did, by pipeline file: a line under those
@@ -565,6 +568,7 @@ impl Workspace {
             settings: None,
             projects: None,
             history: None,
+            actions: None,
             inbox: None,
             share_said: HashMap::new(),
             tickets: None,
@@ -2028,6 +2032,7 @@ impl Workspace {
                     .on_click(cx.listener(|ws, _, window, cx| ws.pick_env(window, cx))),
             )
             .child(div().flex_1())
+            .child(self.actions_button(cx))
             .child(self.projects_button(cx))
             .child(self.tickets_button(cx))
             .child(self.history_button(cx))
@@ -2132,6 +2137,7 @@ impl Render for Workspace {
         let body = match self.envs.active() {
             // Settings opened from the start page shows over it; closing it goes back.
             _ if self.settings.is_some() => self.render_settings(cx),
+            _ if self.actions.is_some() => self.render_actions_page(window, cx),
             _ if self.tickets.is_some() => self.render_tickets_page(cx),
             _ if self.history.is_some() => self.render_history_page(cx),
             _ if self.projects.is_some() => self.render_projects(cx),

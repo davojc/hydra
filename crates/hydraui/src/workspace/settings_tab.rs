@@ -117,6 +117,22 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.text_dialog_about(title, None, initial, placeholder, save, window, cx)
+    }
+
+    /// `text_dialog`, with `about` above the box: what it's for and where to find it.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn text_dialog_about(
+        &mut self,
+        title: String,
+        about: Option<&'static str>,
+        initial: String,
+        placeholder: &'static str,
+        save: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) -> Result<(), String>
+        + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(placeholder)
@@ -144,6 +160,14 @@ impl Workspace {
                 .child(
                     v_flex()
                         .gap_2()
+                        .when_some(about, |d, a| {
+                            d.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(a),
+                            )
+                        })
                         .child(Input::new(&input))
                         .when_some(shown, |d, e| {
                             d.child(div().text_sm().text_color(danger).child(e))

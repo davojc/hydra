@@ -220,11 +220,7 @@ pub fn parse(text: &str) -> (UiConfig, Vec<String>) {
                 Ok(())
             }),
             "slack_connect_url" => get::<String>(value).and_then(|u| {
-                let u = u.trim().trim_end_matches('/').to_string();
-                if !u.starts_with("https://") {
-                    return Err(format!("{u:?} must be an https:// address"));
-                }
-                cfg.slack_connect_url = Some(u);
+                cfg.slack_connect_url = Some(slack_connect_url(&u)?);
                 Ok(())
             }),
             "gmail_client_id" => get::<String>(value).and_then(|id| {
@@ -360,6 +356,19 @@ pub fn with_setting(
         Some(p) => Err(p),
         None => Ok(out),
     }
+}
+
+/// `slack_connect_url` as written: the team's Canopy, an https:// address, without a trailing
+/// `/`.
+pub fn slack_connect_url(u: &str) -> Result<String, String> {
+    let u = u.trim().trim_end_matches('/').to_string();
+    if u.is_empty() {
+        return Err("Paste your team's Canopy address, e.g. https://canopy.example.com".into());
+    }
+    if !u.starts_with("https://") || u.len() <= "https://".len() {
+        return Err(format!("{u:?} must be an https:// address"));
+    }
+    Ok(u)
 }
 
 /// Writes one setting to `paths`' config.toml (made if missing), as `with_setting` does.
@@ -547,6 +556,17 @@ new_terminal = "ctrl-alt-d"
         assert_eq!(cfg.colors.background.as_deref(), Some("#101010"));
         assert_eq!(cfg.colors.palette.as_ref().map(Vec::len), Some(2));
         assert_eq!(cfg.keys["new_terminal"], "ctrl-alt-d");
+    }
+
+    #[test]
+    fn a_canopy_address_is_https_without_a_trailing_slash() {
+        assert_eq!(
+            slack_connect_url(" https://canopy.dev.iov42.net/ ").as_deref(),
+            Ok("https://canopy.dev.iov42.net")
+        );
+        assert!(slack_connect_url("").unwrap_err().contains("Canopy"));
+        assert!(slack_connect_url("http://canopy").is_err());
+        assert!(slack_connect_url("https://").is_err());
     }
 
     #[test]

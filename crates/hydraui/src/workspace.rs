@@ -314,6 +314,8 @@ pub struct Workspace {
     mail_releasing: std::collections::HashSet<String>,
     /// The thread each `[mail]` pipeline last handed over, until it's a run.
     mail_inflight: HashMap<String, (String, std::time::Instant)>,
+    /// Where Connect Slack is for each environment, shown under the button (core spec §73).
+    slack_connecting: HashMap<String, slack::SlackConnecting>,
     /// Pipelines imported from a swarm that has a newer version, by file (core spec §70).
     pipeline_updates: HashMap<String, crate::pipeline_share::Update>,
     /// The `<file> <version>` updates already announced, so each is told once.
@@ -603,6 +605,7 @@ impl Workspace {
             mail_releasing: Default::default(),
             mail_inflight: HashMap::new(),
             pipeline_updates: HashMap::new(),
+            slack_connecting: HashMap::new(),
             updates_told: std::collections::HashSet::new(),
             linear_tickets: HashMap::new(),
             in_flight: Default::default(),

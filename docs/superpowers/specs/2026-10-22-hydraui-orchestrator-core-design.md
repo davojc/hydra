@@ -1522,3 +1522,10 @@ The "⏸ Waiting on the author · 6m" line sat right under the pipeline's card, 
 
 - **Where it is.** On a one-ticket pipeline, the line now sits inside the orchestrator's guide line, under the stage sessions, beside the stage that's waiting. With several tickets, each ticket's line stays in its own box, as before.
 - **Its colour.** A wait on a pull request's author is in the pipeline's colour, like the pill. A question to product stays amber.
+
+## 76. A ticket's details sit with its sessions (added 2026-11-12)
+
+On a pipeline with one ticket open, the ticket's name, its state ("version-2-backend-1937 · Review · waiting on the author") and its pill were drawn in the pipeline's card, above the trigger. They looked like the pipeline's own state, far from the **1. Review PR** session they were about. With two or more tickets, each already had its own box (§46).
+
+- **One ticket gets a box too.** Under its orchestrator, the box holds the ticket's name (a pull request as `repo #N`), its state pill, what it waits on (§75), its link, and the sessions working on it. That's the same box as with several tickets, and the group view already drew one for a single ticket (`open_lanes`).
+- **The pipeline's card is the pipeline's.** While tickets are open, it shows the pipeline's name and "1 ticket in progress" (or "N tickets in progress"). It no longer shows a ticket's pill or progress bar, since the box below has them. With no ticket open, it reads as before ("No ticket yet", Ready).

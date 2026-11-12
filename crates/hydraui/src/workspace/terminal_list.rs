@@ -246,7 +246,8 @@ impl Workspace {
                     continue;
                 }
                 let active = panes.iter().any(|p| Some(*p) == shown);
-                let lanes = self.lanes(*orch, cx);
+                // Each open ticket is a box under the orchestrator, one ticket or several (§76).
+                let lanes = self.open_lanes(*orch, cx);
                 let mut block = v_flex()
                     .id(SharedString::from(format!("pipeline-block-{orch}")))
                     .mx_1()
@@ -257,7 +258,7 @@ impl Workspace {
                     .border_1()
                     // The pipeline's own colour, so pipelines are told apart at a glance.
                     .border_color(color(card.accent).opacity(if active { 0.55 } else { 0.3 }))
-                    .child(self.render_pipeline_card(*orch, card, active, true, cx))
+                    .child(self.render_pipeline_card(*orch, card, active, lanes.is_empty(), cx))
                     .children(self.render_linear_row(*orch, card.accent, cx));
                 let orch = *orch;
                 if let Some(row) = self.terminal_row(

@@ -104,7 +104,8 @@ fn fold(
 ) -> gpui::Stateful<gpui::Div> {
     h_flex()
         .id(id)
-        .gap_2()
+        .flex_wrap()
+        .gap_x_2()
         .cursor_pointer()
         .text_size(px(12.5))
         .text_color(color(theme::TEXT_SECONDARY))
@@ -970,6 +971,7 @@ fn step_card(
                 .child(Textarea::new(&s.prompt))
                 .child(
                     h_flex()
+                        .flex_wrap()
                         .gap_1()
                         .items_center()
                         .child(text(11.5, theme::TEXT_MUTED).mr_1().child("Insert"))
@@ -1219,7 +1221,10 @@ fn add_step(orch: PaneId, adding: bool, cx: &mut Context<Workspace>) -> AnyEleme
     let tile = |id: &str, title: &str, about: &str, jev: bool| {
         v_flex()
             .id(SharedString::from(format!("settings-add-{id}-{orch}")))
+            // Equal halves that shrink with the window: their text wraps, not the row.
             .flex_1()
+            .flex_basis(px(0.))
+            .min_w_0()
             .gap_1()
             .px(px(16.))
             .py(px(14.))
@@ -1263,7 +1268,9 @@ fn add_step(orch: PaneId, adding: bool, cx: &mut Context<Workspace>) -> AnyEleme
         )
         .child(
             h_flex()
+                .w_full()
                 .gap_2()
+                .items_stretch()
                 .child(tile(
                     "claude",
                     "Claude stage",

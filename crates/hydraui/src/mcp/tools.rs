@@ -51,7 +51,11 @@ take nothing outside hydraui that can't be taken back, like approving or merging
 request, unless you will report at or above the bar. Below it, report first and leave that \
 action to the person, saying what's left. When the last proof needs a person's eyes, report \
 check with what to look at, and attach screenshots of it whenever you can capture them, so they \
-can decide in hydraui.";
+can decide in hydraui.
+
+Claims stop two teammates' sessions working one job. When the user asks you to work something \
+shared by claiming it, call claims_take first and only start if it says you hold it; finish with \
+claims_done, or claims_release if you stop. If hydraui tells you a claim has gone, stop that work.";
 
 /// The `tools` array of `tools/list`.
 pub fn list() -> Value {
@@ -128,6 +132,7 @@ pub fn list() -> Value {
     .cloned()
     .chain(super::run_tools::schemas())
     .chain(super::project_tools::schemas())
+    .chain(super::claims_tools::schemas())
     .collect()
 }
 
@@ -464,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn the_list_offers_exactly_the_pre_approved_tools() {
+    fn the_list_offers_exactly_hydras_tools() {
         let names: Vec<_> = list()
             .as_array()
             .unwrap()
@@ -503,7 +508,11 @@ mod tests {
                 "ticket_show",
                 "ticket_ask",
                 "ticket_report",
-                "ticket_checked"
+                "ticket_checked",
+                "claims_take",
+                "claims_release",
+                "claims_done",
+                "claims_list"
             ]
         );
         assert_eq!(names, hydra_providers::claude_files::HYDRAUI_TOOLS);

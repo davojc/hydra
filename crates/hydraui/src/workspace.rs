@@ -5,6 +5,7 @@ mod accounts;
 mod all_tasks;
 mod asking;
 mod busy;
+mod claims_page;
 mod finder;
 mod gmail;
 mod history_tab;
@@ -274,6 +275,8 @@ pub struct Workspace {
     sent_wakes: HashMap<PaneId, (String, String, Instant, u8)>,
     /// Times a wake-up waiting to be sent again was already sent.
     wake_tries: HashMap<PaneId, u8>,
+    /// The lost claims the user was last told a session isn't taking, so they're told once.
+    wake_told: HashMap<PaneId, String>,
     /// When each run waiting on product last had its stage look in the Slack thread.
     ask_checks: HashMap<String, std::time::SystemTime>,
     /// Runs waiting on you that look again (core spec §60): when the wait began, the last
@@ -480,6 +483,8 @@ impl Workspace {
         if let Some(server) = crate::mcp::server::get() {
             // The weekly share a stage needs (orchestrator spec §5.1), from config.toml.
             crate::mcp::server::lock(server.registry()).min_week_left = ui.min_week_left;
+            // Before any terminal opens, so its session's first claim finds them.
+            crate::mcp::claims_tools::connect(server, &hydra.paths);
         }
         let mcp_pump = crate::mcp::server::get().map(|server| {
             let mut rx = server.subscribe();
@@ -500,6 +505,9 @@ impl Workspace {
                         McpEvent::StageStart(s) => ws.start_stage(s, window, cx),
                         McpEvent::RunChanged(changes) => ws.runs_changed(changes, window, cx),
                         McpEvent::Skill(..) => cx.notify(),
+                        McpEvent::ClaimLost { token, text } => {
+                            ws.claim_lost(&token, text, window, cx)
+                        }
                     });
                     if alive.is_err() {
                         break;
@@ -587,6 +595,7 @@ impl Workspace {
             wake_waiting: HashMap::new(),
             sent_wakes: HashMap::new(),
             wake_tries: HashMap::new(),
+            wake_told: HashMap::new(),
             ask_checks: HashMap::new(),
             wait_looks: HashMap::new(),
             keep_looks: HashMap::new(),

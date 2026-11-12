@@ -146,6 +146,7 @@ impl Workspace {
         if state == SessionState::Working {
             self.sent_wakes.remove(&id);
             self.wake_tries.remove(&id);
+            self.wake_told.remove(&id);
         }
         // Its first turn is over: it can be handed work.
         if before == Some(SessionState::Working) && state == SessionState::Idle {

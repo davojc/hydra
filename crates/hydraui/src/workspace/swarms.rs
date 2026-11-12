@@ -146,7 +146,8 @@ fn start(paths: &HydraPaths, name: String, machine: String) -> Opened {
     let swarm_keys = std::sync::Arc::clone(&keys);
     let swarm_key = Box::new(move |id: &str| swarm_keys.swarm(id));
     let set_person = Box::new(move |key: [u8; 32]| keys.set_person(key));
-    let cfg = ServiceConfig::new(swarms::root(paths), identity, swarm_key, set_person, true);
+    let cfg = ServiceConfig::new(swarms::root(paths), identity, swarm_key, set_person, true)
+        .bridge_file(crate::mcp::claims_tools::bridge_file(paths));
     match SwarmsService::start(cfg) {
         Ok((commands, events)) => Opened::Running(lock, commands, events),
         Err(e) => Opened::Failed(format!("Couldn't start the swarms: {e}")),

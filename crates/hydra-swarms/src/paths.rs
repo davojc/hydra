@@ -2,6 +2,8 @@
 //! files and signed changes are stored under.
 use std::path::{Component, Path};
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
@@ -12,6 +14,14 @@ pub const LOG_PREFIX: &[u8] = b"log/";
 pub const FILES_PREFIX: &[u8] = b"files/";
 /// Where each author records what each of its file entries was made from.
 pub const PARENTS_PREFIX: &[u8] = b"parents/";
+/// Where each author records what it knows of each folder: there, gone, or moved. Older hydras
+/// never read under here, so a swarm with these records still syncs for them.
+pub const FOLDERS_PREFIX: &[u8] = b"folders/";
+/// Every move of a folder, one key per move, never overwritten: an author's later word on the
+/// old path replaces its `MovedTo` under `folders/`, but must not undo the move.
+pub const MOVES_PREFIX: &[u8] = b"moves/";
+/// Claims, done marks and releases, by context. Folder sync never reads under here.
+pub const CLAIMS_PREFIX: &[u8] = b"claims/";
 
 /// A swarm-relative path with `/` separators, checked safe on every OS.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -164,12 +174,67 @@ pub fn path_of_parent_key(key: &[u8]) -> Option<RelPath> {
     path_under(PARENTS_PREFIX, key)
 }
 
+pub fn folder_key(p: &RelPath) -> Vec<u8> {
+    key_under(FOLDERS_PREFIX, p)
+}
+
+pub fn path_of_folder_key(key: &[u8]) -> Option<RelPath> {
+    path_under(FOLDERS_PREFIX, key)
+}
+
+/// A move's key. `id` names the move (a hash of what it says and who said it), so two moves
+/// never share a key. The closing zero keeps one id from starting another's key.
+pub fn move_key(id: &str) -> Vec<u8> {
+    let mut k = MOVES_PREFIX.to_vec();
+    k.extend_from_slice(id.as_bytes());
+    k.push(0);
+    k
+}
+
 /// Sorts by time, then signature, so the log reads in the order the roster folds it.
 pub fn log_key(c: &SignedChange) -> Vec<u8> {
     let sig = c.sig.get(..16).unwrap_or(&c.sig);
     let mut k = LOG_PREFIX.to_vec();
     k.extend_from_slice(format!("{:020}-{}", c.at, sig).as_bytes());
     k
+}
+
+/// Where a context's records live. The closing `/` keeps `inbox` from also reading `inbox2`.
+pub fn claims_context_prefix(context: &str) -> Vec<u8> {
+    let mut k = CLAIMS_PREFIX.to_vec();
+    k.extend_from_slice(context.as_bytes());
+    k.push(b'/');
+    k
+}
+
+/// A record's key: its kind, then each part encoded, since a job's key can be anything, a
+/// Message-ID with a `/` in it say. The closing zero is there because a delete clears every entry
+/// its key starts, and one job's key can start another's.
+fn claims_record_key(context: &str, kind: &str, parts: &[&str]) -> Vec<u8> {
+    let mut k = claims_context_prefix(context);
+    k.extend_from_slice(kind.as_bytes());
+    let encoded: Vec<String> = parts.iter().map(|p| URL_SAFE_NO_PAD.encode(p)).collect();
+    k.push(b'/');
+    k.extend_from_slice(encoded.join("/").as_bytes());
+    k.push(0);
+    k
+}
+
+pub fn claim_key(context: &str, key: &str) -> Vec<u8> {
+    claims_record_key(context, "claim", &[key])
+}
+
+pub fn done_key(context: &str, key: &str) -> Vec<u8> {
+    claims_record_key(context, "done", &[key])
+}
+
+pub fn reopen_key(context: &str, key: &str) -> Vec<u8> {
+    claims_record_key(context, "reopen", &[key])
+}
+
+/// `target` is the author whose claim on `key` the release ends.
+pub fn release_key(context: &str, key: &str, target: &str) -> Vec<u8> {
+    claims_record_key(context, "release", &[key, target])
 }
 
 /// `copy` numbered `n`, for when its name is taken by other content:
@@ -316,6 +381,75 @@ mod tests {
         assert_eq!(path_of_parent_key(&parent_key(&b)).unwrap(), b);
         assert!(path_of_parent_key(&file_key(&a)).is_none());
         assert!(path_of_key(&parent_key(&a)).is_none());
+    }
+
+    #[test]
+    fn folder_keys_round_trip_and_stay_apart_from_file_keys() {
+        let a = rel("a");
+        let b = rel("a/b");
+        assert_eq!(folder_key(&a), b"folders/a\0");
+        assert!(!folder_key(&b).starts_with(&folder_key(&a)));
+        assert_eq!(path_of_folder_key(&folder_key(&b)).unwrap(), b);
+        assert!(path_of_folder_key(b"folders/a").is_none());
+        assert!(path_of_folder_key(b"folders/../x\0").is_none());
+        assert!(path_of_folder_key(&file_key(&a)).is_none());
+        assert!(path_of_folder_key(&parent_key(&a)).is_none());
+        assert!(path_of_key(&folder_key(&a)).is_none());
+        assert!(path_of_parent_key(&folder_key(&a)).is_none());
+    }
+
+    #[test]
+    fn move_keys_stay_apart_from_each_other_and_from_other_keys() {
+        let a = move_key("ab");
+        assert_eq!(a, b"moves/ab ");
+        assert!(a.starts_with(MOVES_PREFIX));
+        assert!(!move_key("abc").starts_with(&a));
+        let p = rel("ab");
+        for other in [file_key(&p), folder_key(&p), parent_key(&p)] {
+            assert!(!a.starts_with(&other) && !other.starts_with(&a));
+            assert!(!other.starts_with(MOVES_PREFIX));
+        }
+        assert!(!a.starts_with(FOLDERS_PREFIX) && !a.starts_with(CLAIMS_PREFIX));
+    }
+
+    #[test]
+    fn claim_keys_have_no_extra_slash_whatever_the_key_holds() {
+        let slashes = |k: &[u8]| k.iter().filter(|b| **b == b'/').count();
+        let id = "<a/b@x>";
+        assert_eq!(slashes(&claim_key("inbox", id)), 3);
+        assert_eq!(slashes(&done_key("inbox", id)), 3);
+        assert_eq!(slashes(&release_key("inbox", id, "x/y")), 4);
+        for key in [
+            claim_key("inbox", id),
+            done_key("inbox", id),
+            release_key("inbox", id, "x/y"),
+        ] {
+            assert!(key.starts_with(&claims_context_prefix("inbox")));
+            assert!(key.starts_with(CLAIMS_PREFIX));
+        }
+    }
+
+    #[test]
+    fn claim_keys_stay_apart() {
+        // A delete clears every entry its key starts, so no key may start another.
+        assert!(!claim_key("inbox", "abcd").starts_with(&claim_key("inbox", "abc")));
+        assert!(!claim_key("inbox", "abcdef").starts_with(&claim_key("inbox", "abc")));
+        assert!(!claims_context_prefix("inbox2").starts_with(&claims_context_prefix("inbox")));
+        assert_ne!(claim_key("inbox", "k"), done_key("inbox", "k"));
+        assert_ne!(
+            release_key("inbox", "k", "a"),
+            release_key("inbox", "k", "b")
+        );
+        for other in [
+            claim_key("inbox", "k"),
+            done_key("inbox", "k"),
+            release_key("inbox", "k", "a"),
+        ] {
+            assert_ne!(reopen_key("inbox", "k"), other);
+            assert!(!reopen_key("inbox", "k").starts_with(&other));
+            assert!(!other.starts_with(&reopen_key("inbox", "k")));
+        }
+        assert!(!reopen_key("inbox", "abcd").starts_with(&reopen_key("inbox", "abc")));
     }
 
     #[test]

@@ -224,16 +224,94 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
     })
 }
 
+/// The label of a wake-up that tells of a lost claim, in place of a run's id. Each loss is a
+/// different job to stop, so a wake-up with this label is only ever added to, and keeps the label
+/// once it holds a loss, since a run's label would let that run's next wake-up replace it.
+pub(super) const CLAIMS_WAKE: &str = "claims";
+
+/// Both texts, once each.
+fn join_text(old: String, new: String) -> String {
+    if old.contains(&new) {
+        old
+    } else if new.contains(&old) {
+        new
+    } else {
+        format!("{old} {new}")
+    }
+}
+
 /// The wake-up waiting for an orchestrator after `new` for run `run` joins `waiting`: a newer
 /// one for the same run replaces it; one for another of its tickets is added, so an
-/// orchestrator holding several tickets hears about each.
+/// orchestrator holding several tickets hears about each. Lost claims are always added.
 pub fn join_wake(waiting: Option<(String, String)>, run: String, new: String) -> (String, String) {
     match waiting {
+        Some((old_run, old)) if old_run == CLAIMS_WAKE || run == CLAIMS_WAKE => {
+            (CLAIMS_WAKE.to_string(), join_text(old, new))
+        }
         Some((old_run, old)) if old_run != run && !old.contains(&new) => {
             (run, format!("{old} {new}"))
         }
         _ => (run, new),
     }
+}
+
+/// What to type for a waiting wake-up, given the one last typed that hasn't been confirmed.
+/// Typing replaces that one, and only it would be sent again, so a lost claim on either side goes
+/// with the text: it may be sitting in a Claude Code prompt that never took it.
+pub fn wake_to_type(
+    unconfirmed: Option<(String, String)>,
+    run: String,
+    message: String,
+) -> (String, String) {
+    match unconfirmed {
+        Some((old_run, old)) if old_run == CLAIMS_WAKE || run == CLAIMS_WAKE => {
+            join_wake(Some((old_run, old)), run, message)
+        }
+        _ => (run, message),
+    }
+}
+
+/// How many times a wake-up that doesn't take is typed before the person is told.
+const WAKE_TRIES: u8 = 3;
+
+/// What to do with a wake-up typed a while ago that never started its session working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SentWakeCheck {
+    /// Tell the person it isn't getting through.
+    pub tell: bool,
+    /// Queue it to be typed again; otherwise it is let go.
+    pub again: bool,
+}
+
+/// A run's wake-up can be let go, since its orchestrator can catch up through `run_status`. A lost
+/// claim has no second way to reach its session, which would keep working a key it no longer
+/// holds, so it is never let go. `tries` is how many times it has been typed, `idle` whether the
+/// session is idle now, and `told` whether the person has been told about this text already.
+pub fn check_sent_wake(run: &str, idle: bool, tries: u8, told: bool) -> SentWakeCheck {
+    if run == CLAIMS_WAKE {
+        return SentWakeCheck {
+            tell: tries >= WAKE_TRIES && !told,
+            again: true,
+        };
+    }
+    SentWakeCheck {
+        tell: idle && tries >= WAKE_TRIES,
+        again: idle && tries < WAKE_TRIES,
+    }
+}
+
+/// How many times a wake-up has been typed, once it is typed again.
+pub fn tries_after_typing(before: Option<u8>) -> u8 {
+    (before.unwrap_or(0) + 1).min(WAKE_TRIES)
+}
+
+/// What the person is told when `name` won't take news of a lost claim: all of it, so they can
+/// tell the session themselves.
+pub fn lost_claim_toast(name: &str, message: &str) -> String {
+    format!(
+        "{name} isn't taking messages from hydraui, and this one matters: {message} Look at its \
+         terminal and tell it yourself. hydraui keeps trying too."
+    )
 }
 
 /// Keys a run's escalation toast, so a newer one for the same run replaces it.
@@ -1235,6 +1313,7 @@ impl Workspace {
             let Some(session) = sessions.iter().find(|s| s.pane == pane) else {
                 self.pending_wakes.remove(&pane);
                 self.wake_waiting.remove(&pane);
+                self.wake_told.remove(&pane);
                 continue;
             };
             // Still on its first turn: what's typed now never reaches it.
@@ -1288,6 +1367,11 @@ impl Workspace {
                 }
                 continue;
             }
+            let unconfirmed = self
+                .sent_wakes
+                .get(&pane)
+                .map(|(run, message, ..)| (run.clone(), message.clone()));
+            let (run, message) = wake_to_type(unconfirmed, run, message);
             let typed = self
                 .panes
                 .get(&pane)
@@ -1298,7 +1382,7 @@ impl Workspace {
                 self.reserved.insert(pane, std::time::Instant::now());
                 self.pending_wakes.remove(&pane);
                 self.wake_waiting.remove(&pane);
-                let tries = self.wake_tries.remove(&pane).unwrap_or(0) + 1;
+                let tries = tries_after_typing(self.wake_tries.remove(&pane));
                 self.sent_wakes
                     .insert(pane, (run, message, std::time::Instant::now(), tries));
             }
@@ -1307,7 +1391,8 @@ impl Workspace {
 
     /// A wake-up typed 30 seconds ago whose session never started working didn't reach Claude
     /// (a Claude Code prompt was open over the input): it's sent again, up to 3 times, then
-    /// the user is told to look at that terminal.
+    /// the user is told to look at that terminal. A lost claim goes on being sent after that
+    /// (`check_sent_wake`).
     pub(super) fn recheck_wakes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         const TAKE: std::time::Duration = std::time::Duration::from_secs(30);
         let stale: Vec<PaneId> = self
@@ -1323,24 +1408,34 @@ impl Workspace {
             let Some(view) = self.panes.get(&pane) else {
                 continue;
             };
-            if view.read(cx).claude() != Some(crate::mcp::SessionState::Idle) {
-                continue;
-            }
-            if tries >= 3 {
+            let idle = view.read(cx).claude() == Some(crate::mcp::SessionState::Idle);
+            let told = self.wake_told.get(&pane) == Some(&message);
+            let check = check_sent_wake(&run, idle, tries, told);
+            if check.tell {
                 let name = self.pane_name(pane, cx);
-                let title = self.toast_title(pane, &run, cx);
                 crate::action_log::write(format!(
                     "run {run}: {name} didn't take a wake-up after 3 tries"
                 ));
-                window.push_note(
+                let note = if run == CLAIMS_WAKE {
+                    self.wake_told.insert(pane, message.clone());
+                    let ws = cx.entity();
+                    Note::warning(lost_claim_toast(&name, &message))
+                        .title(self.toast_title(pane, "Lost claim", cx))
+                        .autohide(false)
+                        .on_click(move |_, window, cx| {
+                            ws.update(cx, |ws, cx| ws.show_terminal(pane, window, cx));
+                        })
+                } else {
                     Note::warning(format!(
                         "{name} isn't taking messages from hydraui. Look at its terminal: \
                          Claude Code may be showing a question. Answer it, and hydraui carries \
                          on."
                     ))
-                    .title(title),
-                    cx,
-                );
+                    .title(self.toast_title(pane, &run, cx))
+                };
+                window.push_note(note, cx);
+            }
+            if !check.again {
                 continue;
             }
             crate::action_log::write(format!(
@@ -1669,6 +1764,26 @@ impl Workspace {
         let waiting = self.pending_wakes.remove(&pane);
         self.pending_wakes
             .insert(pane, join_wake(waiting, run, message));
+    }
+
+    /// Tells the session in the terminal holding `token` that a claim of its has gone. A closed
+    /// terminal has nobody left to tell.
+    pub(super) fn claim_lost(
+        &mut self,
+        token: &str,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pane = self
+            .panes
+            .iter()
+            .find(|(_, v)| v.read(cx).mcp_token() == Some(token))
+            .map(|(id, _)| *id);
+        if let Some(pane) = pane {
+            self.queue_wake(pane, CLAIMS_WAKE.into(), text);
+            self.send_wakes(window, cx);
+        }
     }
 
     /// The name and colour of the pipeline terminal `pane` belongs to, when it belongs to one.
@@ -2261,6 +2376,74 @@ pub(super) fn pill_colors(state: CardState, accent: u32) -> (gpui::Hsla, gpui::H
 
 #[cfg(test)]
 mod tests {
+    use super::{SentWakeCheck, check_sent_wake};
+
+    const GO: SentWakeCheck = SentWakeCheck {
+        tell: false,
+        again: false,
+    };
+    const AGAIN: SentWakeCheck = SentWakeCheck {
+        tell: false,
+        again: true,
+    };
+
+    #[test]
+    fn a_runs_wake_up_is_sent_up_to_three_times_and_let_go_if_the_session_moves_on() {
+        for told in [false, true] {
+            assert_eq!(check_sent_wake("A-1", false, 1, told), GO);
+            assert_eq!(check_sent_wake("A-1", false, 3, told), GO);
+            assert_eq!(check_sent_wake("A-1", true, 1, told), AGAIN);
+            assert_eq!(check_sent_wake("A-1", true, 2, told), AGAIN);
+            assert_eq!(
+                check_sent_wake("A-1", true, 3, told),
+                SentWakeCheck {
+                    tell: true,
+                    again: false
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_lost_claim_is_never_let_go_whatever_the_session_is_doing() {
+        for idle in [false, true] {
+            for tries in 1..=3 {
+                for told in [false, true] {
+                    let check = check_sent_wake(super::CLAIMS_WAKE, idle, tries, told);
+                    assert!(check.again, "{idle} {tries} {told}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_person_hears_of_a_stuck_loss_once_after_three_tries() {
+        let check = |idle, tries, told| check_sent_wake(super::CLAIMS_WAKE, idle, tries, told).tell;
+        assert!(!check(true, 2, false));
+        assert!(check(true, 3, false));
+        assert!(!check(true, 3, true), "already told");
+        // Stuck behind a question it never gets out of counts just the same.
+        assert!(check(false, 3, false));
+        assert!(!check(false, 2, false));
+    }
+
+    #[test]
+    fn a_wake_ups_tries_stop_at_three() {
+        assert_eq!(super::tries_after_typing(None), 1);
+        assert_eq!(super::tries_after_typing(Some(2)), 3);
+        assert_eq!(super::tries_after_typing(Some(3)), 3);
+    }
+
+    #[test]
+    fn the_toast_for_a_stuck_loss_says_what_to_tell_the_session() {
+        let text = super::lost_claim_toast("Fixer", "Your claim on k in inbox has gone.");
+        assert!(text.contains("Fixer"), "{text}");
+        assert!(
+            text.contains("Your claim on k in inbox has gone."),
+            "{text}"
+        );
+    }
+
     #[test]
     fn wake_ups_for_different_tickets_add_up_and_one_ticket_keeps_its_newest() {
         let first = super::join_wake(None, "A-1".into(), "A passed.".into());
@@ -2269,6 +2452,72 @@ mod tests {
         assert_eq!(newer.1, "A needs you.");
         let both = super::join_wake(Some(first), "B-1".into(), "B passed.".into());
         assert_eq!(both, ("B-1".into(), "A passed. B passed.".into()));
+    }
+
+    /// A wake-up about claims, as `queue_wake` and `sent_wakes` hold it.
+    fn claims(text: &str) -> (String, String) {
+        (super::CLAIMS_WAKE.to_string(), text.to_string())
+    }
+
+    fn join(waiting: (String, String), new: (String, String)) -> (String, String) {
+        super::join_wake(Some(waiting), new.0, new.1)
+    }
+
+    #[test]
+    fn every_loss_waiting_for_a_session_is_kept() {
+        let both = join(claims("Lost a."), claims("Lost b."));
+        assert_eq!(both, claims("Lost a. Lost b."));
+        assert_eq!(join(both.clone(), claims("Lost a.")), both, "told once");
+    }
+
+    #[test]
+    fn a_loss_sent_again_over_a_newer_one_keeps_both() {
+        // recheck_wakes queues what didn't take while a newer loss waits.
+        let again = join(claims("Lost b."), claims("Lost a."));
+        assert_eq!(again, claims("Lost b. Lost a."));
+        // What it sends again can already hold what waits.
+        let again = join(claims("Lost b."), claims("Lost a. Lost b."));
+        assert_eq!(again, claims("Lost a. Lost b."));
+    }
+
+    #[test]
+    fn a_run_cant_replace_a_loss_it_was_joined_to() {
+        let run = |text: &str| ("A-1".to_string(), text.to_string());
+        let joined = join(claims("Lost a."), run("A passed."));
+        assert_eq!(joined, claims("Lost a. A passed."));
+        // The same run's newer wake-up would replace a wake-up labelled with that run.
+        let newer = join(joined.clone(), run("A needs you."));
+        assert_eq!(newer, claims("Lost a. A passed. A needs you."));
+        assert_eq!(join(joined.clone(), run("A passed.")), joined);
+        assert_eq!(
+            join(run("A passed."), claims("Lost a.")),
+            claims("A passed. Lost a.")
+        );
+    }
+
+    #[test]
+    fn a_loss_typed_over_an_unconfirmed_one_carries_it() {
+        // The older went into an open Claude Code prompt, and nothing else would send it again.
+        let typed = |sent, new: (String, String)| super::wake_to_type(sent, new.0, new.1);
+        let run = |id: &str, text: &str| (id.to_string(), text.to_string());
+        assert_eq!(
+            typed(Some(claims("Lost a.")), claims("Lost b.")),
+            claims("Lost a. Lost b.")
+        );
+        assert_eq!(
+            typed(Some(run("A-1", "A passed.")), claims("Lost a.")),
+            claims("A passed. Lost a.")
+        );
+        assert_eq!(
+            typed(Some(claims("Lost a.")), run("A-1", "A passed.")),
+            claims("Lost a. A passed.")
+        );
+        assert_eq!(typed(None, claims("Lost a.")), claims("Lost a."));
+        // Between runs, what is typed stays as it was.
+        assert_eq!(
+            typed(Some(run("A-1", "A passed.")), run("B-1", "B passed.")),
+            run("B-1", "B passed.")
+        );
     }
 
     use serde_json::json;

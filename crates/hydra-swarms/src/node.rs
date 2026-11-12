@@ -1,7 +1,7 @@
 //! One swarm on the network: an iroh endpoint and router running iroh-docs, iroh-blobs and
 //! iroh-gossip, behind a gate that refuses machines outside the roster, and the swarm document's
 //! files and signed change log.
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,44 +17,119 @@ use iroh::endpoint::{
 };
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey};
+use iroh_blobs::api::downloader::{Downloader, Shuffled};
 use iroh_blobs::store::fs::FsStore;
-use iroh_blobs::{BlobsProtocol, Hash};
+use iroh_blobs::{BlobsProtocol, Hash, HashAndFormat};
 use iroh_docs::api::Doc;
 use iroh_docs::api::protocol::{AddrInfoOptions, ShareMode};
 use iroh_docs::engine::LiveEvent;
 use iroh_docs::protocol::Docs;
-use iroh_docs::store::Query;
-use iroh_docs::{Author, AuthorId, Capability, CapabilityKind, Entry, NamespaceId};
+use iroh_docs::store::{DownloadPolicy, Query};
+use iroh_docs::{Author, AuthorId, Capability, CapabilityKind, ContentStatus, Entry, NamespaceId};
 use iroh_gossip::net::Gossip;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
+use crate::claims::{ClaimRecord, DoneRecord};
 use crate::decide::Remote;
 use crate::ids::{PersonId, PersonKey};
 use crate::invites::{Hydra, Invites};
 use crate::paths::{
-    FILES_PREFIX, LOG_PREFIX, MAX_FILE_BYTES, PARENTS_PREFIX, RelPath, file_key, log_key,
-    parent_key, path_of_key, path_of_parent_key, safe_rel_path,
+    CLAIMS_PREFIX, FILES_PREFIX, FOLDERS_PREFIX, LOG_PREFIX, MAX_FILE_BYTES, MOVES_PREFIX,
+    PARENTS_PREFIX, RelPath, file_key, folder_key, log_key, move_key, parent_key,
+    path_of_folder_key, path_of_key, path_of_parent_key, safe_rel_path,
 };
 use crate::roster::{
     Change, Kept, KeptAuthor, KeptEntry, MAX_CHANGE_BYTES, Machine, Member, Role, Roster,
     SignedChange, Version,
 };
-use crate::wire::ALPN;
+use crate::wire::{ALPN, CLAIMS_ALPN};
 
-/// A parent record holds at most a few hundred hashes.
+mod claims;
+
+/// A parent record holds at most a few hundred hashes, and a claim far less.
 const MAX_RECORD_BYTES: u64 = 64 * 1024;
+/// How many downloads one try at fetching content runs at once. A few, so a try on a slow link adds
+/// little to what iroh-docs may still be bringing and each download not yet started finds whatever
+/// came meanwhile, yet one member that is slow or gone doesn't hold up the rest.
+const FETCHES_AT_ONCE: usize = 4;
 
 /// What one author's file entry for a path was made from, so other machines can tell an edit
 /// made on top of theirs from one made at the same time. `hash` is the entry's (None for a
 /// delete), `parent` the version it was made from (None for a new file), and `ancestors`
-/// `parent` and the versions before it, as far as the author knew them.
+/// `parent` and the versions before it, as far as the author knew them. `since` is when the
+/// oldest of those versions was there at this key, as far as its entries showed when this one
+/// was made (None for a new file, and from older hydras), so a later edit of a file that was
+/// there before a folder rename follows the rename even after every entry holding that version
+/// has been replaced.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ParentRecord {
     pub hash: Option<Hash>,
     pub parent: Option<Hash>,
     #[serde(default)]
     pub ancestors: Vec<Hash>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<u64>,
+}
+
+/// What an author says of a folder. `Deleted` and `MovedTo` are kept as records, not removed, so
+/// a machine that was offline learns the folder went rather than seeing nothing.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum FolderState {
+    Present,
+    Deleted,
+    MovedTo { to: String },
+}
+
+/// One author's newest word on a folder. `at` is unix microseconds the writer chose, not the
+/// entry's timestamp, so it survives the entry being rewritten.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct FolderRecord {
+    pub state: FolderState,
+    pub at: u64,
+}
+
+/// A folder record with who wrote it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct FolderVersion {
+    pub record: FolderRecord,
+    pub author: String,
+    pub machine: String,
+}
+
+/// A folder moved from one path to another, kept under its own key in the move log so no later
+/// record by the same author can overwrite it.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct MoveRecord {
+    pub from: String,
+    pub to: String,
+    pub at: u64,
+}
+
+/// A move with who made it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct MoveVersion {
+    pub record: MoveRecord,
+    pub author: String,
+    pub machine: String,
+}
+
+/// The name of the machine `author` writes for, current or retired.
+fn machine_of(roster: &Roster, author: &str) -> String {
+    match roster.member_by_author(author) {
+        Some(m) => m.machines.iter().find(|m| m.author == author),
+        None => None,
+    }
+    .map(|m| m.name.clone())
+    .or_else(|| roster.retired.get(author).map(|r| r.machine.clone()))
+    .unwrap_or_default()
+}
+
+/// Whether a folder record from `author` counts: a current writer's, or a former one's as claims'
+/// finished keys count, so a folder's history outlasts the machine that wrote it.
+fn folder_author_counts(roster: &Roster, author: &str) -> bool {
+    roster.writes(author) || roster.retired.contains_key(author)
 }
 
 /// Every current writer's entry for one path, and every former writer's as the roster keeps it,
@@ -80,8 +155,12 @@ pub struct NodeConfig {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NodeEvent {
-    /// Any insert into the document, local or remote.
+    /// Any insert into the document, local or remote, other than a claim's.
     Changed,
+    /// An insert under `claims/`, or the content of one arriving. Renewals make these all the time
+    /// and folder sync has no use for them, so they are kept apart from `Changed` and
+    /// `ContentReady`.
+    ClaimsChanged,
     ContentReady(Hash),
     PeerUp(String),
     PeerDown(String),
@@ -90,10 +169,56 @@ pub enum NodeEvent {
     Removed,
     /// Another machine of this person's told this one it was taken out of the swarm.
     Dropped,
+    /// Another member asked about a claim, so this machine has just heard of it.
+    ClaimHeard,
 }
 
-/// The ALPNs that carry the swarm document, its content and its gossip.
-const GATED_ALPNS: [&[u8]; 3] = [iroh_docs::ALPN, iroh_blobs::ALPN, iroh_gossip::ALPN];
+/// The event for an insert under `key`.
+fn insert_event(key: &[u8]) -> NodeEvent {
+    if key.starts_with(CLAIMS_PREFIX) {
+        NodeEvent::ClaimsChanged
+    } else {
+        NodeEvent::Changed
+    }
+}
+
+/// How much content on its way is remembered. Renewals can overtake each other, leaving hashes
+/// whose content never comes, so this can't grow without end.
+const CONTENT_COMING: usize = 1024;
+
+/// The content remote inserts are waiting for, and whether only claims want it. Every renewal is
+/// new content, and its arrival must say the claim can be read now without waking the folder.
+/// Anything not known to be for claims alone still wakes it: a missed wake could leave a file
+/// unsynced until the next pass, where an extra one only costs that pass.
+#[derive(Default)]
+struct ContentComing(VecDeque<(Hash, bool)>);
+
+impl ContentComing {
+    fn inserted(&mut self, hash: Hash, is_claim: bool) {
+        if let Some((_, claims_alone)) = self.0.iter_mut().find(|(h, _)| *h == hash) {
+            *claims_alone &= is_claim;
+            return;
+        }
+        if self.0.len() == CONTENT_COMING {
+            self.0.pop_front();
+        }
+        self.0.push_back((hash, is_claim));
+    }
+
+    fn arrived_for_claims_alone(&mut self, hash: &Hash) -> bool {
+        let at = self.0.iter().position(|(h, _)| h == hash);
+        at.and_then(|i| self.0.remove(i))
+            .is_some_and(|(_, claims_alone)| claims_alone)
+    }
+}
+
+/// The ALPNs that carry the swarm document, its content and its gossip, and questions about claims.
+const GATED_ALPNS: [&[u8]; 4] = [
+    iroh_docs::ALPN,
+    iroh_blobs::ALPN,
+    iroh_gossip::ALPN,
+    CLAIMS_ALPN,
+];
 
 fn is_gated(alpn: &[u8]) -> bool {
     GATED_ALPNS.contains(&alpn)
@@ -109,11 +234,11 @@ struct GateState {
 
 type Gate = Arc<Mutex<GateState>>;
 
-fn lock(gate: &Gate) -> std::sync::MutexGuard<'_, GateState> {
-    gate.lock().unwrap_or_else(|e| e.into_inner())
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Endpoint hooks that keep machines outside the gate off docs, blobs and gossip in both
+/// Endpoint hooks that keep machines outside the gate off docs, blobs, gossip and claims in both
 /// directions: a dial to one is never started, and a connection with one, either way, is closed
 /// as soon as the handshake shows who it is. Other ALPNs (the hydra protocol) pass.
 #[derive(Debug)]
@@ -172,6 +297,19 @@ pub(crate) struct Core {
     pub(crate) addrs: MemoryLookup,
     pub(crate) events: broadcast::Sender<NodeEvent>,
     pub(crate) invites: Invites,
+    /// Content reads have found isn't here, until the swarm's task asks.
+    missing: Mutex<HashSet<Hash>>,
+    /// Claims other members told this machine about, by context, key and author, for the time
+    /// until the document brings them or says they ended.
+    pub(crate) heard: Mutex<HashMap<(String, String, String), ClaimRecord>>,
+    /// The same for done marks, which a member can hold before this machine has synced them.
+    heard_dones: Mutex<HashMap<(String, String, String), DoneRecord>>,
+    /// What each member last said of its own claims, by context and author.
+    told_own: Mutex<HashMap<(String, String), claims::ToldOwn>>,
+    /// Set in tests: take questions about claims and never answer.
+    silent_claims: AtomicBool,
+    /// Set in tests: reading this context's claims fails.
+    unreadable_claims: Mutex<Option<String>>,
 }
 
 /// Where the hydra protocol handler finds the node, once there is one: the router starts before
@@ -240,6 +378,7 @@ async fn start(cfg: &NodeConfig) -> anyhow::Result<Parts> {
         .accept(iroh_gossip::ALPN, gossip)
         .accept(iroh_docs::ALPN, docs.clone())
         .accept(ALPN, Hydra(Arc::clone(&slot)))
+        .accept(CLAIMS_ALPN, claims::Claims(Arc::clone(&slot)))
         .spawn();
     Ok(Parts {
         endpoint,
@@ -408,12 +547,28 @@ impl SwarmNode {
         let (events, _) = broadcast::channel(256);
         let tx = events.clone();
         tokio::spawn(async move {
+            let mut coming = ContentComing::default();
             while let Some(ev) = stream.next().await {
                 let ev = match ev {
-                    Ok(LiveEvent::InsertLocal { .. } | LiveEvent::InsertRemote { .. }) => {
-                        NodeEvent::Changed
+                    Ok(LiveEvent::InsertLocal { entry }) => insert_event(entry.key()),
+                    Ok(LiveEvent::InsertRemote {
+                        entry,
+                        content_status,
+                        ..
+                    }) => {
+                        if !matches!(content_status, ContentStatus::Complete) {
+                            let is_claim = entry.key().starts_with(CLAIMS_PREFIX);
+                            coming.inserted(entry.content_hash(), is_claim);
+                        }
+                        insert_event(entry.key())
                     }
-                    Ok(LiveEvent::ContentReady { hash }) => NodeEvent::ContentReady(hash),
+                    Ok(LiveEvent::ContentReady { hash }) => {
+                        if coming.arrived_for_claims_alone(&hash) {
+                            NodeEvent::ClaimsChanged
+                        } else {
+                            NodeEvent::ContentReady(hash)
+                        }
+                    }
                     Ok(LiveEvent::NeighborUp(p)) => NodeEvent::PeerUp(p.to_string()),
                     Ok(LiveEvent::NeighborDown(p)) => NodeEvent::PeerDown(p.to_string()),
                     Ok(LiveEvent::SyncFinished(_)) => NodeEvent::SyncFinished,
@@ -437,6 +592,12 @@ impl SwarmNode {
             addrs: parts.addrs,
             events,
             invites: Invites::new(&cfg.dir),
+            missing: Mutex::default(),
+            heard: Mutex::default(),
+            heard_dones: Mutex::default(),
+            told_own: Mutex::default(),
+            silent_claims: AtomicBool::new(false),
+            unreadable_claims: Mutex::default(),
         });
         let _ = parts.slot.set(Arc::downgrade(&core));
         let node = SwarmNode {
@@ -646,6 +807,119 @@ impl SwarmNode {
         Ok(())
     }
 
+    /// Records this machine's word on folder `p`.
+    pub async fn put_folder(&self, p: &RelPath, record: &FolderRecord) -> anyhow::Result<()> {
+        let core = &self.core;
+        core.ensure_writable()?;
+        let bytes = serde_json::to_vec(record)?;
+        anyhow::ensure!(
+            bytes.len() as u64 <= MAX_RECORD_BYTES,
+            "a folder record is too big"
+        );
+        core.doc
+            .set_bytes(core.author, folder_key(p), bytes)
+            .await?;
+        Ok(())
+    }
+
+    /// Adds a move to the move log, under a key of its own.
+    pub async fn put_move(&self, m: &MoveRecord) -> anyhow::Result<()> {
+        let core = &self.core;
+        core.ensure_writable()?;
+        let bytes = serde_json::to_vec(m)?;
+        anyhow::ensure!(
+            bytes.len() as u64 <= MAX_RECORD_BYTES,
+            "a move record is too big"
+        );
+        // The author is in the hash too, so two machines' identical moves stay two entries.
+        let mut named = bytes.clone();
+        named.extend_from_slice(core.author.to_string().as_bytes());
+        let id = Hash::new(&named).to_hex().to_string();
+        core.doc
+            .set_bytes(core.author, move_key(&id), bytes)
+            .await?;
+        Ok(())
+    }
+
+    /// Every counting author's moves, in no particular order. Records that don't parse, are over
+    /// the size cap, name a path that isn't safe, or move a folder onto itself are left out.
+    pub async fn moves(&self, roster: &Roster) -> anyhow::Result<Vec<MoveVersion>> {
+        let mut out = Vec::new();
+        let query = Query::key_prefix(MOVES_PREFIX).build();
+        for e in self.core.entries(query).await? {
+            if e.content_len() > MAX_RECORD_BYTES {
+                continue;
+            }
+            let author = e.author().to_string();
+            if !folder_author_counts(roster, &author) {
+                continue;
+            }
+            let Some(bytes) = self.read_blob(e.content_hash()).await? else {
+                continue;
+            };
+            let Ok(record) = serde_json::from_slice::<MoveRecord>(&bytes) else {
+                continue;
+            };
+            if safe_rel_path(&record.from).is_none()
+                || safe_rel_path(&record.to).is_none()
+                || record.from == record.to
+            {
+                continue;
+            }
+            let machine = machine_of(roster, &author);
+            out.push(MoveVersion {
+                record,
+                author,
+                machine,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Per folder, every counting author's newest record, oldest first by `(at, author)`. Keys
+    /// that aren't safe paths, records that don't parse or are over the size cap, and a move
+    /// to a path that isn't safe are left out.
+    pub async fn folder_records(
+        &self,
+        roster: &Roster,
+    ) -> anyhow::Result<BTreeMap<RelPath, Vec<FolderVersion>>> {
+        let mut out: BTreeMap<RelPath, Vec<FolderVersion>> = BTreeMap::new();
+        let query = Query::key_prefix(FOLDERS_PREFIX).build();
+        for e in self.core.entries(query).await? {
+            let Some(path) = path_of_folder_key(e.key()) else {
+                continue;
+            };
+            if e.content_len() > MAX_RECORD_BYTES {
+                continue;
+            }
+            let author = e.author().to_string();
+            if !folder_author_counts(roster, &author) {
+                continue;
+            }
+            let Some(bytes) = self.read_blob(e.content_hash()).await? else {
+                continue;
+            };
+            let Ok(record) = serde_json::from_slice::<FolderRecord>(&bytes) else {
+                continue;
+            };
+            if let FolderState::MovedTo { to } = &record.state
+                && safe_rel_path(to).is_none()
+            {
+                continue;
+            }
+            let machine = machine_of(roster, &author);
+            out.entry(path).or_default().push(FolderVersion {
+                record,
+                author,
+                machine,
+            });
+        }
+        for versions in out.values_mut() {
+            versions.sort_by(|a, b| (a.record.at, &a.author).cmp(&(b.record.at, &b.author)));
+        }
+        Ok(out)
+    }
+
     /// Stores `bytes` and points `p`'s key at them.
     pub async fn put_file(&self, p: &RelPath, bytes: Bytes) -> anyhow::Result<Hash> {
         let core = &self.core;
@@ -669,6 +943,44 @@ impl SwarmNode {
     /// The content of `h`, if it is all here.
     pub async fn read_blob(&self, h: Hash) -> anyhow::Result<Option<Bytes>> {
         self.core.read_blob(h).await
+    }
+
+    /// Whether the content of `h` is all here. Unlike a read, this doesn't note it as missing.
+    pub async fn has_content(&self, h: Hash) -> anyhow::Result<bool> {
+        Ok(self.core.blobs.has(h).await?)
+    }
+
+    /// The content that reads have found wasn't here since this was last asked.
+    pub fn take_missing(&self) -> HashSet<Hash> {
+        std::mem::take(&mut *lock(&self.core.missing))
+    }
+
+    /// Asks `endpoints` for `hashes`, within `timeout`. iroh-docs can't be left to bring everything
+    /// itself: an entry that came from someone who may not have its content is only downloaded
+    /// when a neighbour says it has that content, and if the neighbour said so just before the
+    /// entry arrived, nobody says it again. Whatever couldn't be had shows in the next read.
+    pub async fn fetch_content(
+        &self,
+        hashes: &[Hash],
+        endpoints: &[String],
+        timeout: std::time::Duration,
+    ) {
+        let peers: Vec<EndpointId> = endpoints.iter().filter_map(|e| e.parse().ok()).collect();
+        let downloader = Downloader::new(&self.core.blobs, &self.core.endpoint);
+        let fetches = hashes.iter().copied().map(|hash| {
+            let providers = Shuffled::new(peers.clone());
+            downloader.download(HashAndFormat::raw(hash), providers)
+        });
+        let fetches = fetches.map(std::future::IntoFuture::into_future);
+        let fetches = futures::stream::iter(fetches).buffer_unordered(FETCHES_AT_ONCE);
+        let _ = tokio::time::timeout(timeout, fetches.collect::<Vec<_>>()).await;
+    }
+
+    /// From now on iroh-docs downloads nothing here, as if every entry had lost that race.
+    pub async fn leave_content_unfetched_for_tests(&self) -> anyhow::Result<()> {
+        let nothing = DownloadPolicy::NothingExcept(Vec::new());
+        self.core.doc.set_download_policy(nothing).await?;
+        Ok(())
     }
 
     /// Replaces who this node talks to on docs, blobs and gossip; ids that don't parse are
@@ -874,6 +1186,7 @@ impl Core {
 
     pub(crate) async fn read_blob(&self, h: Hash) -> anyhow::Result<Option<Bytes>> {
         if !self.blobs.has(h).await? {
+            lock(&self.missing).insert(h);
             return Ok(None);
         }
         Ok(Some(self.blobs.get_bytes(h).await?))
@@ -959,4 +1272,87 @@ fn saved_anchor(cfg: &NodeConfig) -> anyhow::Result<PersonId> {
 async fn stop(router: Router, blobs: FsStore) {
     let _ = router.shutdown().await;
     let _ = blobs.shutdown().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hash(n: usize) -> Hash {
+        Hash::new(n.to_string())
+    }
+
+    fn member_with(role: Role, author: &str) -> Member {
+        Member {
+            person: PersonKey::generate().id(),
+            name: author.into(),
+            role,
+            machines: vec![Machine {
+                endpoint: String::new(),
+                name: format!("{author}-pc"),
+                author: author.into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn a_folder_record_counts_from_a_writer_or_a_retired_machine_and_no_one_else() {
+        let anchor = PersonKey::generate();
+        // A genesis only counts when its owner is the anchor.
+        let mut owner = member_with(Role::Owner, "owner");
+        owner.person = anchor.id();
+        let genesis = SignedChange::sign(
+            "swarm",
+            Change::Genesis {
+                name: "Notes".into(),
+                owner,
+            },
+            &anchor,
+            1,
+        );
+        let mut roster = Roster::fold("swarm", &anchor.id(), &[genesis]).expect("a roster");
+        roster.members.push(member_with(Role::Writer, "writer"));
+        roster.members.push(member_with(Role::Reader, "reader"));
+        roster.retired.insert("retired".into(), Default::default());
+
+        assert!(folder_author_counts(&roster, "owner"));
+        assert!(folder_author_counts(&roster, "writer"));
+        assert!(folder_author_counts(&roster, "retired"));
+        assert!(!folder_author_counts(&roster, "reader"));
+        assert!(!folder_author_counts(&roster, "stranger"));
+    }
+
+    #[test]
+    fn content_only_claims_wanted_is_for_claims_alone() {
+        let mut coming = ContentComing::default();
+        coming.inserted(hash(1), true);
+        assert!(coming.arrived_for_claims_alone(&hash(1)));
+        // It's been dealt with, and anything unknown wakes the folder.
+        assert!(!coming.arrived_for_claims_alone(&hash(1)));
+    }
+
+    #[test]
+    fn content_a_file_wants_wakes_the_folder_whichever_came_first() {
+        let mut coming = ContentComing::default();
+        coming.inserted(hash(1), false);
+        assert!(!coming.arrived_for_claims_alone(&hash(1)));
+        coming.inserted(hash(2), true);
+        coming.inserted(hash(2), false);
+        assert!(!coming.arrived_for_claims_alone(&hash(2)));
+        coming.inserted(hash(3), false);
+        coming.inserted(hash(3), true);
+        assert!(!coming.arrived_for_claims_alone(&hash(3)));
+    }
+
+    #[test]
+    fn content_that_never_comes_is_forgotten_oldest_first() {
+        let mut coming = ContentComing::default();
+        for n in 0..=CONTENT_COMING {
+            coming.inserted(hash(n), true);
+        }
+        assert_eq!(coming.0.len(), CONTENT_COMING);
+        assert!(!coming.arrived_for_claims_alone(&hash(0)));
+        assert!(coming.arrived_for_claims_alone(&hash(1)));
+        assert!(coming.arrived_for_claims_alone(&hash(CONTENT_COMING)));
+    }
 }

@@ -465,10 +465,13 @@ impl Workspace {
                         .text_color(tone)
                         .child(match ask.whom {
                             crate::runs::Whom::Product => {
-                                format!("⏸ Waiting for product · {waited}m")
+                                format!("⏸ Waiting for product · {}", crate::asking::waited(waited))
                             }
                             crate::runs::Whom::Author => {
-                                format!("⏸ Waiting on the author · {waited}m")
+                                format!(
+                                    "⏸ Waiting on the author · {}",
+                                    crate::asking::waited(waited)
+                                )
                             }
                         }),
                 )

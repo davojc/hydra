@@ -38,9 +38,32 @@ pub fn answer_prompt(answer: &str) -> String {
     )
 }
 
+/// How long a stage has waited, short: "45m", "2h 30m", "5h", "1d 3h".
+pub fn waited(minutes: u64) -> String {
+    let (d, h, m) = (minutes / 1440, minutes % 1440 / 60, minutes % 60);
+    match (d, h, m) {
+        (0, 0, m) => format!("{m}m"),
+        (0, h, 0) => format!("{h}h"),
+        (0, h, m) => format!("{h}h {m}m"),
+        (d, 0, _) => format!("{d}d"),
+        (d, h, _) => format!("{d}d {h}h"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wait_reads_in_hours_and_minutes() {
+        assert_eq!(waited(0), "0m");
+        assert_eq!(waited(45), "45m");
+        assert_eq!(waited(60), "1h");
+        assert_eq!(waited(150), "2h 30m");
+        assert_eq!(waited(300), "5h");
+        assert_eq!(waited(1440 + 200), "1d 3h");
+        assert_eq!(waited(2 * 1440 + 5), "2d");
+    }
 
     #[test]
     fn the_prompts_say_what_to_do_with_the_answer() {

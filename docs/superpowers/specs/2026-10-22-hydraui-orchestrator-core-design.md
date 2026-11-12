@@ -1467,3 +1467,16 @@ When the person who shared a pipeline (§69) shares it again with changes, every
     - `[shared]`, now at the new version.
   - **Lost:** changes the user made to its stages.
   - **Afterwards:** open tickets take the new look and bars as a save does, and keep their stages. Its settings, if open, reload.
+
+## 71. Confirming what you just did (added 2026-11-12)
+
+Every notice goes to the bell (§57). So after **Export to share**, the only sign it worked was the unread count going up. An action you take now confirms where you're looking.
+
+- **Beside the bell.** For six seconds, a pill to the left of the bell shows the notice, with a mark in the notice's colour: ✓ green when it worked, ! amber or red when it didn't. Its words are cut to fit, the whole of them show on hover, and a click opens the inbox. The notice also lands in the inbox, as every notice does. A newer confirmation replaces the pill.
+- **Where it's used** (`Workspace::confirm`): only for actions you take, not for what happens on its own.
+  - **Export to share:** "Exported to ~/Downloads/prs.toml. Send it on: …" The path is shown with `~` for home.
+  - **Share to a swarm.**
+  - **Import:** from a file or from a swarm.
+  - **Updating a pipeline from its swarm.**
+  - **Deleting a pipeline.**
+  - A failure in any of them shows the same way.

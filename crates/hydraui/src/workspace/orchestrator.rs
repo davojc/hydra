@@ -1498,7 +1498,7 @@ impl Workspace {
             Err(e) => Note::error(format!("It was ended, but not deleted: {e}"))
                 .title(format!("Couldn't delete {name}")),
         };
-        window.push_note(note, cx);
+        self.confirm(note, window, cx);
         cx.notify();
     }
 

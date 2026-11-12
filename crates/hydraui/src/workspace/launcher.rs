@@ -597,7 +597,7 @@ impl Workspace {
             }
             Err(e) => Note::error(e).title("Share to a swarm"),
         };
-        window.push_note(note, cx);
+        self.confirm(note, window, cx);
     }
 
     /// **Import from a swarm** (core spec §69): the pipelines your swarms share; picking one
@@ -712,17 +712,18 @@ impl Workspace {
         match crate::pipeline_share::import_shared(&root, p, id, swarm) {
             Ok(name) => {
                 crate::action_log::write(format!("imported pipeline {name} from swarm {swarm}"));
-                window.push_note(
+                self.confirm(
                     Note::success(
                         "Added. Check its folders and skills, then turn its trigger on. When it's \
                          updated in the swarm, you'll be offered the new version.",
                     )
                     .title(format!("Imported {name}")),
+                    window,
                     cx,
                 );
                 self.start_new_pipeline(name, env, window, cx);
             }
-            Err(e) => window.push_note(Note::warning(e).title("Import from a swarm"), cx),
+            Err(e) => self.confirm(Note::warning(e).title("Import from a swarm"), window, cx),
         }
     }
 
@@ -884,13 +885,14 @@ impl Workspace {
                     self.pipeline_settings.remove(&orch);
                     self.open_pipeline_settings(orch, window, cx);
                 }
-                window.push_note(
+                self.confirm(
                     Note::success(format!("{} is up to date with {}.", p.name, u.swarm_name))
                         .title("Pipeline updated"),
+                    window,
                     cx,
                 );
             }
-            Err(e) => window.push_note(Note::error(e).title("Pipeline update"), cx),
+            Err(e) => self.confirm(Note::error(e).title("Pipeline update"), window, cx),
         }
         cx.notify();
     }
@@ -942,14 +944,15 @@ impl Workspace {
         match crate::pipeline::import(&root, text) {
             Ok(name) => {
                 crate::action_log::write(format!("imported pipeline {name} from {from}"));
-                window.push_note(
+                self.confirm(
                     Note::success("Added. Check its folders and skills, then turn its trigger on.")
                         .title(format!("Imported {name}")),
+                    window,
                     cx,
                 );
                 self.start_new_pipeline(name, env, window, cx);
             }
-            Err(e) => window.push_note(Note::warning(e).title("Import pipeline"), cx),
+            Err(e) => self.confirm(Note::warning(e).title("Import pipeline"), window, cx),
         }
     }
 
@@ -1015,9 +1018,9 @@ impl Workspace {
                                 path.display()
                             ));
                             Note::success(format!(
-                                "Saved to {}. Send it on: they add it with Create pipeline, then \
-                                 Import a file.",
-                                path.display()
+                                "Exported to {}. Send it on: they add it with Create pipeline, \
+                                 then Import a file.",
+                                tilde(&path)
                             ))
                         }
                         Err(e) => Note::error(format!("can't save {}: {e}", path.display())),
@@ -1026,8 +1029,8 @@ impl Workspace {
                 Ok(Err(e)) => Note::error(e.to_string()),
                 _ => return,
             };
-            let _ = this.update_in(cx, |_, window, cx| {
-                window.push_note(note.title("Export pipeline"), cx)
+            let _ = this.update_in(cx, |ws, window, cx| {
+                ws.confirm(note.title("Export pipeline"), window, cx)
             });
         })
         .detach();
@@ -2114,4 +2117,29 @@ fn create_choices(
         .children(copy)
         .child(import)
         .into_any_element()
+}
+
+/// `path` with the home folder as `~`, as the confirmations say it.
+fn tilde(path: &std::path::Path) -> String {
+    match dirs::home_dir().and_then(|h| path.strip_prefix(h).ok().map(std::path::Path::to_path_buf))
+    {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tilde_tests {
+    #[test]
+    fn a_path_under_home_reads_with_a_tilde() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(
+            super::tilde(&home.join("Downloads").join("prs.toml")),
+            "~/Downloads/prs.toml"
+        );
+        assert_eq!(
+            super::tilde(std::path::Path::new("/tmp/x.toml")),
+            "/tmp/x.toml"
+        );
+    }
 }

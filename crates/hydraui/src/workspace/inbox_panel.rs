@@ -65,7 +65,12 @@ impl Workspace {
             }))
             .text_color(color(tone))
             .hover(|s| s.border_color(color(theme::TEAL)))
-            .child("🔔")
+            // A Lucide icon in the button's colour, like the pipelines' marks; not an emoji.
+            .child(
+                gpui_component::Icon::new(gpui_kit_assets::IconName::Bell)
+                    .size(px(14.))
+                    .text_color(color(tone)),
+            )
             .when(unread > 0, |d| d.child(unread.to_string()))
             .tooltip(|window, cx| {
                 gpui_component::tooltip::Tooltip::new("Notifications").build(window, cx)

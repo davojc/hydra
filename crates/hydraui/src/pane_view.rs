@@ -449,6 +449,23 @@ impl PaneView {
         self.title.as_deref()
     }
 
+    /// Whether the terminal's shell is running and no Claude session is, so one can be started.
+    pub fn can_start_claude(&self) -> bool {
+        matches!(self.slot, Slot::Running(_)) && !self.runs_claude()
+    }
+
+    /// Starts Claude here, continuing the folder's most recent conversation (`claude
+    /// --continue`), as if typed at the shell. Does nothing while Claude is already running
+    /// here or the shell isn't; `false` then.
+    pub fn start_claude_continuing(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.can_start_claude() {
+            return false;
+        }
+        let input = continue_claude_input(self.request.shell);
+        self.send(input.as_bytes(), cx);
+        true
+    }
+
     /// Text for the shell as if typed (a path from the file tree, a `cd`).
     pub fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.send(text.as_bytes(), cx);
@@ -1468,9 +1485,33 @@ impl Render for PaneView {
     }
 }
 
+/// What to type at `shell`'s prompt to start Claude continuing the folder's most recent
+/// conversation, Enter included.
+fn continue_claude_input(shell: hydra_platform::shell::ShellKind) -> String {
+    let argv = ["claude".to_string(), "--continue".to_string()];
+    format!("{}\r", crate::hydra::command_line(shell, &argv))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn continuing_claude_types_its_command_and_enter_for_the_shell() {
+        use hydra_platform::shell::ShellKind;
+        assert_eq!(
+            continue_claude_input(ShellKind::Pwsh),
+            "& 'claude' '--continue'\r"
+        );
+        assert_eq!(
+            continue_claude_input(ShellKind::Bash),
+            "'claude' '--continue'\r"
+        );
+        assert_eq!(
+            continue_claude_input(ShellKind::Zsh),
+            "'claude' '--continue'\r"
+        );
+    }
 
     #[test]
     fn remote_control_follows_the_session() {

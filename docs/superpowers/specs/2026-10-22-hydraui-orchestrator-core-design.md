@@ -1396,3 +1396,16 @@ People couldn't find how to import a pipeline. It was the last line of a typed l
   The card's edge is in the pipeline's colour, and brightens on hover. Clicking a card starts that pipeline's orchestrator, as picking it from the list did.
 - **The last card is a dashed "+ Create a pipeline".** It opens the chooser in §66.
 - **Create a pipeline's copy list** uses the same pipeline facts (`my_pipelines`).
+
+## 68. Delete a pipeline (added 2026-11-12)
+
+hydraui had no way to delete a pipeline, other than deleting its file from `~/.hydra/hydraui/pipelines/` by hand.
+
+- **Where.** **Delete this pipeline** is the last row of Pipeline settings, below Advanced settings, set apart by a line. Its one line explains it: "Stops its tickets in progress and moves it to the Trash. Past runs stay in History." The button is a red outline: **Delete pipeline…**
+- **It asks first.** The dialog is titled **Delete <name>?** and says what stops, for example "Its 2 tickets in progress are stopped and their sessions close." It then says "The pipeline moves to the Trash, so you can put it back from there. Its past runs stay in History." The choices are **Cancel** and **Delete pipeline**.
+- **What happens.**
+  - The pipeline ends as **End pipeline** does: its tickets in progress are recorded as stopped by you, and its orchestrators and sessions close.
+  - `pipeline::delete` then moves its file to the Trash (`file_ops::to_recycle_bin`; the Recycle Bin on Windows).
+  - It leaves the sidebar, Start a pipeline and Create a pipeline's copy list.
+  - A notification says "Moved to the Trash. Put it back from there if you need it."
+  - If the Trash refuses the file, the pipeline is ended but not deleted, and the notification says why.

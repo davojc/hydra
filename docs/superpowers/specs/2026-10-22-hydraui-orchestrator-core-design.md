@@ -1394,6 +1394,8 @@ People couldn't find how to import a pipeline. It was the last line of a typed l
   - how many stages it has.
 
   The card's edge is in the pipeline's colour, and brightens on hover. Clicking a card starts that pipeline's orchestrator, as picking it from the list did.
+- **A card is as tall as its text.** A fixed height had squeezed the name line until its letters were cut off.
+- **A scrollbar shows at the grid's right edge** whenever there are more cards than fit, so it's plain there's more below. Create a pipeline's copy list has one too (`scrolled`, with `ScrollbarMode::Always`).
 - **The last card is a dashed "+ Create a pipeline".** It opens the chooser in §66.
 - **Create a pipeline's copy list** uses the same pipeline facts (`my_pipelines`).
 

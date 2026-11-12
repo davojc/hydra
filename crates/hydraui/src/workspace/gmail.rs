@@ -240,6 +240,7 @@ mod tests {
             from: f.into(),
             date: String::new(),
             messages: 1,
+            message_id: String::new(),
         };
         let lines = super::check_lines(
             "jm@iov42.com",

@@ -705,6 +705,20 @@ impl Workspace {
                         .child(format!("Before it can read mail: {}.", missing.join("; "))),
                 );
             }
+            // Without a team swarm, claims stay in each person's own mailbox: two people
+            // reading a group's copies would take the same email (email triage spec §5.1).
+            if m.swarm.read(cx).value().trim().is_empty() {
+                main = main.child(
+                    text(12., theme::TEXT_MUTED)
+                        .pl(px(182.))
+                        .whitespace_normal()
+                        .child(
+                            "No team swarm set: only you are kept off emails you've taken. If \
+                             teammates run this pipeline too, set Team swarm under More options \
+                             so you never both take the same email.",
+                        ),
+                );
+            }
             extra = extra
                 .child(input_field("Gmail search", &m.query))
                 .child(input_field("Team swarm", &m.swarm))

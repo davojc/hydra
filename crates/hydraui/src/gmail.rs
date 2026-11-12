@@ -70,6 +70,9 @@ pub struct Thread {
     /// The last message's `Date` header, as sent.
     pub date: String,
     pub messages: usize,
+    /// The first message's `Message-ID` header: the same in every mailbox holding a copy (a
+    /// group's members), unlike `id`. Empty when it has none.
+    pub message_id: String,
 }
 
 /// The S256 challenge of `verifier`: base64url, unpadded, of its SHA-256.
@@ -442,6 +445,7 @@ fn read_thread(v: &serde_json::Value) -> Option<Thread> {
         from: header(last, "From"),
         date: header(last, "Date"),
         messages: messages.len(),
+        message_id: header(first, "Message-ID"),
     })
 }
 
@@ -551,7 +555,7 @@ pub fn list_threads(
                 access,
                 &format!(
                     "users/me/threads/{}?format=metadata&metadataHeaders=Subject\
-                     &metadataHeaders=From&metadataHeaders=Date",
+                     &metadataHeaders=From&metadataHeaders=Date&metadataHeaders=Message-ID",
                     enc(id)
                 ),
             )?;
@@ -809,7 +813,8 @@ mod tests {
                 {"payload": {"headers": [
                     {"name": "Subject", "value": subject},
                     {"name": "From", "value": "Customer <c@example.com>"},
-                    {"name": "Date", "value": "Mon, 9 Nov 2026 10:00:00 +0000"}
+                    {"name": "Date", "value": "Mon, 9 Nov 2026 10:00:00 +0000"},
+                    {"name": "Message-Id", "value": format!("<{id}@mail.example.com>")}
                 ]}},
                 {"payload": {"headers": [
                     {"name": "Subject", "value": format!("Re: {subject}")},
@@ -852,6 +857,8 @@ mod tests {
                 from: "Ann <a@x.com>".into(),
                 date: "Tue, 10 Nov 2026 09:30:00 +0000".into(),
                 messages: 2,
+                // The first message's, whatever the header's case.
+                message_id: "<t1@mail.example.com>".into(),
             }
         );
         assert_eq!(got[1].subject, "How to share");
@@ -864,6 +871,11 @@ mod tests {
         assert!(list.url.contains("maxResults=10"), "{}", list.url);
         let one = seen.recv().unwrap();
         assert!(one.url.contains("format=metadata"), "{}", one.url);
+        assert!(
+            one.url.contains("metadataHeaders=Message-ID"),
+            "{}",
+            one.url
+        );
         assert_eq!(one.auth.as_deref(), Some("Bearer ya29.a"));
     }
 

@@ -3,6 +3,12 @@
 //! which shows hydraui who has what and covers the moments before a label lands. Two people
 //! claiming at once both see both labels after the settle, and every machine picks the same
 //! winner. Pure but for the swarm's files.
+//!
+//! A Google group has no mailbox of its own: each member reads their own copy of an email, with
+//! its own thread id, and a label on one copy is invisible on another (§5.1). So a swarm claim
+//! is keyed by the email's `Message-ID` (the same in every copy, `mail_watch::claim_key`) and
+//! says which mailbox made it. A claim from another mailbox is the only sign of it this one will
+//! ever see: it holds while its file is there, and counts in the settle as a label would.
 
 use std::path::{Path, PathBuf};
 
@@ -47,44 +53,57 @@ pub fn claimants(label_names: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// A claim in the swarm: who, and when (a log time, `2026-11-11 09:00:01.123`).
+/// A claim in the swarm: who, when (a log time, `2026-11-11 09:00:01.123`), and the mailbox
+/// that made it; empty for a claim written before claims said (read as this mailbox's).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Claim {
     pub who: String,
     pub at: String,
+    pub mailbox: String,
 }
 
-/// `<swarm folder>/claims/<thread>--<who>.md`: one file per person, so two claims never make a
-/// sync conflict, and `.md`, which every swarm syncs.
-pub fn claim_file(swarm: &Path, thread: &str, who: &str) -> PathBuf {
-    swarm.join("claims").join(format!("{thread}--{who}.md"))
+impl Claim {
+    /// Made in a mailbox other than `mine`: its label can never show here (a group's copies).
+    fn elsewhere(&self, mine: &str) -> bool {
+        !self.mailbox.is_empty() && !self.mailbox.eq_ignore_ascii_case(mine)
+    }
 }
 
-/// Writes `who`'s claim on `thread`: who, when, the run's ticket and the subject. Never the
-/// email itself.
+/// `<swarm folder>/claims/<key>--<who>.md`: one file per person, so two claims never make a
+/// sync conflict, and `.md`, which every swarm syncs. `key` is the email's
+/// (`mail_watch::claim_key`).
+pub fn claim_file(swarm: &Path, key: &str, who: &str) -> PathBuf {
+    swarm.join("claims").join(format!("{key}--{who}.md"))
+}
+
+/// Writes `who`'s claim, made in `mailbox`, on the email `key`: who, when, which mailbox, the
+/// run's ticket and the subject. Never the email itself.
+#[allow(clippy::too_many_arguments)]
 pub fn write_claim(
     swarm: &Path,
-    thread: &str,
+    key: &str,
     who: &str,
     at: &str,
     ticket: &str,
     subject: &str,
+    mailbox: &str,
 ) -> std::io::Result<()> {
-    let path = claim_file(swarm, thread, who);
+    let path = claim_file(swarm, key, who);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     std::fs::write(
         path,
         format!(
-            "# Claimed: {subject}\n\nclaimed by: {who}\nat: {at}\nrun: {ticket}\nthread: {thread}\n"
+            "# Claimed: {subject}\n\nclaimed by: {who}\nat: {at}\nmailbox: {mailbox}\n\
+             run: {ticket}\nemail: {key}\n"
         ),
     )
 }
 
-/// The claims on `thread` in the swarm's folder. Sync's conflict copies aren't claims.
-pub fn read_claims(swarm: &Path, thread: &str) -> Vec<Claim> {
-    let prefix = format!("{thread}--");
+/// The claims on the email `key` in the swarm's folder. Sync's conflict copies aren't claims.
+pub fn read_claims(swarm: &Path, key: &str) -> Vec<Claim> {
+    let prefix = format!("{key}--");
     let Ok(entries) = std::fs::read_dir(swarm.join("claims")) else {
         return Vec::new();
     };
@@ -98,18 +117,21 @@ pub fn read_claims(swarm: &Path, thread: &str) -> Vec<Claim> {
                 return None;
             }
             let text = std::fs::read_to_string(e.path()).ok()?;
-            let at = text
-                .lines()
-                .find_map(|l| l.strip_prefix("at:"))
-                .map(|a| a.trim().to_string())?;
-            Some(Claim { who, at })
+            let field = |name: &str| {
+                text.lines()
+                    .find_map(|l| l.strip_prefix(name))
+                    .map(|a| a.trim().to_string())
+            };
+            let at = field("at:")?;
+            let mailbox = field("mailbox:").unwrap_or_default();
+            Some(Claim { who, at, mailbox })
         })
         .collect()
 }
 
-/// Removes `who`'s claim on `thread`, if there is one.
-pub fn remove_claim(swarm: &Path, thread: &str, who: &str) -> std::io::Result<()> {
-    match std::fs::remove_file(claim_file(swarm, thread, who)) {
+/// Removes `who`'s claim on the email `key`, if there is one.
+pub fn remove_claim(swarm: &Path, key: &str, who: &str) -> std::io::Result<()> {
+    match std::fs::remove_file(claim_file(swarm, key, who)) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
     }
@@ -126,12 +148,16 @@ pub enum Found {
     Theirs(String),
 }
 
-/// Whether `me` may claim a thread with these label claimants and swarm claims, at `now`.
-/// Gmail decides: anyone else's label is theirs. A swarm claim of someone else's holds it only
-/// while recent, the moments before their label lands.
-pub fn look(me: &str, labelled: &[String], swarm: &[Claim], now: &str) -> Found {
+/// Whether `me`, reading `mailbox`, may claim a thread with these label claimants and swarm
+/// claims, at `now`. Gmail decides for this mailbox: anyone else's label is theirs. Someone
+/// else's swarm claim made in this mailbox holds only while recent, the moments before their
+/// label lands; one made in another mailbox (a group's copy) holds while it's there.
+pub fn look(me: &str, mailbox: &str, labelled: &[String], swarm: &[Claim], now: &str) -> Found {
     if let Some(other) = labelled.iter().find(|w| *w != me) {
         return Found::Theirs(other.clone());
+    }
+    if let Some(c) = swarm.iter().find(|c| c.who != me && c.elsewhere(mailbox)) {
+        return Found::Theirs(c.who.clone());
     }
     if labelled.iter().any(|w| w == me) {
         return Found::Mine;
@@ -147,13 +173,21 @@ pub fn look(me: &str, labelled: &[String], swarm: &[Claim], now: &str) -> Found 
 /// After the settle: whether `me` keeps the thread. Alone, yes. With rivals, the earliest
 /// swarm claim wins (one not seen counts as latest), then the lowest name, so every machine
 /// picks the same one. Without `me`'s label at all, it's lost to whoever has it.
-pub fn settle(me: &str, labelled: &[String], swarm: &[Claim]) -> Result<(), String> {
+/// Someone claiming from another mailbox (a group's copy) is a rival as a label would be.
+pub fn settle(me: &str, mailbox: &str, labelled: &[String], swarm: &[Claim]) -> Result<(), String> {
     if !labelled.iter().any(|w| w == me) {
         return Err(labelled
             .first()
             .cloned()
             .unwrap_or_else(|| "someone".into()));
     }
+    let mut rivals: Vec<String> = labelled.to_vec();
+    for c in swarm.iter().filter(|c| c.elsewhere(mailbox)) {
+        if !rivals.contains(&c.who) {
+            rivals.push(c.who.clone());
+        }
+    }
+    let labelled = &rivals;
     let when = |who: &str| {
         swarm
             .iter()
@@ -191,10 +225,12 @@ pub struct Claimed {
 /// Claims `items` for `me` (spec §5): those nobody has get `me`'s claim file in `swarm` and
 /// both labels; after `settle`, the labels are read again and a rival claim settled, the loser
 /// taking its claim back. `now` is the log time, for claim files.
+#[allow(clippy::too_many_arguments)]
 pub fn claim(
     ep: &Endpoints,
     access: &str,
     me: &str,
+    mailbox: &str,
     swarm: Option<&Path>,
     items: Vec<Mailed>,
     now: &dyn Fn() -> String,
@@ -208,17 +244,17 @@ pub fn claim(
             .filter_map(|id| known.iter().find(|(k, _)| k == id).map(|(_, n)| n.clone()))
             .collect()
     };
-    let swarm_claims = |thread: &str| swarm.map(|s| read_claims(s, thread)).unwrap_or_default();
+    let swarm_claims = |m: &Mailed| swarm.map(|s| read_claims(s, m.key())).unwrap_or_default();
     let mut out = Claimed::default();
     let mut trying = Vec::new();
     for m in items {
         let on = names(gmail::thread_label_ids(ep, access, &m.thread)?, &known);
-        match look(me, &claimants(&on), &swarm_claims(&m.thread), &now()) {
+        match look(me, mailbox, &claimants(&on), &swarm_claims(&m), &now()) {
             Found::Mine => out.kept.push(m),
             Found::Theirs(who) => out.theirs.push((m, who)),
             Found::Free => {
                 if let Some(s) = swarm {
-                    write_claim(s, &m.thread, me, &now(), &m.ticket, &m.subject)
+                    write_claim(s, m.key(), me, &now(), &m.ticket, &m.subject, mailbox)
                         .map_err(|e| format!("can't write the claim to the swarm: {e}"))?;
                 }
                 gmail::modify_thread(ep, access, &m.thread, &[claimed.clone(), mine.clone()], &[])?;
@@ -234,12 +270,12 @@ pub fn claim(
     let known = gmail::labels(ep, access)?;
     for m in trying {
         let on = names(gmail::thread_label_ids(ep, access, &m.thread)?, &known);
-        match settle(me, &claimants(&on), &swarm_claims(&m.thread)) {
+        match settle(me, mailbox, &claimants(&on), &swarm_claims(&m)) {
             Ok(()) => out.kept.push(m),
             Err(who) => {
                 gmail::modify_thread(ep, access, &m.thread, &[], std::slice::from_ref(&mine))?;
                 if let Some(s) = swarm {
-                    remove_claim(s, &m.thread, me).map_err(|e| e.to_string())?;
+                    remove_claim(s, m.key(), me).map_err(|e| e.to_string())?;
                 }
                 out.lost.push((m, who));
             }
@@ -248,15 +284,16 @@ pub fn claim(
     Ok(out)
 }
 
-/// Ends `me`'s claim on `thread` once its run ends: `done` swaps the claim labels for
-/// `hydra/done`; otherwise they come off, so the thread is free for someone else. Its claim
-/// file goes either way.
+/// Ends `me`'s claim on `thread` (the email `key`) once its run ends: `done` swaps the claim
+/// labels for `hydra/done`; otherwise they come off, so the thread is free for someone else.
+/// Its claim file goes either way.
 pub fn release(
     ep: &Endpoints,
     access: &str,
     me: &str,
     swarm: Option<&Path>,
     thread: &str,
+    key: &str,
     done: bool,
 ) -> Result<(), String> {
     let mut known = gmail::labels(ep, access)?;
@@ -269,7 +306,7 @@ pub fn release(
     };
     gmail::modify_thread(ep, access, thread, &add, &[claimed, mine])?;
     if let Some(s) = swarm {
-        remove_claim(s, thread, me).map_err(|e| e.to_string())?;
+        remove_claim(s, key, me).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -285,6 +322,7 @@ mod tests {
             ticket: crate::mail_watch::ticket(id),
             subject: format!("About {id}"),
             from: "Ann <ann@acme.com>".into(),
+            key: String::new(),
         }
     }
 
@@ -320,6 +358,7 @@ mod tests {
             &ep,
             "a",
             "jordan",
+            "team@x.com",
             Some(swarm.path()),
             vec![mailed("t1")],
             &at,
@@ -347,6 +386,7 @@ mod tests {
             "2026-11-11 09:00:01.000",
             "MAIL-T2",
             "S",
+            "team@x.com",
         )
         .unwrap();
         let (ep, seen) = fake(
@@ -362,6 +402,7 @@ mod tests {
             &ep,
             "a",
             "jordan",
+            "team@x.com",
             Some(swarm.path()),
             vec![mailed("t2")],
             &now,
@@ -402,6 +443,7 @@ mod tests {
                 "2026-11-11 09:00:04.000",
                 "MAIL-T3",
                 "S",
+                "team@x.com",
             )
             .unwrap();
             "2026-11-11 09:00:05.000".to_string()
@@ -410,6 +452,7 @@ mod tests {
             &ep,
             "a",
             "jordan",
+            "team@x.com",
             Some(swarm.path()),
             vec![mailed("t3")],
             &now,
@@ -448,6 +491,7 @@ mod tests {
             &ep,
             "a",
             "jordan",
+            "team@x.com",
             None,
             vec![mailed("t4")],
             &at,
@@ -473,6 +517,7 @@ mod tests {
             "2026-11-11 09:00:01.000",
             "MAIL-T1",
             "S",
+            "team@x.com",
         )
         .unwrap();
         let (ep, seen) = fake(
@@ -482,7 +527,7 @@ mod tests {
             ],
             2,
         );
-        release(&ep, "a", "jordan", Some(swarm.path()), "t1", true).unwrap();
+        release(&ep, "a", "jordan", Some(swarm.path()), "t1", "t1", true).unwrap();
         let body: serde_json::Value = serde_json::from_str(
             &seen
                 .try_iter()
@@ -502,7 +547,7 @@ mod tests {
             ],
             2,
         );
-        release(&ep, "a", "jordan", None, "t1", false).unwrap();
+        release(&ep, "a", "jordan", None, "t1", "t1", false).unwrap();
         let body: serde_json::Value = serde_json::from_str(
             &seen
                 .try_iter()
@@ -523,10 +568,141 @@ mod tests {
         Claim {
             who: who.into(),
             at: at.into(),
+            mailbox: "team@x.com".into(),
         }
     }
 
     const NOW: &str = "2026-11-11 09:30:00.000";
+
+    fn from_box(who: &str, at: &str, mailbox: &str) -> Claim {
+        Claim {
+            who: who.into(),
+            at: at.into(),
+            mailbox: mailbox.into(),
+        }
+    }
+
+    #[test]
+    fn a_claim_from_another_mailbox_holds_while_it_is_there() {
+        // A group: David reads his own copy, so his label never shows in Jordan's mailbox.
+        let old = [from_box(
+            "david",
+            "2026-11-11 08:00:00.000",
+            "david@iov42.com",
+        )];
+        assert_eq!(
+            look("jordan", "jordan@iov42.com", &[], &old, NOW),
+            Found::Theirs("david".into()),
+            "an hour on, still his: nothing else here will ever say so"
+        );
+        // The same claim made in this very mailbox, with no label after an hour: given up.
+        let same = [from_box(
+            "david",
+            "2026-11-11 08:00:00.000",
+            "jordan@iov42.com",
+        )];
+        assert_eq!(
+            look("jordan", "jordan@iov42.com", &[], &same, NOW),
+            Found::Free
+        );
+        // A claim written before claims named their mailbox reads as this mailbox's.
+        let unnamed = [from_box("david", "2026-11-11 08:00:00.000", "")];
+        assert_eq!(
+            look("jordan", "jordan@iov42.com", &[], &unnamed, NOW),
+            Found::Free
+        );
+    }
+
+    #[test]
+    fn rivals_in_other_mailboxes_settle_like_labels() {
+        let me = names(&["jordan"]);
+        // Only my label shows; David claimed his copy first: his.
+        let first = [
+            from_box("jordan", "2026-11-11 09:00:02.000", "jordan@iov42.com"),
+            from_box("david", "2026-11-11 09:00:01.000", "david@iov42.com"),
+        ];
+        assert_eq!(
+            settle("jordan", "jordan@iov42.com", &me, &first),
+            Err("david".into())
+        );
+        // On his machine the same files decide the same way.
+        assert!(settle("david", "david@iov42.com", &names(&["david"]), &first).is_ok());
+        // Mine was first: mine.
+        let second = [
+            from_box("jordan", "2026-11-11 09:00:01.000", "jordan@iov42.com"),
+            from_box("david", "2026-11-11 09:00:02.000", "david@iov42.com"),
+        ];
+        assert!(settle("jordan", "jordan@iov42.com", &me, &second).is_ok());
+        assert_eq!(
+            settle("david", "david@iov42.com", &names(&["david"]), &second),
+            Err("jordan".into())
+        );
+    }
+
+    #[test]
+    fn two_inboxes_racing_for_one_group_email_end_with_one_owner() {
+        // Jordan's copy is thread j1, David's is d1: the same email, the same claim key.
+        let key = "m-00aa11bb22cc33dd";
+        let swarm = tempfile::tempdir().unwrap();
+        let (ep, seen) = fake(
+            vec![
+                ("/gmail/v1/users/me/labels", 200, LABELS.into()),
+                ("/gmail/v1/users/me/threads/j1?", 200, labelled(&["INBOX"])),
+                ("/gmail/v1/users/me/threads/j1/modify", 200, "{}".into()),
+                ("/gmail/v1/users/me/threads/j1/modify", 200, "{}".into()),
+                // After the settle only Jordan's own label is here: David's is on his copy.
+                (
+                    "/gmail/v1/users/me/threads/j1?",
+                    200,
+                    labelled(&["INBOX", "L1", "L2"]),
+                ),
+            ],
+            6,
+        );
+        let sw = swarm.path().to_path_buf();
+        let now = move || {
+            // David's claim on his copy syncs in during the settle, a second before Jordan's.
+            write_claim(
+                &sw,
+                key,
+                "david",
+                "2026-11-11 09:00:04.000",
+                "MAIL-D1",
+                "API 401",
+                "david@iov42.com",
+            )
+            .unwrap();
+            "2026-11-11 09:00:05.000".to_string()
+        };
+        let mut email = mailed("j1");
+        email.key = key.into();
+        let got = claim(
+            &ep,
+            "a",
+            "jordan",
+            "jordan@iov42.com",
+            Some(swarm.path()),
+            vec![email.clone()],
+            &now,
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(got.lost, vec![(email, "david".to_string())]);
+        assert!(got.kept.is_empty(), "only one of them runs it");
+        // Jordan's label comes off his copy, and only David's claim is left in the swarm.
+        let modifies: Vec<serde_json::Value> = seen
+            .try_iter()
+            .filter(|c| c.url.ends_with("/modify"))
+            .map(|c| serde_json::from_str(&c.body).unwrap())
+            .collect();
+        assert_eq!(modifies[1]["removeLabelIds"], serde_json::json!(["L2"]));
+        let left = read_claims(swarm.path(), key);
+        assert_eq!(left.len(), 1);
+        assert_eq!(
+            (left[0].who.as_str(), left[0].mailbox.as_str()),
+            ("david", "david@iov42.com")
+        );
+    }
 
     #[test]
     fn people_become_plain_slugs_and_labels() {
@@ -557,6 +733,7 @@ mod tests {
             "2026-11-11 09:00:01.000",
             "MAIL-T1",
             "API 401",
+            "team@x.com",
         )
         .unwrap();
         write_claim(
@@ -566,6 +743,7 @@ mod tests {
             "2026-11-11 09:00:02.000",
             "MAIL-T1",
             "API 401",
+            "team@x.com",
         )
         .unwrap();
         write_claim(
@@ -575,6 +753,7 @@ mod tests {
             "2026-11-11 09:00:03.000",
             "MAIL-T2",
             "Other",
+            "team@x.com",
         )
         .unwrap();
         // A sync conflict copy is not a claim.
@@ -604,47 +783,62 @@ mod tests {
 
     #[test]
     fn a_look_leaves_others_threads_alone() {
-        assert_eq!(look("jordan", &[], &[], NOW), Found::Free);
-        assert_eq!(look("jordan", &names(&["jordan"]), &[], NOW), Found::Mine);
+        assert_eq!(look("jordan", "team@x.com", &[], &[], NOW), Found::Free);
         assert_eq!(
-            look("jordan", &names(&["victoria"]), &[], NOW),
+            look("jordan", "team@x.com", &names(&["jordan"]), &[], NOW),
+            Found::Mine
+        );
+        assert_eq!(
+            look("jordan", "team@x.com", &names(&["victoria"]), &[], NOW),
             Found::Theirs("victoria".into())
         );
         // Their label hasn't landed yet, but their claim is a minute old.
         let fresh = [by("victoria", "2026-11-11 09:29:00.000")];
         assert_eq!(
-            look("jordan", &[], &fresh, NOW),
+            look("jordan", "team@x.com", &[], &fresh, NOW),
             Found::Theirs("victoria".into())
         );
         // An hour-old claim with no label was given up: the thread is free.
         let old = [by("victoria", "2026-11-11 08:30:00.000")];
-        assert_eq!(look("jordan", &[], &old, NOW), Found::Free);
+        assert_eq!(look("jordan", "team@x.com", &[], &old, NOW), Found::Free);
         // My own claim file alone doesn't stop me.
         let mine = [by("jordan", "2026-11-11 09:29:00.000")];
-        assert_eq!(look("jordan", &[], &mine, NOW), Found::Free);
+        assert_eq!(look("jordan", "team@x.com", &[], &mine, NOW), Found::Free);
     }
 
     #[test]
     fn rivals_settle_on_the_earliest_claim_then_the_lowest_name() {
-        assert!(settle("jordan", &names(&["jordan"]), &[]).is_ok());
+        assert!(settle("jordan", "team@x.com", &names(&["jordan"]), &[]).is_ok());
         let both = names(&["jordan", "victoria"]);
         let early_v = [
             by("jordan", "2026-11-11 09:00:02.000"),
             by("victoria", "2026-11-11 09:00:01.000"),
         ];
-        assert_eq!(settle("jordan", &both, &early_v), Err("victoria".into()));
-        assert!(settle("victoria", &both, &early_v).is_ok());
-        // Same time, or neither seen: the lowest name, for everyone.
-        assert!(settle("jordan", &both, &[]).is_ok());
-        assert_eq!(settle("victoria", &both, &[]), Err("jordan".into()));
-        // Only one claim seen: it's earlier than one not seen.
-        let only_v = [by("victoria", "2026-11-11 09:00:05.000")];
-        assert_eq!(settle("jordan", &both, &only_v), Err("victoria".into()));
-        // My label is gone: lost to whoever has it.
         assert_eq!(
-            settle("jordan", &names(&["victoria"]), &[]),
+            settle("jordan", "team@x.com", &both, &early_v),
             Err("victoria".into())
         );
-        assert_eq!(settle("jordan", &[], &[]), Err("someone".into()));
+        assert!(settle("victoria", "team@x.com", &both, &early_v).is_ok());
+        // Same time, or neither seen: the lowest name, for everyone.
+        assert!(settle("jordan", "team@x.com", &both, &[]).is_ok());
+        assert_eq!(
+            settle("victoria", "team@x.com", &both, &[]),
+            Err("jordan".into())
+        );
+        // Only one claim seen: it's earlier than one not seen.
+        let only_v = [by("victoria", "2026-11-11 09:00:05.000")];
+        assert_eq!(
+            settle("jordan", "team@x.com", &both, &only_v),
+            Err("victoria".into())
+        );
+        // My label is gone: lost to whoever has it.
+        assert_eq!(
+            settle("jordan", "team@x.com", &names(&["victoria"]), &[]),
+            Err("victoria".into())
+        );
+        assert_eq!(
+            settle("jordan", "team@x.com", &[], &[]),
+            Err("someone".into())
+        );
     }
 }

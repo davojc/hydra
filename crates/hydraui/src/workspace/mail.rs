@@ -164,6 +164,8 @@ impl Workspace {
                             ticket: mail_watch::ticket(&t.id),
                             subject: t.subject.clone(),
                             from: t.from.clone(),
+                            // The same in every copy of a group's email (spec §5.1).
+                            key: mail_watch::claim_key(t),
                         })
                         .collect();
                     // One person per email (spec §5): only threads this person keeps run.
@@ -171,6 +173,7 @@ impl Workspace {
                         &ep,
                         &access,
                         &me,
+                        &address,
                         swarm.as_deref(),
                         fresh,
                         &crate::action_log::now,
@@ -230,6 +233,7 @@ impl Workspace {
             .collect();
         for m in &new {
             state.held.insert(m.thread.clone(), m.ticket.clone());
+            state.keys.insert(m.thread.clone(), m.key().to_string());
         }
         state.queue.extend(new.iter().cloned());
         if let Err(e) = mail_watch::save(&root, &p.file, &state) {
@@ -303,12 +307,13 @@ impl Workspace {
             return;
         }
         let root = self.hydra.paths.root().to_path_buf();
-        let held = mail_watch::load(&root, &p.file).held;
+        let state = mail_watch::load(&root, &p.file);
+        let (held, keys) = (state.held, state.keys);
         if held.is_empty() {
             return;
         }
         let history = crate::run_history::read(&root, &[]);
-        let ended: Vec<(String, bool)> = held
+        let ended: Vec<(String, String, bool)> = held
             .iter()
             .filter_map(|(thread, ticket)| {
                 let e = history
@@ -321,6 +326,7 @@ impl Workspace {
                 (!open).then(|| {
                     (
                         thread.clone(),
+                        keys.get(thread).cloned().unwrap_or_else(|| thread.clone()),
                         e.outcome == crate::run_history::Outcome::Done,
                     )
                 })
@@ -346,13 +352,14 @@ impl Workspace {
                     let ep = Endpoints::google();
                     let access = gmail::refresh(&ep, &client, &hydra.gmail_sign_in(&env)?)?;
                     let mut released = Vec::new();
-                    for (thread, finished) in ended {
+                    for (thread, key, finished) in ended {
                         crate::mail_claim::release(
                             &ep,
                             &access,
                             &me,
                             swarm.as_deref(),
                             &thread,
+                            &key,
                             finished,
                         )?;
                         released.push((thread, finished));
@@ -368,6 +375,7 @@ impl Workspace {
                         let mut state = mail_watch::load(&root, &file);
                         for (thread, finished) in &released {
                             state.held.remove(thread);
+                            state.keys.remove(thread);
                             crate::action_log::write(format!(
                                 "mail {file}: let go of {thread} ({})",
                                 if *finished { "done" } else { "freed" }

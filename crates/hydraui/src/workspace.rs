@@ -224,8 +224,9 @@ pub struct Workspace {
     history: Option<history_tab::HistoryTab>,
     /// The notifications panel under the bell, while open (core spec §57).
     inbox: Option<inbox_panel::InboxPanel>,
-    /// What an action you just took did, beside the bell for a few seconds (core spec §71).
-    flash: Option<inbox_panel::Flash>,
+    /// What Export to share or Share to a swarm just did, by pipeline file: a line under those
+    /// buttons in its settings for a while (core spec §71), and the seq that set it.
+    share_said: HashMap<String, (crate::inbox::Kind, String, u64)>,
     /// Tickets (core spec §53), when shown.
     tickets: Option<tickets_tab::TicketsTab>,
     /// Every environment's projects, as last read.
@@ -563,7 +564,7 @@ impl Workspace {
             projects: None,
             history: None,
             inbox: None,
-            flash: None,
+            share_said: HashMap::new(),
             tickets: None,
             projects_data: Default::default(),
             tasks_tabs: HashMap::new(),

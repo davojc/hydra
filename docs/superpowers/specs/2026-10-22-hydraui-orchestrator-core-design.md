@@ -1468,18 +1468,14 @@ When the person who shared a pipeline (§69) shares it again with changes, every
   - **Lost:** changes the user made to its stages.
   - **Afterwards:** open tickets take the new look and bars as a save does, and keep their stages. Its settings, if open, reload.
 
-## 71. Confirming what you just did (added 2026-11-12)
+## 71. What Export and Share just did (added 2026-11-12, revised the same day)
 
-Every notice goes to the bell (§57). So after **Export to share**, the only sign it worked was the unread count going up. An action you take now confirms where you're looking.
+Every notice goes to the bell (§57). So after **Export to share**, the only sign it worked was the bell's count going up.
 
-- **Beside the bell.** For six seconds, a pill to the left of the bell shows the notice, with a mark in the notice's colour: ✓ green when it worked, ! amber or red when it didn't. Its words are cut to fit, the whole of them show on hover, and a click opens the inbox. The notice also lands in the inbox, as every notice does. A newer confirmation replaces the pill.
-- **Where it's used** (`Workspace::confirm`): only for actions you take, not for what happens on its own.
-  - **Export to share:** "Exported to ~/Downloads/prs.toml. Send it on: …" The path is shown with `~` for home.
-  - **Share to a swarm.**
-  - **Import:** from a file or from a swarm.
-  - **Updating a pipeline from its swarm.**
-  - **Deleting a pipeline.**
-  - A failure in any of them shows the same way.
+- **Under the buttons.** **Export to share** and **Share to a swarm** now say what they did in a line of text under the two buttons in Pipeline settings. In green with ✓ when it worked ("Exported to ~/Downloads/prs.toml", "Shared to Team"), in red with ! when it didn't. The line is the notice's first sentence, and the path is shown with `~` for home.
+  - It stays for 15 seconds, and a newer one replaces it (`Workspace::share_said`).
+  - The full notice still goes to the inbox.
+- **First tried as a pill beside the bell, for these and other actions.** That was taken out the same day, at the user's request: the confirmation belongs where you clicked. Imports, updates and Delete pipeline notify through the inbox as before.
 
 ## 72. "With you" while you're in a waiting stage (added 2026-11-12)
 

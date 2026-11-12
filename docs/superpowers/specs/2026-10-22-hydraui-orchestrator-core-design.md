@@ -1529,3 +1529,23 @@ On a pipeline with one ticket open, the ticket's name, its state ("version-2-bac
 
 - **One ticket gets a box too.** Under its orchestrator, the box holds the ticket's name (a pull request as `repo #N`), its state pill, what it waits on (§75), its link, and the sessions working on it. That's the same box as with several tickets, and the group view already drew one for a single ticket (`open_lanes`).
 - **The pipeline's card is the pipeline's.** While tickets are open, it shows the pipeline's name and "1 ticket in progress" (or "N tickets in progress"). It no longer shows a ticket's pill or progress bar, since the box below has them. With no ticket open, it reads as before ("No ticket yet", Ready).
+
+## 77. One pill for what a ticket waits on (added 2026-11-12)
+
+With each ticket in its own box (§76), the box said the same thing twice: a **Waiting on author** pill, and a "⏸ Waiting on the author · 23m ›" line under it. The same happened for a question to product.
+
+- **One pill.** The line is gone from the ticket's box. The pill carries what the line added: how long the ticket has waited ("Waiting on author · 23m", "Asked product · 5m").
+- **A click on the pill** opens the question: what's asked, its thread, **Check now** and **Answer…**. A click anywhere else on the box's head still opens the ticket.
+
+## 78. Check Gmail says what it found (added 2026-11-12)
+
+**Check Gmail** reported only to the bell, so pressing it looked like nothing happened. It's the same gap Connect Slack had (§73).
+
+- **A dialog.** **Gmail for <env>** now opens with:
+  - which mailbox is connected: "Connected as …. This is the mailbox hydraui reads.";
+  - its newest inbox threads, each with its subject and sender;
+  - how to read another mailbox: Connect Gmail… and sign in as that account.
+
+  A failure opens the dialog too ("Couldn't read the mailbox: …").
+- **A missing Google client** opens the same dialog, for Check Gmail and for Connect Gmail. It says to set `gmail_client_id` and `gmail_client_secret`, then choose **Reload config**.
+- **The bell.** The notices still go there too.

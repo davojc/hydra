@@ -1715,6 +1715,24 @@ pub fn import(hydra_root: &Path, text: &str) -> Result<String, String> {
     Ok(name)
 }
 
+/// **Delete pipeline…** (core spec §68): moves pipeline `name`'s file away with `remove` (the
+/// Trash, in the app, so it can be put back) and returns where it was.
+pub fn delete(
+    hydra_root: &Path,
+    name: &str,
+    remove: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<PathBuf, String> {
+    if !plain_name(name) {
+        return Err(format!("{name:?} isn't a pipeline name"));
+    }
+    let path = folder(hydra_root).join(format!("{name}.toml"));
+    if !path.is_file() {
+        return Err(format!("there's no pipeline {name}"));
+    }
+    remove(&path)?;
+    Ok(path)
+}
+
 /// Values a stage prompt's placeholders are filled with.
 pub struct PromptVars<'a> {
     pub ticket: &'a str,
@@ -2228,6 +2246,33 @@ mod tests {
         edit.color = None;
         save(d.path(), "prs", &edit).unwrap();
         assert_eq!(load(d.path(), "prs").unwrap().color, None);
+    }
+
+    #[test]
+    fn deleting_a_pipeline_moves_only_its_file() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        let base = "name = \"P\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n";
+        for n in ["keep", "gone"] {
+            std::fs::write(folder(d.path()).join(format!("{n}.toml")), base).unwrap();
+        }
+        let gone = delete(d.path(), "gone", |p| {
+            std::fs::remove_file(p).map_err(|e| e.to_string())
+        });
+        assert_eq!(gone.unwrap(), folder(d.path()).join("gone.toml"));
+        assert_eq!(names(d.path()), ["keep"]);
+        assert!(
+            delete(d.path(), "gone", |_| Ok(()))
+                .unwrap_err()
+                .contains("no pipeline")
+        );
+        assert!(delete(d.path(), "../keep", |_| Ok(())).is_err());
+        // The Trash refusing leaves it where it was.
+        assert_eq!(
+            delete(d.path(), "keep", |_| Err("trash full".into())),
+            Err("trash full".into())
+        );
+        assert_eq!(names(d.path()), ["keep"]);
     }
 
     #[test]

@@ -1412,6 +1412,96 @@ impl Workspace {
         });
     }
 
+    /// **Delete pipeline…** (core spec §68): asks first, saying what stops, then ends the
+    /// pipeline and moves its file (`file`) to the Trash.
+    pub(super) fn delete_pipeline_dialog(
+        &mut self,
+        orch: PaneId,
+        file: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = crate::pipeline::load(self.hydra.paths.root(), &file)
+            .map_or_else(|_| file.clone(), |p| p.name);
+        let slots = self.slots(orch, cx);
+        let open: usize = slots.iter().map(|s| self.open_runs_of(*s, cx).len()).sum();
+        let tickets = match open {
+            0 => String::new(),
+            1 => "Its ticket in progress is stopped and its sessions close. ".to_string(),
+            n => format!("Its {n} tickets in progress are stopped and their sessions close. "),
+        };
+        let body = format!(
+            "{tickets}The pipeline moves to the Trash, so you can put it back from there. Its \
+             past runs stay in History."
+        );
+        let ws = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (ws, file) = (ws.clone(), file.clone());
+            dialog
+                .title(format!("Delete {name}?"))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(color(theme::TEXT))
+                        .child(body.clone()),
+                )
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("delete-pipeline-cancel")
+                                .label("Cancel")
+                                .ghost()
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("delete-pipeline-go")
+                                .label("Delete pipeline")
+                                .danger()
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let file = file.clone();
+                                    ws.update(cx, |ws, cx| {
+                                        ws.delete_pipeline(orch, &file, window, cx)
+                                    });
+                                }),
+                        ),
+                )
+        });
+    }
+
+    fn delete_pipeline(
+        &mut self,
+        orch: PaneId,
+        file: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = crate::pipeline::load(self.hydra.paths.root(), file)
+            .map_or_else(|_| file.to_string(), |p| p.name);
+        self.end_pipeline(orch, window, cx);
+        self.pipeline_settings.remove(&orch);
+        let note = match crate::pipeline::delete(
+            self.hydra.paths.root(),
+            file,
+            crate::file_ops::to_recycle_bin,
+        ) {
+            Ok(path) => {
+                crate::action_log::write(format!(
+                    "deleted pipeline {file}: {} moved to the Trash",
+                    path.display()
+                ));
+                Note::success("Moved to the Trash. Put it back from there if you need it.")
+                    .title(format!("Deleted {name}"))
+            }
+            Err(e) => Note::error(format!("It was ended, but not deleted: {e}"))
+                .title(format!("Couldn't delete {name}")),
+        };
+        window.push_note(note, cx);
+        cx.notify();
+    }
+
     /// Asks before stopping one ticket of orchestrator `orch` (its run `run`, shown as `title`).
     pub(super) fn stop_ticket_dialog(
         &mut self,

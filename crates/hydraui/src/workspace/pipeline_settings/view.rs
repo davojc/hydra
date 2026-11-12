@@ -328,7 +328,38 @@ impl Workspace {
         }
         page = page
             .child(add_step(orch, draft.adding, cx))
-            .child(self.render_advanced(orch, draft, &edit, cx));
+            .child(self.render_advanced(orch, draft, &edit, cx))
+            // Last, apart from the rest: deleting it (core spec §68).
+            .child({
+                let file = draft.file.clone();
+                h_flex()
+                    .mt(px(12.))
+                    .pt(px(18.))
+                    .gap_3()
+                    .items_center()
+                    .border_t_1()
+                    .border_color(color(theme::BORDER_SUBTLE))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(text(13., theme::TEXT).child("Delete this pipeline"))
+                            .child(text(12., theme::TEXT_MUTED).whitespace_normal().child(
+                                "Stops its tickets in progress and moves it to the Trash. \
+                                 Past runs stay in History.",
+                            )),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("delete-pipeline-{orch}")))
+                            .label("Delete pipeline…")
+                            .danger()
+                            .outline()
+                            .small()
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                ws.delete_pipeline_dialog(orch, file.clone(), window, cx)
+                            })),
+                    )
+            });
 
         let save_bar =
             if dirty {

@@ -15,7 +15,7 @@ const CHECK_MAX: usize = 10;
 
 impl Workspace {
     /// The team's Google client from config, or a notice saying what to set.
-    fn gmail_client(
+    pub(super) fn gmail_client(
         &self,
         title: &str,
         window: &mut Window,

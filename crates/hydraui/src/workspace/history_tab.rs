@@ -114,6 +114,7 @@ impl Workspace {
         self.settings = None;
         self.projects = None;
         self.tickets = None;
+        self.actions = None;
         let now = crate::action_log::now();
         let last_look = self.ui.history_seen.clone();
         self.history = Some(HistoryTab {

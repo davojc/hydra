@@ -101,6 +101,7 @@ impl Workspace {
         self.settings = None;
         self.projects = None;
         self.history = None;
+        self.actions = None;
         let shown = self.envs.active().map(|t| t.env.clone());
         let env = shown
             .clone()

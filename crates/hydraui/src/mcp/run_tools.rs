@@ -14,7 +14,7 @@ use crate::run_log;
 use crate::runs::{Change, Decided, Refusal, Role, StageStatus};
 
 /// The tools this module answers, in the order `tools/list` shows them.
-pub const NAMES: [&str; 7] = [
+pub const NAMES: [&str; 8] = [
     "run_start",
     "stage_start",
     "run_status",
@@ -22,6 +22,7 @@ pub const NAMES: [&str; 7] = [
     "stage_report",
     "stage_ask",
     "stage_answer",
+    "action_propose",
 ];
 
 /// The `tools/list` entries for `NAMES`.
@@ -191,6 +192,28 @@ pub fn schemas() -> Vec<Value> {
                 "required": ["answer"],
             },
         }),
+        json!({
+            "name": "action_propose",
+            "description": "Stage session: put a draft in front of a person to approve before \
+                it goes anywhere, as your prompt says (a reply to a customer's email, say). It \
+                appears in hydraui's Actions page; the person approves it (an email's reply is \
+                then saved as a Gmail draft in its thread), rejects it, or asks for a change. \
+                Then stop: hydraui tells you what they decided. After a change is asked for, \
+                call this again with the revised draft. Never send or post the draft yourself.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": string("What the person approves, in a line: e.g. \"Reply to Ann \
+                        at Acme about sharing records\"."),
+                    "proposal": string("The draft itself, exactly as it would go out: for an \
+                        email, the reply's text only (no subject or headers)."),
+                    "context": string("What it answers, for the person to judge it by \
+                        (optional): when your run came from an email, hydraui shows the email \
+                        itself."),
+                },
+                "required": ["title", "proposal"],
+            },
+        }),
     ]
 }
 
@@ -239,6 +262,14 @@ pub fn call(
             &arg("who"),
         ),
         "stage_answer" => stage_answer(reg, &root, token, &arg("answer")),
+        "action_propose" => action_propose(
+            reg,
+            &root,
+            token,
+            &arg("title"),
+            &arg("proposal"),
+            &arg("context"),
+        ),
         _ => stage_report(reg, &root, token, args),
     })
 }
@@ -453,7 +484,8 @@ fn stage_ask(
     who: &str,
 ) -> (Outcome, Option<McpEvent>) {
     let link = (!link.is_empty()).then_some(link);
-    let Some(whom) = crate::runs::Whom::parse(who) else {
+    let Some(whom) = crate::runs::Whom::parse(who).filter(|w| *w != crate::runs::Whom::Approval)
+    else {
         return (
             Outcome::err(format!("who {who:?} must be \"product\" or \"author\"")),
             None,
@@ -471,6 +503,93 @@ fn stage_ask(
         Outcome::ok(
             "Recorded: your ticket waits for the answer. Stop here and don't make the change: \
              hydraui will ask you to look for the answer, or give it to you."
+                .to_string(),
+        ),
+        Some(McpEvent::RunChanged(changes)),
+    )
+}
+
+/// A stage's draft for a person to approve (core spec §80): kept as an action, and the stage
+/// waits on it as on a question. A run that came from an email shows that email and keeps its
+/// Gmail thread, for Approve's draft.
+fn action_propose(
+    reg: &mut Registry,
+    root: &Path,
+    token: &str,
+    title: &str,
+    proposal: &str,
+    context: &str,
+) -> (Outcome, Option<McpEvent>) {
+    let Role::Stage(r, i) = reg.runs.role(token) else {
+        return (
+            Outcome::err("only a stage's own session proposes an action"),
+            None,
+        );
+    };
+    let (run, ticket, file) = (r.id.clone(), r.ticket.clone(), r.pipeline.file.clone());
+    let (name, stage_title) = (r.pipeline.name.clone(), r.pipeline.stages[i].title.clone());
+    let id = crate::actions::id_for(&run, i);
+    let existing = crate::actions::load(root, &id);
+    // The email behind the run, as its Jev stage reads it, and the thread it came from.
+    let email_md = [
+        crate::jev_stage::run_folder(root, &run),
+        crate::mail_watch::thread_folder(root, &ticket),
+    ]
+    .iter()
+    .find_map(|d| std::fs::read_to_string(d.join("email.md")).ok());
+    let thread = crate::mail_watch::load(root, &file)
+        .held
+        .into_iter()
+        .find_map(|(thread, t)| (t == ticket).then_some(thread));
+    let email = match (&email_md, thread) {
+        (Some(md), Some(thread)) => {
+            let (subject, from) = crate::actions::email_heading(md);
+            Some(crate::actions::Email {
+                thread,
+                subject,
+                from,
+            })
+        }
+        _ => None,
+    };
+    let now = crate::action_log::now();
+    let action = match crate::actions::propose(
+        existing,
+        crate::actions::Proposal {
+            run: &run,
+            ticket: &ticket,
+            pipeline: &file,
+            pipeline_name: &name,
+            stage: i,
+            stage_title: &stage_title,
+            title,
+            context: email_md.as_deref().unwrap_or(context),
+            proposal,
+            email,
+            now: &now,
+        },
+    ) {
+        Ok(a) => a,
+        Err(e) => return (Outcome::err(e), None),
+    };
+    let changes = match reg.runs.ask(
+        token,
+        &action.title,
+        None,
+        std::time::SystemTime::now(),
+        crate::runs::Whom::Approval,
+    ) {
+        Ok(changes) => changes,
+        Err(e) => return (Outcome::err(e), None),
+    };
+    if let Err(e) = crate::actions::save(root, &action) {
+        return (Outcome::err(format!("couldn't keep the action: {e}")), None);
+    }
+    run_log::record(root, &reg.runs, &changes);
+    (
+        Outcome::ok(
+            "It's in hydraui's Actions for a person to approve. Stop here and don't send or \
+             post it: hydraui tells you whether they approved, rejected or want a change."
                 .to_string(),
         ),
         Some(McpEvent::RunChanged(changes)),

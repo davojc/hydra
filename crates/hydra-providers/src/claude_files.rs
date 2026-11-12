@@ -331,7 +331,7 @@ pub fn render_claude_md(env: &str, base: Option<&str>, over: Option<&str>) -> Op
 pub const HYDRAUI_SERVER: &str = "hydraui";
 
 /// The tools that server offers.
-pub const HYDRAUI_TOOLS: [&str; 34] = [
+pub const HYDRAUI_TOOLS: [&str; 35] = [
     "tasks_read",
     "tasks_add",
     "tasks_take",
@@ -345,6 +345,7 @@ pub const HYDRAUI_TOOLS: [&str; 34] = [
     "stage_report",
     "stage_ask",
     "stage_answer",
+    "action_propose",
     "plan_show",
     "plan_set_spec",
     "plan_propose_milestone",
@@ -370,7 +371,7 @@ pub const HYDRAUI_TOOLS: [&str; 34] = [
 
 /// The tools of that server that Claude Code may call without asking. The claims tools are left
 /// to the session's permission mode: nothing undoes a done, which holds the key for everyone.
-pub const HYDRAUI_ALLOWED: [&str; 30] = [
+pub const HYDRAUI_ALLOWED: [&str; 31] = [
     "tasks_read",
     "tasks_add",
     "tasks_take",
@@ -384,6 +385,7 @@ pub const HYDRAUI_ALLOWED: [&str; 30] = [
     "stage_report",
     "stage_ask",
     "stage_answer",
+    "action_propose",
     "plan_show",
     "plan_set_spec",
     "plan_propose_milestone",
@@ -524,6 +526,7 @@ mod tests {
                 "mcp__hydraui__stage_report",
                 "mcp__hydraui__stage_ask",
                 "mcp__hydraui__stage_answer",
+                "mcp__hydraui__action_propose",
                 "mcp__hydraui__plan_show",
                 "mcp__hydraui__plan_set_spec",
                 "mcp__hydraui__plan_propose_milestone",

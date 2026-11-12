@@ -151,6 +151,9 @@ pub enum Whom {
     /// The pull request's author (or whoever owns the change) to push fixes or reply: a review
     /// that asked for changes waits on them, which isn't a person in hydraui being needed.
     Author,
+    /// A person approving the stage's draft in Actions (core spec §80): proposed with
+    /// `action_propose`, never with `stage_ask`.
+    Approval,
 }
 
 impl Whom {
@@ -159,6 +162,7 @@ impl Whom {
         match word.trim().to_ascii_lowercase().as_str() {
             "" | "product" => Some(Whom::Product),
             "author" => Some(Whom::Author),
+            "approval" => Some(Whom::Approval),
             _ => None,
         }
     }
@@ -167,6 +171,7 @@ impl Whom {
         match self {
             Whom::Product => "product",
             Whom::Author => "author",
+            Whom::Approval => "approval",
         }
     }
 }
@@ -1303,6 +1308,10 @@ impl Runs {
             ),
             Whom::Author => format!(
                 "{} is waiting on the author: {question}",
+                r.pipeline.stages[si].title
+            ),
+            Whom::Approval => format!(
+                "{} is waiting for you to approve in Actions: {question}",
                 r.pipeline.stages[si].title
             ),
         });

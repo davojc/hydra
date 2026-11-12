@@ -1095,6 +1095,55 @@ mod tests {
     }
 
     #[test]
+    fn a_stage_proposes_an_action_and_waits_for_a_person() {
+        use crate::runs::Decided;
+        let (home, reg, orch) = with_pipeline();
+        let stage = first_stage_open(&reg, &orch);
+        let propose = json!({
+            "title": "Reply to Ann about sharing",
+            "proposal": "Hi Ann, use Share on the record.",
+            "context": "Ann asked how to share a record.",
+        });
+        assert!(
+            call(&reg, &orch, "action_propose", propose.clone()).1,
+            "not the orchestrator's"
+        );
+        // An approval is only ever proposed, never asked.
+        assert!(
+            call(
+                &reg,
+                &stage,
+                "stage_ask",
+                json!({"question": "q", "who": "approval"})
+            )
+            .1
+        );
+        let (text, err, event) = call(&reg, &stage, "action_propose", propose.clone());
+        assert!(!err && text.contains("Actions"), "{text}");
+        assert!(
+            matches!(&event, Some(McpEvent::RunChanged(c)) if matches!(&c[0].what, Decided::Asked(q) if q == "Reply to Ann about sharing"))
+        );
+        let st: Value =
+            serde_json::from_str(&call(&reg, &orch, "run_status", json!({})).0).unwrap();
+        assert_eq!(st["state"], "needs_you");
+        let listed = crate::actions::list(home.path(), &crate::action_log::now());
+        assert_eq!(listed.len(), 1);
+        let a = &listed[0];
+        assert_eq!(
+            (a.run.as_str(), a.revision, &a.state),
+            ("INTH-7-1", 1, &crate::actions::State::Waiting)
+        );
+        assert_eq!(a.context, "Ann asked how to share a record.");
+        assert!(a.email.is_none(), "no email behind this run");
+        // It waits on the user's approval, as the log says.
+        let log =
+            std::fs::read_to_string(crate::run_log::file_for(home.path(), "INTH-7-1")).unwrap();
+        assert!(log.contains(r#""who":"approval""#), "{log}");
+        // Waiting already: not again.
+        assert!(call(&reg, &stage, "action_propose", propose).1);
+    }
+
+    #[test]
     fn closing_a_stage_terminal_fails_its_stage() {
         use crate::runs::Decided;
         let (_home, reg, orch) = with_pipeline();
@@ -1251,7 +1300,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 34);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 35);
         let bad: Value = serde_json::from_str(&rpc(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"tasks_delete","arguments":{}}}"#).body.unwrap()).unwrap();
         assert_eq!(bad["error"]["code"], -32602);
         let junk: Value = serde_json::from_str(&rpc("{not json").body.unwrap()).unwrap();

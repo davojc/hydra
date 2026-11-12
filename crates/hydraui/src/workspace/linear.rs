@@ -79,6 +79,8 @@ pub(super) struct Source {
     pub(super) pick_tooltip: String,
     /// A Slack trigger offers Connect Slack while it's stopped (a missing or bad token).
     pub(super) env: Option<String>,
+    /// Where it looks: `Linear` or `Slack`.
+    pub(super) service: &'static str,
 }
 
 /// A trigger's state for one orchestrator (`Workspace::trigger_view`).
@@ -98,6 +100,8 @@ pub(super) struct TriggerView {
     pub(super) last: Option<SystemTime>,
     pub(super) open_run: Option<String>,
     pub(super) checking: bool,
+    /// Why it stopped by itself, as the error said it (shown on hover).
+    pub(super) stopped: Option<String>,
     pub(super) source: Source,
 }
 
@@ -644,8 +648,9 @@ impl Workspace {
                         w.on = false;
                         w.status = None;
                         w.stopped = Some(reason.clone());
+                        let s = linear_watch::stopped("Linear", &reason);
                         window.push_note(
-                            Note::error(format!("Stopped watching Linear: {reason}"))
+                            Note::error(format!("{}. {}", s.title, s.hint))
                                 .title(pipeline.name.clone()),
                             cx,
                         );
@@ -885,6 +890,7 @@ impl Workspace {
                 waiting_line: None,
                 tooltip: linear_watch::trigger_tooltip(&s),
                 env: None,
+                service: "Linear",
                 pick: "Pick next ticket",
                 pick_tooltip: format!(
                     "Start the {} ticket in {} whose SLA breaches first, now. Once: it doesn't \
@@ -894,6 +900,7 @@ impl Workspace {
             },
             (None, Some((p, s, env))) => Source {
                 env: Some(env),
+                service: "Slack",
                 looking: crate::slack_watch::looking(&s),
                 every_minutes: s.every_minutes,
                 noun: "PR",
@@ -950,6 +957,7 @@ impl Workspace {
             looking: &source.looking,
             every_minutes: source.every_minutes,
             noun: source.noun,
+            service: source.service,
             waiting: source.waiting,
         });
         let checking = w.is_some_and(|w| w.checking);
@@ -975,6 +983,7 @@ impl Workspace {
             last: w.and_then(|w| w.last),
             open_run,
             checking,
+            stopped: w.and_then(|w| w.stopped.clone()),
             source,
         })))
     }
@@ -1009,8 +1018,13 @@ impl Workspace {
             last,
             open_run,
             checking,
+            stopped,
             source,
         } = t;
+        // Stopped by itself: what happened and what to do, the error itself on hover (§65).
+        let stop = stopped
+            .filter(|_| mode == linear_watch::Mode::Stopped && !checking)
+            .map(|why| (linear_watch::stopped(source.service, &why), why));
         let (fg, bg, dot) = match mode {
             linear_watch::Mode::Automatic => (color(accent), color(accent).opacity(0.16), "●"),
             linear_watch::Mode::Manual => (color(theme::TEXT_SECONDARY), color(theme::RAISED), "○"),
@@ -1050,16 +1064,14 @@ impl Workspace {
                                 .child(format!("{dot} {}", mode.label())),
                         ),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(color(if mode == linear_watch::Mode::Stopped && !checking {
-                            theme::RED
-                        } else {
-                            theme::TEXT_SECONDARY
-                        }))
-                        .child(line),
-                )
+                .when(stop.is_none(), |d| {
+                    d.child(
+                        div()
+                            .text_xs()
+                            .text_color(color(theme::TEXT_SECONDARY))
+                            .child(line),
+                    )
+                })
                 .when_some(source.waiting_line.clone(), |d, waiting| {
                     d.child(
                         div()
@@ -1087,29 +1099,60 @@ impl Workspace {
                         accent,
                     ))
                 })
-                .when_some(
-                    source
-                        .env
-                        .clone()
-                        .filter(|_| mode == linear_watch::Mode::Stopped),
-                    |d, env| {
-                        d.child(
-                            h_flex().child(
-                                Button::new(SharedString::from(format!("slack-connect-{orch}")))
-                                    .label("Connect Slack")
-                                    .primary()
-                                    .xsmall()
-                                    .tooltip(
-                                        "Sign in to Slack in your browser; the token is kept in \
-                                         your keychain and Automatic comes back on.",
-                                    )
-                                    .on_click(cx.listener(move |ws, _, window, cx| {
-                                        ws.connect_slack(env.clone(), window, cx)
-                                    })),
-                            ),
-                        )
-                    },
-                )
+                .when_some(stop, |d, (s, why)| {
+                    let env = source.env.clone().filter(|_| s.sign_in);
+                    let action = match env {
+                        Some(env) => {
+                            Button::new(SharedString::from(format!("slack-connect-{orch}")))
+                                .label("Connect Slack")
+                                .primary()
+                                .xsmall()
+                                .tooltip(
+                                    "Sign in to Slack in your browser; the token is kept in your \
+                                 keychain and Automatic comes back on.",
+                                )
+                                .on_click(cx.listener(move |ws, _, window, cx| {
+                                    ws.connect_slack(env.clone(), window, cx)
+                                }))
+                        }
+                        None => Button::new(SharedString::from(format!("trigger-retry-{orch}")))
+                            .label("Try again")
+                            .outline()
+                            .xsmall()
+                            .tooltip("Turn Automatic back on and look now")
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                ws.toggle_linear_watch(orch, window, cx)
+                            })),
+                    };
+                    d.child(
+                        v_flex()
+                            .id(SharedString::from(format!("trigger-stopped-{orch}")))
+                            .gap(px(2.))
+                            .px(px(10.))
+                            .py(px(8.))
+                            .rounded(px(8.))
+                            .bg(color(theme::RED_TINT))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(color(theme::RED))
+                                    .child(s.title),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(color(theme::TEXT_SECONDARY))
+                                    .whitespace_normal()
+                                    .child(s.hint),
+                            )
+                            .child(h_flex().pt_1().child(action))
+                            .tooltip(move |window, cx| {
+                                gpui_component::tooltip::Tooltip::new(format!("Details: {why}"))
+                                    .build(window, cx)
+                            }),
+                    )
+                })
                 // Automatic picks by itself; a pick by hand is for Manual (or Stopped).
                 .when(!on && open_run.is_none(), |d| {
                     d.child(

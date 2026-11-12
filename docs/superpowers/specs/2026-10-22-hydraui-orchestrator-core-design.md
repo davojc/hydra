@@ -1352,3 +1352,18 @@ icon = "git-pull-request"
 - **The choices.** There are 30 Lucide icons (`pipeline_icon::ICONS`), each with a plain name in settings: Pull request, Branch, Code, Bug, Ticket, Checklist, Test, Search, Shield, Rocket, Lightning, Sparkles, Mail, Inbox, Message, Bell, People, Bot, Calendar, Clock, Book, Database, Package, Layers, Wrench, Globe, Target, Flag, Star and Heart. `crate::assets` bundles those the default set lacks. A test checks that every one loads.
 - **Errors.** A name that isn't one of them is a file error that says where to pick one.
 - **Pipeline settings.** Under the colours, a row of tiles shows the ◆ and each icon in the pipeline's colour. Each is named on hover, and the chosen one is ringed. Saving writes `icon`, or removes it when the ◆ is chosen.
+
+## 65. A stopped trigger, in words (added 2026-11-12)
+
+A trigger that stopped by itself used to show the raw error in red on its card. That was a whole URL and a chain of "Network Error: Network Error: …", and it offered Connect Slack even when the network was the problem. Now `linear_watch::stopped` reads the error, and the card shows a short headline, one line on what to do, and the button that fits. The error itself shows on hover, as "Details: …".
+
+| What went wrong | Headline | What to do | Button |
+|---|---|---|---|
+| Sign-in rejected or missing (a rejected key, `invalid_auth`, `not_authed`, a revoked or expired token, HTTP 401/403) | "Slack needs you to sign in again" | "Connect Slack, and checking starts again." (Linear: "Set a new Linear API key, then try again.") | **Connect Slack** for Slack; **Try again** for Linear |
+| Rate limited | "Slack asked hydraui to slow down" | "Wait a few minutes, then try again." | **Try again** |
+| HTTP 5xx | "Slack is having problems" | "It's on their side. Try again in a while." | **Try again** |
+| Not reachable, timed out, network | "Couldn't reach Slack" | "Check your internet connection, then try again." | **Try again** |
+| Anything else | "Stopped checking Slack" | "Something went wrong. Try again, or hover for details." | **Try again** |
+
+- **Try again** turns Automatic back on and looks at once.
+- The notification when a trigger stops uses the same words.

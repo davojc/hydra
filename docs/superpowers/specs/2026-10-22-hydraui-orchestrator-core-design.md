@@ -1536,3 +1536,16 @@ With each ticket in its own box (§76), the box said the same thing twice: a **W
 
 - **One pill.** The line is gone from the ticket's box. The pill carries what the line added: how long the ticket has waited ("Waiting on author · 23m", "Asked product · 5m").
 - **A click on the pill** opens the question: what's asked, its thread, **Check now** and **Answer…**. A click anywhere else on the box's head still opens the ticket.
+
+## 78. Check Gmail says what it found (added 2026-11-12)
+
+**Check Gmail** reported only to the bell, so pressing it looked like nothing happened. It's the same gap Connect Slack had (§73).
+
+- **A dialog.** **Gmail for <env>** now opens with:
+  - which mailbox is connected: "Connected as …. This is the mailbox hydraui reads.";
+  - its newest inbox threads, each with its subject and sender;
+  - how to read another mailbox: Connect Gmail… and sign in as that account.
+
+  A failure opens the dialog too ("Couldn't read the mailbox: …").
+- **A missing Google client** opens the same dialog, for Check Gmail and for Connect Gmail. It says to set `gmail_client_id` and `gmail_client_secret`, then choose **Reload config**.
+- **The bell.** The notices still go there too.

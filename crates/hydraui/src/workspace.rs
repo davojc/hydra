@@ -224,6 +224,8 @@ pub struct Workspace {
     history: Option<history_tab::HistoryTab>,
     /// The notifications panel under the bell, while open (core spec §57).
     inbox: Option<inbox_panel::InboxPanel>,
+    /// What an action you just took did, beside the bell for a few seconds (core spec §71).
+    flash: Option<inbox_panel::Flash>,
     /// Tickets (core spec §53), when shown.
     tickets: Option<tickets_tab::TicketsTab>,
     /// Every environment's projects, as last read.
@@ -561,6 +563,7 @@ impl Workspace {
             projects: None,
             history: None,
             inbox: None,
+            flash: None,
             tickets: None,
             projects_data: Default::default(),
             tasks_tabs: HashMap::new(),

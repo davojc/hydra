@@ -630,9 +630,10 @@ impl Workspace {
         };
         view.update(cx, |v, cx| v.set_name(Some(name.clone()), cx));
         if let Some(token) = view.read(cx).mcp_token().map(str::to_string) {
-            server::lock(sv.registry())
-                .runs
-                .relink(run, stage, &token, &name);
+            let mut reg = server::lock(sv.registry());
+            reg.runs.relink(run, stage, &token, &name);
+            // You're in it now: the card says With you, not Needs you (§72).
+            reg.runs.person_in(run, stage);
         }
         note_run(
             run,
@@ -1498,7 +1499,7 @@ impl Workspace {
             Err(e) => Note::error(format!("It was ended, but not deleted: {e}"))
                 .title(format!("Couldn't delete {name}")),
         };
-        window.push_note(note, cx);
+        self.confirm(note, window, cx);
         cx.notify();
     }
 
@@ -2241,6 +2242,8 @@ pub(super) fn pill_colors(state: CardState, accent: u32) -> (gpui::Hsla, gpui::H
         CardState::Ready | CardState::Stopped => pair(theme::TEXT_SECONDARY, theme::RAISED),
         // Someone else's move: calm, not a call for the user.
         CardState::Waiting | CardState::Rechecking => (color(accent), color(accent).opacity(0.16)),
+        // The user is at it: calm, in the pipeline's colour.
+        CardState::WithYou => (color(accent), color(accent).opacity(0.16)),
         CardState::NeedsYou => pair(theme::RED, theme::RED_TINT),
         CardState::Asking | CardState::Checking | CardState::Paused => {
             pair(theme::AMBER, theme::AMBER_TINT)

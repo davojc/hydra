@@ -2,12 +2,12 @@
 //! that drops down from the tab strip instead of toasts over the work.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, SharedString, deferred, div, px};
+use gpui::{AnyElement, Context, SharedString, Window, deferred, div, px};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Sizable, h_flex, v_flex};
 
 use super::Workspace;
-use crate::inbox::{Inbox, Kind};
+use crate::inbox::{Inbox, Kind, Note, PushNote};
 use crate::orchestrator_theme::{self as theme, color};
 
 /// The panel while it is open: how many notices were unread when it opened, shown as new.
@@ -15,6 +15,18 @@ use crate::orchestrator_theme::{self as theme, color};
 pub struct InboxPanel {
     pub new: usize,
 }
+
+/// What an action you just took did (core spec §71), shown beside the bell until `FLASH` has
+/// passed. `seq` tells a newer one from the one a timer means to clear.
+#[derive(Debug, Clone)]
+pub struct Flash {
+    pub text: SharedString,
+    pub kind: Kind,
+    pub seq: u64,
+}
+
+/// How long a confirmation stays beside the bell.
+const FLASH: std::time::Duration = std::time::Duration::from_secs(6);
 
 fn kind_color(kind: Kind) -> u32 {
     match kind {
@@ -26,8 +38,87 @@ fn kind_color(kind: Kind) -> u32 {
 }
 
 impl Workspace {
+    /// Tells you what an action you just took did: beside the bell for a few seconds, and in
+    /// the inbox as every notice is (core spec §71). For things you did, like Export, not for
+    /// what happens on its own.
+    pub(super) fn confirm(&mut self, note: Note, window: &mut Window, cx: &mut Context<Self>) {
+        let seq = self.flash.as_ref().map_or(1, |f| f.seq + 1);
+        self.flash = Some(Flash {
+            text: note.message.clone(),
+            kind: note.kind,
+            seq,
+        });
+        window.push_note(note, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(FLASH).await;
+            let _ = this.update(cx, |ws, cx| {
+                if ws.flash.as_ref().is_some_and(|f| f.seq == seq) {
+                    ws.flash = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The confirmation beside the bell, while there is one: its mark and its words, the whole
+    /// of them on hover; a click opens the inbox.
+    fn flash_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let f = self.flash.clone()?;
+        let tone = kind_color(f.kind);
+        let mark = match f.kind {
+            Kind::Success => "✓",
+            Kind::Error | Kind::Warning => "!",
+            Kind::Info => "·",
+        };
+        let full = f.text.clone();
+        Some(
+            h_flex()
+                .id("flash")
+                .flex_none()
+                .max_w(px(420.))
+                .gap_1p5()
+                .items_center()
+                .h(px(26.))
+                .px_2p5()
+                .mr_1()
+                .rounded_md()
+                .border_1()
+                .border_color(color(tone).opacity(0.5))
+                .bg(color(tone).opacity(0.1))
+                .text_sm()
+                .cursor_pointer()
+                .child(div().flex_none().text_color(color(tone)).child(mark))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(color(theme::TEXT))
+                        .child(f.text),
+                )
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(full.clone()).build(window, cx)
+                })
+                .on_click(cx.listener(|ws, _, _, cx| {
+                    ws.flash = None;
+                    ws.toggle_inbox(cx);
+                }))
+                .into_any_element(),
+        )
+    }
+
     /// The bell, right of History: its unread count, amber while one is a warning or error.
     pub(super) fn inbox_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
+            .flex_none()
+            .items_center()
+            .children(self.flash_pill(cx))
+            .child(self.bell(cx))
+            .into_any_element()
+    }
+
+    fn bell(&self, cx: &mut Context<Self>) -> AnyElement {
         let (unread, urgent) = cx
             .try_global::<Inbox>()
             .map_or((0, false), |i| (i.unread(), i.urgent()));

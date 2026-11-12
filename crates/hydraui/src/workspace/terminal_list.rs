@@ -416,7 +416,7 @@ impl Workspace {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().text_xs().text_color(color(c.accent)).child("◆"))
+                    .child(crate::pipeline_icon::mark(c.icon.as_deref(), c.accent, 13.))
                     .child(
                         div()
                             .flex_1()
@@ -427,6 +427,7 @@ impl Workspace {
                             .text_color(color(crate::orchestrator_theme::TEXT))
                             .child(c.name.clone()),
                     )
+                    .children(self.update_pill(lead, cx))
                     .when(c.state.has_pill(), |d| {
                         d.child(
                             div()

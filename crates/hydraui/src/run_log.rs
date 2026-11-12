@@ -57,6 +57,8 @@ pub fn stage_added_fields(spec: &crate::pipeline::Stage, after: Option<&str>) ->
         "folder": spec.folder,
         "worktree": spec.worktree,
         "prompt": spec.prompt,
+        "jev": spec.jev,
+        "keep": spec.keep,
         "after": after,
     })
 }
@@ -76,6 +78,14 @@ pub fn read_stage_added(e: &Value) -> Option<(crate::pipeline::Stage, Option<Str
             folder: text("folder"),
             worktree: e.get("worktree").and_then(Value::as_bool).unwrap_or(false),
             prompt: text("prompt")?,
+            jev: e
+                .get("jev")
+                .filter(|j| !j.is_null())
+                .and_then(|j| serde_json::from_value(j.clone()).ok()),
+            keep: e
+                .get("keep")
+                .filter(|k| !k.is_null())
+                .and_then(|k| serde_json::from_value(k.clone()).ok()),
         },
         text("after"),
     ))
@@ -116,6 +126,7 @@ pub fn record(hydra_root: &Path, runs: &Runs, changes: &[Change]) {
             Decided::Retrying => ("re-run", json!({"stage": stage})),
             Decided::Reopened => ("went back", json!({"stage": stage})),
             Decided::Rescoring => ("scoring again", json!({"stage": stage})),
+            Decided::Rechecking(why) => ("checking again", json!({"stage": stage, "reason": why})),
             Decided::Checked(note) => ("checked", json!({"stage": stage, "note": note})),
             Decided::Paused => ("paused", json!({})),
             Decided::Resumed => ("resumed", json!({})),

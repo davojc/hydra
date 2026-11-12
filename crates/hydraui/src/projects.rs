@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use hydraui_projects::{
     Decision, DecisionMeta, Project, ProjectFile, Review, Ticket, TicketKind, TicketMeta,
-    TicketStatus, next_id, progress, repo,
+    TicketStatus, next_id, progress, repo, stages,
 };
 
 /// How long a clone or pull may take before it's given up on.
@@ -413,6 +413,75 @@ pub fn move_ticket(dir: &Path, ticket: &Ticket, status: TicketStatus) -> Result<
     repo::write_ticket(dir, &t).map_err(|e| e.to_string())
 }
 
+/// Puts `ticket` at stage `stage` of its project (spec §14.8): as a person moving it on the
+/// board, so that stage and the checks after it run again.
+pub fn move_to_stage(dir: &Path, p: &Project, ticket: &Ticket, stage: &str) -> Result<(), String> {
+    let mut t = ticket.clone();
+    stages::move_to(&p.file.stages(), &mut t.meta, stage)?;
+    repo::write_ticket(dir, &t).map_err(|e| e.to_string())
+}
+
+/// Milestone `milestone`'s done tickets with pull requests that skipped a check stage, such
+/// as one added after they finished. A person's tasks aren't checked.
+pub fn skipped_checks(p: &Project, milestone: &str) -> Vec<String> {
+    let all = p.file.stages();
+    p.tickets
+        .iter()
+        .filter(|t| t.meta.milestone == milestone && !t.meta.person)
+        .filter(|t| stages::skipped_checks(&all, &t.meta))
+        .map(|t| t.id.clone())
+        .collect()
+}
+
+/// Sends `skipped_checks` back to the first check stage each hasn't passed, for the
+/// milestone's run to check. Returns the tickets sent.
+pub fn send_back_skipped(dir: &Path, p: &Project, milestone: &str) -> Result<Vec<String>, String> {
+    let all = p.file.stages();
+    let ids = skipped_checks(p, milestone);
+    for t in p.tickets.iter().filter(|t| ids.contains(&t.id)) {
+        let first = all
+            .iter()
+            .find(|s| s.kind == stages::StageKind::Check && !t.meta.passed.contains(&s.id))
+            .ok_or("the project has no check stage")?;
+        let mut t = t.clone();
+        stages::move_to(&all, &mut t.meta, &first.id)?;
+        repo::write_ticket(dir, &t).map_err(|e| e.to_string())?;
+    }
+    Ok(ids)
+}
+
+/// Saves the project's stages (spec §14.8), once they make sense. A prompt left as its default
+/// isn't written, nor are stages left as the defaults, so improved wording reaches them.
+pub fn save_stages(dir: &Path, new: &[stages::Stage]) -> Result<(), String> {
+    if let Some(e) = stages::problem(new) {
+        return Err(e);
+    }
+    let mut new = new.to_vec();
+    for st in &mut new {
+        let default_prompt = match st.kind {
+            stages::StageKind::Work => stages::DEFAULT_WORK_PROMPT,
+            stages::StageKind::Check => stages::DEFAULT_CHECK_PROMPT,
+        };
+        if st.prompt.trim() == default_prompt.trim() {
+            st.prompt.clear();
+        }
+        if st.kind == stages::StageKind::Check
+            || st.fix_prompt.trim() == stages::DEFAULT_FIX_PROMPT.trim()
+        {
+            st.fix_prompt.clear();
+        }
+        if st.kind == stages::StageKind::Work {
+            st.on_fail.clear();
+        }
+    }
+    if new == stages::defaults() {
+        new.clear();
+    }
+    let mut file = repo::load(dir).map_err(|e| e.to_string())?.file;
+    file.stages = new;
+    repo::write_project_file(dir, &file).map_err(|e| e.to_string())
+}
+
 /// After testing failed again, a person's call: `fix` sends the ticket back to a work session
 /// with what failed; otherwise it's tested again as it is (say, after they fixed it by hand).
 pub fn retry_failed_test(dir: &Path, ticket: &Ticket, fix: bool) -> Result<(), String> {
@@ -468,6 +537,7 @@ pub fn new_project(checkout: &Path, name: &str, login: &str) -> Result<String, S
         spec_note: String::new(),
         linear: Vec::new(),
         sync: Default::default(),
+        stages: Vec::new(),
         extra: Default::default(),
     };
     repo::write_project_file(&checkout.join(&slug), &file).map_err(|e| e.to_string())?;
@@ -1172,7 +1242,80 @@ pub fn ticket_workspace(
         let path = folder.join(folder_name(&r.clone)?);
         worktree_at(hydra, env, &r.clone, &branch, r.base.as_deref(), &path)?;
     }
+    for clash in link_repo_skills(&folder) {
+        crate::action_log::write(format!("projects: {}: {clash}", folder.display()));
+    }
     Ok((folder, branch))
+}
+
+/// Links each repo's own skills (`<repo>/.claude/skills/<name>`) into `folder/.claude/skills`,
+/// so a session started in a folder of several repos' worktrees has them as skills: Claude
+/// Code only registers a project's skills from the folder it starts in. Names stay as they
+/// are, so the skill router counts them. When two repos have a skill of the same name the
+/// first keeps it; each such clash, or a link that couldn't be made, comes back to be logged.
+pub fn link_repo_skills(folder: &Path) -> Vec<String> {
+    let mut said = Vec::new();
+    let into = folder.join(".claude").join("skills");
+    let mut repos: Vec<PathBuf> = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && p.file_name().is_some_and(|n| n != ".claude"))
+        .collect();
+    repos.sort();
+    for repo in repos {
+        let skills = repo.join(".claude").join("skills");
+        let mut found: Vec<PathBuf> = std::fs::read_dir(&skills)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.join("SKILL.md").is_file())
+            .collect();
+        found.sort();
+        for skill in found {
+            let Some(name) = skill.file_name() else {
+                continue;
+            };
+            let link = into.join(name);
+            if link.exists() {
+                // Ours from before, or another repo's of the same name.
+                let same = std::fs::canonicalize(&link).ok() == std::fs::canonicalize(&skill).ok();
+                if !same {
+                    said.push(format!(
+                        "skill {} is in more than one repo: {} keeps it",
+                        name.to_string_lossy(),
+                        std::fs::read_link(&link)
+                            .ok()
+                            .and_then(|t| t.ancestors().nth(3).map(Path::to_path_buf))
+                            .and_then(|r| r.file_name().map(|n| n.to_string_lossy().into_owned()))
+                            .unwrap_or_else(|| "the first".into())
+                    ));
+                }
+                continue;
+            }
+            if let Err(e) = std::fs::create_dir_all(&into).and_then(|_| link_dir(&skill, &link)) {
+                said.push(format!(
+                    "couldn't link skill {}: {e}",
+                    name.to_string_lossy()
+                ));
+            }
+        }
+    }
+    said
+}
+
+#[cfg(unix)]
+fn link_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+/// Windows lets only some users make links: when it can't, the session reads the skill's files
+/// itself, as it did before.
+#[cfg(windows)]
+fn link_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
 }
 
 fn folder_name(clone: &Path) -> Result<String, String> {
@@ -2046,6 +2189,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_folder_of_repos_has_each_repos_skills() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().join("pg-tickets").join("pg-3-share");
+        let skill = |repo: &str, name: &str| {
+            let dir = folder.join(repo).join(".claude").join("skills").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\n---\n{repo}"),
+            )
+            .unwrap();
+        };
+        skill("version2-frontend", "angular-developer");
+        skill("version2-frontend", "i18n");
+        skill("version2-backend", "backend-dev");
+        skill("version2-backend", "i18n");
+        // Not a skill: no SKILL.md.
+        std::fs::create_dir_all(folder.join("version2-backend/.claude/skills/notes")).unwrap();
+        let clashes = link_repo_skills(&folder);
+        let linked = folder.join(".claude").join("skills");
+        for name in ["angular-developer", "backend-dev", "i18n"] {
+            assert!(linked.join(name).join("SKILL.md").is_file(), "{name}");
+        }
+        assert!(!linked.join("notes").exists());
+        // Both repos have i18n: one keeps it, and the clash is said.
+        assert_eq!(clashes.len(), 1, "{clashes:?}");
+        assert!(clashes[0].contains("i18n"), "{clashes:?}");
+        // Linking again changes nothing and says nothing new.
+        assert!(link_repo_skills(&folder).iter().all(|c| c.contains("i18n")));
+    }
+
+    #[test]
     fn work_settings_are_kept_per_project_on_this_machine() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
@@ -2426,6 +2601,7 @@ mod tests {
                 spec_note: String::new(),
                 linear: Vec::new(),
                 sync: Default::default(),
+                stages: Vec::new(),
                 extra: Default::default(),
             },
         )
@@ -2847,6 +3023,77 @@ mod tests {
             (t.meta.status, t.meta.check.as_str()),
             (TicketStatus::Testing, "")
         );
+    }
+
+    #[test]
+    fn stages_are_saved_checked_and_kept_short() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("pg");
+        project(&dir);
+        let mut mine = stages::defaults();
+        mine[1].prompt = stages::DEFAULT_CHECK_PROMPT.into();
+        save_stages(&dir, &mine).unwrap();
+        // The defaults, as they are: nothing written, so new wording reaches them.
+        assert!(repo::load(&dir).unwrap().file.stages.is_empty());
+        mine[1].prompt = "Run the e2e suite on {prs}".into();
+        mine.push(stages::Stage {
+            id: "security".into(),
+            title: "Security review".into(),
+            kind: stages::StageKind::Check,
+            ..Default::default()
+        });
+        save_stages(&dir, &mine).unwrap();
+        let saved = repo::load(&dir).unwrap().file.stages;
+        assert_eq!(saved.len(), 3);
+        assert_eq!(saved[1].prompt, "Run the e2e suite on {prs}");
+        assert_eq!(saved[0].prompt, "");
+        let bad = vec![mine[1].clone()];
+        assert!(save_stages(&dir, &bad).unwrap_err().contains("work stage"));
+        assert_eq!(repo::load(&dir).unwrap().file.stages.len(), 3);
+    }
+
+    #[test]
+    fn done_tickets_that_skipped_a_check_go_back_to_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("pg");
+        let p = project(&dir);
+        for title in ["A", "B", "C", "D"] {
+            let p = repo::load(&dir).unwrap();
+            new_ticket(&dir, &p, title, "M1", TicketKind::Feature, "me").unwrap();
+        }
+        let _ = p;
+        let pr = "https://github.com/iov42/fe/pull/1".to_string();
+        for (i, t) in repo::load(&dir).unwrap().tickets.into_iter().enumerate() {
+            let mut t = t;
+            t.meta.status = TicketStatus::Done;
+            t.meta.prs = vec![pr.clone()];
+            match i {
+                1 => t.meta.passed = vec!["testing".into()],
+                2 => t.meta.prs.clear(),
+                3 => t.meta.milestone = "M2".into(),
+                _ => {}
+            }
+            repo::write_ticket(&dir, &t).unwrap();
+        }
+        let p = repo::load(&dir).unwrap();
+        assert_eq!(skipped_checks(&p, "M1"), vec!["PG-1".to_string()]);
+        assert_eq!(
+            send_back_skipped(&dir, &p, "M1").unwrap(),
+            vec!["PG-1".to_string()]
+        );
+        let t = repo::load(&dir).unwrap().tickets.remove(0);
+        assert_eq!(
+            (t.meta.status, t.meta.stage.as_str()),
+            (TicketStatus::Testing, "testing")
+        );
+        let p = repo::load(&dir).unwrap();
+        move_to_stage(&dir, &p, &p.tickets[1], "dev").unwrap();
+        let t = repo::load(&dir).unwrap().tickets.remove(1);
+        assert_eq!(
+            (t.meta.status, t.meta.stage.as_str()),
+            (TicketStatus::InProgress, "dev")
+        );
+        assert!(t.meta.passed.is_empty());
     }
 
     #[test]

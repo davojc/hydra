@@ -119,6 +119,19 @@ impl Workspace {
                     ws.connect_slack(env, w, cx)
                 });
             }
+            Action::ConnectGmail => {
+                let envs = self.hydra.env_names();
+                self.choose_env_from(envs, "Connect Gmail for", window, cx, |ws, env, w, cx| {
+                    ws.connect_gmail(env, w, cx)
+                });
+            }
+            Action::CheckGmail => {
+                let envs = self.hydra.env_names();
+                self.choose_env_from(envs, "Check Gmail in", window, cx, |ws, env, w, cx| {
+                    ws.check_gmail(env, w, cx)
+                });
+            }
+            Action::CheckMailNow => self.mail_tick(true, window, cx),
             Action::EditPipelines => {
                 let root = self.hydra.paths.root().to_path_buf();
                 if let Err(e) = crate::pipeline::ensure_example(&root) {
@@ -411,8 +424,9 @@ impl Workspace {
         );
     }
 
-    /// Picks the orchestrator's pipeline (the example is written when there is none); one
-    /// pipeline is taken without asking.
+    /// **Start pipeline** (core spec §67): a card per pipeline, in its colour with its icon,
+    /// saying where its work comes from, and a last card to create one. The example is written
+    /// when there is none.
     pub(super) fn choose_pipeline(
         &mut self,
         env: String,
@@ -423,39 +437,21 @@ impl Workspace {
         if let Err(e) = crate::pipeline::ensure_example(&root) {
             crate::action_log::write(format!("example pipeline: {e}"));
         }
-        let names = crate::pipeline::names(&root);
-        // Each file by its name and the name the views show, so they're told apart; then a
-        // new one.
-        let mut labels = pipeline_labels(&root, &names);
-        labels.push("New pipeline…".into());
-        let state = cx.new(|cx| CommandState::new(window, cx));
+        let mine = my_pipelines(&root);
         let workspace = cx.entity();
-        let first = Cell::new(true);
-        window.open_dialog(cx, move |dialog, window, cx| {
-            if first.replace(false) {
-                state.update(cx, |s, cx| s.focus(window, cx));
-            }
-            let (choices, workspace, env) = (names.clone(), workspace.clone(), env.clone());
-            dialog.title("Pipeline").child(
-                Command::new(&state)
-                    .items(labels.iter().map(|l| CommandItem::new().label(l.clone())))
-                    .placeholder("Pipeline")
-                    .on_confirm(move |ix, window, cx| {
-                        window.close_dialog(cx);
-                        let env = env.clone();
-                        match choices.get(ix.row).cloned() {
-                            Some(name) => workspace
-                                .update(cx, |ws, cx| ws.open_orchestrator(&env, &name, window, cx)),
-                            None => workspace
-                                .update(cx, |ws, cx| ws.new_pipeline(Some(env), window, cx)),
-                        }
-                    }),
-            )
+        let scroll = gpui::ScrollHandle::new();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            dialog
+                .title("Start a pipeline")
+                .w(px(640.))
+                .child(start_cards(&mine, &workspace, &env, &scroll, cx))
         });
     }
 
-    /// **New pipeline…**: start blank or from a copy of a pipeline, name it, then its
-    /// orchestrator starts (in `env`, else one picked) with its settings open to fill in.
+    /// **Create pipeline** (core spec §66): one chooser with three ways to start. Start fresh
+    /// (blank, or a starter), copy one of yours, or import a file someone sent. Each goes on to
+    /// name it (or pick the file), then its orchestrator starts (in `env`, else one picked)
+    /// with its settings open.
     pub(super) fn new_pipeline(
         &mut self,
         env: Option<String>,
@@ -463,38 +459,534 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let root = self.hydra.paths.root().to_path_buf();
-        let names = crate::pipeline::names(&root);
-        let mut labels = vec!["Blank: one stage to fill in".to_string()];
-        labels.extend(
-            pipeline_labels(&root, &names)
-                .into_iter()
-                .map(|l| format!("Copy of {l}")),
-        );
-        labels.push("Import from a file…".into());
-        let state = cx.new(|cx| CommandState::new(window, cx));
+        let mine = my_pipelines(&root);
         let workspace = cx.entity();
-        let first = Cell::new(true);
-        window.open_dialog(cx, move |dialog, window, cx| {
-            if first.replace(false) {
-                state.update(cx, |s, cx| s.focus(window, cx));
-            }
-            let (names, workspace, env) = (names.clone(), workspace.clone(), env.clone());
-            dialog.title("New pipeline: start from").child(
-                Command::new(&state)
-                    .items(labels.iter().map(|l| CommandItem::new().label(l.clone())))
-                    .placeholder("Blank, or a pipeline to copy")
-                    .on_confirm(move |ix, window, cx| {
-                        window.close_dialog(cx);
-                        let env = env.clone();
-                        if ix.row == names.len() + 1 {
-                            workspace.update(cx, |ws, cx| ws.import_pipeline(env, window, cx));
-                            return;
-                        }
-                        let from = ix.row.checked_sub(1).and_then(|i| names.get(i).cloned());
-                        workspace.update(cx, |ws, cx| ws.name_pipeline(from, env, window, cx));
-                    }),
+        let scroll = gpui::ScrollHandle::new();
+        let in_swarm = self.swarms.iter().any(|s| !s.removed);
+        window.open_dialog(cx, move |dialog, _, cx| {
+            dialog
+                .title("Create a pipeline")
+                .w(px(600.))
+                .child(create_choices(
+                    &mine, &workspace, &env, &scroll, in_swarm, cx,
+                ))
+        });
+    }
+
+    /// **Share to a swarm** (core spec §69): picks one of your swarms, then writes pipeline
+    /// `file` into its `pipelines` folder for your team.
+    pub(super) fn share_to_swarm_dialog(
+        &mut self,
+        file: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let swarms: Vec<(String, std::path::PathBuf, bool, bool)> = self
+            .swarms
+            .iter()
+            .filter(|s| !s.removed)
+            .map(|s| {
+                (
+                    s.name.clone(),
+                    s.folder.clone(),
+                    s.my_role != hydra_swarms::Role::Reader,
+                    crate::pipeline_share::syncs_toml(&s.types),
+                )
+            })
+            .collect();
+        let workspace = cx.entity();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let muted = cx.theme().muted_foreground;
+            let rows = swarms
+                .iter()
+                .enumerate()
+                .map(|(i, (name, folder, writes, toml))| {
+                    let (workspace, file, name, folder) = (
+                        workspace.clone(),
+                        file.clone(),
+                        name.clone(),
+                        folder.clone(),
+                    );
+                    let (writes, toml) = (*writes, *toml);
+                    h_flex()
+                        .id(SharedString::from(format!("share-swarm-{i}")))
+                        .gap_3()
+                        .items_center()
+                        .px(px(14.))
+                        .py(px(10.))
+                        .rounded(px(10.))
+                        .border_1()
+                        .border_color(rgb(0x1f2524))
+                        .when(writes, |d| {
+                            d.cursor_pointer()
+                                .hover(|d| d.border_color(rgb(crate::orchestrator_theme::TEAL)))
+                        })
+                        .child(
+                            gpui_component::Icon::new(gpui_kit_assets::IconName::Users)
+                                .size(px(16.))
+                                .text_color(rgb(crate::orchestrator_theme::TEAL)),
+                        )
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .child(div().text_sm().child(name.clone()))
+                                .child(div().text_xs().text_color(muted).child(
+                                    match (writes, toml) {
+                                        (false, _) => {
+                                            "You can only read this swarm, so you can't share \
+                                             to it"
+                                        }
+                                        (true, true) => "Shared as a .toml file",
+                                        (true, false) => {
+                                            "Shared as a .md note: this swarm doesn't sync \
+                                             .toml files"
+                                        }
+                                    },
+                                )),
+                        )
+                        .when(writes, |d| {
+                            d.on_click(move |_, window, cx| {
+                                window.close_dialog(cx);
+                                let (file, name, folder) =
+                                    (file.clone(), name.clone(), folder.clone());
+                                workspace.update(cx, |ws, cx| {
+                                    ws.share_to_swarm(&file, &name, &folder, toml, window, cx)
+                                });
+                            })
+                        })
+                });
+            dialog.title("Share to a swarm").w(px(520.)).child(
+                v_flex()
+                    .gap_2()
+                    .pb_2()
+                    .child(div().text_xs().text_color(muted).child(
+                        "Pick the swarm to share it with. It goes in that swarm's pipelines \
+                         folder, without this machine's own settings.",
+                    ))
+                    .children(rows),
             )
         });
+    }
+
+    fn share_to_swarm(
+        &mut self,
+        file: &str,
+        swarm: &str,
+        folder: &std::path::Path,
+        toml: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let note = match crate::pipeline_share::share(self.hydra.paths.root(), file, folder, toml) {
+            Ok((path, replaced)) => {
+                crate::action_log::write(format!(
+                    "shared pipeline {file} to swarm {swarm}: {}",
+                    path.display()
+                ));
+                Note::success(format!(
+                    "{} {swarm}. Your team adds it with Create pipeline, then Import from a \
+                     swarm.",
+                    if replaced {
+                        "Updated its copy in"
+                    } else {
+                        "Shared to"
+                    }
+                ))
+                .title("Share to a swarm")
+            }
+            Err(e) => Note::error(e).title("Share to a swarm"),
+        };
+        self.share_said(file, note, window, cx);
+    }
+
+    /// **Import from a swarm** (core spec §69): the pipelines your swarms share; picking one
+    /// adds it as a new pipeline that takes nothing until turned on, then opens its settings.
+    fn import_from_swarm_dialog(
+        &mut self,
+        env: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let found: Vec<(String, String, crate::pipeline_share::Shared)> = self
+            .swarms
+            .iter()
+            .filter(|s| !s.removed)
+            .flat_map(|s| {
+                crate::pipeline_share::shared(&s.folder)
+                    .into_iter()
+                    .map(|p| (s.id.clone(), s.name.clone(), p))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let workspace = cx.entity();
+        let scroll = gpui::ScrollHandle::new();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            use crate::orchestrator_theme::{self as theme, color};
+            let muted = cx.theme().muted_foreground;
+            let body = if found.is_empty() {
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .pb_2()
+                    .child(
+                        "Nothing is shared in your swarms yet. A teammate shares one with Share \
+                         to a swarm, at the top of a pipeline's settings.",
+                    )
+                    .into_any_element()
+            } else {
+                scrolled(
+                    v_flex()
+                        .id("swarm-pipelines")
+                        .gap_2()
+                        .children(found.iter().enumerate().map(|(i, (id, swarm, p))| {
+                            let accent = p.color.unwrap_or(theme::TEAL);
+                            let (workspace, env, one) = (
+                                workspace.clone(),
+                                env.clone(),
+                                (id.clone(), swarm.clone(), p.clone()),
+                            );
+                            h_flex()
+                                .id(SharedString::from(format!("swarm-pipeline-{i}")))
+                                .gap_3()
+                                .items_center()
+                                .px(px(14.))
+                                .py(px(10.))
+                                .rounded(px(10.))
+                                .border_1()
+                                .border_color(color(accent).opacity(0.3))
+                                .hover(|d| d.border_color(color(accent)))
+                                .cursor_pointer()
+                                .child(crate::pipeline_icon::mark(p.icon.as_deref(), accent, 16.))
+                                .child(
+                                    v_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(div().text_sm().truncate().child(p.name.clone()))
+                                        .child(div().text_xs().text_color(muted).truncate().child(
+                                            format!(
+                                                "{swarm} · {} · {}",
+                                                p.source,
+                                                crate::settings_words::stages(p.stages)
+                                            ),
+                                        )),
+                                )
+                                .child(div().text_xs().text_color(color(theme::TEAL)).child("Add"))
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let (env, (id, swarm, p)) = (env.clone(), one.clone());
+                                    workspace.update(cx, |ws, cx| {
+                                        ws.import_from_swarm(&p, &id, &swarm, env, window, cx)
+                                    });
+                                })
+                        })),
+                    &scroll,
+                    360.,
+                )
+            };
+            dialog.title("Import from a swarm").w(px(560.)).child(
+                v_flex()
+                    .gap_3()
+                    .pb_2()
+                    .child(div().text_xs().text_color(muted).child(
+                        "Pipelines your swarms share. The one you add is yours, and it starts \
+                         switched off for you to check.",
+                    ))
+                    .child(body),
+            )
+        });
+    }
+
+    /// Says what Export to share or Share to a swarm did with pipeline `file`: in the inbox, and
+    /// as a line under those buttons in its settings for 15 seconds (core spec §71).
+    fn share_said(&mut self, file: &str, note: Note, window: &mut Window, cx: &mut Context<Self>) {
+        let seq = self
+            .share_said
+            .values()
+            .map(|(_, _, s)| *s)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let short = note
+            .message
+            .split(". ")
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches('.')
+            .to_string();
+        self.share_said
+            .insert(file.to_string(), (note.kind, short, seq));
+        window.push_note(note, cx);
+        let file = file.to_string();
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(15))
+                .await;
+            let _ = this.update(cx, |ws, cx| {
+                if ws.share_said.get(&file).is_some_and(|(_, _, s)| *s == seq) {
+                    ws.share_said.remove(&file);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Adds `p`, shared in swarm `id` (`swarm`), as a new pipeline that remembers where it came
+    /// from, so the owner's later versions are offered (core spec §70); then opens it.
+    fn import_from_swarm(
+        &mut self,
+        p: &crate::pipeline_share::Shared,
+        id: &str,
+        swarm: &str,
+        env: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let root = self.hydra.paths.root().to_path_buf();
+        match crate::pipeline_share::import_shared(&root, p, id, swarm) {
+            Ok(name) => {
+                crate::action_log::write(format!("imported pipeline {name} from swarm {swarm}"));
+                window.push_note(
+                    Note::success(
+                        "Added. Check its folders and skills, then turn its trigger on. When it's \
+                         updated in the swarm, you'll be offered the new version.",
+                    )
+                    .title(format!("Imported {name}")),
+                    cx,
+                );
+                self.start_new_pipeline(name, env, window, cx);
+            }
+            Err(e) => window.push_note(Note::warning(e).title("Import from a swarm"), cx),
+        }
+    }
+
+    /// Looks in each imported pipeline's swarm for a newer version (core spec §70), and tells
+    /// of each new one once.
+    pub(super) fn pipeline_updates_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.hydra.paths.root().to_path_buf();
+        let swarms: Vec<(String, std::path::PathBuf, String)> = self
+            .swarms
+            .iter()
+            .filter(|s| !s.removed)
+            .map(|s| (s.id.clone(), s.folder.clone(), s.name.clone()))
+            .collect();
+        let find = |id: &str| {
+            swarms
+                .iter()
+                .find(|(i, _, _)| i == id)
+                .map(|(_, f, n)| (f.clone(), n.clone()))
+        };
+        let mut now = std::collections::HashMap::new();
+        for file in crate::pipeline::names(&root) {
+            let Ok(p) = crate::pipeline::load(&root, &file) else {
+                continue;
+            };
+            if let Some(u) = crate::pipeline_share::newer(&p, find) {
+                if self.updates_told.insert(format!("{file} {}", u.version)) {
+                    window.push_note(
+                        Note::info(format!(
+                            "{} has a newer version in {}. Open its settings to update.",
+                            p.name, u.swarm_name
+                        ))
+                        .title("Pipeline update"),
+                        cx,
+                    );
+                }
+                now.insert(file, u);
+            }
+        }
+        if now != self.pipeline_updates {
+            self.pipeline_updates = now;
+            cx.notify();
+        }
+    }
+
+    /// **Update** (core spec §70): asks first, then takes the swarm's newer version of pipeline
+    /// `file`; **Not now** skips that version.
+    pub(super) fn update_pipeline_dialog(
+        &mut self,
+        file: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(u) = self.pipeline_updates.get(&file).cloned() else {
+            return;
+        };
+        let name = crate::pipeline::load(self.hydra.paths.root(), &file)
+            .map_or_else(|_| file.clone(), |p| p.name);
+        let workspace = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (skip_ws, go_ws) = (workspace.clone(), workspace.clone());
+            let (skip_file, go_file) = (file.clone(), file.clone());
+            let skip_v = u.version.clone();
+            dialog
+                .title(format!("Update {name}?"))
+                .w(px(520.))
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .text_sm()
+                        .child(format!(
+                            "{} has a newer version of this pipeline. Updating takes its \
+                             stages and settings.",
+                            u.swarm_name
+                        ))
+                        .child(
+                            "It keeps what's yours here: its name, whether its trigger is on, \
+                             its schedule and mailbox, and the environment it starts in. Changes \
+                             you made to its stages are replaced. Tickets in progress carry on \
+                             with the stages they started with.",
+                        ),
+                )
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("update-pipeline-skip")
+                                .label("Not now")
+                                .ghost()
+                                .tooltip("Skip this version; you'll be offered the next one")
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let (file, v) = (skip_file.clone(), skip_v.clone());
+                                    skip_ws.update(cx, |ws, cx| {
+                                        ws.skip_pipeline_update(&file, &v, window, cx)
+                                    });
+                                }),
+                        )
+                        .child(
+                            Button::new("update-pipeline-go")
+                                .label("Update")
+                                .primary()
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let file = go_file.clone();
+                                    go_ws
+                                        .update(cx, |ws, cx| ws.update_pipeline(&file, window, cx));
+                                }),
+                        ),
+                )
+        });
+    }
+
+    fn skip_pipeline_update(
+        &mut self,
+        file: &str,
+        version: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match crate::pipeline_share::skip(self.hydra.paths.root(), file, version) {
+            Ok(()) => {
+                self.pipeline_updates.remove(file);
+                cx.notify();
+            }
+            Err(e) => window.push_note(Note::error(e).title("Pipeline update"), cx),
+        }
+    }
+
+    fn update_pipeline(&mut self, file: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(u) = self.pipeline_updates.get(file).cloned() else {
+            return;
+        };
+        let root = self.hydra.paths.root().to_path_buf();
+        let updated = crate::pipeline_share::update(&root, file, &u)
+            .and_then(|()| crate::pipeline::load(&root, file));
+        match updated {
+            Ok(p) => {
+                crate::action_log::write(format!(
+                    "pipeline {file}: updated to version {} from {}",
+                    u.version, u.swarm_name
+                ));
+                // Open tickets take its new look and bars; new stages join as a save's do.
+                if let Some(sv) = crate::mcp::server::get() {
+                    let added = crate::mcp::server::lock(sv.registry())
+                        .runs
+                        .refresh_from_file(file, &p);
+                    crate::run_log::record_added(&root, &added);
+                }
+                self.pipeline_updates.remove(file);
+                // Its settings, if open, show the new version.
+                let open: Vec<crate::envs::PaneId> = self
+                    .pipeline_settings
+                    .iter()
+                    .filter(|(_, d)| d.file() == file)
+                    .map(|(o, _)| *o)
+                    .collect();
+                for orch in open {
+                    self.pipeline_settings.remove(&orch);
+                    self.open_pipeline_settings(orch, window, cx);
+                }
+                window.push_note(
+                    Note::success(format!("{} is up to date with {}.", p.name, u.swarm_name))
+                        .title("Pipeline updated"),
+                    cx,
+                );
+            }
+            Err(e) => window.push_note(Note::error(e).title("Pipeline update"), cx),
+        }
+        cx.notify();
+    }
+
+    /// The **Update available** pill on orchestrator `orch`'s card, when its pipeline has one.
+    pub(super) fn update_pill(
+        &self,
+        orch: crate::envs::PaneId,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let file = self.orchestrators.get(&orch)?.clone();
+        self.pipeline_updates.get(&file)?;
+        Some(
+            div()
+                .id(SharedString::from(format!("update-pill-{orch}")))
+                .flex_none()
+                .px(px(6.))
+                .py(px(1.))
+                .rounded(px(4.))
+                .text_xs()
+                .bg(rgb(crate::orchestrator_theme::TEAL).opacity(0.16))
+                .text_color(rgb(crate::orchestrator_theme::TEAL))
+                .cursor_pointer()
+                .child("Update")
+                .tooltip(|window, cx| {
+                    gpui_component::tooltip::Tooltip::new(
+                        "Its swarm has a newer version of this pipeline",
+                    )
+                    .build(window, cx)
+                })
+                .on_click(cx.listener(move |ws, _, window, cx| {
+                    cx.stop_propagation();
+                    ws.update_pipeline_dialog(file.clone(), window, cx)
+                }))
+                .into_any_element(),
+        )
+    }
+
+    /// Adds `text` (a pipeline from `from`, a file or a swarm) as a new pipeline, then opens it.
+    fn import_text(
+        &mut self,
+        text: &str,
+        from: &str,
+        env: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let root = self.hydra.paths.root().to_path_buf();
+        match crate::pipeline::import(&root, text) {
+            Ok(name) => {
+                crate::action_log::write(format!("imported pipeline {name} from {from}"));
+                window.push_note(
+                    Note::success("Added. Check its folders and skills, then turn its trigger on.")
+                        .title(format!("Imported {name}")),
+                    cx,
+                );
+                self.start_new_pipeline(name, env, window, cx);
+            }
+            Err(e) => window.push_note(Note::warning(e).title("Import pipeline"), cx),
+        }
     }
 
     /// **Export pipeline…**: picks the pipeline, then where to save it.
@@ -559,8 +1051,9 @@ impl Workspace {
                                 path.display()
                             ));
                             Note::success(format!(
-                                "Saved to {}. Send it on; they add it with Import pipeline…",
-                                path.display()
+                                "Exported to {}. Send it on: they add it with Create pipeline, \
+                                 then Import a file.",
+                                tilde(&path)
                             ))
                         }
                         Err(e) => Note::error(format!("can't save {}: {e}", path.display())),
@@ -569,8 +1062,8 @@ impl Workspace {
                 Ok(Err(e)) => Note::error(e.to_string()),
                 _ => return,
             };
-            let _ = this.update_in(cx, |_, window, cx| {
-                window.push_note(note.title("Export pipeline"), cx)
+            let _ = this.update_in(cx, |ws, window, cx| {
+                ws.share_said(&name, note.title("Export pipeline"), window, cx)
             });
         })
         .detach();
@@ -579,39 +1072,28 @@ impl Workspace {
     /// **Import pipeline…** (core spec §44): picks a pipeline file, adds it as a new pipeline
     /// that takes nothing until turned on, then starts its orchestrator (in `env`, else one
     /// picked) with its settings open to check.
-    fn import_pipeline(
+    pub(super) fn import_pipeline(
         &mut self,
         env: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.open_dialog_path(false, window, cx, move |ws, path, window, cx| {
-            let root = ws.hydra.paths.root().to_path_buf();
-            let added = std::fs::read_to_string(&path)
-                .map_err(|e| format!("can't read {}: {e}", path.display()))
-                .and_then(|text| crate::pipeline::import(&root, &text));
-            match added {
-                Ok(name) => {
-                    crate::action_log::write(format!(
-                        "imported pipeline {name} from {}",
-                        path.display()
-                    ));
-                    window.push_note(
-                        Note::success(
-                            "Added. Check its folders and skills, then turn its trigger on.",
-                        )
-                        .title(format!("Imported {name}")),
-                        cx,
-                    );
-                    ws.start_new_pipeline(name, env, window, cx);
+            match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    ws.import_text(&text, &path.display().to_string(), env.clone(), window, cx)
                 }
-                Err(e) => window.push_note(Note::warning(e).title("Import pipeline"), cx),
+                Err(e) => window.push_note(
+                    Note::warning(format!("can't read {}: {e}", path.display()))
+                        .title("Import pipeline"),
+                    cx,
+                ),
             }
         });
     }
 
     /// Names the new pipeline (copied from `from`, else blank) and writes its file.
-    fn name_pipeline(
+    pub(super) fn name_pipeline(
         &mut self,
         from: Option<String>,
         env: Option<String>,
@@ -623,6 +1105,10 @@ impl Workspace {
         let ws = cx.entity();
         let first = Cell::new(true);
         let hint = match &from {
+            Some(f) if f == crate::pipeline::EMAIL_TRIAGE => "Takes its work from Gmail on \
+                weekday mornings: Jev sorts each email, then Claude investigates and drafts a \
+                reply for a person. Set the mailbox and categories in its settings."
+                .to_string(),
             Some(f) => format!(
                 "A copy of {f}: its stages, bars and prompts. It won't watch Linear or start at \
                  launch until you turn those on in its settings."
@@ -643,8 +1129,13 @@ impl Workspace {
                             window.close_dialog(cx);
                             crate::action_log::write(format!(
                                 "new pipeline {name} ({})",
-                                from.as_deref()
-                                    .map_or("blank".into(), |f| format!("from {f}"))
+                                from.as_deref().map_or("blank".into(), |f| {
+                                    if f == crate::pipeline::EMAIL_TRIAGE {
+                                        "email triage starter".into()
+                                    } else {
+                                        format!("from {f}")
+                                    }
+                                })
                             ));
                             let env = env.clone();
                             ws.update(cx, |ws, cx| ws.start_new_pipeline(name, env, window, cx));
@@ -1280,4 +1771,410 @@ pub(super) fn pipeline_labels(root: &std::path::Path, names: &[String]) -> Vec<S
             _ => n.clone(),
         })
         .collect()
+}
+
+/// A pipeline of yours, as Start a pipeline and Create a pipeline show it.
+#[derive(Clone)]
+struct Mine {
+    file: String,
+    name: String,
+    color: Option<u32>,
+    icon: Option<String>,
+    stages: usize,
+    /// Where its work comes from, e.g. `Slack · #pull-requests`.
+    source: String,
+}
+
+/// Every pipeline that loads, by file name.
+fn my_pipelines(root: &std::path::Path) -> Vec<Mine> {
+    crate::pipeline::names(root)
+        .into_iter()
+        .filter_map(|file| {
+            let p = crate::pipeline::load(root, &file).ok()?;
+            Some(Mine {
+                source: crate::settings_words::source_short(&p),
+                file,
+                name: p.name,
+                color: p.color,
+                icon: p.icon,
+                stages: p.stages.len(),
+            })
+        })
+        .collect()
+}
+
+/// `content` scrolling within `max_h`, with a scrollbar always shown at its right edge so
+/// it's plain there's more below (the dialogs' lists).
+fn scrolled(
+    content: gpui::Stateful<gpui::Div>,
+    scroll: &gpui::ScrollHandle,
+    max_h: f32,
+) -> gpui::AnyElement {
+    use gpui_component::scroll::{Scrollbar, ScrollbarMode};
+    div()
+        .relative()
+        .child(
+            content
+                .max_h(px(max_h))
+                .overflow_y_scroll()
+                .track_scroll(scroll)
+                // Room for the scrollbar, so it never sits on a card.
+                .pr(px(14.)),
+        )
+        .child(
+            div().absolute().inset_0().child(
+                Scrollbar::vertical(scroll)
+                    .id(content_id(max_h))
+                    .mode(ScrollbarMode::Always),
+            ),
+        )
+        .into_any_element()
+}
+
+fn content_id(max_h: f32) -> SharedString {
+    SharedString::from(format!("dialog-scrollbar-{max_h}"))
+}
+
+/// Start a pipeline's cards: one per pipeline, then **Create a pipeline**.
+fn start_cards(
+    mine: &[Mine],
+    workspace: &gpui::Entity<Workspace>,
+    env: &str,
+    scroll: &gpui::ScrollHandle,
+    cx: &gpui::App,
+) -> gpui::AnyElement {
+    use crate::orchestrator_theme::{self as theme, color};
+    let muted = cx.theme().muted_foreground;
+    let card = |id: SharedString| {
+        v_flex()
+            .id(id)
+            .w(px(184.))
+            .gap(px(6.))
+            .p(px(12.))
+            .rounded(px(10.))
+            .border_1()
+            .cursor_pointer()
+    };
+    let cards = mine.iter().map(|m| {
+        let accent = m.color.unwrap_or(theme::TEAL);
+        let (workspace, env, file) = (workspace.clone(), env.to_string(), m.file.clone());
+        card(SharedString::from(format!("start-{}", m.file)))
+            .border_color(color(accent).opacity(0.3))
+            .bg(color(0x131616))
+            .hover(|d| {
+                d.border_color(color(accent))
+                    .bg(color(accent).opacity(0.06))
+            })
+            .child(
+                div()
+                    .size(px(30.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(8.))
+                    .bg(color(accent).opacity(0.14))
+                    .child(crate::pipeline_icon::mark(m.icon.as_deref(), accent, 16.)),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .truncate()
+                    .child(m.name.clone()),
+            )
+            .child(
+                v_flex()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .truncate()
+                            .child(m.source.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(crate::settings_words::stages(m.stages)),
+                    ),
+            )
+            .on_click(move |_, window, cx| {
+                window.close_dialog(cx);
+                let env = env.clone();
+                workspace.update(cx, |ws, cx| ws.open_orchestrator(&env, &file, window, cx));
+            })
+            .into_any_element()
+    });
+    let create = {
+        let (workspace, env) = (workspace.clone(), env.to_string());
+        card("start-create".into())
+            .items_center()
+            .justify_center()
+            .border_dashed()
+            .border_color(color(theme::BORDER_STRONG))
+            .hover(|d| d.border_color(color(theme::TEAL)))
+            .child(div().text_color(color(theme::TEAL)).text_xl().child("+"))
+            .child(div().text_sm().child("Create a pipeline"))
+            .on_click(move |_, window, cx| {
+                window.close_dialog(cx);
+                let env = env.clone();
+                workspace.update(cx, |ws, cx| ws.new_pipeline(Some(env), window, cx));
+            })
+            .into_any_element()
+    };
+    v_flex()
+        .gap_3()
+        .pb_2()
+        .child(
+            div()
+                .text_xs()
+                .text_color(muted)
+                .child("Pick the pipeline to run, or create a new one."),
+        )
+        .child(scrolled(
+            h_flex()
+                .id("start-cards")
+                .flex_wrap()
+                .items_start()
+                .gap(px(10.))
+                .children(cards)
+                .child(create),
+            scroll,
+            400.,
+        ))
+        .into_any_element()
+}
+
+/// What a choice does once picked.
+#[derive(Clone)]
+enum Start {
+    /// Name a new pipeline made from this (`None`: blank).
+    Name(Option<String>),
+    Import,
+    /// Import from one of your swarms.
+    Swarm,
+}
+
+/// Create a pipeline's three sections: start fresh, copy one of yours, import a file.
+fn create_choices(
+    mine: &[Mine],
+    workspace: &gpui::Entity<Workspace>,
+    env: &Option<String>,
+    scroll: &gpui::ScrollHandle,
+    in_swarm: bool,
+    cx: &gpui::App,
+) -> gpui::AnyElement {
+    use crate::orchestrator_theme::{self as theme, color};
+    let muted = cx.theme().muted_foreground;
+    let pick = |start: Start| {
+        let (workspace, env) = (workspace.clone(), env.clone());
+        move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut gpui::App| {
+            window.close_dialog(cx);
+            let env = env.clone();
+            workspace.update(cx, |ws, cx| match start.clone() {
+                Start::Name(from) => ws.name_pipeline(from, env, window, cx),
+                Start::Import => ws.import_pipeline(env, window, cx),
+                Start::Swarm => ws.import_from_swarm_dialog(env, window, cx),
+            });
+        }
+    };
+    let heading = |title: &'static str, about: &'static str| {
+        v_flex()
+            .gap(px(2.))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(title),
+            )
+            .child(div().text_xs().text_color(muted).child(about))
+    };
+    let tile = |id: &'static str,
+                icon: gpui_kit_assets::IconName,
+                title: &'static str,
+                about: &'static str| {
+        h_flex()
+            .id(id)
+            .flex_1()
+            .flex_basis(px(0.))
+            .min_w_0()
+            .gap_3()
+            .items_start()
+            .px(px(14.))
+            .py(px(12.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(color(0x1f2524))
+            .bg(color(0x131616))
+            .hover(|d| d.border_color(color(theme::TEAL)))
+            .cursor_pointer()
+            .child(
+                gpui_component::Icon::new(icon)
+                    .size(px(18.))
+                    .text_color(color(theme::TEAL)),
+            )
+            .child(
+                // The rest of the tile's width: without it the text has none and wraps per letter.
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .whitespace_normal()
+                            .child(about),
+                    ),
+            )
+    };
+    let fresh = v_flex()
+        .gap_2()
+        .child(heading(
+            "Start fresh",
+            "Build it yourself, or begin from a ready-made starter.",
+        ))
+        .child(
+            h_flex()
+                .gap_2()
+                .items_stretch()
+                .child(
+                    tile(
+                        "create-blank",
+                        gpui_kit_assets::IconName::FilePlus,
+                        "Blank",
+                        "One stage to fill in yourself.",
+                    )
+                    .on_click(pick(Start::Name(None))),
+                )
+                .child(
+                    tile(
+                        "create-email-triage",
+                        gpui_kit_assets::IconName::Mail,
+                        "Email triage",
+                        "Gmail, Jev sorts each email, Claude drafts a reply.",
+                    )
+                    .on_click(pick(Start::Name(Some(
+                        crate::pipeline::EMAIL_TRIAGE.to_string(),
+                    )))),
+                ),
+        );
+    let copy = (!mine.is_empty()).then(|| {
+        v_flex()
+            .gap_2()
+            .child(heading(
+                "Copy one of yours",
+                "The copy starts switched off, so it never takes the original's work.",
+            ))
+            .child(scrolled(
+                v_flex()
+                    .id("create-copies")
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(color(0x1f2524))
+                    .children(mine.iter().map(|m| {
+                        let accent = m.color.unwrap_or(theme::TEAL);
+                        h_flex()
+                            .id(SharedString::from(format!("create-copy-{}", m.file)))
+                            .gap_3()
+                            .items_center()
+                            .px(px(14.))
+                            .py(px(9.))
+                            .border_b_1()
+                            .border_color(color(0x1a1f1e))
+                            .hover(|d| d.bg(color(0x161b1a)))
+                            .cursor_pointer()
+                            .child(crate::pipeline_icon::mark(m.icon.as_deref(), accent, 15.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .child(m.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(crate::settings_words::stages(m.stages)),
+                            )
+                            .child(div().text_xs().text_color(color(theme::TEAL)).child("Copy"))
+                            .on_click(pick(Start::Name(Some(m.file.clone()))))
+                    })),
+                scroll,
+                220.,
+            ))
+    });
+    let import = v_flex()
+        .gap_2()
+        .child(heading(
+            "Import one someone shared",
+            "Added switched off, for you to check before it takes any work.",
+        ))
+        .child(
+            h_flex()
+                .gap_2()
+                .items_stretch()
+                .child(
+                    tile(
+                        "create-import",
+                        gpui_kit_assets::IconName::FileUp,
+                        "From a file",
+                        "A .toml they saved with Export to share.",
+                    )
+                    .on_click(pick(Start::Import)),
+                )
+                .when(in_swarm, |row| {
+                    row.child(
+                        tile(
+                            "create-swarm",
+                            gpui_kit_assets::IconName::Users,
+                            "From a swarm",
+                            "One your team shared with Share to a swarm.",
+                        )
+                        .on_click(pick(Start::Swarm)),
+                    )
+                }),
+        );
+    v_flex()
+        .gap(px(20.))
+        .pb_2()
+        .child(fresh)
+        .children(copy)
+        .child(import)
+        .into_any_element()
+}
+
+/// `path` with the home folder as `~`, as the confirmations say it.
+fn tilde(path: &std::path::Path) -> String {
+    match dirs::home_dir().and_then(|h| path.strip_prefix(h).ok().map(std::path::Path::to_path_buf))
+    {
+        // `~`, then the rest with this system's own separator (`\` on Windows).
+        Some(rest) => format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tilde_tests {
+    #[test]
+    fn a_path_under_home_reads_with_a_tilde() {
+        let home = dirs::home_dir().unwrap();
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(
+            super::tilde(&home.join("Downloads").join("prs.toml")),
+            format!("~{sep}Downloads{sep}prs.toml")
+        );
+        assert_eq!(
+            super::tilde(std::path::Path::new("/tmp/x.toml")),
+            "/tmp/x.toml"
+        );
+    }
 }

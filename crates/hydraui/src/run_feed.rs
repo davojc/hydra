@@ -131,12 +131,18 @@ pub fn items(run: &str, text: &str) -> Vec<Item> {
                 if let Some(score) = rating.and_then(|r| r.get("score")).and_then(Value::as_u64) {
                     scores.insert(s("stage"), score.min(100));
                 }
-                let summary = rating
-                    .and_then(|r| r.get("summary"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string();
+                // What a person must do reads first, when the report says.
+                let text = |k: &str| {
+                    rating
+                        .and_then(|r| r.get(k))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string()
+                };
+                let summary = Some(text("ask"))
+                    .filter(|a| !a.is_empty())
+                    .unwrap_or_else(|| text("summary"));
                 let against: Vec<String> = rating
                     .and_then(|r| r.get("reasons"))
                     .and_then(Value::as_array)
@@ -195,6 +201,9 @@ pub fn items(run: &str, text: &str) -> Vec<Item> {
                         format!("Needs you: {} needs a person to check", stage(id)),
                         rest,
                     ),
+                    Some(Parts::Asked { stage: id, ask }) => {
+                        (id.to_string(), format!("Needs you: {}", stage(id)), ask)
+                    }
                     None => (
                         last_reported.clone(),
                         format!("Needs you: {}", short(&reason, 120)),
@@ -328,9 +337,16 @@ enum Parts<'a> {
     Blocked { stage: &'a str, rest: &'a str },
     /// `stage <id> needs a person to check: <rest>`
     Check { stage: &'a str, rest: &'a str },
+    /// `<what the person must do> (stage <id>: <score>, bar <bar>)`: a report with an ask.
+    Asked { stage: &'a str, ask: &'a str },
 }
 
 fn needs_you_parts(reason: &str) -> Option<Parts<'_>> {
+    if let Some((ask, tail)) = reason.rsplit_once(" (stage ")
+        && let Some((id, _)) = tail.strip_suffix(')').and_then(|t| t.split_once(": "))
+    {
+        return Some(Parts::Asked { stage: id, ask });
+    }
     let r = reason.strip_prefix("stage ")?;
     if let Some((id, rest)) = r.split_once(" is blocked: ") {
         return Some(Parts::Blocked { stage: id, rest });
@@ -723,6 +739,25 @@ mod tests {
             Some("Review done. A RED-zone PR needs a human line-by-line review and approval.")
         );
         assert_eq!(last.details, vec![steps, "CI was still pending."]);
+    }
+
+    #[test]
+    fn a_stage_held_back_for_a_person_reads_as_what_they_must_do() {
+        let text = log(&[
+            started("2026-11-10 08:00:00.000"),
+            json!({"at": "2026-11-10 08:10:00.000", "event": "report", "stage": "first",
+                "rating": {"score": 88, "summary": "Reviewed #5. Two bugs fixed, CI green.",
+                    "ask": "Approve PR #5 on GitHub as a code owner",
+                    "reasons": [{"side": "against", "text": "RED zone."}]}}),
+            json!({"at": "2026-11-10 08:10:00.001", "event": "needs you",
+                "reason": "Approve PR #5 on GitHub as a code owner (stage first: 88, bar 95)"}),
+        ]);
+        let last = items("r", &text).pop().unwrap();
+        assert_eq!(last.text, "Needs you: First");
+        assert_eq!(
+            last.summary.as_deref(),
+            Some("Approve PR #5 on GitHub as a code owner")
+        );
     }
 
     #[test]

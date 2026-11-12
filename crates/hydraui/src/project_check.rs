@@ -99,6 +99,7 @@ pub fn moves(p: &Project, seen: &[Observation]) -> Vec<Move> {
             }
         }
     }
+    let stages = p.file.stages();
     let mut out = Vec::new();
     for t in &p.tickets {
         let Some((signal, prs)) = best.get(&t.id) else {
@@ -112,7 +113,17 @@ pub fn moves(p: &Project, seen: &[Observation]) -> Vec<Move> {
             .filter(|u| !t.meta.prs.contains(u))
             .cloned()
             .collect();
-        match move_for(t.meta.status, *signal) {
+        // A merged pull request is done only once every check stage passed it; until then it
+        // goes to testing, so the run checks it (spec §14.8).
+        let to = match move_for(t.meta.status, *signal) {
+            Some(TicketStatus::Done)
+                if !hydraui_projects::stages::checks_passed(&stages, &t.meta) =>
+            {
+                (t.meta.status < TicketStatus::Testing).then_some(TicketStatus::Testing)
+            }
+            to => to,
+        };
+        match to {
             Some(to) => out.push(Move {
                 ticket: t.id.clone(),
                 from: t.meta.status,
@@ -344,10 +355,41 @@ mod tests {
         assert_eq!(
             summary,
             vec![
-                ("PG-1", TicketStatus::Done, 1),
+                // Merged but never checked: testing first, not done (spec §14.8).
+                ("PG-1", TicketStatus::Testing, 1),
                 ("PG-2", TicketStatus::InProgress, 0),
                 // Already in review: no move, but its pull request is recorded.
                 ("PG-3", TicketStatus::InReview, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_merged_pull_request_is_done_only_after_every_check_passed() {
+        let mut p = project(&[
+            ("PG-1", TicketStatus::Testing),
+            ("PG-2", TicketStatus::InReview),
+            ("PG-3", TicketStatus::InReview),
+        ]);
+        p.tickets[1].meta.passed = vec!["testing".into()];
+        // From before stages: check = passed.
+        p.tickets[2].meta.check = "passed".into();
+        let seen = prs_observed(
+            r#"[{"title":"PG-1","headRefName":"a","state":"MERGED","url":"u1"},
+                {"title":"PG-2","headRefName":"b","state":"MERGED","url":"u2"},
+                {"title":"PG-3","headRefName":"c","state":"MERGED","url":"u3"}]"#,
+        )
+        .unwrap();
+        let all = moves(&p, &seen);
+        let got: Vec<(&str, TicketStatus)> =
+            all.iter().map(|m| (m.ticket.as_str(), m.to)).collect();
+        assert_eq!(
+            got,
+            vec![
+                // Still being checked: it stays, its pull request recorded.
+                ("PG-1", TicketStatus::Testing),
+                ("PG-2", TicketStatus::Done),
+                ("PG-3", TicketStatus::Done),
             ]
         );
     }

@@ -1235,3 +1235,255 @@ env = "iov42"         # optional
 - **The orchestrator's first prompt.** It says work can come from the schedule, so it waits rather than asking for a ticket.
 - **Copies and exports.** These drop `[schedule]`, as they drop `[autostart]`, so a copy never runs beside the original.
 - **Not yet:** the card shows nothing of the schedule. It doesn't run while hydraui is closed.
+
+## 59. Needs you, at a glance (added 2026-11-11)
+
+A run waiting for a person used to show everything its stage reported, all at the same weight: a paragraph headline, a large score, every reason with its buttons, and every piece of evidence. The one thing the person had to do, such as approving a PR on GitHub, had no button.
+
+- **`ask` in a report.** `stage_report` takes an optional `ask`: one line, starting with a verb, of at most 140 characters, saying what a person must do now, e.g. "Approve PR #5 on GitHub as a code owner". A Jev stage sends one too: "Confirm Jev's pick of how_to, or stop the run".
+- **The reason leads with it.** A below-bar report with an ask waits as `<ask> (stage <id>: <score>, bar <bar>)`. So the sidebar, the status bar, notices and History all say what's needed first. History's line reads "Needs you: <stage>", and its summary is the ask.
+- **The panel, top to bottom:**
+  - **The pill and context.** The pill says Needs you, Check by hand or Blocked. Beside it: the ticket, the stage, and its score against the bar.
+  - **The ask** as the headline. Without one, it's "Check <stage> by hand", "Unblock <stage>" or "Decide what <stage> does next". With no report at all, it's the reason's first sentence.
+  - **Why:** at most two sentences of the summary (or of the check steps), cut at 240 characters.
+  - **One main button:** open the run's link ("Open PR on GitHub ↗", "Open in Linear ↗"). Then "I've done it, continue" or "I checked it, it works", and Step into the session.
+  - **More:** Score again, Re-run with a note, Go back to an earlier stage and Stop this ticket.
+  - **Details,** folded by default: "88% (bar 95%), 4 reasons, 6 pieces of evidence". Unfolded, it shows the full check steps and pictures, then the whole report with its reasons, must-address marks and evidence.
+- **A person passes a stage held back for them.** `Choice::Checked` passes a stage that asked for a check by hand, as before. It now also passes a below-bar *done* report that gave an `ask`: the stage held back on purpose and said what a person must do. A below-bar report without an ask still can't be passed by a person. Its gate holds until it's re-run, sent back or stopped.
+
+## 60. While a stage waits (added 2026-11-11)
+
+A stage that ends needing a person used to stop dead. Its session was never asked to look at its pull request again, whatever its prompt said about polling. Waiting on an author or product looked again every 5 minutes, a rule in the code that nobody could see or change. Now one visible setting covers every pipeline:
+
+```toml
+[waiting]
+look_every = 5        # minutes between looks; 0 never looks. 5 when left out
+look_for = 0          # hours to keep looking; 0 until someone acts
+needs_you = false     # also look while a stage waits on you. Off when left out
+then = "stop"         # when look_for runs out: "stop" looking, or "close" a session waiting on you
+```
+
+Left out, it's exactly what hydraui did before: author and product waits looked every 5 minutes, and stages waiting on you didn't look. Saving the defaults writes no `[waiting]`.
+
+- **Waiting on its author or product** (`stage_ask`). The session is told to look in its thread or pull request on this timetable. **Check now** still looks at once. The card's "next check in N min" follows the timetable.
+- **Waiting on you (needs you), with `needs_you = true`.**
+  - The stopped stage stays stopped and the run still needs you.
+  - Every `look_every` minutes its session is woken with one standard instruction: "You're waiting on a person: <the report's ask, else the reason>. Look again at what your stage depends on, as your prompt describes it. If something changed that settles it, do what your stage needs again and call stage_report: that report counts. If nothing changed, say so in one line and end your turn without reporting."
+  - `Runs::look_again` allows that one extra report. A report that clears the bar passes the stage and resumes the run by itself. One that doesn't updates what the run needs.
+  - Any person's choice (pass, re-run, go back, stop) cancels a look in progress, so a late report from it doesn't count.
+- **Limits.** `look_for` hours count from when the wait began, as hydraui saw it, so a restart starts the count again. When they run out, looking stops. With `then = "close"`, a session waiting on you also closes; a stopped stage's session closing isn't a failure, and **Re-run** opens a new one. A stage waiting on its author or product only stops looking: it's still running, and closing it would count as a failure.
+- **Pipeline settings.** **While a stage waits** sits on the main page, not under Advanced, with chips:
+  - **Look again every:** Off, 5 min, 15 min, 30 min, 1 hour.
+  - **Keep looking for:** Until someone acts, 1, 4, 8 hours, 1 day.
+  - **While it waits on you:** Look again, Don't look.
+  - **When it's done looking:** Stop looking, Close its session.
+
+  A value set in the file that isn't a chip shows as one. Under the chips, the setting reads back in words, then comes the exact instruction a session waiting on you gets. A line also states the other standing rule: "A run about a pull request also ends by itself when that pull request is merged or closed."
+- **Fixed with it.** When a run was ended because its pull request was merged, hydraui closed its stage's session and then counted that as "its session ended without reporting". It told the orchestrator to start the stage again. A session closing on a run that has ended now changes nothing.
+
+## 61. Resume a waiting stage's session, and stop a ticket, from its page (added 2026-11-11, revised the same day)
+
+A ticket that needs you stays in the sidebar under its orchestrator, but the session that stopped there was easy to lose. Its terminal could be anywhere, or already closed. The controls for it belong on the ticket's page, not crowding its sidebar row, so the sidebar row now shows only the ticket and its state.
+
+- **Resume session.** The needs-you panel (§59) shows **Step into** while the stopped stage's terminal is open. Once that terminal is gone (`Runs::waiting_session` names the session, and no terminal holds it), **Resume session** takes its place.
+  - It runs `claude --resume <its logged Claude session>` in the folder the run's log recorded, with the pipeline's stage settings and no prompt, for you to talk to. The run log notes `session resumed`.
+  - The stage stays where it is and the run still needs you. The new terminal becomes the stage's session (`Runs::relink`), so looking again (§60), **Score again** and its next report all still count.
+  - When it can't resume (no logged session, or the orchestrator is closed), a notice says so and points to **Re-run with a note**.
+- **Stop this ticket.** It sits in the Pipeline tab's bar, beside **End pipeline**, for whichever ticket is shown while it's open, whatever its state. It's the same as the sidebar's old ×: it stops the ticket and closes its sessions. It left the needs-you panel's **More** menu. Right-clicking an orchestrator still offers it too.
+
+## 62. A step that keeps checking (added 2026-11-11)
+
+A prompt can't keep a stage open. "Keep checking until it's ready to approve" in a review prompt changed nothing: once the session reported below its bar, the stage stopped and the run needed you. Even with §60's "While it waits on you → Look again", the run showed Needs you while it looked. So keeping on is a setting of the step, and the prompt needn't mention polling.
+
+```toml
+[[stage]]
+id = "review"
+title = "Review PR"
+keep_checking = { every = 10, for = 8 }   # minutes, hours
+```
+
+- **Below its bar.** A report from a step that keeps checking, *done* but under its bar, with no `ask` (nothing a person must do), doesn't stop it.
+  - The stage stays running, its report is kept as the latest, and `Run.rechecking` names it. The run log notes `checking again`.
+  - The orchestrator is told the stage keeps checking: do nothing, and don't start the next stage.
+  - The card reads **Checking again** (`… · below its bar, checking again`) in the pipeline's colour, not Needs you.
+- **Its looks.** Every `every` minutes, its session is told: "Your stage reported N, under its bar of B, and keeps checking. Look again at what it depends on…; if something changed, do what your stage needs again and call stage_report; if nothing changed, end your turn without reporting." Its next report counts at once. At the bar, it passes and the run goes on. Under it, it keeps checking.
+- **When it asks you.**
+  - **Its `for` hours run out** (`Runs::stop_checking`): it stops at its gate and the run needs you, "stage review: 40, bar 95. It kept checking for 8 hours. …".
+  - **A report with an `ask`,** such as a red-zone approval only a person can give: it needs you at once (§59). It still looks again on the step's timetable, in place of the pipeline's §60 setting.
+  - **Blocked and check-by-hand reports** go to you as before.
+  - **Any person's choice** ends the checking.
+- **Pipeline settings.** Each Claude step has a **Below its bar** row under its prompt: **Ask me** or **Keep checking**; every 5 min, 10 min, 30 min or 1 hour; for 1, 4 or 8 hours or 1 day. A line reads it back in words. A Jev step has no session, so it can't keep checking.
+- **Also fixed:** the orchestrator's note for a stage waiting on its author said "every 5 minutes" whatever the pipeline set. It now says the pipeline's `look_every`.
+
+## 63. Pipeline settings for a first-time user (added 2026-11-11)
+
+Pipeline settings had grown into one long form. Rows of chips sat under every prompt, the waiting rules sat in the middle of the page, and nothing said what was left to do. The page is now read top to bottom as the pipeline runs, and it says what's next.
+
+- **What's left to set up.** A checklist sits under the title. It lists everything that keeps the pipeline from being saved, each with where it is ("Step 2: Name this step"), and a **Go to** button that unfolds that part and scrolls to it. With nothing left, one quiet line reads "Set up and ready to run". `pipeline::problems` lists them all, each with its `Part`. `validate` is its first, and the save bar names the part too.
+- **Starts when.** The source is one card that reads as a sentence, from `settings_words::source`: "A pull request is posted in #pull-requests", then "Checks every 1 minute, looking back 1 day". **Change** unfolds it to the **Where work comes from** dropdown and the fields most people set. The rest sits under **More options**: Linear's states and timing, Slack's timing and reactions, the schedule's environment, mail's search, swarm and environment. Its timings (check every, look back) are dropdowns. A card that needs setting up has an amber edge and is unfolded when the page opens.
+- **Steps as cards.**
+  - **Folded,** a step shows its number, its name, its kind (**Claude** or **Sort (Jev)**), the first line of its instructions, and what's set under More options ("keeps checking · 95% sure · team skills").
+  - **Unfolded,** it shows its name and **What should this step do?**, with buttons to insert `{ticket}`, `{pr}` and `{handoff}` where the cursor is.
+  - **More options** holds **If it isn't sure enough** (Stop and ask me, or Keep checking, §62), **Check again every** and **For up to**, **Sure enough at** (its own pass mark), **Skill** and **Works in**, all as dropdowns, and a sentence that reads them back.
+  - **Move up**, **Move down** and **Remove step** sit in its **⋯** menu.
+  - A one-step pipeline opens with its step unfolded, a new step is added unfolded and scrolled to, and a step with a problem opens unfolded.
+- **Add a stage.** A dashed button. Clicked, it becomes two tiles, **Claude stage** ("Does the work: reviews a pull request, fixes a ticket, drafts a reply.") and **Sort with Jev** ("Picks one category, like what an email is about, so the next stage knows."), with **Cancel**. Picking one adds it, unfolded.
+- **Advanced settings,** folded, holds **While a step waits** (§60, as dropdowns), **Tickets at once**, the **Default pass mark**, **Branch name** and **Product questions**.
+- **Words.** The page says *stage*, as the rest of hydraui does, and *sure enough* for the bar.
+- **Headings.** Name, Trigger and Stages each have a large heading with one line under it saying what the section is for. The team skills note wraps inside the page.
+- **Colours.** There are 16 to pick from: Teal, Cyan, Blue, Indigo, Violet, Purple, Pink, Rose, Red, Coral, Orange, Amber, Yellow, Lime, Green and Slate. The first eight keep their values, so saved pipelines look the same.
+- **Status bar.** It no longer shows the orchestrator's line ("INTH Development · INTH-184 · needs you: …", red when a run needs you). The inbox and its notifications say what needs you now; the bar keeps the environment, accounts, usage, git and folder.
+
+## 64. A pipeline's icon (added 2026-11-12)
+
+Colour alone wasn't enough to tell pipelines apart at a glance, so a pipeline can also have an icon.
+
+```toml
+icon = "git-pull-request"
+```
+
+- **Where it shows.** The icon replaces the ◆ wherever the pipeline's mark appeared, in the pipeline's colour:
+  - the sidebar card;
+  - the grouped card of a pipeline running several tickets;
+  - an interrupted run's card, which stays amber;
+  - the strip at the head of a pipeline's tabs.
+
+  Left out, the mark is the ◆, as before.
+- **The choices.** There are 30 Lucide icons (`pipeline_icon::ICONS`), each with a plain name in settings: Pull request, Branch, Code, Bug, Ticket, Checklist, Test, Search, Shield, Rocket, Lightning, Sparkles, Mail, Inbox, Message, Bell, People, Bot, Calendar, Clock, Book, Database, Package, Layers, Wrench, Globe, Target, Flag, Star and Heart. `crate::assets` bundles those the default set lacks. A test checks that every one loads.
+- **It follows Save everywhere.** Saving gives every run of the pipeline its new name, colour and icon (`Pipeline::take_look`), ended runs included. Before this, open runs took the name and colour but not the icon, and ended runs took nothing. A run rebuilt after a restart also takes them from the file as it is now. Before, it kept the look from when it started, so a needs-you run went back to its old ◆. What a run *does* (its stages) stays as it started.
+- **Errors.** A name that isn't one of them is a file error that says where to pick one.
+- **Pipeline settings.** Under the name, a preview of the mark sits in its colour, with its colour and icon named ("Violet · Pull request") and **Change**. **Change** opens one panel with the 16 colours and then the ◆ and the icons, each named on hover and ringed when chosen, and **Done** folds it again. Saving writes `icon`, or removes it when the ◆ is chosen.
+
+## 65. A stopped trigger, in words (added 2026-11-12)
+
+A trigger that stopped by itself used to show the raw error in red on its card. That was a whole URL and a chain of "Network Error: Network Error: …", and it offered Connect Slack even when the network was the problem. Now `linear_watch::stopped` reads the error, and the card shows a short headline, one line on what to do, and the button that fits. The error itself shows on hover, as "Details: …".
+
+| What went wrong | Headline | What to do | Button |
+|---|---|---|---|
+| Sign-in rejected or missing (a rejected key, `invalid_auth`, `not_authed`, a revoked or expired token, HTTP 401/403) | "Slack needs you to sign in again" | "Connect Slack, and checking starts again." (Linear: "Set a new Linear API key, then try again.") | **Connect Slack** for Slack; **Try again** for Linear |
+| Rate limited | "Slack asked hydraui to slow down" | "Wait a few minutes, then try again." | **Try again** |
+| HTTP 5xx | "Slack is having problems" | "It's on their side. Try again in a while." | **Try again** |
+| Not reachable, timed out, network | "Couldn't reach Slack" | "Check your internet connection, then try again." | **Try again** |
+| Anything else | "Stopped checking Slack" | "Something went wrong. Try again, or hover for details." | **Try again** |
+
+- **Try again** turns Automatic back on and looks at once.
+- The notification when a trigger stops uses the same words.
+
+## 66. Create a pipeline, and Export to share (added 2026-11-12)
+
+People couldn't find how to import a pipeline. It was the last line of a typed list, and Export was a plain grey word in the settings title row.
+
+- **Create pipeline** opens one chooser titled **Create a pipeline**, in three sections. Each has a heading and a line saying what it's for.
+  - **Start fresh: build it yourself, or begin from a ready-made starter.**
+    - **Blank:** "One stage to fill in yourself."
+    - **Email triage:** "Gmail, Jev sorts each email, Claude drafts a reply."
+  - **Copy one of yours: the copy starts switched off, so it never takes the original's work.** It lists your pipelines, each with its mark, its name and how many stages it has, and scrolls past a handful. It doesn't show when you have none.
+  - **Import one someone shared: added switched off, for you to check before it takes any work.** Two tiles: **From a file** ("A .toml they saved with Export to share."), and **From a swarm** (§69) when you're in one.
+
+  Picking a choice goes on as before. You name the pipeline, or pick the file. Then its orchestrator starts with its settings open. The launcher's **New pipeline…** opens the same chooser, and **Import pipeline…** stays there too.
+- **Export to share** is now an outlined button with a share icon, in the settings title row. Its confirmation says how the other person adds the file: "they add it with Create pipeline, then Import a file."
+
+## 67. Start a pipeline, as cards (added 2026-11-12)
+
+**Start pipeline** opened a typed list of file names. It now opens **Start a pipeline**, with a short line ("Pick the pipeline to run, or create a new one.") above a grid of small cards that scrolls past a few rows.
+
+- **One card per pipeline**, each showing:
+  - its icon, in a tile of its colour;
+  - its name;
+  - where its work comes from (`settings_words::source_short`): "Linear · INTH", "Slack · #pull-requests", "Gmail", "On a schedule" or "Started by you";
+  - how many stages it has.
+
+  The card's edge is in the pipeline's colour, and brightens on hover. Clicking a card starts that pipeline's orchestrator, as picking it from the list did.
+- **A card is as tall as its text.** A fixed height had squeezed the name line until its letters were cut off.
+- **A scrollbar shows at the grid's right edge** whenever there are more cards than fit, so it's plain there's more below. Create a pipeline's copy list has one too (`scrolled`, with `ScrollbarMode::Always`).
+- **The last card is a dashed "+ Create a pipeline".** It opens the chooser in §66.
+- **Create a pipeline's copy list** uses the same pipeline facts (`my_pipelines`).
+
+## 68. Delete a pipeline (added 2026-11-12)
+
+hydraui had no way to delete a pipeline, other than deleting its file from `~/.hydra/hydraui/pipelines/` by hand.
+
+- **Where.** **Delete this pipeline** is the last row of Pipeline settings, below Advanced settings, set apart by a line. Its one line explains it: "Stops its tickets in progress and moves it to the Trash. Past runs stay in History." The button is a red outline: **Delete pipeline…**
+- **It asks first.** The dialog is titled **Delete <name>?** and says what stops, for example "Its 2 tickets in progress are stopped and their sessions close." It then says "The pipeline moves to the Trash, so you can put it back from there. Its past runs stay in History." The choices are **Cancel** and **Delete pipeline**.
+- **What happens.**
+  - The pipeline ends as **End pipeline** does: its tickets in progress are recorded as stopped by you, and its orchestrators and sessions close.
+  - `pipeline::delete` then moves its file to the Trash (`file_ops::to_recycle_bin`; the Recycle Bin on Windows).
+  - It leaves the sidebar, Start a pipeline and Create a pipeline's copy list.
+  - A notification says "Moved to the Trash. Put it back from there if you need it."
+  - If the Trash refuses the file, the pipeline is ended but not deleted, and the notification says why.
+
+## 69. Share a pipeline through a swarm (added 2026-11-12)
+
+A team in a swarm can share pipelines without sending files around.
+
+- **Share to a swarm.** This button sits beside **Export to share** at the top of Pipeline settings. It's greyed out until you're in a swarm, and its tooltip then says "Join a swarm on the Swarms page to share pipelines with your team".
+  - It opens **Share to a swarm**, which lists your swarms. A swarm you can only read is listed but can't be picked ("You can only read this swarm, so you can't share to it"), because a reader's files don't sync.
+  - Picking a swarm writes the pipeline, exported (so without this machine's `[autostart]`), into `<swarm folder>/pipelines/`. If that folder doesn't exist yet, it's made.
+    - **A swarm that syncs `.toml`** (`pipeline_share::syncs_toml` on the swarm's types) gets the pipeline file itself, `<file>.toml`.
+    - **Any other swarm** gets `<file>.md`.
+    - Each swarm's row says which it will be: "Shared as a .toml file", or "Shared as a .md note: this swarm doesn't sync .toml files".
+    - When the form changes (say an owner has since added `.toml`), the copy in the other form is removed, so the team sees it once. It's removed only if it holds this same pipeline.
+  - Sharing it again updates the copy. The notification says "Shared to <swarm>" or "Updated its copy in <swarm>", and tells you how your team adds it.
+- **Why `.md` for the rest.** A swarm syncs only `.md` until an owner adds other types, so a `.toml` file there would reach no one. The file reads as a note:
+  - a heading with the pipeline's name;
+  - a line saying how to add it;
+  - the settings in a `toml` block.
+
+  `pipeline_share::{to_md, from_md}`.
+- **Import from a swarm.** In Create a pipeline (§66), the import section is now **Import one someone shared**, with two tiles: **From a file** and **From a swarm**. The swarm tile shows only when you're in a swarm.
+  - **From a swarm** lists every pipeline your swarms share, read from each `pipelines` folder (`.md`, and plain `.toml` for swarms that sync it). Each row shows its mark in its colour, its name, its swarm, where its work comes from and its stages.
+  - **Add** makes it a new pipeline of yours, switched off, as importing a file does (`pipeline::import`), and opens its settings.
+  - With nothing shared yet, it says how a teammate shares one.
+
+## 70. Updates to a pipeline shared through a swarm (added 2026-11-12)
+
+When the person who shared a pipeline (§69) shares it again with changes, everyone who imported it from that swarm is offered the new version.
+
+- **Where it came from.** **Import from a swarm** writes a `[shared]` table into the new pipeline's file. It's this machine's own record: export leaves it out, and import drops any it brings.
+
+  ```toml
+  [shared]
+  swarm = "<swarm id>"     # stays the same if the swarm is renamed
+  swarm_name = "Team"
+  file = "review-prs"      # its file in the swarm's pipelines folder, .toml or .md
+  version = "af63dc4c8601ec8c"
+  skipped = "…"            # a version the user said Not now to
+  ```
+
+  `version` is `pipeline_share::version`, an FNV-1a fingerprint of the shared text. It's the same on every machine.
+- **Spotting a new version.** Every 30 seconds, with the schedule check, `pipeline_updates_tick` reads each imported pipeline's file in its swarm (`.toml` or `.md`). `pipeline_share::newer` offers it when its fingerprint differs from `version`, and isn't the one `skipped`.
+  - A swarm you've left, or a file that's gone, offers nothing.
+  - Each new version is announced once: "Review PR's has a newer version in Team. Open its settings to update."
+- **Where it shows.**
+  - An **Update** pill on the pipeline's sidebar card. Clicking it opens the update.
+  - A banner at the top of its Pipeline settings: "A newer version is available", with **Review update…**.
+- **The update dialog.** It's titled **Update <name>?** and says what changes and what's kept. **Not now** skips that version, so only a newer one is offered again. **Update** takes it.
+- **What an update keeps** (`pipeline_share::update`).
+  - **Replaced:** the stages and settings become the shared version's.
+  - **Kept:**
+    - its name here;
+    - `[autostart]`, `[schedule]` and `[mail]`;
+    - whether its Linear or Slack trigger is on;
+    - `[shared]`, now at the new version.
+  - **Lost:** changes the user made to its stages.
+  - **Afterwards:** open tickets take the new look and bars as a save does, and keep their stages. Its settings, if open, reload.
+
+## 71. What Export and Share just did (added 2026-11-12, revised the same day)
+
+Every notice goes to the bell (§57). So after **Export to share**, the only sign it worked was the bell's count going up.
+
+- **Under the buttons.** **Export to share** and **Share to a swarm** now say what they did in a line of text under the two buttons in Pipeline settings. In green with ✓ when it worked ("Exported to ~/Downloads/prs.toml", "Shared to Team"), in red with ! when it didn't. The line is the notice's first sentence, and the path is shown with `~` for home.
+  - It stays for 15 seconds, and a newer one replaces it (`Workspace::share_said`).
+  - The full notice still goes to the inbox.
+- **First tried as a pill beside the bell, for these and other actions.** That was taken out the same day, at the user's request: the confirmation belongs where you clicked. Imports, updates and Delete pipeline notify through the inbox as before.
+
+## 72. "With you" while you're in a waiting stage (added 2026-11-12)
+
+When a run waited on you and you went to it, with **Resume session** (§61) or **Step into**, its card still said **Needs you** in red. That was wrong: you were the one working on it.
+
+- **`Run.with_you`.** `Runs::person_in(run, stage)` sets it, from **Resume session** once the reopened session is linked, and from **Step into**. It counts only while the run waits on a person.
+- **What it shows.** The card's pill reads **With you**, in the pipeline's colour, and the group card ranks it beside Working, below a run that still needs someone. On the Pipeline page, the needs-you panel's pill reads **With you** in teal. Its ask and buttons stay, for when you're done.
+- **When it ends.**
+  - The stage reports: it goes on, or waits on you again, as its report says.
+  - You make a choice: pass, re-run, go back or stop.
+  - You close the session you were in: it says **Needs you** again, since it's yours to act on.

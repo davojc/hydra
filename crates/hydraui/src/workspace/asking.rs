@@ -17,7 +17,7 @@ use super::orchestrator::tell;
 use crate::envs::PaneId;
 use crate::mcp::server;
 use crate::orchestrator_theme::{self as theme, color};
-use crate::runs::{Ask, Change, Decided, Run};
+use crate::runs::{Ask, Change, Decided, Run, RunState};
 
 impl Workspace {
     /// The pane of the session that asked `run`'s question.
@@ -88,7 +88,9 @@ impl Workspace {
                     } = r.asking.as_ref()?;
                     let link = link.as_deref()?;
                     let last = self.ask_checks.get(&r.id).copied();
-                    if !crate::asking::check_due(*since, last, now) {
+                    // The pipeline's [waiting] timetable (core spec §60).
+                    let w = r.pipeline.waiting;
+                    if crate::waiting::look(&w, *since, last, now) != crate::waiting::Look::Now {
                         return None;
                     }
                     let pane = self.asking_pane(r, cx)?;
@@ -111,14 +113,195 @@ impl Workspace {
         self.send_wakes(window, cx);
     }
 
+    /// Each second: a run waiting on you whose pipeline looks while it waits (`[waiting]
+    /// needs_you`) has its stopped stage's session told to look again on the timetable; once
+    /// its hours are up it stops, and with `then = "close"` its session closes (core spec §60).
+    pub(super) fn waiting_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sv) = server::get() else {
+            return;
+        };
+        let now = SystemTime::now();
+        // (run, stage, session token, what it waits for, settings)
+        let waiting: Vec<(
+            String,
+            usize,
+            String,
+            String,
+            crate::pipeline::WaitingSettings,
+        )> = {
+            let reg = server::lock(sv.registry());
+            reg.runs
+                .all()
+                .filter_map(|r| {
+                    let RunState::NeedsYou(why) = &r.state else {
+                        return None;
+                    };
+                    let si = r
+                        .stages
+                        .iter()
+                        .position(|s| s.status == crate::runs::StageStatus::Stopped)?;
+                    // A step that keeps checking looks on its own timetable (core spec §62).
+                    let w = r.pipeline.stages[si]
+                        .keep
+                        .map_or(r.pipeline.waiting, |k| k.waiting());
+                    if !w.needs_you || w.look_every == 0 || r.fix_after.is_some() {
+                        return None;
+                    }
+                    let a = r.stages[si].latest()?;
+                    let token = a.session.clone()?;
+                    let what = a
+                        .rating
+                        .as_ref()
+                        .map(|x| x.ask.trim().to_string())
+                        .filter(|x| !x.is_empty())
+                        .unwrap_or_else(|| why.clone());
+                    Some((r.id.clone(), si, token, what, w))
+                })
+                .collect()
+        };
+        let ids: std::collections::HashSet<String> =
+            waiting.iter().map(|(id, ..)| id.clone()).collect();
+        self.wait_looks.retain(|id, _| ids.contains(id));
+        let mut woke = false;
+        for (run, si, token, what, w) in waiting {
+            let pane = self
+                .panes
+                .iter()
+                .find(|(_, v)| v.read(cx).mcp_token() == Some(token.as_str()))
+                .map(|(id, _)| *id);
+            let entry = self
+                .wait_looks
+                .entry(run.clone())
+                .or_insert((now, None, false));
+            if entry.2 {
+                continue;
+            }
+            match crate::waiting::look(&w, entry.0, entry.1, now) {
+                crate::waiting::Look::NotYet => {}
+                crate::waiting::Look::Now => {
+                    entry.1 = Some(now);
+                    let Some(pane) = pane else {
+                        continue;
+                    };
+                    let ok = server::lock(sv.registry()).runs.look_again(&run, si);
+                    if ok.is_ok() {
+                        crate::action_log::write(format!(
+                            "run {run}: waiting on you, it looks again"
+                        ));
+                        self.queue_wake(pane, run.clone(), crate::waiting::needs_you_prompt(&what));
+                        woke = true;
+                    }
+                }
+                crate::waiting::Look::Over => {
+                    entry.2 = true;
+                    crate::action_log::write(format!(
+                        "run {run}: it looked for {} hour(s) and stopped looking",
+                        w.look_for
+                    ));
+                    if w.then == crate::pipeline::WaitThen::Close
+                        && let Some(pane) = pane
+                    {
+                        crate::action_log::write(format!("run {run}: its waiting session closes"));
+                        self.close_terminal_now(pane, window, cx);
+                    }
+                }
+            }
+        }
+        woke |= self.keep_tick(now, cx);
+        if woke {
+            self.send_wakes(window, cx);
+        }
+    }
+
+    /// Steps below their bar that keep checking (core spec §62): each one's session is told to
+    /// look again on its step's timetable; when its hours are up it stops and the run asks you.
+    /// Whether it woke one.
+    fn keep_tick(&mut self, now: SystemTime, cx: &mut Context<Self>) -> bool {
+        let Some(sv) = server::get() else {
+            return false;
+        };
+        // (run, stage, session token, timetable, latest score, bar)
+        let checking: Vec<(String, String, crate::pipeline::KeepChecking, u8, u8)> = {
+            let reg = server::lock(sv.registry());
+            reg.runs
+                .all()
+                .filter_map(|r| {
+                    let si = r.rechecking?;
+                    let keep = r.pipeline.stages.get(si)?.keep?;
+                    let a = r.stages.get(si)?.latest()?;
+                    let score = a.rating.as_ref().map_or(0, |x| x.score);
+                    Some((
+                        r.id.clone(),
+                        a.session.clone()?,
+                        keep,
+                        score,
+                        r.pipeline.bar_for(si),
+                    ))
+                })
+                .collect()
+        };
+        let ids: std::collections::HashSet<String> =
+            checking.iter().map(|(id, ..)| id.clone()).collect();
+        self.keep_looks.retain(|id, _| ids.contains(id));
+        let mut woke = false;
+        for (run, token, keep, score, bar) in checking {
+            let entry = self.keep_looks.entry(run.clone()).or_insert((now, None));
+            match crate::waiting::look(&keep.waiting(), entry.0, entry.1, now) {
+                crate::waiting::Look::NotYet => {}
+                crate::waiting::Look::Now => {
+                    entry.1 = Some(now);
+                    let pane = self
+                        .panes
+                        .iter()
+                        .find(|(_, v)| v.read(cx).mcp_token() == Some(token.as_str()))
+                        .map(|(id, _)| *id);
+                    if let Some(pane) = pane {
+                        crate::action_log::write(format!(
+                            "run {run}: below its bar, it looks again"
+                        ));
+                        self.queue_wake(
+                            pane,
+                            run.clone(),
+                            crate::waiting::keep_checking_prompt(score, bar),
+                        );
+                        woke = true;
+                    }
+                }
+                crate::waiting::Look::Over => {
+                    self.keep_looks.remove(&run);
+                    let changes = server::lock(sv.registry()).runs.stop_checking(&run);
+                    crate::action_log::write(format!(
+                        "run {run}: it kept checking for {} hours: it asks you now",
+                        keep.hours
+                    ));
+                    tell(changes);
+                    cx.notify();
+                }
+            }
+        }
+        woke
+    }
+
     /// **Check now**: the waiting session looks in its thread at once, then every 5 minutes
     /// from there.
     fn check_answer_now(&mut self, run: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let due = SystemTime::now()
-            .checked_sub(crate::asking::CHECK_EVERY)
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        self.ask_checks.insert(run.to_string(), due);
-        self.asking_tick(window, cx);
+        // At once, whatever the timetable; the next look counts from now.
+        let woken = server::get().and_then(|sv| {
+            let reg = server::lock(sv.registry());
+            let r = reg.runs.run(run)?;
+            let ask = r.asking.as_ref()?;
+            let link = ask.link.as_deref()?;
+            let pane = self.asking_pane(r, cx)?;
+            Some((
+                pane,
+                crate::asking::check_prompt_for(ask.whom, &ask.question, link),
+            ))
+        });
+        if let Some((pane, prompt)) = woken {
+            self.ask_checks.insert(run.to_string(), SystemTime::now());
+            self.queue_wake(pane, run.to_string(), prompt);
+            self.send_wakes(window, cx);
+        }
     }
 
     /// **Answer…**: the user's answer to `run`'s question, recorded and typed to the stage.
@@ -317,13 +500,20 @@ impl Workspace {
             Some(ch) => format!("Asked in {ch} {waited} min ago"),
             None => format!("Asked you {waited} min ago"),
         };
-        let meta = if ask.link.is_some() {
-            match crate::asking::next_check_in(ask.since, self.ask_checks.get(&run).copied(), now) {
-                0 => format!("{asked} · checking Slack for a reply"),
+        let waiting = server::get()
+            .and_then(|sv| Some(server::lock(sv.registry()).runs.run(&run)?.pipeline.waiting))
+            .unwrap_or_default();
+        let meta = match (&ask.link, waiting.look_every) {
+            (None, _) | (_, 0) => asked,
+            (Some(_), _) => match crate::waiting::next_in(
+                &waiting,
+                ask.since,
+                self.ask_checks.get(&run).copied(),
+                now,
+            ) {
+                0 => format!("{asked} · checking for a reply"),
                 m => format!("{asked} · next check for a reply in {m} min"),
-            }
-        } else {
-            asked
+            },
         };
         let ws = cx.entity();
         window.open_dialog(cx, move |dialog, _, _| {

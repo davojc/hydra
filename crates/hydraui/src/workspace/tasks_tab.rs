@@ -485,7 +485,8 @@ impl Workspace {
             .border_b_1()
             .border_color(border);
         // First, fixed and not a button: the pipeline these tabs belong to.
-        if let Some((name, accent)) = self.pipeline_of(id, cx) {
+        if let Some(card) = self.pipeline_card_of(id, cx) {
+            let (name, accent) = (card.name, card.accent);
             strip = strip.child(
                 h_flex()
                     .px_2()
@@ -496,12 +497,11 @@ impl Workspace {
                     .border_color(border)
                     .text_sm()
                     .font_weight(gpui::FontWeight::MEDIUM)
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(crate::orchestrator_theme::color(accent))
-                            .child("◆"),
-                    )
+                    .child(crate::pipeline_icon::mark(
+                        card.icon.as_deref(),
+                        accent,
+                        13.,
+                    ))
                     .child(name),
             );
         }

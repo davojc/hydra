@@ -259,7 +259,8 @@ impl Workspace {
                     // The pipeline's own colour, so pipelines are told apart at a glance.
                     .border_color(color(card.accent).opacity(if active { 0.55 } else { 0.3 }))
                     .child(self.render_pipeline_card(*orch, card, active, lanes.is_empty(), cx))
-                    .children(self.render_linear_row(*orch, card.accent, cx));
+                    .children(self.render_linear_row(*orch, card.accent, cx))
+                    .children(self.render_schedule_row(*orch, card.accent, cx));
                 let orch = *orch;
                 if let Some(row) = self.terminal_row(
                     orch,
@@ -522,7 +523,8 @@ impl Workspace {
             .border_1()
             .border_color(accent.opacity(if active { 0.55 } else { 0.3 }))
             .child(self.render_pipeline_card(lead, &group, active, false, cx))
-            .children(self.render_linear_row(lead, group.accent, cx));
+            .children(self.render_linear_row(lead, group.accent, cx))
+            .children(self.render_schedule_row(lead, group.accent, cx));
         for (orch, _, panes) in members {
             let orch = *orch;
             if let Some(row) =

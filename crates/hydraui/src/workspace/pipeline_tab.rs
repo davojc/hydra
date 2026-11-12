@@ -1103,7 +1103,7 @@ impl Workspace {
                     SharedString::from(format!("look-bar-tab-{orch}")),
                     p,
                     last,
-                    source.every_minutes,
+                    std::time::Duration::from_secs(u64::from(source.every_minutes.max(1)) * 60),
                     checking,
                     accent,
                 ))

@@ -202,6 +202,9 @@ pub struct Run {
     /// A stage below its bar that keeps checking (core spec §62): still running, looking again
     /// on its step's timetable until it passes or its hours run out.
     pub rechecking: Option<usize>,
+    /// A stage waiting on a person who has stepped into its session or resumed it (core spec
+    /// §72): they're at it, so the run reads "With you", not "Needs you".
+    pub with_you: Option<usize>,
     /// What it's about, as a link: the pull request a Slack-triggered run reviews (`{pr}`).
     pub link: Option<String>,
 }
@@ -548,6 +551,7 @@ impl Runs {
             fix_after: None,
             looking: None,
             rechecking: None,
+            with_you: None,
             link: None,
         });
         Ok(self.runs.last().expect("just pushed"))
@@ -771,6 +775,17 @@ impl Runs {
         }
     }
 
+    /// A person stepped into stage `stage` of `run`, or resumed its session, while the run waits
+    /// on them (core spec §72). Nothing else: what they do there decides what happens next.
+    pub fn person_in(&mut self, run: &str, stage: usize) {
+        if let Some(r) = self.index(run).map(|ri| &mut self.runs[ri])
+            && matches!(r.state, RunState::NeedsYou(_))
+            && stage < r.stages.len()
+        {
+            r.with_you = Some(stage);
+        }
+    }
+
     /// A starting stage's terminal or worktree couldn't be made.
     pub fn start_failed(&mut self, run: &str, stage: usize, why: &str) -> Vec<Change> {
         match self.index(run) {
@@ -916,6 +931,7 @@ impl Runs {
         };
         r.looking = None;
         r.rechecking = None;
+        r.with_you = None;
         // Below its bar, with nothing a person must do: a step that keeps checking stays at
         // work and looks again later (core spec §62).
         let keep = !passed
@@ -1003,6 +1019,12 @@ impl Runs {
     /// resumed or stopped (core spec §52). A set-aside run's stages closing change nothing.
     pub fn session_gone(&mut self, token: &str) -> Vec<Change> {
         let mut changes = Vec::new();
+        // The person closed the stage's session they were in: it's theirs to act on again.
+        if let Some((ri, si)) = self.stage_of(token)
+            && self.runs[ri].with_you == Some(si)
+        {
+            self.runs[ri].with_you = None;
+        }
         // A run that has ended (its pull request merged, say) closing its stage's session is
         // hydraui's doing, not a failure.
         if let Some((ri, si)) = self.stage_of(token)
@@ -1310,6 +1332,7 @@ impl Runs {
         // A person acting ends any look in progress: its report wouldn't count.
         self.runs[ri].looking = None;
         self.runs[ri].rechecking = None;
+        self.runs[ri].with_you = None;
         let r = &self.runs[ri];
         let waiting = r
             .stages
@@ -2053,6 +2076,38 @@ mod tests {
         Choice::Retry {
             note: note.to_string(),
         }
+    }
+
+    #[test]
+    fn a_run_is_with_you_while_you_are_in_its_waiting_stage() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b"]);
+        started(&mut runs, &id, "a", "tok-a");
+        // Not waiting on anyone: stepping in changes nothing.
+        runs.person_in(&id, 0);
+        assert_eq!(runs.run(&id).unwrap().with_you, None);
+        runs.report("tok-a", rated(40)).unwrap();
+        assert!(matches!(
+            runs.run(&id).unwrap().state,
+            RunState::NeedsYou(_)
+        ));
+        runs.person_in(&id, 0);
+        assert_eq!(runs.run(&id).unwrap().with_you, Some(0));
+        assert_eq!(
+            crate::pipeline_card::card(runs.run(&id).unwrap()).state,
+            crate::pipeline_card::CardState::WithYou
+        );
+        // Closing the session they were in hands it back to them.
+        runs.session_gone("tok-a");
+        assert_eq!(runs.run(&id).unwrap().with_you, None);
+        assert_eq!(
+            crate::pipeline_card::card(runs.run(&id).unwrap()).state,
+            crate::pipeline_card::CardState::NeedsYou
+        );
+        // A choice of theirs ends it too.
+        runs.person_in(&id, 0);
+        runs.person(&id, retry("again")).unwrap();
+        assert_eq!(runs.run(&id).unwrap().with_you, None);
     }
 
     #[test]

@@ -1480,3 +1480,14 @@ Every notice goes to the bell (§57). So after **Export to share**, the only sig
   - **Updating a pipeline from its swarm.**
   - **Deleting a pipeline.**
   - A failure in any of them shows the same way.
+
+## 72. "With you" while you're in a waiting stage (added 2026-11-12)
+
+When a run waited on you and you went to it, with **Resume session** (§61) or **Step into**, its card still said **Needs you** in red. That was wrong: you were the one working on it.
+
+- **`Run.with_you`.** `Runs::person_in(run, stage)` sets it, from **Resume session** once the reopened session is linked, and from **Step into**. It counts only while the run waits on a person.
+- **What it shows.** The card's pill reads **With you**, in the pipeline's colour, and the group card ranks it beside Working, below a run that still needs someone. On the Pipeline page, the needs-you panel's pill reads **With you** in teal. Its ask and buttons stay, for when you're done.
+- **When it ends.**
+  - The stage reports: it goes on, or waits on you again, as its report says.
+  - You make a choice: pass, re-run, go back or stop.
+  - You close the session you were in: it says **Needs you** again, since it's yours to act on.

@@ -20,6 +20,8 @@ pub enum CardState {
     Checking,
     /// A step below its bar that keeps checking (core spec §62): at work, not stopped.
     Rechecking,
+    /// Waiting on the user, who is in its session now (core spec §72).
+    WithYou,
     Paused,
     Done,
     Stopped,
@@ -34,6 +36,7 @@ impl CardState {
             CardState::Asking => "Asked product",
             CardState::Waiting => "Waiting on author",
             CardState::Rechecking => "Checking again",
+            CardState::WithYou => "With you",
             CardState::Checking => "Check it",
             CardState::Paused => "Paused",
             CardState::Done => "Done",
@@ -127,6 +130,7 @@ pub fn card(run: &Run) -> Card {
     let state = match &run.state {
         RunState::Finished => CardState::Done,
         RunState::Stopped(_) => CardState::Stopped,
+        RunState::NeedsYou(_) if run.with_you.is_some() => CardState::WithYou,
         RunState::NeedsYou(_)
             if run
                 .asking
@@ -207,7 +211,8 @@ pub fn group_card(runs: &[&Card]) -> Card {
         CardState::NeedsYou => 0,
         CardState::Asking | CardState::Checking => 1,
         CardState::Waiting | CardState::Rechecking => 3,
-        CardState::Working => 2,
+        // Someone's at it: below a run that still needs a person, beside one at work.
+        CardState::Working | CardState::WithYou => 2,
         CardState::Paused => 3,
         CardState::Stopped => 4,
         CardState::Done => 5,
@@ -217,6 +222,7 @@ pub fn group_card(runs: &[&Card]) -> Card {
         matches!(
             s,
             CardState::Working
+                | CardState::WithYou
                 | CardState::NeedsYou
                 | CardState::Asking
                 | CardState::Waiting

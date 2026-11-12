@@ -1918,7 +1918,11 @@ impl Workspace {
         } else {
             format!("Resume at {} with a note", spec.title)
         };
-        let (pill_fg, pill_bg) = match glance.pill {
+        // While you're in its session, it's with you, not waiting on you (§72).
+        let with_you = run.with_you == Some(si);
+        let pill = if with_you { "With you" } else { glance.pill };
+        let (pill_fg, pill_bg) = match pill {
+            "With you" => (theme::TEAL, theme::TEAL_TINT),
             "Blocked" => (theme::RED, theme::RED_TINT),
             _ => (theme::AMBER, theme::AMBER_TINT),
         };
@@ -1995,10 +1999,17 @@ impl Workspace {
                     Button::new("pipeline-step-in")
                         .label(format!("Step into {label}"))
                         .when(link.is_none() && !glance.person_passes, |b| b.primary())
-                        .on_click(cx.listener(move |ws, _, window, cx| {
-                            ws.pipeline_tab_update(orch, cx, |t| t.stepped_in = true);
-                            ws.focus_active(window, cx);
-                        })),
+                        .on_click({
+                            let run = run_id.clone();
+                            cx.listener(move |ws, _, window, cx| {
+                                ws.pipeline_tab_update(orch, cx, |t| t.stepped_in = true);
+                                // You're in it now: the card says With you (§72).
+                                if let Some(sv) = server::get() {
+                                    server::lock(sv.registry()).runs.person_in(&run, si);
+                                }
+                                ws.focus_active(window, cx);
+                            })
+                        }),
                 );
             }
             // Everything else a person can do, out of the way.
@@ -2118,7 +2129,7 @@ impl Workspace {
                                             .py(px(2.))
                                             .rounded(px(4.))
                                             .bg(color(pill_bg))
-                                            .child(text(11.5, pill_fg).child(glance.pill)),
+                                            .child(text(11.5, pill_fg).child(pill)),
                                     )
                                     .child(text(12.5, theme::TEXT_MUTED).child(context)),
                             )

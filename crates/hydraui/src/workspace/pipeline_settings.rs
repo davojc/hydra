@@ -97,6 +97,8 @@ pub(super) struct SettingsDraft {
     color: Option<u32>,
     /// Its icon; `None`: the ◆ (core spec §64).
     icon: Option<String>,
+    /// The colour and icon picker is open.
+    look_open: bool,
     /// Tickets run at once, each with its own orchestrator.
     runs: u8,
     /// What a waiting stage's session does (core spec §60).
@@ -570,6 +572,7 @@ impl Workspace {
             product_asks: saved.product_asks,
             color: saved.color,
             icon: saved.icon.clone(),
+            look_open: false,
             runs: saved.runs_at_once,
             waiting: saved.waiting,
             advanced: false,

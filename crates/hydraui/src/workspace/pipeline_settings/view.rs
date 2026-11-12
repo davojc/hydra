@@ -285,8 +285,7 @@ impl Workspace {
                         "What it's called in the sidebar, and the colour and icon that tell it apart.",
                     ))
                     .child(div().max_w(px(480.)).child(Input::new(&draft.name)))
-                    .child(color_swatches(orch, draft.color, cx))
-                    .child(icon_picker(orch, draft.icon.as_deref(), draft.color, cx)),
+                    .child(look_picker(orch, draft, cx)),
             )
             // 3. What starts a run.
             .child(
@@ -724,6 +723,71 @@ impl Workspace {
         );
         body.into_any_element()
     }
+}
+
+/// The pipeline's look (core spec §64): folded, a preview of its mark with its colour and icon
+/// named, and **Change**; open, the colours and the icons to pick from, and **Done**.
+fn look_picker(orch: PaneId, draft: &SettingsDraft, cx: &mut Context<Workspace>) -> AnyElement {
+    let accent = draft.color.unwrap_or(theme::TEAL);
+    let open = draft.look_open;
+    let preview = div()
+        .size(px(40.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(10.))
+        .bg(color(accent).opacity(0.14))
+        .border_1()
+        .border_color(color(accent).opacity(0.5))
+        .child(crate::pipeline_icon::mark(
+            draft.icon.as_deref(),
+            accent,
+            20.,
+        ));
+    let head = h_flex()
+        .gap_3()
+        .items_center()
+        .child(preview)
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    text(13.5, theme::TEXT).child(words::look(draft.color, draft.icon.as_deref())),
+                )
+                .child(text(12., theme::TEXT_MUTED).child("How it shows in the sidebar")),
+        )
+        .child(
+            Button::new(SharedString::from(format!("look-toggle-{orch}")))
+                .label(if open { "Done" } else { "Change" })
+                .ghost()
+                .small()
+                .on_click(cx.listener(move |ws, _, _, cx| {
+                    ws.with_draft(orch, cx, |d| d.look_open = !d.look_open)
+                })),
+        );
+    if !open {
+        return div().max_w(px(480.)).child(head).into_any_element();
+    }
+    let label = |t: &'static str| text(12., theme::TEXT_SECONDARY).child(t);
+    card(SharedString::from(format!("look-{orch}")), None)
+        .max_w(px(560.))
+        .gap_3()
+        .child(head)
+        .child(
+            v_flex()
+                .gap_2()
+                .child(label("Colour"))
+                .child(color_swatches(orch, draft.color, cx)),
+        )
+        .child(v_flex().gap_2().child(label("Icon")).child(icon_picker(
+            orch,
+            draft.icon.as_deref(),
+            draft.color,
+            cx,
+        )))
+        .into_any_element()
 }
 
 /// The icon row (core spec §64): the ◆ and each of `pipeline_icon::ICONS`, in the pipeline's

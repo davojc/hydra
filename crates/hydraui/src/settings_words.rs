@@ -188,6 +188,20 @@ pub fn unsure(keep: Option<KeepChecking>, bar: u8) -> String {
     }
 }
 
+/// A pipeline's colour and icon by name, e.g. "Violet · Pull request"; a colour not among
+/// `pipeline::COLORS` is its hex, and no icon is the Diamond.
+pub fn look(color: Option<u32>, icon: Option<&str>) -> String {
+    let c = color.unwrap_or(crate::orchestrator_theme::TEAL);
+    let colour = crate::pipeline::COLORS
+        .iter()
+        .find(|(_, h)| *h == c)
+        .map_or_else(|| crate::pipeline::color_text(c), |(n, _)| n.to_string());
+    let shape = icon
+        .and_then(|i| crate::pipeline_icon::ICONS.iter().find(|(n, _)| *n == i))
+        .map_or("Diamond", |(_, l)| *l);
+    format!("{colour} · {shape}")
+}
+
 fn or<'a>(s: &'a str, empty: &'a str) -> &'a str {
     if s.trim().is_empty() { empty } else { s.trim() }
 }
@@ -210,6 +224,16 @@ mod tests {
     }
 
     const STEP: &str = "name = \"P\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n";
+
+    #[test]
+    fn a_look_reads_as_its_colour_and_icon() {
+        assert_eq!(look(None, None), "Teal · Diamond");
+        assert_eq!(
+            look(Some(0x9b7cf0), Some("git-pull-request")),
+            "Violet · Pull request"
+        );
+        assert_eq!(look(Some(0x123456), Some("mail")), "#123456 · Mail");
+    }
 
     #[test]
     fn durations_read_as_people_say_them() {

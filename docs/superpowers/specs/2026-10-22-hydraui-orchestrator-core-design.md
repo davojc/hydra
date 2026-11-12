@@ -1351,7 +1351,7 @@ icon = "git-pull-request"
   Left out, the mark is the ◆, as before.
 - **The choices.** There are 30 Lucide icons (`pipeline_icon::ICONS`), each with a plain name in settings: Pull request, Branch, Code, Bug, Ticket, Checklist, Test, Search, Shield, Rocket, Lightning, Sparkles, Mail, Inbox, Message, Bell, People, Bot, Calendar, Clock, Book, Database, Package, Layers, Wrench, Globe, Target, Flag, Star and Heart. `crate::assets` bundles those the default set lacks. A test checks that every one loads.
 - **Errors.** A name that isn't one of them is a file error that says where to pick one.
-- **Pipeline settings.** Under the colours, a row of tiles shows the ◆ and each icon in the pipeline's colour. Each is named on hover, and the chosen one is ringed. Saving writes `icon`, or removes it when the ◆ is chosen.
+- **Pipeline settings.** Under the name, a preview of the mark sits in its colour, with its colour and icon named ("Violet · Pull request") and **Change**. **Change** opens one panel with the 16 colours and then the ◆ and the icons, each named on hover and ringed when chosen, and **Done** folds it again. Saving writes `icon`, or removes it when the ◆ is chosen.
 
 ## 65. A stopped trigger, in words (added 2026-11-12)
 

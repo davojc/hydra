@@ -261,19 +261,42 @@ impl Workspace {
                             .child("Pipeline settings"),
                     )
                     .child({
-                        let file = draft.file.clone();
-                        Button::new(SharedString::from(format!("export-{orch}")))
-                            .icon(gpui_kit_assets::IconName::Share)
-                            .label("Export to share")
-                            .outline()
-                            .small()
-                            .tooltip(
-                                "Save this pipeline as a file to send someone. Saved settings \
-                                 only; it holds no secrets.",
+                        let (file, file2) = (draft.file.clone(), draft.file.clone());
+                        let in_swarm = self.swarms.iter().any(|s| !s.removed);
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new(SharedString::from(format!("share-swarm-{orch}")))
+                                    .icon(gpui_kit_assets::IconName::Users)
+                                    .label("Share to a swarm")
+                                    .outline()
+                                    .small()
+                                    .disabled(!in_swarm)
+                                    .tooltip(if in_swarm {
+                                        "Put it in a swarm's pipelines folder, so your team can \
+                                         add it with Import from a swarm"
+                                    } else {
+                                        "Join a swarm on the Swarms page to share pipelines with \
+                                         your team"
+                                    })
+                                    .on_click(cx.listener(move |ws, _, window, cx| {
+                                        ws.share_to_swarm_dialog(file2.clone(), window, cx)
+                                    })),
                             )
-                            .on_click(cx.listener(move |ws, _, window, cx| {
-                                ws.export_pipeline(file.clone(), window, cx)
-                            }))
+                            .child(
+                                Button::new(SharedString::from(format!("export-{orch}")))
+                                    .icon(gpui_kit_assets::IconName::Share)
+                                    .label("Export to share")
+                                    .outline()
+                                    .small()
+                                    .tooltip(
+                                        "Save this pipeline as a file to send someone. Saved \
+                                         settings only; it holds no secrets.",
+                                    )
+                                    .on_click(cx.listener(move |ws, _, window, cx| {
+                                        ws.export_pipeline(file.clone(), window, cx)
+                                    })),
+                            )
                     }),
             )
             // 1. What's left to set up.

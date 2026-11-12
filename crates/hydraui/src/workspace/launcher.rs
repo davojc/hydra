@@ -439,11 +439,12 @@ impl Workspace {
         }
         let mine = my_pipelines(&root);
         let workspace = cx.entity();
+        let scroll = gpui::ScrollHandle::new();
         window.open_dialog(cx, move |dialog, _, cx| {
             dialog
                 .title("Start a pipeline")
                 .w(px(640.))
-                .child(start_cards(&mine, &workspace, &env, cx))
+                .child(start_cards(&mine, &workspace, &env, &scroll, cx))
         });
     }
 
@@ -460,11 +461,12 @@ impl Workspace {
         let root = self.hydra.paths.root().to_path_buf();
         let mine = my_pipelines(&root);
         let workspace = cx.entity();
+        let scroll = gpui::ScrollHandle::new();
         window.open_dialog(cx, move |dialog, _, cx| {
             dialog
                 .title("Create a pipeline")
                 .w(px(600.))
-                .child(create_choices(&mine, &workspace, &env, cx))
+                .child(create_choices(&mine, &workspace, &env, &scroll, cx))
         });
     }
 
@@ -1293,11 +1295,44 @@ fn my_pipelines(root: &std::path::Path) -> Vec<Mine> {
         .collect()
 }
 
+/// `content` scrolling within `max_h`, with a scrollbar always shown at its right edge so
+/// it's plain there's more below (the dialogs' lists).
+fn scrolled(
+    content: gpui::Stateful<gpui::Div>,
+    scroll: &gpui::ScrollHandle,
+    max_h: f32,
+) -> gpui::AnyElement {
+    use gpui_component::scroll::{Scrollbar, ScrollbarMode};
+    div()
+        .relative()
+        .child(
+            content
+                .max_h(px(max_h))
+                .overflow_y_scroll()
+                .track_scroll(scroll)
+                // Room for the scrollbar, so it never sits on a card.
+                .pr(px(14.)),
+        )
+        .child(
+            div().absolute().inset_0().child(
+                Scrollbar::vertical(scroll)
+                    .id(content_id(max_h))
+                    .mode(ScrollbarMode::Always),
+            ),
+        )
+        .into_any_element()
+}
+
+fn content_id(max_h: f32) -> SharedString {
+    SharedString::from(format!("dialog-scrollbar-{max_h}"))
+}
+
 /// Start a pipeline's cards: one per pipeline, then **Create a pipeline**.
 fn start_cards(
     mine: &[Mine],
     workspace: &gpui::Entity<Workspace>,
     env: &str,
+    scroll: &gpui::ScrollHandle,
     cx: &gpui::App,
 ) -> gpui::AnyElement {
     use crate::orchestrator_theme::{self as theme, color};
@@ -1306,7 +1341,6 @@ fn start_cards(
         v_flex()
             .id(id)
             .w(px(184.))
-            .h(px(112.))
             .gap(px(6.))
             .p(px(12.))
             .rounded(px(10.))
@@ -1389,16 +1423,17 @@ fn start_cards(
                 .text_color(muted)
                 .child("Pick the pipeline to run, or create a new one."),
         )
-        .child(
+        .child(scrolled(
             h_flex()
                 .id("start-cards")
                 .flex_wrap()
+                .items_start()
                 .gap(px(10.))
-                .max_h(px(400.))
-                .overflow_y_scroll()
                 .children(cards)
                 .child(create),
-        )
+            scroll,
+            400.,
+        ))
         .into_any_element()
 }
 
@@ -1415,6 +1450,7 @@ fn create_choices(
     mine: &[Mine],
     workspace: &gpui::Entity<Workspace>,
     env: &Option<String>,
+    scroll: &gpui::ScrollHandle,
     cx: &gpui::App,
 ) -> gpui::AnyElement {
     use crate::orchestrator_theme::{self as theme, color};
@@ -1524,11 +1560,9 @@ fn create_choices(
                 "Copy one of yours",
                 "The copy starts switched off, so it never takes the original's work.",
             ))
-            .child(
+            .child(scrolled(
                 v_flex()
                     .id("create-copies")
-                    .max_h(px(220.))
-                    .overflow_y_scroll()
                     .rounded(px(10.))
                     .border_1()
                     .border_color(color(0x1f2524))
@@ -1562,7 +1596,9 @@ fn create_choices(
                             .child(div().text_xs().text_color(color(theme::TEAL)).child("Copy"))
                             .on_click(pick(Start::Name(Some(m.file.clone()))))
                     })),
-            )
+                scroll,
+                220.,
+            ))
     });
     let import = v_flex()
         .gap_2()

@@ -119,6 +119,72 @@ impl When {
     }
 }
 
+/// Where the clock stands between a schedule's runs, in seconds: since the run time before
+/// (or since its time today, while that run is due and not yet started), and to the next.
+/// Counted on the wall clock, so a daylight-saving change is an hour out for that one wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Wait {
+    pub since: u64,
+    pub left: u64,
+}
+
+impl Wait {
+    /// How far through the wait, 0.0 just after a run time to 1.0 when the next is due.
+    pub fn progress(&self) -> f32 {
+        match self.since + self.left {
+            0 => 1.0,
+            all => self.since as f32 / all as f32,
+        }
+    }
+}
+
+impl When {
+    /// The wait at log time `now`, when the last run started on date `last` (as `due`).
+    pub fn wait(&self, now: &str, last: Option<&str>) -> Option<Wait> {
+        let (date, time) = now.split_once(' ')?;
+        let day = weekday(date)?;
+        let mut hms = time.get(..8)?.split(':').map(|p| p.parse::<i64>().ok());
+        let secs = hms.next()?? * 3600 + hms.next()?? * 60 + hms.next()??;
+        let slot = i64::from(self.hour) * 3600 + i64::from(self.minute) * 60;
+        let on = |d: i64| self.days[(day as i64 + d).rem_euclid(7) as usize];
+        let since = (0..=7)
+            .find(|&d| on(-d) && (d > 0 || slot <= secs))
+            .map(|d| d * 86_400 + secs - slot)?;
+        let left = if self.due(now, last) {
+            0
+        } else {
+            (0..=7)
+                .find(|&d| on(d) && (d > 0 || slot > secs))
+                .map(|d| d * 86_400 + slot - secs)?
+        };
+        Some(Wait {
+            since: u64::try_from(since).ok()?,
+            left: u64::try_from(left).ok()?,
+        })
+    }
+}
+
+/// Seconds to go, as a person would say them: "30 seconds", "1 hour 25 minutes", "8 hours",
+/// "1 day 5 hours", "6 days".
+pub fn countdown(secs: u64) -> String {
+    let n = |n: u64, one: &str| {
+        if n == 1 {
+            format!("1 {one}")
+        } else {
+            format!("{n} {one}s")
+        }
+    };
+    let (d, h, m) = (secs / 86_400, secs % 86_400 / 3600, secs % 3600 / 60);
+    match secs {
+        0..60 => n(secs, "second"),
+        60..3600 => n(m, "minute"),
+        3600..7200 if m > 0 => format!("1 hour {}", n(m, "minute")),
+        3600..86_400 => n(secs / 3600, "hour"),
+        86_400..172_800 if h > 0 => format!("1 day {}", n(h, "hour")),
+        _ => n(d, "day"),
+    }
+}
+
 /// Monday 0 to Sunday 6, of `YYYY-MM-DD`.
 pub fn weekday(date: &str) -> Option<usize> {
     let mut p = date.split('-').map(|p| p.parse::<i64>().ok());
@@ -257,6 +323,57 @@ mod tests {
         assert!(!w.due("2026-11-16 22:15:00.000", Some("2026-11-16")));
         // Not on Tuesday, however late.
         assert!(!w.due("2026-11-17 19:00:00.000", Some("2026-11-09")));
+    }
+
+    #[test]
+    fn the_wait_runs_from_the_run_before_to_the_next() {
+        let w = parse("daily 09:00").unwrap();
+        // Before today's run: since yesterday's, an hour to go.
+        let t = w
+            .wait("2026-11-16 08:00:00.000", Some("2026-11-15"))
+            .unwrap();
+        assert_eq!((t.since, t.left), (23 * 3600, 3600));
+        // Just after today's run started: tomorrow's is next.
+        let t = w
+            .wait("2026-11-16 09:00:30.000", Some("2026-11-16"))
+            .unwrap();
+        assert_eq!((t.since, t.left), (30, 24 * 3600 - 30));
+        // Started on the second of its time: the next is tomorrow's, not this one.
+        let t = w
+            .wait("2026-11-16 09:00:00.000", Some("2026-11-16"))
+            .unwrap();
+        assert_eq!((t.since, t.left), (0, 24 * 3600));
+        // Due and not started yet: nothing left to wait, the bar is full.
+        let t = w
+            .wait("2026-11-16 09:00:10.000", Some("2026-11-15"))
+            .unwrap();
+        assert_eq!((t.since, t.left), (10, 0));
+        assert!((t.progress() - 1.0).abs() < f32::EPSILON);
+        // Weekly: Tuesday to Thursday 19:26 is 2 days, since the Thursday before 5.
+        let w = parse("thu 19:26").unwrap();
+        let t = w.wait("2026-11-10 19:26:00.000", None).unwrap();
+        assert_eq!((t.since, t.left), (5 * 86_400, 2 * 86_400));
+        assert!((t.progress() - 5.0 / 7.0).abs() < 1e-6);
+        // Run that Thursday: a week to the next.
+        let t = w
+            .wait("2026-11-12 19:27:00.000", Some("2026-11-12"))
+            .unwrap();
+        assert_eq!((t.since, t.left), (60, 7 * 86_400 - 60));
+        assert!(w.wait("not a time", None).is_none());
+    }
+
+    #[test]
+    fn the_time_left_reads_like_a_person_would_say_it() {
+        assert_eq!(countdown(1), "1 second");
+        assert_eq!(countdown(30), "30 seconds");
+        assert_eq!(countdown(90), "1 minute");
+        assert_eq!(countdown(59 * 60 + 59), "59 minutes");
+        assert_eq!(countdown(3600), "1 hour");
+        assert_eq!(countdown(3600 + 25 * 60), "1 hour 25 minutes");
+        assert_eq!(countdown(8 * 3600 + 100), "8 hours");
+        assert_eq!(countdown(86_400 + 5 * 3600), "1 day 5 hours");
+        assert_eq!(countdown(86_400 + 10), "1 day");
+        assert_eq!(countdown(6 * 86_400 + 23 * 3600), "6 days");
     }
 
     #[test]

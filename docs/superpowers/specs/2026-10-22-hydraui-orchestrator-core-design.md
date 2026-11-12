@@ -1549,3 +1549,12 @@ With each ticket in its own box (§76), the box said the same thing twice: a **W
   A failure opens the dialog too ("Couldn't read the mailbox: …").
 - **A missing Google client** opens the same dialog, for Check Gmail and for Connect Gmail. It says to set `gmail_client_id` and `gmail_client_secret`, then choose **Reload config**.
 - **The bell.** The notices still go there too.
+
+## 79. A scheduled pipeline counts down to its next run (added 2026-11-12)
+
+A Linear or Slack pipeline's card has a bar filling towards its next look. A scheduled pipeline (§58) had nothing, so nobody could tell when it would run next.
+
+- **A row under its card.** It reads "Thursdays at 19:26 · next run in 8 hours" and counts down: "1 day 5 hours", "1 hour 25 minutes", "30 seconds".
+- **A bar.** It fills from the run time before to the next, the same bar a trigger's look uses. It's full, with "starting its run now", while a run is due and not yet started.
+- **Only on the lead card.** With several runs at once, only the card holding the pipeline's trigger shows it.
+- **Wall clock.** The wait is counted on the local wall clock, so across a daylight-saving change that one wait is an hour out.

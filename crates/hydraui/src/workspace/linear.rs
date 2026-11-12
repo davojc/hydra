@@ -111,7 +111,7 @@ pub(super) fn look_bar(
     key: SharedString,
     p: f32,
     last: Option<SystemTime>,
-    every: u32,
+    every: Duration,
     checking: bool,
     accent: u32,
 ) -> AnyElement {
@@ -151,7 +151,7 @@ pub(super) fn look_bar(
                         .repeat()
                         .with_max_fps(30.),
                     move |d, _| {
-                        let p = linear_watch::look_progress(last, SystemTime::now(), every)
+                        let p = linear_watch::progress_over(last, SystemTime::now(), every)
                             .unwrap_or(p);
                         d.w(relative(p))
                     },
@@ -1041,7 +1041,7 @@ impl Workspace {
         };
         let on = mode == linear_watch::Mode::Automatic;
         let tooltip = source.tooltip;
-        let every = source.every_minutes;
+        let every = Duration::from_secs(u64::from(source.every_minutes.max(1)) * 60);
         Some(
             v_flex()
                 .id(SharedString::from(format!("linear-row-{orch}")))

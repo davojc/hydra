@@ -222,9 +222,17 @@ pub fn trigger(f: &TriggerFacts) -> (Mode, String) {
 /// How far through the wait for its next look a watcher is, 0.0 just after a look to 1.0 when
 /// one is due; `None` before its first look.
 pub fn look_progress(last: Option<SystemTime>, now: SystemTime, every_minutes: u32) -> Option<f32> {
+    progress_over(
+        last,
+        now,
+        Duration::from_secs(u64::from(every_minutes.max(1)) * 60),
+    )
+}
+
+/// How far through a wait of `every` that started at `last` the clock is at `now`, at most 1.0.
+pub fn progress_over(last: Option<SystemTime>, now: SystemTime, every: Duration) -> Option<f32> {
     let since = now.duration_since(last?).unwrap_or_default();
-    let every = Duration::from_secs(u64::from(every_minutes.max(1)) * 60);
-    Some((since.as_secs_f32() / every.as_secs_f32()).min(1.0))
+    Some((since.as_secs_f32() / every.as_secs_f32().max(1.0)).min(1.0))
 }
 
 /// What a **Pick next ticket** found, for the notification it ends with.

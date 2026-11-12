@@ -1,5 +1,6 @@
 //! The app's assets: gpui-component's default icons, plus the ones the default set leaves out:
-//! the file tree's file-type icons, the task board's delete icon and the title bar's help icon.
+//! the file tree's file-type icons, the task board's delete icon, the title bar's help icon and
+//! the pipelines' icons.
 use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};
@@ -18,7 +19,29 @@ gpui_kit_assets::icon_assets!(
         FileImage,
         FileLock,
         Trash,
-        CircleQuestionMark
+        CircleQuestionMark,
+        // Pipelines' icons (`crate::pipeline_icon::ICONS`) the default set leaves out.
+        GitPullRequest,
+        GitBranch,
+        Code,
+        Bug,
+        Ticket,
+        ClipboardCheck,
+        FlaskConical,
+        Shield,
+        Rocket,
+        Zap,
+        Sparkles,
+        Mail,
+        MessageSquare,
+        Users,
+        Clock,
+        Database,
+        Package,
+        Layers,
+        Wrench,
+        Target,
+        Flag
     ]
 );
 

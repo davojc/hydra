@@ -104,7 +104,8 @@ fn fold(
 ) -> gpui::Stateful<gpui::Div> {
     h_flex()
         .id(id)
-        .gap_2()
+        .flex_wrap()
+        .gap_x_2()
         .cursor_pointer()
         .text_size(px(12.5))
         .text_color(color(theme::TEXT_SECONDARY))
@@ -281,10 +282,11 @@ impl Workspace {
                     .gap(px(10.))
                     .child(heading(
                         "Name",
-                        "What it's called in the sidebar, and its colour.",
+                        "What it's called in the sidebar, and the colour and icon that tell it apart.",
                     ))
                     .child(div().max_w(px(480.)).child(Input::new(&draft.name)))
-                    .child(color_swatches(orch, draft.color, cx)),
+                    .child(color_swatches(orch, draft.color, cx))
+                    .child(icon_picker(orch, draft.icon.as_deref(), draft.color, cx)),
             )
             // 3. What starts a run.
             .child(
@@ -724,6 +726,55 @@ impl Workspace {
     }
 }
 
+/// The icon row (core spec §64): the ◆ and each of `pipeline_icon::ICONS`, in the pipeline's
+/// colour, the chosen one ringed and named on hover.
+fn icon_picker(
+    orch: PaneId,
+    chosen: Option<&str>,
+    accent: Option<u32>,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let accent = accent.unwrap_or(theme::TEAL);
+    let choices = std::iter::once((None, "Diamond (the default)")).chain(
+        crate::pipeline_icon::ICONS
+            .iter()
+            .map(|(n, l)| (Some(*n), *l)),
+    );
+    h_flex()
+        .flex_wrap()
+        .gap_1()
+        .children(choices.map(|(icon, label)| {
+            let on = icon == chosen;
+            div()
+                .id(SharedString::from(format!(
+                    "pipeline-icon-{orch}-{}",
+                    icon.unwrap_or("diamond")
+                )))
+                .size(px(30.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(7.))
+                .border_1()
+                .border_color(if on {
+                    color(theme::TEXT)
+                } else {
+                    color(theme::BORDER_SUBTLE)
+                })
+                .when(on, |d| d.bg(color(accent).opacity(0.12)))
+                .hover(|d| d.border_color(color(accent)))
+                .cursor_pointer()
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(label).build(window, cx)
+                })
+                .child(crate::pipeline_icon::mark(icon, accent, 15.))
+                .on_click(cx.listener(move |ws, _, _, cx| {
+                    ws.with_draft(orch, cx, |d| d.icon = icon.map(str::to_string))
+                }))
+        }))
+        .into_any_element()
+}
+
 fn runs_label(n: u8) -> String {
     if n == 1 {
         "One ticket at a time".into()
@@ -970,6 +1021,7 @@ fn step_card(
                 .child(Textarea::new(&s.prompt))
                 .child(
                     h_flex()
+                        .flex_wrap()
                         .gap_1()
                         .items_center()
                         .child(text(11.5, theme::TEXT_MUTED).mr_1().child("Insert"))
@@ -1117,18 +1169,42 @@ fn step_card(
             body = body
                 .child(label("What should Jev decide?"))
                 .child(Textarea::new(&j.instructions))
-                .child(label("Categories: a name, and what it means"))
-                .children(j.options.iter().map(|(row, name, means)| {
-                    let row = *row;
+                .child(label(
+                    "Categories: a name, what it means, and what the run does then. End the run \
+                     for a category this pipeline doesn't deal with: its run stops quietly, and \
+                     an email goes back to the inbox unclaimed.",
+                ))
+                .children(j.options.iter().map(|(row, name, means, end)| {
+                    let (row, end) = (*row, *end);
+                    let then = dropdown(
+                        SharedString::from(format!("jev-opt-then-{key}-{row}")),
+                        if end { "End the run" } else { "Go on" }.into(),
+                        vec![("Go on".into(), !end), ("End the run".into(), end)],
+                        ws.clone(),
+                        Rc::new(move |i, ws, _, cx| {
+                            ws.with_stage(orch, key, cx, |s| {
+                                if let Some(o) = s
+                                    .jev
+                                    .as_mut()
+                                    .and_then(|j| j.options.iter_mut().find(|o| o.0 == row))
+                                {
+                                    o.3 = i == 1;
+                                }
+                            })
+                        }),
+                    );
                     h_flex()
                         .gap_2()
+                        .items_center()
                         .child(
                             div()
                                 .w(px(170.))
                                 .flex_none()
                                 .child(Input::new(name).small()),
                         )
-                        .child(div().flex_1().child(Input::new(means).small()))
+                        .child(div().flex_1().min_w_0().child(Input::new(means).small()))
+                        .child(text(11.5, theme::TEXT_MUTED).flex_none().child("Then"))
+                        .child(div().w(px(130.)).flex_none().child(then))
                         .child(
                             Button::new(SharedString::from(format!("jev-opt-x-{key}-{row}")))
                                 .label("×")
@@ -1138,7 +1214,7 @@ fn step_card(
                                 .on_click(cx.listener(move |ws, _, _, cx| {
                                     ws.with_stage(orch, key, cx, |s| {
                                         if let Some(j) = s.jev.as_mut() {
-                                            j.options.retain(|(r, _, _)| *r != row);
+                                            j.options.retain(|o| o.0 != row);
                                         }
                                     })
                                 })),
@@ -1219,7 +1295,10 @@ fn add_step(orch: PaneId, adding: bool, cx: &mut Context<Workspace>) -> AnyEleme
     let tile = |id: &str, title: &str, about: &str, jev: bool| {
         v_flex()
             .id(SharedString::from(format!("settings-add-{id}-{orch}")))
+            // Equal halves that shrink with the window: their text wraps, not the row.
             .flex_1()
+            .flex_basis(px(0.))
+            .min_w_0()
             .gap_1()
             .px(px(16.))
             .py(px(14.))
@@ -1263,7 +1342,9 @@ fn add_step(orch: PaneId, adding: bool, cx: &mut Context<Workspace>) -> AnyEleme
         )
         .child(
             h_flex()
+                .w_full()
                 .gap_2()
+                .items_stretch()
                 .child(tile(
                     "claude",
                     "Claude stage",

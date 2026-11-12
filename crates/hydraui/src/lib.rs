@@ -47,6 +47,7 @@ pub mod pdf_view;
 pub mod pickup;
 pub mod pipeline;
 pub mod pipeline_card;
+pub mod pipeline_icon;
 pub mod pipeline_view;
 pub mod project_check;
 pub mod project_run;

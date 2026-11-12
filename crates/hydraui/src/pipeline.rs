@@ -47,6 +47,9 @@ pub struct Pipeline {
     /// Its accent on the card and the frame round its sessions (`color = "#rrggbb"`), so
     /// pipelines are told apart at a glance; `None`: the default teal.
     pub color: Option<u32>,
+    /// Its icon in place of the ◆ (`icon = "mail"`, one of `pipeline_icon::ICONS`, core spec
+    /// §64); `None`: the ◆.
+    pub icon: Option<String>,
     /// Where its work comes from in Slack instead (`[slack]`): pull requests posted in a
     /// channel. A pipeline has one trigger, this or `linear`.
     pub slack: Option<SlackSettings>,
@@ -376,6 +379,7 @@ struct File {
     schedule: Option<FileSchedule>,
     mail: Option<FileMail>,
     color: Option<String>,
+    icon: Option<String>,
     runs_at_once: Option<u8>,
     waiting: Option<FileWaiting>,
 }
@@ -677,6 +681,9 @@ struct FileStage {
     instructions: Option<String>,
     #[serde(default)]
     options: BTreeMap<String, String>,
+    /// A Jev stage's categories that end the run: `general = "end"`.
+    #[serde(default)]
+    route: BTreeMap<String, String>,
     keep_checking: Option<FileKeep>,
 }
 
@@ -751,22 +758,26 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
                         s.id
                     ));
                 }
-                Some(crate::jev_stage::JevStage::new(
-                    s.input.clone(),
-                    s.model.clone(),
-                    s.instructions.clone(),
-                    s.options.clone(),
-                    &s.id,
-                )?)
+                Some(
+                    crate::jev_stage::JevStage::new(
+                        s.input.clone(),
+                        s.model.clone(),
+                        s.instructions.clone(),
+                        s.options.clone(),
+                        &s.id,
+                    )?
+                    .with_route(&s.route, &s.id)?,
+                )
             }
             None | Some("" | "claude") => {
                 if s.input.is_some()
                     || s.model.is_some()
                     || s.instructions.is_some()
                     || !s.options.is_empty()
+                    || !s.route.is_empty()
                 {
                     return Err(format!(
-                        "stage {}: input, model, instructions and options are for a Jev stage: \
+                        "stage {}: input, model, instructions, options and route are for a Jev stage: \
                          add kind = \"jev\"",
                         s.id
                     ));
@@ -861,6 +872,11 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
         schedule: file.schedule.map(schedule_settings).transpose()?,
         mail: file.mail.map(mail_settings).transpose()?,
         color: file.color.as_deref().map(parse_color).transpose()?,
+        icon: file
+            .icon
+            .as_deref()
+            .map(crate::pipeline_icon::check)
+            .transpose()?,
         waiting: file
             .waiting
             .map(waiting_settings)
@@ -896,6 +912,7 @@ pub struct Edit {
     pub product_style: Option<String>,
     pub product_asks: bool,
     pub color: Option<u32>,
+    pub icon: Option<String>,
     pub slack: Option<SlackSettings>,
     pub schedule: Option<ScheduleSettings>,
     /// `[mail]`, kept as the file has it: Pipeline settings doesn't edit it yet.
@@ -950,6 +967,7 @@ impl From<&Pipeline> for Edit {
             product_style: p.product_style.clone(),
             product_asks: p.product_asks,
             color: p.color,
+            icon: p.icon.clone(),
             slack: p.slack.clone(),
             schedule: p.schedule.clone(),
             mail: p.mail.clone(),
@@ -1350,6 +1368,12 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
             doc.remove("color");
         }
     }
+    match &edit.icon {
+        Some(i) => doc["icon"] = value(i.as_str()),
+        None => {
+            doc.remove("icon");
+        }
+    }
     let old: Vec<Table> = doc
         .get("stage")
         .and_then(Item::as_array_of_tables)
@@ -1429,12 +1453,21 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
                     options[k.as_str()] = value(v.trim());
                 }
                 table["options"] = Item::Table(options);
+                let mut route = Table::new();
+                for k in &j.ends {
+                    route[k.as_str()] = value("end");
+                }
+                if route.is_empty() {
+                    table.remove("route");
+                } else {
+                    table["route"] = Item::Table(route);
+                }
                 for k in ["skill", "folder", "worktree"] {
                     table.remove(k);
                 }
             }
             None => {
-                for k in ["kind", "instructions", "input", "model", "options"] {
+                for k in ["kind", "instructions", "input", "model", "options", "route"] {
                     table.remove(k);
                 }
             }
@@ -1791,6 +1824,7 @@ mod tests {
                     model: None,
                     instructions: "What do they ask?".into(),
                     options,
+                    ends: Default::default(),
                 }),
                 keep: None,
             },
@@ -1844,6 +1878,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
+            ends: Default::default(),
         };
         edit.stages[0].jev = Some(jev("", &[("a", "A"), ("b", "B")]));
         assert_eq!(validate(&edit), Err("Give the Jev step its question"));
@@ -2185,6 +2220,30 @@ mod tests {
         edit.color = None;
         save(d.path(), "prs", &edit).unwrap();
         assert_eq!(load(d.path(), "prs").unwrap().color, None);
+    }
+
+    #[test]
+    fn a_pipelines_icon_is_read_and_saved() {
+        let base = "name = \"P\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n";
+        assert_eq!(parse(base).unwrap().icon, None);
+        let p = parse(&format!("icon = \"mail\"\n{base}")).unwrap();
+        assert_eq!(p.icon.as_deref(), Some("mail"));
+        assert!(
+            parse(&format!("icon = \"kettle\"\n{base}"))
+                .unwrap_err()
+                .contains("kettle")
+        );
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(folder(d.path()).join("p.toml"), base).unwrap();
+        let mut edit = Edit::from(&load(d.path(), "p").unwrap());
+        edit.icon = Some("bug".into());
+        save(d.path(), "p", &edit).unwrap();
+        assert_eq!(load(d.path(), "p").unwrap().icon.as_deref(), Some("bug"));
+        edit.icon = None;
+        save(d.path(), "p", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("p.toml")).unwrap();
+        assert!(!text.contains("icon"), "{text}");
     }
 
     #[test]
@@ -2561,6 +2620,42 @@ title = "Draft a reply"
         assert_eq!(j.options.len(), 3);
         let text = std::fs::read_to_string(folder(d.path()).join("mail.toml")).unwrap();
         assert!(!text.contains("Do the \"Sort\" stage"), "{text}");
+    }
+
+    #[test]
+    fn a_jev_stages_route_is_saved_with_it() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(
+            folder(d.path()).join("mail.toml"),
+            "name = \"Mail\"\n[[stage]]\nid = \"classify\"\ntitle = \"Classify\"\n\
+             kind = \"jev\"\ninstructions = \"Q\"\n[stage.options]\na = \"A\"\nb = \"B\"\n\
+             [stage.route]\nb = \"finish\"\n[[stage]]\nid = \"draft\"\ntitle = \"Draft\"\n",
+        )
+        .unwrap();
+        let mut edit = edit_of(&load(d.path(), "mail").unwrap());
+        assert_eq!(
+            edit.stages[0].jev.as_ref().unwrap().ends,
+            ["b".to_string()].into()
+        );
+        edit.stages.swap(0, 1);
+        save(d.path(), "mail", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("mail.toml")).unwrap();
+        assert!(text.contains("[stage.route]\nb = \"end\""), "{text}");
+        let p = load(d.path(), "mail").unwrap();
+        assert_eq!(
+            p.stages[1].jev.as_ref().unwrap().ends,
+            ["b".to_string()].into()
+        );
+        // Going on everywhere writes no route.
+        let mut edit = edit_of(&p);
+        edit.stages[1].jev.as_mut().unwrap().ends.clear();
+        save(d.path(), "mail", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("mail.toml")).unwrap();
+        assert!(!text.contains("route"), "{text}");
+        let claude =
+            "name = \"P\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n[stage.route]\nx = \"end\"\n";
+        assert!(parse(claude).unwrap_err().contains("route"));
     }
 
     #[test]

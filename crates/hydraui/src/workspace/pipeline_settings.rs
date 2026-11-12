@@ -50,8 +50,8 @@ struct DraftStage {
 /// file it reads and the model.
 struct JevDraft {
     instructions: Entity<TextareaState>,
-    /// Each category's row key, name and meaning.
-    options: Vec<(u64, Entity<InputState>, Entity<InputState>)>,
+    /// Each category's row key, name and meaning, and whether it ends the run.
+    options: Vec<(u64, Entity<InputState>, Entity<InputState>, bool)>,
     input: Entity<InputState>,
     model: Entity<InputState>,
 }
@@ -66,8 +66,15 @@ impl JevDraft {
             options: self
                 .options
                 .iter()
-                .map(|(_, k, v)| (text(k), text(v)))
+                .map(|(_, k, v, _)| (text(k), text(v)))
                 .filter(|(k, v)| !(k.is_empty() && v.is_empty()))
+                .collect(),
+            ends: self
+                .options
+                .iter()
+                .filter(|(_, _, _, end)| *end)
+                .map(|(_, k, _, _)| text(k))
+                .filter(|k| !k.is_empty())
                 .collect(),
         }
     }
@@ -88,6 +95,8 @@ pub(super) struct SettingsDraft {
     product_asks: bool,
     /// The card's accent; `None`: the default teal.
     color: Option<u32>,
+    /// Its icon; `None`: the ◆ (core spec §64).
+    icon: Option<String>,
     /// Tickets run at once, each with its own orchestrator.
     runs: u8,
     /// What a waiting stage's session does (core spec §60).
@@ -273,6 +282,7 @@ impl SettingsDraft {
                 .filter(|c| !c.is_empty()),
             product_asks: self.product_asks,
             color: self.color,
+            icon: self.icon.clone(),
             runs_at_once: self.runs,
             waiting: self.waiting,
             bar: slider_value(&self.bar, cx),
@@ -559,6 +569,7 @@ impl Workspace {
             product_style,
             product_asks: saved.product_asks,
             color: saved.color,
+            icon: saved.icon.clone(),
             runs: saved.runs_at_once,
             waiting: saved.waiting,
             advanced: false,
@@ -676,6 +687,7 @@ impl Workspace {
                     row_key,
                     line(k.clone(), "how_to"),
                     line(v.clone(), "Asks how to do something with the platform"),
+                    j.ends.contains(k),
                 ));
             }
             JevDraft {
@@ -758,6 +770,7 @@ impl Workspace {
                         model: None,
                         instructions: String::new(),
                         options: [("".to_string(), "".to_string())].into(),
+                        ends: Default::default(),
                     }),
                     keep: None,
                 }
@@ -820,7 +833,7 @@ impl Workspace {
             .find(|s| s.key == key)
             .and_then(|s| s.jev.as_mut())
         {
-            j.options.push((row_key, name, means));
+            j.options.push((row_key, name, means, false));
         }
         draft._subs.extend(subs);
         cx.notify();

@@ -677,6 +677,9 @@ struct FileStage {
     instructions: Option<String>,
     #[serde(default)]
     options: BTreeMap<String, String>,
+    /// A Jev stage's categories that end the run: `general = "end"`.
+    #[serde(default)]
+    route: BTreeMap<String, String>,
     keep_checking: Option<FileKeep>,
 }
 
@@ -751,22 +754,26 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
                         s.id
                     ));
                 }
-                Some(crate::jev_stage::JevStage::new(
-                    s.input.clone(),
-                    s.model.clone(),
-                    s.instructions.clone(),
-                    s.options.clone(),
-                    &s.id,
-                )?)
+                Some(
+                    crate::jev_stage::JevStage::new(
+                        s.input.clone(),
+                        s.model.clone(),
+                        s.instructions.clone(),
+                        s.options.clone(),
+                        &s.id,
+                    )?
+                    .with_route(&s.route, &s.id)?,
+                )
             }
             None | Some("" | "claude") => {
                 if s.input.is_some()
                     || s.model.is_some()
                     || s.instructions.is_some()
                     || !s.options.is_empty()
+                    || !s.route.is_empty()
                 {
                     return Err(format!(
-                        "stage {}: input, model, instructions and options are for a Jev stage: \
+                        "stage {}: input, model, instructions, options and route are for a Jev stage: \
                          add kind = \"jev\"",
                         s.id
                     ));
@@ -1429,12 +1436,21 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
                     options[k.as_str()] = value(v.trim());
                 }
                 table["options"] = Item::Table(options);
+                let mut route = Table::new();
+                for k in &j.ends {
+                    route[k.as_str()] = value("end");
+                }
+                if route.is_empty() {
+                    table.remove("route");
+                } else {
+                    table["route"] = Item::Table(route);
+                }
                 for k in ["skill", "folder", "worktree"] {
                     table.remove(k);
                 }
             }
             None => {
-                for k in ["kind", "instructions", "input", "model", "options"] {
+                for k in ["kind", "instructions", "input", "model", "options", "route"] {
                     table.remove(k);
                 }
             }
@@ -1791,6 +1807,7 @@ mod tests {
                     model: None,
                     instructions: "What do they ask?".into(),
                     options,
+                    ends: Default::default(),
                 }),
                 keep: None,
             },
@@ -1844,6 +1861,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
+            ends: Default::default(),
         };
         edit.stages[0].jev = Some(jev("", &[("a", "A"), ("b", "B")]));
         assert_eq!(validate(&edit), Err("Give the Jev step its question"));
@@ -2561,6 +2579,42 @@ title = "Draft a reply"
         assert_eq!(j.options.len(), 3);
         let text = std::fs::read_to_string(folder(d.path()).join("mail.toml")).unwrap();
         assert!(!text.contains("Do the \"Sort\" stage"), "{text}");
+    }
+
+    #[test]
+    fn a_jev_stages_route_is_saved_with_it() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(
+            folder(d.path()).join("mail.toml"),
+            "name = \"Mail\"\n[[stage]]\nid = \"classify\"\ntitle = \"Classify\"\n\
+             kind = \"jev\"\ninstructions = \"Q\"\n[stage.options]\na = \"A\"\nb = \"B\"\n\
+             [stage.route]\nb = \"finish\"\n[[stage]]\nid = \"draft\"\ntitle = \"Draft\"\n",
+        )
+        .unwrap();
+        let mut edit = edit_of(&load(d.path(), "mail").unwrap());
+        assert_eq!(
+            edit.stages[0].jev.as_ref().unwrap().ends,
+            ["b".to_string()].into()
+        );
+        edit.stages.swap(0, 1);
+        save(d.path(), "mail", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("mail.toml")).unwrap();
+        assert!(text.contains("[stage.route]\nb = \"end\""), "{text}");
+        let p = load(d.path(), "mail").unwrap();
+        assert_eq!(
+            p.stages[1].jev.as_ref().unwrap().ends,
+            ["b".to_string()].into()
+        );
+        // Going on everywhere writes no route.
+        let mut edit = edit_of(&p);
+        edit.stages[1].jev.as_mut().unwrap().ends.clear();
+        save(d.path(), "mail", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("mail.toml")).unwrap();
+        assert!(!text.contains("route"), "{text}");
+        let claude =
+            "name = \"P\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n[stage.route]\nx = \"end\"\n";
+        assert!(parse(claude).unwrap_err().contains("route"));
     }
 
     #[test]

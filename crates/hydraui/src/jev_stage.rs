@@ -4,7 +4,7 @@
 //! score under the stage's bar asks a person, as any stage's does. Pure but for reading the
 //! input; the call itself is `jev::ask`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -30,6 +30,10 @@ pub struct JevStage {
     pub instructions: String,
     /// Each option's name and what it means; `none` is always among them.
     pub options: BTreeMap<String, String>,
+    /// Categories that end the run here (`[stage.route] general = "end"`): the pipeline
+    /// doesn't deal with them, so the run stops quietly and its email goes back unclaimed.
+    #[serde(default)]
+    pub ends: BTreeSet<String>,
 }
 
 impl JevStage {
@@ -92,7 +96,37 @@ impl JevStage {
                 .filter(|m| !m.is_empty()),
             instructions,
             options,
+            ends: BTreeSet::new(),
         })
+    }
+
+    /// Takes `[stage.route]`: a category set to `"end"` (or `"finish"`) ends the run; any other
+    /// category goes on to the next stage.
+    pub fn with_route(
+        mut self,
+        route: &BTreeMap<String, String>,
+        id: &str,
+    ) -> Result<Self, String> {
+        for (name, to) in route {
+            if name == crate::jev::NONE || !self.options.contains_key(name) {
+                return Err(format!(
+                    "stage {id}: [stage.route] names {name:?}, which isn't one of its options"
+                ));
+            }
+            match to.trim() {
+                "end" | "finish" => {
+                    self.ends.insert(name.clone());
+                }
+                "next" => {}
+                other => {
+                    return Err(format!(
+                        "stage {id}: route {name} = {other:?}: write \"end\" to end the run \
+                         there, or leave it out to go on"
+                    ));
+                }
+            }
+        }
+        Ok(self)
     }
 
     /// The settings `jev::ask` takes: a score of `bar` percent is enough.
@@ -138,6 +172,23 @@ pub fn problem(j: &JevStage) -> Option<&'static str> {
         return Some("A Jev step reads a file name in the run's folder, like email.md");
     }
     None
+}
+
+/// The category a Jev report handed over (`category: how_to`).
+pub fn category(handoff: &str) -> Option<&str> {
+    handoff
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("category:"))
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+}
+
+/// Why the run ends at this Jev stage, when Jev sorted it into a category set to end the run.
+pub fn ended_by(j: &JevStage, handoff: &str) -> Option<String> {
+    let c = category(handoff)?;
+    j.ends
+        .contains(c)
+        .then(|| format!("Not for this pipeline: Jev sorted it as {c}"))
 }
 
 /// The run's folder, beside its log: `<root>/hydraui/runs/<run>/`.
@@ -479,6 +530,99 @@ mod tests {
         );
         // A stage reports once.
         assert!(file(&mut reg, &unsure, &report(&verdict("how_to", 0.9), "m")).is_err());
+    }
+
+    #[test]
+    fn a_route_ends_the_run_for_its_categories() {
+        let s = email_stage()
+            .with_route(&opts(&[("user_error", "end"), ("how_to", "next")]), "c")
+            .unwrap();
+        assert_eq!(s.ends, ["user_error".to_string()].into());
+        assert_eq!(
+            ended_by(&s, "category: user_error\nconfidence: 0.91").as_deref(),
+            Some("Not for this pipeline: Jev sorted it as user_error")
+        );
+        assert_eq!(ended_by(&s, "category: how_to\nconfidence: 0.91"), None);
+        assert_eq!(ended_by(&s, "nothing handed over"), None);
+        assert!(
+            email_stage()
+                .with_route(&opts(&[("how_to", "finish")]), "c")
+                .unwrap()
+                .ends
+                .contains("how_to")
+        );
+        for bad in [("bug", "end"), ("none", "end"), ("how_to", "elsewhere")] {
+            assert!(
+                email_stage().with_route(&opts(&[bad]), "c").is_err(),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_run_ends_quietly_at_a_category_it_does_not_take() {
+        use crate::runs::{Choice, RunState, StageStatus};
+        let home = tempfile::tempdir().unwrap();
+        let dir = crate::pipeline::folder(home.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("mail.toml"),
+            "name = \"Mail\"\nruns_at_once = 3\n[[stage]]\nid = \"classify\"\n\
+             title = \"Classify\"\nkind = \"jev\"\nbar = 70\ninstructions = \"Q\"\n\
+             [stage.options]\nhow_to = \"H\"\nuser_error = \"U\"\n\
+             [stage.route]\nuser_error = \"end\"\n\
+             [[stage]]\nid = \"draft\"\ntitle = \"Draft\"\n",
+        )
+        .unwrap();
+        let mut reg = crate::mcp::registry::Registry::default();
+        reg.hydra_root = Some(home.path().to_path_buf());
+        let orch = reg.register("orchestrator", home.path().to_path_buf());
+        let mut start = |ticket: &str| {
+            let call = |reg: &mut crate::mcp::registry::Registry, name: &str, args: Value| {
+                crate::mcp::run_tools::call(reg, &orch, name, &args).unwrap()
+            };
+            call(
+                &mut reg,
+                "run_start",
+                json!({"pipeline": "mail", "ticket": ticket, "summary": "S"}),
+            );
+            let (_, event) = call(
+                &mut reg,
+                "stage_start",
+                json!({"run": format!("{ticket}-1"), "stage": "classify"}),
+            );
+            let Some(crate::mcp::server::McpEvent::StageStart(s)) = event else {
+                panic!("a stage start");
+            };
+            s
+        };
+        let (skip, take, unsure) = (start("MAIL-1"), start("MAIL-2"), start("MAIL-3"));
+
+        file(&mut reg, &skip, &report(&verdict("user_error", 0.91), "m")).unwrap();
+        let r = reg.runs.run("MAIL-1-1").unwrap();
+        assert_eq!(r.stages[0].status, StageStatus::Passed);
+        assert_eq!(r.stages[1].status, StageStatus::Waiting);
+        assert_eq!(
+            r.state,
+            RunState::Stopped("Not for this pipeline: Jev sorted it as user_error".into())
+        );
+
+        file(&mut reg, &take, &report(&verdict("how_to", 0.91), "m")).unwrap();
+        assert_eq!(reg.runs.run("MAIL-2-1").unwrap().state, RunState::Running);
+
+        // Under its bar a person confirms Jev's pick, and the route still applies.
+        file(&mut reg, &unsure, &report(&verdict("user_error", 0.5), "m")).unwrap();
+        assert!(matches!(
+            reg.runs.run("MAIL-3-1").unwrap().state,
+            RunState::NeedsYou(_)
+        ));
+        reg.runs
+            .person("MAIL-3-1", Choice::Checked { note: "yes".into() })
+            .unwrap();
+        assert!(matches!(
+            &reg.runs.run("MAIL-3-1").unwrap().state,
+            RunState::Stopped(why) if why.starts_with("Not for this pipeline")
+        ));
     }
 
     #[test]

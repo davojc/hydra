@@ -1119,18 +1119,42 @@ fn step_card(
             body = body
                 .child(label("What should Jev decide?"))
                 .child(Textarea::new(&j.instructions))
-                .child(label("Categories: a name, and what it means"))
-                .children(j.options.iter().map(|(row, name, means)| {
-                    let row = *row;
+                .child(label(
+                    "Categories: a name, what it means, and what the run does then. End the run \
+                     for a category this pipeline doesn't deal with: its run stops quietly, and \
+                     an email goes back to the inbox unclaimed.",
+                ))
+                .children(j.options.iter().map(|(row, name, means, end)| {
+                    let (row, end) = (*row, *end);
+                    let then = dropdown(
+                        SharedString::from(format!("jev-opt-then-{key}-{row}")),
+                        if end { "End the run" } else { "Go on" }.into(),
+                        vec![("Go on".into(), !end), ("End the run".into(), end)],
+                        ws.clone(),
+                        Rc::new(move |i, ws, _, cx| {
+                            ws.with_stage(orch, key, cx, |s| {
+                                if let Some(o) = s
+                                    .jev
+                                    .as_mut()
+                                    .and_then(|j| j.options.iter_mut().find(|o| o.0 == row))
+                                {
+                                    o.3 = i == 1;
+                                }
+                            })
+                        }),
+                    );
                     h_flex()
                         .gap_2()
+                        .items_center()
                         .child(
                             div()
                                 .w(px(170.))
                                 .flex_none()
                                 .child(Input::new(name).small()),
                         )
-                        .child(div().flex_1().child(Input::new(means).small()))
+                        .child(div().flex_1().min_w_0().child(Input::new(means).small()))
+                        .child(text(11.5, theme::TEXT_MUTED).flex_none().child("Then"))
+                        .child(div().w(px(130.)).flex_none().child(then))
                         .child(
                             Button::new(SharedString::from(format!("jev-opt-x-{key}-{row}")))
                                 .label("×")
@@ -1140,7 +1164,7 @@ fn step_card(
                                 .on_click(cx.listener(move |ws, _, _, cx| {
                                     ws.with_stage(orch, key, cx, |s| {
                                         if let Some(j) = s.jev.as_mut() {
-                                            j.options.retain(|(r, _, _)| *r != row);
+                                            j.options.retain(|o| o.0 != row);
                                         }
                                     })
                                 })),

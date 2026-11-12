@@ -128,10 +128,14 @@ user_error = "Reports an error caused by how they called or configured it"
   - **Handoff:** `category: how_to` and `confidence: 0.86`. The next stage's session reads them from `stage_brief`.
   - **A pick of `none`:** reported *blocked*.
   - **Under the bar:** the run goes to needs you as any stage's does, e.g. "stage classify: 48, bar 70".
+- **Routes** (built 2026-11-12). `[stage.route]` sets a category to `"end"` (`"finish"` also reads) for one this pipeline doesn't deal with. Every other category goes on to the next stage.
+  - When the Jev stage passes with that category, either on its own or after a person confirms Jev's pick, the run stops there: "Not for this pipeline: Jev sorted it as general". The next stage never starts.
+  - It's logged as a stopped run, so an email's claim is released without `hydra/done`. The thread stays in the inbox for a person, or for another pipeline.
+  - A route naming a category the stage doesn't have, or `none`, is an error, and so is a route on a Claude stage.
+  - In Pipeline settings, each category row has **Then: Go on / End the run**. Saving writes `[stage.route]` only when some category ends the run.
 - **Stages added mid-run.** A Jev stage added in the middle of a run logs its question in `stage added`, so a restart replays it as a Jev stage.
 - **Pipeline settings.** A Jev stage shows "Jev · 3 options · reads email.md" in place of skill and folder, and its question and options in place of the prompt. Its bar slider is its minimum confidence. The question is edited in the pipeline file for now. Saving keeps it and writes it no prompt. Saving also now keeps a stage's sub-tables, like `[stage.options]`, with their stage when stages move; they were written under the wrong stage before.
 - **Not yet:**
-  - `[stage.route]` (e.g. `not_a_question = "finish"`). For now the next stage's prompt can say what to do per category.
   - Picking the category with buttons at needs-you. The person passes the stage, or sends it back, as for any stage.
   - Editing the options in Pipeline settings (§10, step 6).
   - `{category}` and `{confidence}` as prompt placeholders. They arrive in the handoff instead.

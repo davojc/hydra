@@ -891,6 +891,11 @@ impl Runs {
         let bar = r.pipeline.bar_for(si);
         let id = r.pipeline.stages[si].id.clone();
         let passed = passes(&rating, bar);
+        // A Jev stage's category this pipeline doesn't take ends the run there.
+        let ended = r.pipeline.stages[si]
+            .jev
+            .as_ref()
+            .and_then(|j| crate::jev_stage::ended_by(j, &rating.handoff));
         let why = match rating.outcome {
             // What the person must do leads, wherever the reason is shown.
             _ if !passed && !rating.ask.is_empty() => format!(
@@ -957,7 +962,14 @@ impl Runs {
                 stage: Some(si),
                 what: Decided::Passed,
             }];
-            if si + 1 == r.stages.len() {
+            if let Some(why) = ended {
+                r.state = RunState::Stopped(why.clone());
+                changes.push(Change {
+                    run,
+                    stage: None,
+                    what: Decided::RunStopped(why),
+                });
+            } else if si + 1 == r.stages.len() {
                 r.state = RunState::Finished;
                 changes.push(Change {
                     run,
@@ -1369,6 +1381,10 @@ impl Runs {
         else {
             return Err(format!("run {} has nothing left to do", r.id));
         };
+        let ended = r.stages[si]
+            .rating()
+            .zip(r.pipeline.stages[si].jev.as_ref())
+            .and_then(|(x, j)| crate::jev_stage::ended_by(j, &x.handoff));
         let s = &mut r.stages[si];
         // A stage that asked a person to check something by hand, or that held back on purpose
         // and said what a person must do (`ask`), passes once they say they did it.
@@ -1390,7 +1406,14 @@ impl Runs {
             stage: Some(si),
             what: Decided::Checked(note.to_string()),
         }];
-        if si + 1 == r.stages.len() {
+        if let Some(why) = ended {
+            r.state = RunState::Stopped(why.clone());
+            changes.push(Change {
+                run: id,
+                stage: None,
+                what: Decided::RunStopped(why),
+            });
+        } else if si + 1 == r.stages.len() {
             r.state = RunState::Finished;
             changes.push(Change {
                 run: id,

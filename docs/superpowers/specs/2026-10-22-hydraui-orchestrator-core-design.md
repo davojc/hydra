@@ -1350,6 +1350,7 @@ icon = "git-pull-request"
 
   Left out, the mark is the ◆, as before.
 - **The choices.** There are 30 Lucide icons (`pipeline_icon::ICONS`), each with a plain name in settings: Pull request, Branch, Code, Bug, Ticket, Checklist, Test, Search, Shield, Rocket, Lightning, Sparkles, Mail, Inbox, Message, Bell, People, Bot, Calendar, Clock, Book, Database, Package, Layers, Wrench, Globe, Target, Flag, Star and Heart. `crate::assets` bundles those the default set lacks. A test checks that every one loads.
+- **It follows Save everywhere.** Saving gives every run of the pipeline its new name, colour and icon (`Pipeline::take_look`), ended runs included. Before this, open runs took the name and colour but not the icon, and ended runs took nothing. A run rebuilt after a restart also takes them from the file as it is now. Before, it kept the look from when it started, so a needs-you run went back to its old ◆. What a run *does* (its stages) stays as it started.
 - **Errors.** A name that isn't one of them is a file error that says where to pick one.
 - **Pipeline settings.** Under the name, a preview of the mark sits in its colour, with its colour and icon named ("Violet · Pull request") and **Change**. **Change** opens one panel with the 16 colours and then the ◆ and the icons, each named on hover and ringed when chosen, and **Done** folds it again. Saving writes `icon`, or removes it when the ◆ is chosen.
 

@@ -328,8 +328,9 @@ impl Workspace {
                         w.on = false;
                         w.status = None;
                         w.stopped = Some(reason.clone());
+                        let s = crate::linear_watch::stopped("Slack", &reason);
                         window.push_note(
-                            Note::error(format!("Stopped watching {}: {reason}", settings.label))
+                            Note::error(format!("{}. {}", s.title, s.hint))
                                 .title(pipeline.name.clone()),
                             cx,
                         );

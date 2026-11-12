@@ -467,8 +467,10 @@ impl Workspace {
         });
     }
 
-    /// **New pipeline…**: start blank or from a copy of a pipeline, name it, then its
-    /// orchestrator starts (in `env`, else one picked) with its settings open to fill in.
+    /// **Create pipeline** (core spec §66): one chooser with three ways to start. Start fresh
+    /// (blank, or a starter), copy one of yours, or import a file someone sent. Each goes on to
+    /// name it (or pick the file), then its orchestrator starts (in `env`, else one picked)
+    /// with its settings open.
     pub(super) fn new_pipeline(
         &mut self,
         env: Option<String>,
@@ -476,44 +478,25 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let root = self.hydra.paths.root().to_path_buf();
-        let names = crate::pipeline::names(&root);
-        let mut labels = vec![
-            "Blank: one stage to fill in".to_string(),
-            "Email triage: Gmail, Jev sorts each email, Claude drafts a reply".to_string(),
-        ];
-        labels.extend(
-            pipeline_labels(&root, &names)
-                .into_iter()
-                .map(|l| format!("Copy of {l}")),
-        );
-        labels.push("Import from a file…".into());
-        let state = cx.new(|cx| CommandState::new(window, cx));
+        let mine: Vec<Mine> = crate::pipeline::names(&root)
+            .into_iter()
+            .filter_map(|file| {
+                let p = crate::pipeline::load(&root, &file).ok()?;
+                Some(Mine {
+                    file,
+                    name: p.name,
+                    color: p.color,
+                    icon: p.icon,
+                    stages: p.stages.len(),
+                })
+            })
+            .collect();
         let workspace = cx.entity();
-        let first = Cell::new(true);
-        window.open_dialog(cx, move |dialog, window, cx| {
-            if first.replace(false) {
-                state.update(cx, |s, cx| s.focus(window, cx));
-            }
-            let (names, workspace, env) = (names.clone(), workspace.clone(), env.clone());
-            dialog.title("New pipeline: start from").child(
-                Command::new(&state)
-                    .items(labels.iter().map(|l| CommandItem::new().label(l.clone())))
-                    .placeholder("Blank, or a pipeline to copy")
-                    .on_confirm(move |ix, window, cx| {
-                        window.close_dialog(cx);
-                        let env = env.clone();
-                        if ix.row == names.len() + 2 {
-                            workspace.update(cx, |ws, cx| ws.import_pipeline(env, window, cx));
-                            return;
-                        }
-                        let from = match ix.row {
-                            0 => None,
-                            1 => Some(crate::pipeline::EMAIL_TRIAGE.to_string()),
-                            n => names.get(n - 2).cloned(),
-                        };
-                        workspace.update(cx, |ws, cx| ws.name_pipeline(from, env, window, cx));
-                    }),
-            )
+        window.open_dialog(cx, move |dialog, _, cx| {
+            dialog
+                .title("Create a pipeline")
+                .w(px(600.))
+                .child(create_choices(&mine, &workspace, &env, cx))
         });
     }
 
@@ -579,7 +562,8 @@ impl Workspace {
                                 path.display()
                             ));
                             Note::success(format!(
-                                "Saved to {}. Send it on; they add it with Import pipeline…",
+                                "Saved to {}. Send it on: they add it with Create pipeline, then \
+                                 Import a file.",
                                 path.display()
                             ))
                         }
@@ -599,7 +583,7 @@ impl Workspace {
     /// **Import pipeline…** (core spec §44): picks a pipeline file, adds it as a new pipeline
     /// that takes nothing until turned on, then starts its orchestrator (in `env`, else one
     /// picked) with its settings open to check.
-    fn import_pipeline(
+    pub(super) fn import_pipeline(
         &mut self,
         env: Option<String>,
         window: &mut Window,
@@ -631,7 +615,7 @@ impl Workspace {
     }
 
     /// Names the new pipeline (copied from `from`, else blank) and writes its file.
-    fn name_pipeline(
+    pub(super) fn name_pipeline(
         &mut self,
         from: Option<String>,
         env: Option<String>,
@@ -1309,4 +1293,197 @@ pub(super) fn pipeline_labels(root: &std::path::Path, names: &[String]) -> Vec<S
             _ => n.clone(),
         })
         .collect()
+}
+
+/// A pipeline of yours, as Create a pipeline lists it to copy.
+#[derive(Clone)]
+struct Mine {
+    file: String,
+    name: String,
+    color: Option<u32>,
+    icon: Option<String>,
+    stages: usize,
+}
+
+/// What a choice does once picked.
+#[derive(Clone)]
+enum Start {
+    /// Name a new pipeline made from this (`None`: blank).
+    Name(Option<String>),
+    Import,
+}
+
+/// Create a pipeline's three sections: start fresh, copy one of yours, import a file.
+fn create_choices(
+    mine: &[Mine],
+    workspace: &gpui::Entity<Workspace>,
+    env: &Option<String>,
+    cx: &gpui::App,
+) -> gpui::AnyElement {
+    use crate::orchestrator_theme::{self as theme, color};
+    let muted = cx.theme().muted_foreground;
+    let pick = |start: Start| {
+        let (workspace, env) = (workspace.clone(), env.clone());
+        move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut gpui::App| {
+            window.close_dialog(cx);
+            let env = env.clone();
+            workspace.update(cx, |ws, cx| match start.clone() {
+                Start::Name(from) => ws.name_pipeline(from, env, window, cx),
+                Start::Import => ws.import_pipeline(env, window, cx),
+            });
+        }
+    };
+    let heading = |title: &'static str, about: &'static str| {
+        v_flex()
+            .gap(px(2.))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(title),
+            )
+            .child(div().text_xs().text_color(muted).child(about))
+    };
+    let tile = |id: &'static str,
+                icon: gpui_kit_assets::IconName,
+                title: &'static str,
+                about: &'static str| {
+        h_flex()
+            .id(id)
+            .flex_1()
+            .flex_basis(px(0.))
+            .min_w_0()
+            .gap_3()
+            .items_start()
+            .px(px(14.))
+            .py(px(12.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(color(0x1f2524))
+            .bg(color(0x131616))
+            .hover(|d| d.border_color(color(theme::TEAL)))
+            .cursor_pointer()
+            .child(
+                gpui_component::Icon::new(icon)
+                    .size(px(18.))
+                    .text_color(color(theme::TEAL)),
+            )
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .whitespace_normal()
+                            .child(about),
+                    ),
+            )
+    };
+    let fresh = v_flex()
+        .gap_2()
+        .child(heading(
+            "Start fresh",
+            "Build it yourself, or begin from a ready-made starter.",
+        ))
+        .child(
+            h_flex()
+                .gap_2()
+                .items_stretch()
+                .child(
+                    tile(
+                        "create-blank",
+                        gpui_kit_assets::IconName::FilePlus,
+                        "Blank",
+                        "One stage to fill in yourself.",
+                    )
+                    .on_click(pick(Start::Name(None))),
+                )
+                .child(
+                    tile(
+                        "create-email-triage",
+                        gpui_kit_assets::IconName::Mail,
+                        "Email triage",
+                        "Gmail, Jev sorts each email, Claude drafts a reply.",
+                    )
+                    .on_click(pick(Start::Name(Some(
+                        crate::pipeline::EMAIL_TRIAGE.to_string(),
+                    )))),
+                ),
+        );
+    let copy = (!mine.is_empty()).then(|| {
+        v_flex()
+            .gap_2()
+            .child(heading(
+                "Copy one of yours",
+                "The copy starts switched off, so it never takes the original's work.",
+            ))
+            .child(
+                v_flex()
+                    .id("create-copies")
+                    .max_h(px(220.))
+                    .overflow_y_scroll()
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(color(0x1f2524))
+                    .children(mine.iter().map(|m| {
+                        let accent = m.color.unwrap_or(theme::TEAL);
+                        h_flex()
+                            .id(SharedString::from(format!("create-copy-{}", m.file)))
+                            .gap_3()
+                            .items_center()
+                            .px(px(14.))
+                            .py(px(9.))
+                            .border_b_1()
+                            .border_color(color(0x1a1f1e))
+                            .hover(|d| d.bg(color(0x161b1a)))
+                            .cursor_pointer()
+                            .child(crate::pipeline_icon::mark(m.icon.as_deref(), accent, 15.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .child(m.name.clone()),
+                            )
+                            .child(div().text_xs().text_color(muted).child(if m.stages == 1 {
+                                "1 stage".to_string()
+                            } else {
+                                format!("{} stages", m.stages)
+                            }))
+                            .child(div().text_xs().text_color(color(theme::TEAL)).child("Copy"))
+                            .on_click(pick(Start::Name(Some(m.file.clone()))))
+                    })),
+            )
+    });
+    let import = v_flex()
+        .gap_2()
+        .child(heading(
+            "Import a file someone sent you",
+            "A pipeline they saved with Export to share. It's added switched off, for you to check.",
+        ))
+        .child(
+            tile(
+                "create-import",
+                gpui_kit_assets::IconName::FileUp,
+                "Choose a pipeline file…",
+                "A .toml file. It holds no secrets.",
+            )
+            .on_click(pick(Start::Import)),
+        );
+    v_flex()
+        .gap(px(20.))
+        .pb_2()
+        .child(fresh)
+        .children(copy)
+        .child(import)
+        .into_any_element()
 }

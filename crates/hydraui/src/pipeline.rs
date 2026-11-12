@@ -307,6 +307,14 @@ pub const PRODUCT_TOOLS: &str =
     "mcp__claude_ai_Slack__slack_send_message,mcp__claude_ai_Slack__slack_read_thread";
 
 impl Pipeline {
+    /// Takes `now`'s name, colour and icon: how a pipeline looks follows its file at once on
+    /// every run, whatever the run started with (core spec §64).
+    pub fn take_look(&mut self, now: &Pipeline) {
+        self.name = now.name.clone();
+        self.color = now.color;
+        self.icon = now.icon.clone();
+    }
+
     /// Whether its orchestrator starts in Automatic (`watch` in `[linear]` or `[slack]`).
     pub fn watches(&self) -> bool {
         self.linear.as_ref().is_some_and(|l| l.watch)

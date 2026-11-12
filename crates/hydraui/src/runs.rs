@@ -1058,15 +1058,18 @@ impl Runs {
     /// to report): open runs of it take its name, its bar, and each stage's settings for the
     /// stages they share. Their stage lists stay as they started (§2).
     pub fn refresh_from_file(&mut self, file: &str, now: &Pipeline) -> Vec<Added> {
+        // How it looks follows Save at once on every card of the pipeline, ended runs too, so
+        // no card keeps an old name, colour or icon (core spec §64).
+        for r in self.runs.iter_mut().filter(|r| r.pipeline.file == file) {
+            r.pipeline.take_look(now);
+        }
         for r in self
             .runs
             .iter_mut()
             .filter(|r| r.pipeline.file == file && r.state.open())
         {
-            r.pipeline.name = now.name.clone();
             r.pipeline.bar = now.bar;
-            // How it looks and how it asks product follow Save at once too.
-            r.pipeline.color = now.color;
+            // How it asks product follows Save at once too.
             r.pipeline.product_channel = now.product_channel.clone();
             r.pipeline.product_style = now.product_style.clone();
             // A stage's own settings reach it from its next start; removing and reordering
@@ -3332,11 +3335,16 @@ mod tests {
         now.stages[1].bar = Some(95);
         now.name = "Renamed".into();
         now.color = Some(0xd8c35a);
+        now.icon = Some("mail".into());
         now.product_style = Some("Keep it short.".into());
         runs.refresh_from_file("t", &now);
-        // A new name and colour show at once (the design: the card follows Save).
+        // A new name, colour and icon show at once (the design: the card follows Save).
         assert_eq!(runs.run(&id).unwrap().pipeline.name, "Renamed");
         assert_eq!(runs.run(&id).unwrap().pipeline.color, Some(0xd8c35a));
+        assert_eq!(
+            runs.run(&id).unwrap().pipeline.icon.as_deref(),
+            Some("mail")
+        );
         assert_eq!(
             runs.run(&id).unwrap().pipeline.product_style.as_deref(),
             Some("Keep it short.")
@@ -3352,6 +3360,25 @@ mod tests {
         other.stages[0].bar = Some(10);
         runs.refresh_from_file("other", &other);
         assert_eq!(runs.run(&id).unwrap().pipeline.bar_for(0), 95);
+    }
+
+    #[test]
+    fn an_ended_runs_card_takes_a_new_look_too() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a"]);
+        runs.person(&id, Choice::Stop).unwrap();
+        let mut now = pipeline(&["a"]);
+        now.icon = Some("bug".into());
+        now.color = Some(0xe06666);
+        now.stages[0].bar = Some(10);
+        runs.refresh_from_file("t", &now);
+        let r = runs.run(&id).unwrap();
+        assert_eq!(
+            (r.pipeline.icon.as_deref(), r.pipeline.color),
+            (Some("bug"), Some(0xe06666))
+        );
+        // What it ran stays as it was.
+        assert_ne!(r.pipeline.bar_for(0), 10);
     }
 
     #[test]

@@ -1350,5 +1350,35 @@ icon = "git-pull-request"
 
   Left out, the mark is the ◆, as before.
 - **The choices.** There are 30 Lucide icons (`pipeline_icon::ICONS`), each with a plain name in settings: Pull request, Branch, Code, Bug, Ticket, Checklist, Test, Search, Shield, Rocket, Lightning, Sparkles, Mail, Inbox, Message, Bell, People, Bot, Calendar, Clock, Book, Database, Package, Layers, Wrench, Globe, Target, Flag, Star and Heart. `crate::assets` bundles those the default set lacks. A test checks that every one loads.
+- **It follows Save everywhere.** Saving gives every run of the pipeline its new name, colour and icon (`Pipeline::take_look`), ended runs included. Before this, open runs took the name and colour but not the icon, and ended runs took nothing. A run rebuilt after a restart also takes them from the file as it is now. Before, it kept the look from when it started, so a needs-you run went back to its old ◆. What a run *does* (its stages) stays as it started.
 - **Errors.** A name that isn't one of them is a file error that says where to pick one.
-- **Pipeline settings.** Under the colours, a row of tiles shows the ◆ and each icon in the pipeline's colour. Each is named on hover, and the chosen one is ringed. Saving writes `icon`, or removes it when the ◆ is chosen.
+- **Pipeline settings.** Under the name, a preview of the mark sits in its colour, with its colour and icon named ("Violet · Pull request") and **Change**. **Change** opens one panel with the 16 colours and then the ◆ and the icons, each named on hover and ringed when chosen, and **Done** folds it again. Saving writes `icon`, or removes it when the ◆ is chosen.
+
+## 65. A stopped trigger, in words (added 2026-11-12)
+
+A trigger that stopped by itself used to show the raw error in red on its card. That was a whole URL and a chain of "Network Error: Network Error: …", and it offered Connect Slack even when the network was the problem. Now `linear_watch::stopped` reads the error, and the card shows a short headline, one line on what to do, and the button that fits. The error itself shows on hover, as "Details: …".
+
+| What went wrong | Headline | What to do | Button |
+|---|---|---|---|
+| Sign-in rejected or missing (a rejected key, `invalid_auth`, `not_authed`, a revoked or expired token, HTTP 401/403) | "Slack needs you to sign in again" | "Connect Slack, and checking starts again." (Linear: "Set a new Linear API key, then try again.") | **Connect Slack** for Slack; **Try again** for Linear |
+| Rate limited | "Slack asked hydraui to slow down" | "Wait a few minutes, then try again." | **Try again** |
+| HTTP 5xx | "Slack is having problems" | "It's on their side. Try again in a while." | **Try again** |
+| Not reachable, timed out, network | "Couldn't reach Slack" | "Check your internet connection, then try again." | **Try again** |
+| Anything else | "Stopped checking Slack" | "Something went wrong. Try again, or hover for details." | **Try again** |
+
+- **Try again** turns Automatic back on and looks at once.
+- The notification when a trigger stops uses the same words.
+
+## 66. Create a pipeline, and Export to share (added 2026-11-12)
+
+People couldn't find how to import a pipeline. It was the last line of a typed list, and Export was a plain grey word in the settings title row.
+
+- **Create pipeline** opens one chooser titled **Create a pipeline**, in three sections. Each has a heading and a line saying what it's for.
+  - **Start fresh: build it yourself, or begin from a ready-made starter.**
+    - **Blank:** "One stage to fill in yourself."
+    - **Email triage:** "Gmail, Jev sorts each email, Claude drafts a reply."
+  - **Copy one of yours: the copy starts switched off, so it never takes the original's work.** It lists your pipelines, each with its mark, its name and how many stages it has, and scrolls past a handful. It doesn't show when you have none.
+  - **Import a file someone sent you: a pipeline they saved with Export to share, added switched off, for you to check.** One tile: **Choose a pipeline file…** ("A .toml file. It holds no secrets.").
+
+  Picking a choice goes on as before. You name the pipeline, or pick the file. Then its orchestrator starts with its settings open. The launcher's **New pipeline…** opens the same chooser, and **Import pipeline…** stays there too.
+- **Export to share** is now an outlined button with a share icon, in the settings title row. Its confirmation says how the other person adds the file: "they add it with Create pipeline, then Import a file."

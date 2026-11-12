@@ -1487,3 +1487,31 @@ When a run waited on you and you went to it, with **Resume session** (§61) or *
   - The stage reports: it goes on, or waits on you again, as its report says.
   - You make a choice: pass, re-run, go back or stop.
   - You close the session you were in: it says **Needs you** again, since it's yours to act on.
+
+## 73. Connect Slack says what it's doing (added 2026-11-12)
+
+A Windows user on 0.6.49 pressed **Connect Slack**, and it seemed to do nothing. Connect Slack needs `slack_connect_url`, the team's Canopy, which finishes the Slack sign-in. A fresh install doesn't have it, and the warning went only to the bell (§57). Every other way the sign-in could stop was reported the same way.
+
+- **No Canopy address yet.** Connect Slack opens **Connect Slack: your team's Canopy**. Its one line says what the address is for and to ask whoever set up hydraui for the team. It has a box for the address.
+  - **Save** checks the address with the rule config uses (`config::slack_connect_url`: https://, no trailing slash), writes it to config.toml, and starts the sign-in at once.
+  - A wrong address is named in the dialog, which stays open.
+- **Under the button.** The card's stopped box shows where the sign-in has got to (`Workspace::slack_connecting`):
+  - while the browser is out: "Finish signing in in your browser.", with **Didn't open? Open it again**, which opens the same sign-in page;
+  - if it fails: "Couldn't connect: <why>", in red.
+  - Connecting clears it, and the trigger goes back on as before. The notices still go to the bell too.
+
+## 74. A stage looking again can wait on the author again (added 2026-11-12)
+
+geo-tool-109-1 showed the gap.
+
+- The review stage re-reviewed Kris's fix, judged it resolved, and stopped for a code owner's approval (RED zone).
+- Its keep-checking looks (§62) then found a second reviewer's findings that reopened the PR. It requested changes again and asked to wait on Kris.
+- `stage_ask` refused with "this stage isn't running", because the stage was stopped and looking again. So it reported, and the run showed **Needs you** ("Wait for krisrimar-iov42 to fix …"), not **Waiting on author**. Kris's next push would then be looked for only until its keep-checking hours ran out.
+
+**The fix.** A stopped stage that was told to look again (`Run.looking`) may ask, as it may already report. Asking puts it back to work, waiting on its answer, as a stage that asked while running is:
+
+- it goes back to Running;
+- `looking`, `rechecking` and `with_you` clear;
+- the run waits on the author.
+
+A stopped stage that isn't looking again is still refused.

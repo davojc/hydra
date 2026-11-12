@@ -1124,6 +1124,39 @@ impl Workspace {
                                 ws.toggle_linear_watch(orch, window, cx)
                             })),
                     };
+                    // Where a Connect Slack already pressed has got to (§73).
+                    let connecting = source
+                        .env
+                        .as_deref()
+                        .filter(|_| s.sign_in)
+                        .and_then(|e| self.slack_connecting_of(e).cloned());
+                    let progress = connecting.map(|c| match c {
+                        super::slack::SlackConnecting::Waiting(url) => h_flex()
+                            .gap_1()
+                            .flex_wrap()
+                            .text_xs()
+                            .child(
+                                div()
+                                    .text_color(color(theme::TEXT_SECONDARY))
+                                    .child("Finish signing in in your browser."),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("slack-reopen-{orch}")))
+                                    .text_color(color(theme::TEAL))
+                                    .cursor_pointer()
+                                    .hover(|d| d.underline())
+                                    .child("Didn't open? Open it again")
+                                    .on_click(move |_, _, cx| cx.open_url(&url)),
+                            )
+                            .into_any_element(),
+                        super::slack::SlackConnecting::Failed(why) => div()
+                            .text_xs()
+                            .text_color(color(theme::RED))
+                            .whitespace_normal()
+                            .child(format!("Couldn't connect: {why}"))
+                            .into_any_element(),
+                    });
                     d.child(
                         v_flex()
                             .id(SharedString::from(format!("trigger-stopped-{orch}")))
@@ -1147,6 +1180,7 @@ impl Workspace {
                                     .child(s.hint),
                             )
                             .child(h_flex().pt_1().child(action))
+                            .children(progress)
                             .tooltip(move |window, cx| {
                                 gpui_component::tooltip::Tooltip::new(format!("Details: {why}"))
                                     .build(window, cx)

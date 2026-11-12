@@ -2125,7 +2125,7 @@ impl Workspace {
                         )
                     }),
             )
-            .children(self.render_question(orchestrator, Some(&run.id), cx))
+            .children(self.render_question(orchestrator, Some(&run.id), c.accent, cx))
             .children(link)
             .children(sessions)
             .into_any_element()

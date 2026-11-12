@@ -421,13 +421,21 @@ impl Workspace {
     /// Under an orchestrator while its ticket waits on product: one short line; clicking it
     /// shows the question, its thread, **Check now** and **Answer…**.
     /// `run`: that ticket's question, in its box in the sidebar; `None`: the orchestrator's.
+    /// `accent`: the pipeline's colour. A wait on a pull request's author is nothing for the
+    /// user to do, so it's calm in that colour, as the card's pill is; a question to product
+    /// is amber.
     pub(super) fn render_question(
         &self,
         orch: PaneId,
         run: Option<&str>,
+        accent: u32,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let (_, ask, _) = self.asked(orch, run, cx)?;
+        let (tone, tint) = match ask.whom {
+            crate::runs::Whom::Author => (color(accent), color(accent).opacity(0.16)),
+            crate::runs::Whom::Product => (color(theme::AMBER), color(theme::AMBER_TINT)),
+        };
         let run = run.map(str::to_string);
         let waited = SystemTime::now()
             .duration_since(ask.since)
@@ -438,14 +446,13 @@ impl Workspace {
                     "question-{orch}-{}",
                     run.as_deref().unwrap_or("")
                 )))
-                .when(run.is_none(), |d| d.ml(px(26.)))
                 .mr_1()
                 .my_1()
                 .px_2()
                 .py_1()
                 .gap_2()
                 .rounded(px(6.))
-                .bg(color(theme::AMBER_TINT))
+                .bg(tint)
                 .cursor_pointer()
                 .hover(|d| d.opacity(0.85))
                 .child(
@@ -455,7 +462,7 @@ impl Workspace {
                         .truncate()
                         .text_xs()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(color(theme::AMBER))
+                        .text_color(tone)
                         .child(match ask.whom {
                             crate::runs::Whom::Product => {
                                 format!("⏸ Waiting for product · {waited}m")
@@ -466,13 +473,7 @@ impl Workspace {
                         }),
                 )
                 // Never cut off: the line opens the question.
-                .child(
-                    div()
-                        .flex_none()
-                        .text_xs()
-                        .text_color(color(theme::AMBER))
-                        .child("›"),
-                )
+                .child(div().flex_none().text_xs().text_color(tone).child("›"))
                 .on_click(cx.listener(move |ws, _, window, cx| {
                     ws.question_dialog(orch, run.clone(), window, cx)
                 }))

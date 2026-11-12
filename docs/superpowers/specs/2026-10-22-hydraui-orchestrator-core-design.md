@@ -1515,3 +1515,10 @@ geo-tool-109-1 showed the gap.
 - the run waits on the author.
 
 A stopped stage that isn't looking again is still refused.
+
+## 75. What a ticket waits on, under its stage (added 2026-11-12)
+
+The "⏸ Waiting on the author · 6m" line sat right under the pipeline's card, above the Automatic trigger row. So it read as the trigger's state rather than the ticket's. It was also amber, while the card's pill showed the same wait in calm green: waiting on an author is nothing for you to do (§42).
+
+- **Where it is.** On a one-ticket pipeline, the line now sits inside the orchestrator's guide line, under the stage sessions, beside the stage that's waiting. With several tickets, each ticket's line stays in its own box, as before.
+- **Its colour.** A wait on a pull request's author is in the pipeline's colour, like the pill. A question to product stays amber.

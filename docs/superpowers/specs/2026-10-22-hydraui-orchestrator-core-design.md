@@ -1368,3 +1368,17 @@ A trigger that stopped by itself used to show the raw error in red on its card. 
 
 - **Try again** turns Automatic back on and looks at once.
 - The notification when a trigger stops uses the same words.
+
+## 66. Create a pipeline, and Export to share (added 2026-11-12)
+
+People couldn't find how to import a pipeline. It was the last line of a typed list, and Export was a plain grey word in the settings title row.
+
+- **Create pipeline** opens one chooser titled **Create a pipeline**, in three sections. Each has a heading and a line saying what it's for.
+  - **Start fresh: build it yourself, or begin from a ready-made starter.**
+    - **Blank:** "One stage to fill in yourself."
+    - **Email triage:** "Gmail, Jev sorts each email, Claude drafts a reply."
+  - **Copy one of yours: the copy starts switched off, so it never takes the original's work.** It lists your pipelines, each with its mark, its name and how many stages it has, and scrolls past a handful. It doesn't show when you have none.
+  - **Import a file someone sent you: a pipeline they saved with Export to share, added switched off, for you to check.** One tile: **Choose a pipeline file…** ("A .toml file. It holds no secrets.").
+
+  Picking a choice goes on as before. You name the pipeline, or pick the file. Then its orchestrator starts with its settings open. The launcher's **New pipeline…** opens the same chooser, and **Import pipeline…** stays there too.
+- **Export to share** is now an outlined button with a share icon, in the settings title row. Its confirmation says how the other person adds the file: "they add it with Create pipeline, then Import a file."

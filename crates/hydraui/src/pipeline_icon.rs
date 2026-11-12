@@ -95,7 +95,12 @@ mod tests {
     #[test]
     fn every_icon_is_bundled() {
         use gpui::AssetSource;
-        for (name, _) in ICONS {
+        // Create a pipeline's and Export to share's icons too.
+        for name in ICONS
+            .iter()
+            .map(|(n, _)| *n)
+            .chain(["share", "file-plus", "file-up"])
+        {
             let bytes = crate::assets::AppAssets.load(&path(name)).unwrap();
             assert!(bytes.is_some_and(|b| !b.is_empty()), "{name} isn't bundled");
         }

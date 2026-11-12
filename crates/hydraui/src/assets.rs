@@ -41,7 +41,11 @@ gpui_kit_assets::icon_assets!(
         Layers,
         Wrench,
         Target,
-        Flag
+        Flag,
+        // Export to share and Create a pipeline's choices.
+        Share,
+        FilePlus,
+        FileUp
     ]
 );
 

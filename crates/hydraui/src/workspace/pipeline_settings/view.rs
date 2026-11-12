@@ -263,8 +263,10 @@ impl Workspace {
                     .child({
                         let file = draft.file.clone();
                         Button::new(SharedString::from(format!("export-{orch}")))
-                            .label("Export…")
-                            .ghost()
+                            .icon(gpui_kit_assets::IconName::Share)
+                            .label("Export to share")
+                            .outline()
+                            .small()
                             .tooltip(
                                 "Save this pipeline as a file to send someone. Saved settings \
                                  only; it holds no secrets.",

@@ -267,6 +267,11 @@ fn text(size: f32, hex: u32) -> gpui::Div {
 }
 
 impl SettingsDraft {
+    /// The pipeline file it edits.
+    pub(super) fn file(&self) -> &str {
+        &self.file
+    }
+
     fn edit(&self, cx: &App) -> Edit {
         Edit {
             name: self.name.read(cx).value().to_string(),

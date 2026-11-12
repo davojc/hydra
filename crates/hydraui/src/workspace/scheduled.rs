@@ -19,6 +19,8 @@ impl Workspace {
         self.schedule_checked = Some(std::time::Instant::now());
         // `[mail]` pipelines look on their own timetables (email triage spec §3).
         self.mail_tick(false, window, cx);
+        // Pipelines imported from a swarm look for a newer version there (core spec §70).
+        self.pipeline_updates_tick(window, cx);
         let root = self.hydra.paths.root().to_path_buf();
         let now = crate::action_log::now();
         let Some(date) = now.split(' ').next().map(str::to_string) else {

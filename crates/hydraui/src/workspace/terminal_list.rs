@@ -427,6 +427,7 @@ impl Workspace {
                             .text_color(color(crate::orchestrator_theme::TEXT))
                             .child(c.name.clone()),
                     )
+                    .children(self.update_pill(lead, cx))
                     .when(c.state.has_pill(), |d| {
                         d.child(
                             div()

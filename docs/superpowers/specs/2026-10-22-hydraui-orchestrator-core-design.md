@@ -1434,3 +1434,36 @@ A team in a swarm can share pipelines without sending files around.
   - **From a swarm** lists every pipeline your swarms share, read from each `pipelines` folder (`.md`, and plain `.toml` for swarms that sync it). Each row shows its mark in its colour, its name, its swarm, where its work comes from and its stages.
   - **Add** makes it a new pipeline of yours, switched off, as importing a file does (`pipeline::import`), and opens its settings.
   - With nothing shared yet, it says how a teammate shares one.
+
+## 70. Updates to a pipeline shared through a swarm (added 2026-11-12)
+
+When the person who shared a pipeline (§69) shares it again with changes, everyone who imported it from that swarm is offered the new version.
+
+- **Where it came from.** **Import from a swarm** writes a `[shared]` table into the new pipeline's file. It's this machine's own record: export leaves it out, and import drops any it brings.
+
+  ```toml
+  [shared]
+  swarm = "<swarm id>"     # stays the same if the swarm is renamed
+  swarm_name = "Team"
+  file = "review-prs"      # its file in the swarm's pipelines folder, .toml or .md
+  version = "af63dc4c8601ec8c"
+  skipped = "…"            # a version the user said Not now to
+  ```
+
+  `version` is `pipeline_share::version`, an FNV-1a fingerprint of the shared text. It's the same on every machine.
+- **Spotting a new version.** Every 30 seconds, with the schedule check, `pipeline_updates_tick` reads each imported pipeline's file in its swarm (`.toml` or `.md`). `pipeline_share::newer` offers it when its fingerprint differs from `version`, and isn't the one `skipped`.
+  - A swarm you've left, or a file that's gone, offers nothing.
+  - Each new version is announced once: "Review PR's has a newer version in Team. Open its settings to update."
+- **Where it shows.**
+  - An **Update** pill on the pipeline's sidebar card. Clicking it opens the update.
+  - A banner at the top of its Pipeline settings: "A newer version is available", with **Review update…**.
+- **The update dialog.** It's titled **Update <name>?** and says what changes and what's kept. **Not now** skips that version, so only a newer one is offered again. **Update** takes it.
+- **What an update keeps** (`pipeline_share::update`).
+  - **Replaced:** the stages and settings become the shared version's.
+  - **Kept:**
+    - its name here;
+    - `[autostart]`, `[schedule]` and `[mail]`;
+    - whether its Linear or Slack trigger is on;
+    - `[shared]`, now at the new version.
+  - **Lost:** changes the user made to its stages.
+  - **Afterwards:** open tickets take the new look and bars as a save does, and keep their stages. Its settings, if open, reload.

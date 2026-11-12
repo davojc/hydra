@@ -50,6 +50,9 @@ pub struct Pipeline {
     /// Its icon in place of the ◆ (`icon = "mail"`, one of `pipeline_icon::ICONS`, core spec
     /// §64); `None`: the ◆.
     pub icon: Option<String>,
+    /// The swarm it was imported from (`[shared]`, core spec §70), so a newer version there
+    /// can be offered; `None`: made here, or imported from a file.
+    pub shared: Option<SharedFrom>,
     /// Where its work comes from in Slack instead (`[slack]`): pull requests posted in a
     /// channel. A pipeline has one trigger, this or `linear`.
     pub slack: Option<SlackSettings>,
@@ -388,6 +391,7 @@ struct File {
     mail: Option<FileMail>,
     color: Option<String>,
     icon: Option<String>,
+    shared: Option<FileShared>,
     runs_at_once: Option<u8>,
     waiting: Option<FileWaiting>,
 }
@@ -583,6 +587,31 @@ fn slack_settings(f: FileSlack) -> Result<SlackSettings, String> {
         lookback_hours: f.lookback_hours.unwrap_or(DEFAULT_LOOKBACK_HOURS).max(1),
         watch: f.watch.unwrap_or(false),
     })
+}
+
+/// Where a pipeline imported from a swarm came from (`[shared]`, core spec §70).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedFrom {
+    /// The swarm's id, which stays the same when it's renamed.
+    pub swarm: String,
+    /// Its name when imported, shown when it can't be found.
+    pub swarm_name: String,
+    /// Its file in the swarm's `pipelines` folder, without `.toml` or `.md`.
+    pub file: String,
+    /// `pipeline_share::version` of what was imported, or last updated to.
+    pub version: String,
+    /// A newer version the user chose not to take; offered again only when there's another.
+    pub skipped: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileShared {
+    swarm: String,
+    swarm_name: Option<String>,
+    file: String,
+    version: String,
+    skipped: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -885,6 +914,13 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
             .as_deref()
             .map(crate::pipeline_icon::check)
             .transpose()?,
+        shared: file.shared.map(|s| SharedFrom {
+            swarm_name: s.swarm_name.unwrap_or_else(|| s.swarm.clone()),
+            swarm: s.swarm,
+            file: s.file,
+            version: s.version,
+            skipped: s.skipped,
+        }),
         waiting: file
             .waiting
             .map(waiting_settings)
@@ -1680,6 +1716,8 @@ pub fn export(hydra_root: &Path, name: &str) -> Result<String, String> {
     let text = std::fs::read_to_string(&path).map_err(|e| format!("can't read {name}: {e}"))?;
     let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("{name}: {e}"))?;
     doc.remove("autostart");
+    // Where this machine imported it from is its own business, not the next person's.
+    doc.remove("shared");
     Ok(doc.to_string())
 }
 
@@ -1707,6 +1745,7 @@ pub fn import(hydra_root: &Path, text: &str) -> Result<String, String> {
     }
     doc["name"] = value(shown);
     takes_nothing(&mut doc);
+    doc.remove("shared");
     let text = doc.to_string();
     parse(&text).map_err(not_one)?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;

@@ -82,6 +82,147 @@ pub fn share(
     Ok((file, replaced))
 }
 
+/// A short fingerprint of a shared pipeline's text (FNV-1a, so it's the same on every machine
+/// and every build), to tell when the copy in the swarm has changed.
+pub fn version(text: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in text.trim().bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+/// Adds `s`, found in swarm `swarm_id` (`swarm_name`), as a new pipeline here, recording where
+/// it came from so a newer version can be offered (core spec §70). Returns its file name.
+pub fn import_shared(
+    hydra_root: &Path,
+    s: &Shared,
+    swarm_id: &str,
+    swarm_name: &str,
+) -> Result<String, String> {
+    let name = crate::pipeline::import(hydra_root, &s.text)?;
+    let stem = s
+        .file
+        .file_stem()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let v = version(&s.text);
+    edit_file(hydra_root, &name, |doc| {
+        let mut t = toml_edit::Table::new();
+        t["swarm"] = toml_edit::value(swarm_id);
+        t["swarm_name"] = toml_edit::value(swarm_name);
+        t["file"] = toml_edit::value(stem.as_str());
+        t["version"] = toml_edit::value(v.as_str());
+        doc["shared"] = toml_edit::Item::Table(t);
+    })?;
+    Ok(name)
+}
+
+/// A newer version of an imported pipeline, found in its swarm.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Update {
+    pub version: String,
+    pub text: String,
+    /// The swarm's name now.
+    pub swarm_name: String,
+}
+
+/// The newer version of `p` in the swarm it came from, if there is one it hasn't skipped.
+/// `swarm` finds a swarm you're in by id: its folder and name.
+pub fn newer(
+    p: &crate::pipeline::Pipeline,
+    swarm: impl Fn(&str) -> Option<(PathBuf, String)>,
+) -> Option<Update> {
+    let from = p.shared.as_ref()?;
+    let (folder, swarm_name) = swarm(&from.swarm)?;
+    let dir = folder.join(SWARM_DIR);
+    let text = ["toml", "md"].iter().find_map(|ext| {
+        let raw = std::fs::read_to_string(dir.join(format!("{}.{ext}", from.file))).ok()?;
+        if *ext == "md" {
+            from_md(&raw)
+        } else {
+            Some(raw)
+        }
+    })?;
+    crate::pipeline::parse(&text).ok()?;
+    let v = version(&text);
+    (v != from.version && from.skipped.as_deref() != Some(v.as_str())).then_some(Update {
+        version: v,
+        text,
+        swarm_name,
+    })
+}
+
+/// Takes update `u` into pipeline `name`: its stages and settings become the shared ones, but
+/// it keeps what is this machine's: its name here, `[autostart]`, `[schedule]`, `[mail]`,
+/// whether its Linear or Slack trigger is on, and where it came from (now at `u`'s version).
+pub fn update(hydra_root: &Path, name: &str, u: &Update) -> Result<(), String> {
+    use toml_edit::{DocumentMut, Item, value};
+    let path = crate::pipeline::folder(hydra_root).join(format!("{name}.toml"));
+    let local: DocumentMut = std::fs::read_to_string(&path)
+        .map_err(|e| format!("can't read {name}: {e}"))?
+        .parse()
+        .map_err(|e| format!("{name}: {e}"))?;
+    let mut doc: DocumentMut = u
+        .text
+        .parse()
+        .map_err(|e| format!("the shared version: {e}"))?;
+    for key in ["name", "autostart", "schedule", "mail", "shared"] {
+        match local.get(key) {
+            Some(item) => doc[key] = item.clone(),
+            None => {
+                doc.remove(key);
+            }
+        }
+    }
+    for trigger in ["linear", "slack"] {
+        let on = local
+            .get(trigger)
+            .and_then(|t| t.get("watch"))
+            .and_then(Item::as_bool)
+            .unwrap_or(false);
+        if let Some(t) = doc.get_mut(trigger).and_then(Item::as_table_mut) {
+            t["watch"] = value(on);
+        }
+    }
+    if let Some(t) = doc.get_mut("shared").and_then(Item::as_table_mut) {
+        t["version"] = value(u.version.as_str());
+        t.remove("skipped");
+    }
+    let text = doc.to_string();
+    crate::pipeline::parse(&text).map_err(|e| format!("the shared version doesn't fit: {e}"))?;
+    std::fs::write(&path, text).map_err(|e| format!("can't write {}: {e}", path.display()))
+}
+
+/// **Not now**: pipeline `name` isn't offered version `v` again, only a newer one.
+pub fn skip(hydra_root: &Path, name: &str, v: &str) -> Result<(), String> {
+    edit_file(hydra_root, name, |doc| {
+        if let Some(t) = doc
+            .get_mut("shared")
+            .and_then(toml_edit::Item::as_table_mut)
+        {
+            t["skipped"] = toml_edit::value(v);
+        }
+    })
+}
+
+fn edit_file(
+    hydra_root: &Path,
+    name: &str,
+    f: impl FnOnce(&mut toml_edit::DocumentMut),
+) -> Result<(), String> {
+    let path = crate::pipeline::folder(hydra_root).join(format!("{name}.toml"));
+    let mut doc: toml_edit::DocumentMut = std::fs::read_to_string(&path)
+        .map_err(|e| format!("can't read {name}: {e}"))?
+        .parse()
+        .map_err(|e| format!("{name}: {e}"))?;
+    f(&mut doc);
+    let text = doc.to_string();
+    crate::pipeline::parse(&text).map_err(|e| format!("{name}: {e}"))?;
+    std::fs::write(&path, text).map_err(|e| format!("can't write {}: {e}", path.display()))
+}
+
 /// A pipeline found in a swarm's `pipelines` folder.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Shared {
@@ -209,6 +350,74 @@ mod tests {
         std::fs::write(dir.join("prs.md"), "# my own notes\n").unwrap();
         share(home.path(), "prs", swarm.path(), true).unwrap();
         assert!(dir.join("prs.md").exists());
+    }
+
+    #[test]
+    fn an_imported_pipeline_is_offered_its_owners_updates() {
+        let swarm = tempfile::tempdir().unwrap();
+        let folder = swarm.path().to_path_buf();
+        let find = |id: &str| (id == "sw1").then(|| (folder.clone(), "Team".to_string()));
+
+        // The owner shares it.
+        let owner = home_with("prs", ONE);
+        share(owner.path(), "prs", swarm.path(), true).unwrap();
+
+        // A teammate imports it, then turns its Slack trigger on and sets it to start here.
+        let mine = tempfile::tempdir().unwrap();
+        let found = shared(swarm.path());
+        let name = import_shared(mine.path(), &found[0], "sw1", "Team").unwrap();
+        let p = crate::pipeline::load(mine.path(), &name).unwrap();
+        let from = p.shared.clone().unwrap();
+        assert_eq!((from.swarm.as_str(), from.file.as_str()), ("sw1", "prs"));
+        assert_eq!(newer(&p, find), None, "nothing newer yet");
+
+        // The owner adds a stage and shares again.
+        let two = format!("{ONE}[[stage]]\nid = \"b\"\ntitle = \"B\"\n");
+        std::fs::write(crate::pipeline::folder(owner.path()).join("prs.toml"), &two).unwrap();
+        share(owner.path(), "prs", swarm.path(), true).unwrap();
+        let u = newer(&p, find).expect("the owner's update is offered");
+        assert_eq!(u.swarm_name, "Team");
+
+        // Not now: that version isn't offered again.
+        skip(mine.path(), &name, &u.version).unwrap();
+        let p = crate::pipeline::load(mine.path(), &name).unwrap();
+        assert_eq!(newer(&p, find), None);
+
+        // A later version is, and updating keeps what is this machine's.
+        let three =
+            format!("{two}[slack]\nchannel = \"C0C217CER6G\"\nlabel = \"prs\"\nwatch = true\n");
+        std::fs::write(
+            crate::pipeline::folder(owner.path()).join("prs.toml"),
+            &three,
+        )
+        .unwrap();
+        share(owner.path(), "prs", swarm.path(), true).unwrap();
+        let u = newer(&p, find).expect("a newer version is offered again");
+        update(mine.path(), &name, &u).unwrap();
+        let p = crate::pipeline::load(mine.path(), &name).unwrap();
+        assert_eq!(p.stages.len(), 2, "its stages are the owner's");
+        assert!(
+            p.slack.as_ref().is_some_and(|s| !s.watch),
+            "its trigger stays off here"
+        );
+        assert_eq!(p.name, "Review PR's");
+        assert_eq!(newer(&p, find), None, "up to date");
+        // Re-exported, where it came from stays here.
+        assert!(
+            !crate::pipeline::export(mine.path(), &name)
+                .unwrap()
+                .contains("[shared]")
+        );
+        // A swarm it isn't in any more offers nothing.
+        assert_eq!(newer(&p, |_| None), None);
+    }
+
+    #[test]
+    fn versions_are_stable_and_ignore_edge_whitespace() {
+        assert_eq!(version("a = 1\n"), version("a = 1"));
+        assert_ne!(version("a = 1"), version("a = 2"));
+        // FNV-1a 64 of "a", as published.
+        assert_eq!(version("a"), "af63dc4c8601ec8c");
     }
 
     #[test]

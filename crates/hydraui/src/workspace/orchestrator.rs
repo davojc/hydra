@@ -2011,6 +2011,7 @@ impl Workspace {
                             .text_color(color(theme::TEXT))
                             .child(c.name.clone()),
                     )
+                    .children(self.update_pill(orchestrator, cx))
                     .child(self.collapse_toggle(orchestrator, false, cx)),
             )
             .child(

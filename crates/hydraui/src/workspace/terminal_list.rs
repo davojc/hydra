@@ -748,9 +748,20 @@ impl Workspace {
                 })
                 .context_menu({
                     let ws = cx.entity();
+                    // Only where no Claude session is running: one is started in the shell.
+                    let can_start_claude = v.can_start_claude();
                     move |menu, _, _| {
-                        let (tasks_ws, rename_ws, restart_ws, close_ws) =
-                            (ws.clone(), ws.clone(), ws.clone(), ws.clone());
+                        let (tasks_ws, rename_ws, restart_ws, close_ws, claude_ws) =
+                            (ws.clone(), ws.clone(), ws.clone(), ws.clone(), ws.clone());
+                        let menu = menu.when(can_start_claude, |menu| {
+                            menu.item(PopupMenuItem::new("Start Claude (continue)").on_click(
+                                move |_, window, cx| {
+                                    claude_ws.update(cx, |ws, cx| {
+                                        ws.start_claude_continuing(id, window, cx)
+                                    });
+                                },
+                            ))
+                        });
                         // Its project's board as a Tasks tab beside it (task-board §4).
                         menu.item(PopupMenuItem::new("Tasks").on_click(move |_, window, cx| {
                             tasks_ws.update(cx, |ws, cx| {

@@ -1372,6 +1372,23 @@ impl Workspace {
         self.restart_asking(env, terminals, window, cx);
     }
 
+    /// Shows terminal `id` and starts Claude in it, continuing the folder's most recent
+    /// conversation, unless a Claude session is already running there.
+    pub(super) fn start_claude_continuing(
+        &mut self,
+        id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.panes.get(&id).cloned() else {
+            return;
+        };
+        if view.update(cx, |v, cx| v.start_claude_continuing(cx)) {
+            self.show_terminal(id, window, cx);
+            crate::action_log::write(format!("started Claude --continue in terminal {id}"));
+        }
+    }
+
     /// Restarts one terminal, asking first when a command is running in it.
     pub(super) fn restart_terminal(
         &mut self,

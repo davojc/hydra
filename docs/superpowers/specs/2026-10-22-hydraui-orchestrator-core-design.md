@@ -1382,3 +1382,17 @@ People couldn't find how to import a pipeline. It was the last line of a typed l
 
   Picking a choice goes on as before. You name the pipeline, or pick the file. Then its orchestrator starts with its settings open. The launcher's **New pipeline…** opens the same chooser, and **Import pipeline…** stays there too.
 - **Export to share** is now an outlined button with a share icon, in the settings title row. Its confirmation says how the other person adds the file: "they add it with Create pipeline, then Import a file."
+
+## 67. Start a pipeline, as cards (added 2026-11-12)
+
+**Start pipeline** opened a typed list of file names. It now opens **Start a pipeline**, with a short line ("Pick the pipeline to run, or create a new one.") above a grid of small cards that scrolls past a few rows.
+
+- **One card per pipeline**, each showing:
+  - its icon, in a tile of its colour;
+  - its name;
+  - where its work comes from (`settings_words::source_short`): "Linear · INTH", "Slack · #pull-requests", "Gmail", "On a schedule" or "Started by you";
+  - how many stages it has.
+
+  The card's edge is in the pipeline's colour, and brightens on hover. Clicking a card starts that pipeline's orchestrator, as picking it from the list did.
+- **The last card is a dashed "+ Create a pipeline".** It opens the chooser in §66.
+- **Create a pipeline's copy list** uses the same pipeline facts (`my_pipelines`).

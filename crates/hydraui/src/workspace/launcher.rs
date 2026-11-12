@@ -424,8 +424,9 @@ impl Workspace {
         );
     }
 
-    /// Picks the orchestrator's pipeline (the example is written when there is none); one
-    /// pipeline is taken without asking.
+    /// **Start pipeline** (core spec §67): a card per pipeline, in its colour with its icon,
+    /// saying where its work comes from, and a last card to create one. The example is written
+    /// when there is none.
     pub(super) fn choose_pipeline(
         &mut self,
         env: String,
@@ -436,34 +437,13 @@ impl Workspace {
         if let Err(e) = crate::pipeline::ensure_example(&root) {
             crate::action_log::write(format!("example pipeline: {e}"));
         }
-        let names = crate::pipeline::names(&root);
-        // Each file by its name and the name the views show, so they're told apart; then a
-        // new one.
-        let mut labels = pipeline_labels(&root, &names);
-        labels.push("New pipeline…".into());
-        let state = cx.new(|cx| CommandState::new(window, cx));
+        let mine = my_pipelines(&root);
         let workspace = cx.entity();
-        let first = Cell::new(true);
-        window.open_dialog(cx, move |dialog, window, cx| {
-            if first.replace(false) {
-                state.update(cx, |s, cx| s.focus(window, cx));
-            }
-            let (choices, workspace, env) = (names.clone(), workspace.clone(), env.clone());
-            dialog.title("Pipeline").child(
-                Command::new(&state)
-                    .items(labels.iter().map(|l| CommandItem::new().label(l.clone())))
-                    .placeholder("Pipeline")
-                    .on_confirm(move |ix, window, cx| {
-                        window.close_dialog(cx);
-                        let env = env.clone();
-                        match choices.get(ix.row).cloned() {
-                            Some(name) => workspace
-                                .update(cx, |ws, cx| ws.open_orchestrator(&env, &name, window, cx)),
-                            None => workspace
-                                .update(cx, |ws, cx| ws.new_pipeline(Some(env), window, cx)),
-                        }
-                    }),
-            )
+        window.open_dialog(cx, move |dialog, _, cx| {
+            dialog
+                .title("Start a pipeline")
+                .w(px(640.))
+                .child(start_cards(&mine, &workspace, &env, cx))
         });
     }
 
@@ -478,19 +458,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let root = self.hydra.paths.root().to_path_buf();
-        let mine: Vec<Mine> = crate::pipeline::names(&root)
-            .into_iter()
-            .filter_map(|file| {
-                let p = crate::pipeline::load(&root, &file).ok()?;
-                Some(Mine {
-                    file,
-                    name: p.name,
-                    color: p.color,
-                    icon: p.icon,
-                    stages: p.stages.len(),
-                })
-            })
-            .collect();
+        let mine = my_pipelines(&root);
         let workspace = cx.entity();
         window.open_dialog(cx, move |dialog, _, cx| {
             dialog
@@ -1295,7 +1263,7 @@ pub(super) fn pipeline_labels(root: &std::path::Path, names: &[String]) -> Vec<S
         .collect()
 }
 
-/// A pipeline of yours, as Create a pipeline lists it to copy.
+/// A pipeline of yours, as Start a pipeline and Create a pipeline show it.
 #[derive(Clone)]
 struct Mine {
     file: String,
@@ -1303,6 +1271,135 @@ struct Mine {
     color: Option<u32>,
     icon: Option<String>,
     stages: usize,
+    /// Where its work comes from, e.g. `Slack · #pull-requests`.
+    source: String,
+}
+
+/// Every pipeline that loads, by file name.
+fn my_pipelines(root: &std::path::Path) -> Vec<Mine> {
+    crate::pipeline::names(root)
+        .into_iter()
+        .filter_map(|file| {
+            let p = crate::pipeline::load(root, &file).ok()?;
+            Some(Mine {
+                source: crate::settings_words::source_short(&p),
+                file,
+                name: p.name,
+                color: p.color,
+                icon: p.icon,
+                stages: p.stages.len(),
+            })
+        })
+        .collect()
+}
+
+/// Start a pipeline's cards: one per pipeline, then **Create a pipeline**.
+fn start_cards(
+    mine: &[Mine],
+    workspace: &gpui::Entity<Workspace>,
+    env: &str,
+    cx: &gpui::App,
+) -> gpui::AnyElement {
+    use crate::orchestrator_theme::{self as theme, color};
+    let muted = cx.theme().muted_foreground;
+    let card = |id: SharedString| {
+        v_flex()
+            .id(id)
+            .w(px(184.))
+            .h(px(112.))
+            .gap(px(6.))
+            .p(px(12.))
+            .rounded(px(10.))
+            .border_1()
+            .cursor_pointer()
+    };
+    let cards = mine.iter().map(|m| {
+        let accent = m.color.unwrap_or(theme::TEAL);
+        let (workspace, env, file) = (workspace.clone(), env.to_string(), m.file.clone());
+        card(SharedString::from(format!("start-{}", m.file)))
+            .border_color(color(accent).opacity(0.3))
+            .bg(color(0x131616))
+            .hover(|d| {
+                d.border_color(color(accent))
+                    .bg(color(accent).opacity(0.06))
+            })
+            .child(
+                div()
+                    .size(px(30.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(8.))
+                    .bg(color(accent).opacity(0.14))
+                    .child(crate::pipeline_icon::mark(m.icon.as_deref(), accent, 16.)),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .truncate()
+                    .child(m.name.clone()),
+            )
+            .child(
+                v_flex()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .truncate()
+                            .child(m.source.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(crate::settings_words::stages(m.stages)),
+                    ),
+            )
+            .on_click(move |_, window, cx| {
+                window.close_dialog(cx);
+                let env = env.clone();
+                workspace.update(cx, |ws, cx| ws.open_orchestrator(&env, &file, window, cx));
+            })
+            .into_any_element()
+    });
+    let create = {
+        let (workspace, env) = (workspace.clone(), env.to_string());
+        card("start-create".into())
+            .items_center()
+            .justify_center()
+            .border_dashed()
+            .border_color(color(theme::BORDER_STRONG))
+            .hover(|d| d.border_color(color(theme::TEAL)))
+            .child(div().text_color(color(theme::TEAL)).text_xl().child("+"))
+            .child(div().text_sm().child("Create a pipeline"))
+            .on_click(move |_, window, cx| {
+                window.close_dialog(cx);
+                let env = env.clone();
+                workspace.update(cx, |ws, cx| ws.new_pipeline(Some(env), window, cx));
+            })
+            .into_any_element()
+    };
+    v_flex()
+        .gap_3()
+        .pb_2()
+        .child(
+            div()
+                .text_xs()
+                .text_color(muted)
+                .child("Pick the pipeline to run, or create a new one."),
+        )
+        .child(
+            h_flex()
+                .id("start-cards")
+                .flex_wrap()
+                .gap(px(10.))
+                .max_h(px(400.))
+                .overflow_y_scroll()
+                .children(cards)
+                .child(create),
+        )
+        .into_any_element()
 }
 
 /// What a choice does once picked.
@@ -1454,11 +1551,12 @@ fn create_choices(
                                     .text_sm()
                                     .child(m.name.clone()),
                             )
-                            .child(div().text_xs().text_color(muted).child(if m.stages == 1 {
-                                "1 stage".to_string()
-                            } else {
-                                format!("{} stages", m.stages)
-                            }))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(crate::settings_words::stages(m.stages)),
+                            )
                             .child(div().text_xs().text_color(color(theme::TEAL)).child("Copy"))
                             .on_click(pick(Start::Name(Some(m.file.clone()))))
                     })),

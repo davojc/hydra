@@ -202,6 +202,35 @@ pub fn look(color: Option<u32>, icon: Option<&str>) -> String {
     format!("{colour} · {shape}")
 }
 
+/// Where a pipeline's work comes from, in a few words for its card in Start a pipeline.
+pub fn source_short(p: &crate::pipeline::Pipeline) -> String {
+    if let Some(l) = &p.linear {
+        format!("Linear · {}", or(&l.team, "a team"))
+    } else if let Some(s) = &p.slack {
+        let label = s.label.trim().trim_start_matches('#');
+        if label.is_empty() {
+            "Slack".into()
+        } else {
+            format!("Slack · #{label}")
+        }
+    } else if p.mail.is_some() {
+        "Gmail".into()
+    } else if p.schedule.is_some() {
+        "On a schedule".into()
+    } else {
+        "Started by you".into()
+    }
+}
+
+/// "1 stage", "3 stages".
+pub fn stages(n: usize) -> String {
+    if n == 1 {
+        "1 stage".into()
+    } else {
+        format!("{n} stages")
+    }
+}
+
 fn or<'a>(s: &'a str, empty: &'a str) -> &'a str {
     if s.trim().is_empty() { empty } else { s.trim() }
 }
@@ -233,6 +262,34 @@ mod tests {
             "Violet · Pull request"
         );
         assert_eq!(look(Some(0x123456), Some("mail")), "#123456 · Mail");
+    }
+
+    #[test]
+    fn a_card_says_where_work_comes_from() {
+        let p = |extra: &str| crate::pipeline::parse(&format!("{STEP}{extra}")).unwrap();
+        assert_eq!(source_short(&p("")), "Started by you");
+        assert_eq!(
+            source_short(&p("[linear]\nteam = \"INTH\"\n")),
+            "Linear · INTH"
+        );
+        assert_eq!(
+            source_short(&p(
+                "[slack]\nchannel = \"C0C217CER6G\"\nlabel = \"#pull-requests\"\n"
+            )),
+            "Slack · #pull-requests"
+        );
+        assert_eq!(
+            source_short(&p("[mail]\ncheck = \"weekdays 09:00\"\n")),
+            "Gmail"
+        );
+        assert_eq!(
+            source_short(&p("[schedule]\nevery = \"mon 18:00\"\n")),
+            "On a schedule"
+        );
+        assert_eq!(
+            (stages(1).as_str(), stages(3).as_str()),
+            ("1 stage", "3 stages")
+        );
     }
 
     #[test]

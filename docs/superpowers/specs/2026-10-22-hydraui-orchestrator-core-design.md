@@ -1378,7 +1378,7 @@ People couldn't find how to import a pipeline. It was the last line of a typed l
     - **Blank:** "One stage to fill in yourself."
     - **Email triage:** "Gmail, Jev sorts each email, Claude drafts a reply."
   - **Copy one of yours: the copy starts switched off, so it never takes the original's work.** It lists your pipelines, each with its mark, its name and how many stages it has, and scrolls past a handful. It doesn't show when you have none.
-  - **Import a file someone sent you: a pipeline they saved with Export to share, added switched off, for you to check.** One tile: **Choose a pipeline file…** ("A .toml file. It holds no secrets.").
+  - **Import one someone shared: added switched off, for you to check before it takes any work.** Two tiles: **From a file** ("A .toml they saved with Export to share."), and **From a swarm** (§69) when you're in one.
 
   Picking a choice goes on as before. You name the pipeline, or pick the file. Then its orchestrator starts with its settings open. The launcher's **New pipeline…** opens the same chooser, and **Import pipeline…** stays there too.
 - **Export to share** is now an outlined button with a share icon, in the settings title row. Its confirmation says how the other person adds the file: "they add it with Create pipeline, then Import a file."
@@ -1411,3 +1411,22 @@ hydraui had no way to delete a pipeline, other than deleting its file from `~/.h
   - It leaves the sidebar, Start a pipeline and Create a pipeline's copy list.
   - A notification says "Moved to the Trash. Put it back from there if you need it."
   - If the Trash refuses the file, the pipeline is ended but not deleted, and the notification says why.
+
+## 69. Share a pipeline through a swarm (added 2026-11-12)
+
+A team in a swarm can share pipelines without sending files around.
+
+- **Share to a swarm.** This button sits beside **Export to share** at the top of Pipeline settings. It's greyed out until you're in a swarm, and its tooltip then says "Join a swarm on the Swarms page to share pipelines with your team".
+  - It opens **Share to a swarm**, which lists your swarms. A swarm you can only read is listed but can't be picked ("You can only read this swarm, so you can't share to it"), because a reader's files don't sync.
+  - Picking a swarm writes the pipeline, exported (so without this machine's `[autostart]`), to `<swarm folder>/pipelines/<file>.md`. If that folder doesn't exist yet, it's made.
+  - Sharing it again updates the copy. The notification says "Shared to <swarm>" or "Updated its copy in <swarm>", and tells you how your team adds it.
+- **Why `.md`.** A swarm syncs only `.md` until an owner adds other types, so a `.toml` file there would reach no one. The file reads as a note:
+  - a heading with the pipeline's name;
+  - a line saying how to add it;
+  - the settings in a `toml` block.
+
+  `pipeline_share::{to_md, from_md}`.
+- **Import from a swarm.** In Create a pipeline (§66), the import section is now **Import one someone shared**, with two tiles: **From a file** and **From a swarm**. The swarm tile shows only when you're in a swarm.
+  - **From a swarm** lists every pipeline your swarms share, read from each `pipelines` folder (`.md`, and plain `.toml` for swarms that sync it). Each row shows its mark in its colour, its name, its swarm, where its work comes from and its stages.
+  - **Add** makes it a new pipeline of yours, switched off, as importing a file does (`pipeline::import`), and opens its settings.
+  - With nothing shared yet, it says how a teammate shares one.

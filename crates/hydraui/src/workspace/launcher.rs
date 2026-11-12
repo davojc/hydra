@@ -462,12 +462,250 @@ impl Workspace {
         let mine = my_pipelines(&root);
         let workspace = cx.entity();
         let scroll = gpui::ScrollHandle::new();
+        let in_swarm = self.swarms.iter().any(|s| !s.removed);
         window.open_dialog(cx, move |dialog, _, cx| {
             dialog
                 .title("Create a pipeline")
                 .w(px(600.))
-                .child(create_choices(&mine, &workspace, &env, &scroll, cx))
+                .child(create_choices(
+                    &mine, &workspace, &env, &scroll, in_swarm, cx,
+                ))
         });
+    }
+
+    /// **Share to a swarm** (core spec §69): picks one of your swarms, then writes pipeline
+    /// `file` into its `pipelines` folder for your team.
+    pub(super) fn share_to_swarm_dialog(
+        &mut self,
+        file: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let swarms: Vec<(String, std::path::PathBuf, bool)> = self
+            .swarms
+            .iter()
+            .filter(|s| !s.removed)
+            .map(|s| {
+                (
+                    s.name.clone(),
+                    s.folder.clone(),
+                    s.my_role != hydra_swarms::Role::Reader,
+                )
+            })
+            .collect();
+        let workspace = cx.entity();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let muted = cx.theme().muted_foreground;
+            let rows = swarms
+                .iter()
+                .enumerate()
+                .map(|(i, (name, folder, writes))| {
+                    let (workspace, file, name, folder) = (
+                        workspace.clone(),
+                        file.clone(),
+                        name.clone(),
+                        folder.clone(),
+                    );
+                    let writes = *writes;
+                    h_flex()
+                        .id(SharedString::from(format!("share-swarm-{i}")))
+                        .gap_3()
+                        .items_center()
+                        .px(px(14.))
+                        .py(px(10.))
+                        .rounded(px(10.))
+                        .border_1()
+                        .border_color(rgb(0x1f2524))
+                        .when(writes, |d| {
+                            d.cursor_pointer()
+                                .hover(|d| d.border_color(rgb(crate::orchestrator_theme::TEAL)))
+                        })
+                        .child(
+                            gpui_component::Icon::new(gpui_kit_assets::IconName::Users)
+                                .size(px(16.))
+                                .text_color(rgb(crate::orchestrator_theme::TEAL)),
+                        )
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .child(div().text_sm().child(name.clone()))
+                                .child(div().text_xs().text_color(muted).child(if writes {
+                                    "Your team will find it under Import from a swarm"
+                                } else {
+                                    "You can only read this swarm, so you can't share to it"
+                                })),
+                        )
+                        .when(writes, |d| {
+                            d.on_click(move |_, window, cx| {
+                                window.close_dialog(cx);
+                                let (file, name, folder) =
+                                    (file.clone(), name.clone(), folder.clone());
+                                workspace.update(cx, |ws, cx| {
+                                    ws.share_to_swarm(&file, &name, &folder, window, cx)
+                                });
+                            })
+                        })
+                });
+            dialog.title("Share to a swarm").w(px(520.)).child(
+                v_flex()
+                    .gap_2()
+                    .pb_2()
+                    .child(div().text_xs().text_color(muted).child(
+                        "Pick the swarm to share it with. It goes in that swarm's pipelines \
+                         folder, without this machine's own settings.",
+                    ))
+                    .children(rows),
+            )
+        });
+    }
+
+    fn share_to_swarm(
+        &mut self,
+        file: &str,
+        swarm: &str,
+        folder: &std::path::Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let note = match crate::pipeline_share::share(self.hydra.paths.root(), file, folder) {
+            Ok((path, replaced)) => {
+                crate::action_log::write(format!(
+                    "shared pipeline {file} to swarm {swarm}: {}",
+                    path.display()
+                ));
+                Note::success(format!(
+                    "{} {swarm}. Your team adds it with Create pipeline, then Import from a \
+                     swarm.",
+                    if replaced {
+                        "Updated its copy in"
+                    } else {
+                        "Shared to"
+                    }
+                ))
+                .title("Share to a swarm")
+            }
+            Err(e) => Note::error(e).title("Share to a swarm"),
+        };
+        window.push_note(note, cx);
+    }
+
+    /// **Import from a swarm** (core spec §69): the pipelines your swarms share; picking one
+    /// adds it as a new pipeline that takes nothing until turned on, then opens its settings.
+    fn import_from_swarm_dialog(
+        &mut self,
+        env: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let found: Vec<(String, crate::pipeline_share::Shared)> = self
+            .swarms
+            .iter()
+            .filter(|s| !s.removed)
+            .flat_map(|s| {
+                crate::pipeline_share::shared(&s.folder)
+                    .into_iter()
+                    .map(|p| (s.name.clone(), p))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let workspace = cx.entity();
+        let scroll = gpui::ScrollHandle::new();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            use crate::orchestrator_theme::{self as theme, color};
+            let muted = cx.theme().muted_foreground;
+            let body = if found.is_empty() {
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .pb_2()
+                    .child(
+                        "Nothing is shared in your swarms yet. A teammate shares one with Share \
+                         to a swarm, at the top of a pipeline's settings.",
+                    )
+                    .into_any_element()
+            } else {
+                scrolled(
+                    v_flex()
+                        .id("swarm-pipelines")
+                        .gap_2()
+                        .children(found.iter().enumerate().map(|(i, (swarm, p))| {
+                            let accent = p.color.unwrap_or(theme::TEAL);
+                            let (workspace, env, text) =
+                                (workspace.clone(), env.clone(), p.text.clone());
+                            h_flex()
+                                .id(SharedString::from(format!("swarm-pipeline-{i}")))
+                                .gap_3()
+                                .items_center()
+                                .px(px(14.))
+                                .py(px(10.))
+                                .rounded(px(10.))
+                                .border_1()
+                                .border_color(color(accent).opacity(0.3))
+                                .hover(|d| d.border_color(color(accent)))
+                                .cursor_pointer()
+                                .child(crate::pipeline_icon::mark(p.icon.as_deref(), accent, 16.))
+                                .child(
+                                    v_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(div().text_sm().truncate().child(p.name.clone()))
+                                        .child(div().text_xs().text_color(muted).truncate().child(
+                                            format!(
+                                                "{swarm} · {} · {}",
+                                                p.source,
+                                                crate::settings_words::stages(p.stages)
+                                            ),
+                                        )),
+                                )
+                                .child(div().text_xs().text_color(color(theme::TEAL)).child("Add"))
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let (env, text) = (env.clone(), text.clone());
+                                    workspace.update(cx, |ws, cx| {
+                                        ws.import_text(&text, "a swarm", env, window, cx)
+                                    });
+                                })
+                        })),
+                    &scroll,
+                    360.,
+                )
+            };
+            dialog.title("Import from a swarm").w(px(560.)).child(
+                v_flex()
+                    .gap_3()
+                    .pb_2()
+                    .child(div().text_xs().text_color(muted).child(
+                        "Pipelines your swarms share. The one you add is yours, and it starts \
+                         switched off for you to check.",
+                    ))
+                    .child(body),
+            )
+        });
+    }
+
+    /// Adds `text` (a pipeline from `from`, a file or a swarm) as a new pipeline, then opens it.
+    fn import_text(
+        &mut self,
+        text: &str,
+        from: &str,
+        env: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let root = self.hydra.paths.root().to_path_buf();
+        match crate::pipeline::import(&root, text) {
+            Ok(name) => {
+                crate::action_log::write(format!("imported pipeline {name} from {from}"));
+                window.push_note(
+                    Note::success("Added. Check its folders and skills, then turn its trigger on.")
+                        .title(format!("Imported {name}")),
+                    cx,
+                );
+                self.start_new_pipeline(name, env, window, cx);
+            }
+            Err(e) => window.push_note(Note::warning(e).title("Import pipeline"), cx),
+        }
     }
 
     /// **Export pipeline…**: picks the pipeline, then where to save it.
@@ -560,26 +798,15 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.open_dialog_path(false, window, cx, move |ws, path, window, cx| {
-            let root = ws.hydra.paths.root().to_path_buf();
-            let added = std::fs::read_to_string(&path)
-                .map_err(|e| format!("can't read {}: {e}", path.display()))
-                .and_then(|text| crate::pipeline::import(&root, &text));
-            match added {
-                Ok(name) => {
-                    crate::action_log::write(format!(
-                        "imported pipeline {name} from {}",
-                        path.display()
-                    ));
-                    window.push_note(
-                        Note::success(
-                            "Added. Check its folders and skills, then turn its trigger on.",
-                        )
-                        .title(format!("Imported {name}")),
-                        cx,
-                    );
-                    ws.start_new_pipeline(name, env, window, cx);
+            match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    ws.import_text(&text, &path.display().to_string(), env.clone(), window, cx)
                 }
-                Err(e) => window.push_note(Note::warning(e).title("Import pipeline"), cx),
+                Err(e) => window.push_note(
+                    Note::warning(format!("can't read {}: {e}", path.display()))
+                        .title("Import pipeline"),
+                    cx,
+                ),
             }
         });
     }
@@ -1443,6 +1670,8 @@ enum Start {
     /// Name a new pipeline made from this (`None`: blank).
     Name(Option<String>),
     Import,
+    /// Import from one of your swarms.
+    Swarm,
 }
 
 /// Create a pipeline's three sections: start fresh, copy one of yours, import a file.
@@ -1451,6 +1680,7 @@ fn create_choices(
     workspace: &gpui::Entity<Workspace>,
     env: &Option<String>,
     scroll: &gpui::ScrollHandle,
+    in_swarm: bool,
     cx: &gpui::App,
 ) -> gpui::AnyElement {
     use crate::orchestrator_theme::{self as theme, color};
@@ -1463,6 +1693,7 @@ fn create_choices(
             workspace.update(cx, |ws, cx| match start.clone() {
                 Start::Name(from) => ws.name_pipeline(from, env, window, cx),
                 Start::Import => ws.import_pipeline(env, window, cx),
+                Start::Swarm => ws.import_from_swarm_dialog(env, window, cx),
             });
         }
     };
@@ -1603,17 +1834,33 @@ fn create_choices(
     let import = v_flex()
         .gap_2()
         .child(heading(
-            "Import a file someone sent you",
-            "A pipeline they saved with Export to share. It's added switched off, for you to check.",
+            "Import one someone shared",
+            "Added switched off, for you to check before it takes any work.",
         ))
         .child(
-            tile(
-                "create-import",
-                gpui_kit_assets::IconName::FileUp,
-                "Choose a pipeline file…",
-                "A .toml file. It holds no secrets.",
-            )
-            .on_click(pick(Start::Import)),
+            h_flex()
+                .gap_2()
+                .items_stretch()
+                .child(
+                    tile(
+                        "create-import",
+                        gpui_kit_assets::IconName::FileUp,
+                        "From a file",
+                        "A .toml they saved with Export to share.",
+                    )
+                    .on_click(pick(Start::Import)),
+                )
+                .when(in_swarm, |row| {
+                    row.child(
+                        tile(
+                            "create-swarm",
+                            gpui_kit_assets::IconName::Users,
+                            "From a swarm",
+                            "One your team shared with Share to a swarm.",
+                        )
+                        .on_click(pick(Start::Swarm)),
+                    )
+                }),
         );
     v_flex()
         .gap(px(20.))

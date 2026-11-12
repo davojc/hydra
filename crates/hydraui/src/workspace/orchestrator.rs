@@ -2079,14 +2079,9 @@ impl Workspace {
             _ => color(theme::BORDER_STRONG),
         };
         let id = run.id.clone();
-        // Waiting on an author or product: the pill says for how long, and opens the question
-        // (one pill, not a pill and a line saying the same, core spec §77).
-        let waited = run.asking.as_ref().map(|a| {
-            std::time::SystemTime::now()
-                .duration_since(a.since)
-                .map_or(0, |d| d.as_secs() / 60)
-        });
-        let asked_run = run.id.clone();
+        // Waiting on an author or product: the line under the head says so, for how long, and
+        // opens the question; the pill would only repeat it (core spec §77).
+        let waiting = run.asking.is_some();
         let title = crate::pipeline_card::ticket_title(&run.ticket, run.link.as_deref());
         let prs = crate::linear_watch::pr_links(run);
         // A pull request's own link is its title; a Linear ticket's link and PRs show below.
@@ -2124,12 +2119,9 @@ impl Workspace {
                             .text_color(color(theme::TEXT))
                             .child(title),
                     )
-                    .when(c.state.has_pill(), |d| {
+                    .when(c.state.has_pill() && !waiting, |d| {
                         d.child(
                             div()
-                                .id(SharedString::from(format!(
-                                    "lane-pill-{orchestrator}-{asked_run}"
-                                )))
                                 .flex_none()
                                 .px(px(6.))
                                 .py(px(1.))
@@ -2137,27 +2129,11 @@ impl Workspace {
                                 .text_xs()
                                 .bg(bg)
                                 .text_color(fg)
-                                .child(match waited {
-                                    Some(m) => format!("{} · {m}m", c.state.word()),
-                                    None => c.state.word().to_string(),
-                                })
-                                .when(waited.is_some(), |p| {
-                                    let run = asked_run.clone();
-                                    p.cursor_pointer().hover(|p| p.opacity(0.85)).on_click(
-                                        cx.listener(move |ws, _, window, cx| {
-                                            cx.stop_propagation();
-                                            ws.question_dialog(
-                                                orchestrator,
-                                                Some(run.clone()),
-                                                window,
-                                                cx,
-                                            )
-                                        }),
-                                    )
-                                }),
+                                .child(c.state.word()),
                         )
                     }),
             )
+            .children(self.render_question(orchestrator, Some(&run.id), c.accent, cx))
             .children(link)
             .children(sessions)
             .into_any_element()

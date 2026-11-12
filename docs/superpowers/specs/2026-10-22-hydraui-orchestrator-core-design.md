@@ -1530,12 +1530,12 @@ On a pipeline with one ticket open, the ticket's name, its state ("version-2-bac
 - **One ticket gets a box too.** Under its orchestrator, the box holds the ticket's name (a pull request as `repo #N`), its state pill, what it waits on (§75), its link, and the sessions working on it. That's the same box as with several tickets, and the group view already drew one for a single ticket (`open_lanes`).
 - **The pipeline's card is the pipeline's.** While tickets are open, it shows the pipeline's name and "1 ticket in progress" (or "N tickets in progress"). It no longer shows a ticket's pill or progress bar, since the box below has them. With no ticket open, it reads as before ("No ticket yet", Ready).
 
-## 77. One pill for what a ticket waits on (added 2026-11-12)
+## 77. One line for what a ticket waits on (added 2026-11-12, revised the same day)
 
 With each ticket in its own box (§76), the box said the same thing twice: a **Waiting on author** pill, and a "⏸ Waiting on the author · 23m ›" line under it. The same happened for a question to product.
 
-- **One pill.** The line is gone from the ticket's box. The pill carries what the line added: how long the ticket has waited ("Waiting on author · 23m", "Asked product · 5m").
-- **A click on the pill** opens the question: what's asked, its thread, **Check now** and **Answer…**. A click anywhere else on the box's head still opens the ticket.
+- **The line stays, and the pill goes.** While a ticket waits on its author or on product, its box shows the full-width line, in the pipeline's colour for an author and amber for product. The line says how long it has waited, and a click opens the question: what's asked, its thread, **Check now** and **Answer…**. The state pill is left out, since it would only repeat the line. Every other state keeps its pill.
+- **Tried the other way first.** The pill was given the wait time and the click instead, and the line removed. That was reversed the same day at the user's request: the line reads better.
 
 ## 78. Check Gmail says what it found (added 2026-11-12)
 

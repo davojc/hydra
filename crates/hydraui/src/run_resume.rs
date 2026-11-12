@@ -154,6 +154,10 @@ fn read(hydra_root: &Path, file: &Path, alive: &impl Fn(u32) -> bool) -> Option<
     let pipeline = match started.get("pipeline_text").and_then(Value::as_str) {
         Some(t) => crate::pipeline::parse(t).ok().map(|mut p| {
             p.file = file.to_string();
+            // What it runs is as it started; how it looks is the file's now (core spec §64).
+            if let Ok(now) = crate::pipeline::load(hydra_root, file) {
+                p.take_look(&now);
+            }
             p
         }),
         None => crate::pipeline::load(hydra_root, file).ok(),
@@ -468,11 +472,39 @@ mod tests {
         let r = &found[0].run;
         assert_eq!(r.pipeline.file, "two");
         assert_eq!(r.pipeline.stages.len(), 2);
+        assert_eq!((r.pipeline.icon.as_deref(), r.pipeline.color), (None, None));
         assert_eq!(r.stages[1].status, StageStatus::Running);
         // Logged before the pipeline was: the file as it is now, which no longer fits.
         let home = home_with(&mid_run());
         std::fs::write(crate::pipeline::folder(home.path()).join("two.toml"), one).unwrap();
         assert!(interrupted(home.path(), |_| false).is_empty());
+    }
+
+    #[test]
+    fn a_resumed_run_looks_as_its_pipeline_does_now() {
+        let two = "name = \"Two\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\nskill = \"qa\"\n\
+                   [[stage]]\nid = \"b\"\ntitle = \"B\"\n";
+        let mut log = mid_run();
+        log[0] = line(
+            "run started",
+            &format!(
+                r#","ticket":"INTH-7","summary":"Export","pipeline":"two","pipeline_text":{}"#,
+                serde_json::to_string(two).unwrap()
+            ),
+        );
+        let home = home_with(&log);
+        let now = format!(
+            "icon = \"bug\"\ncolor = \"#e06666\"\n{}",
+            two.replace("Two", "Renamed")
+        );
+        std::fs::write(crate::pipeline::folder(home.path()).join("two.toml"), now).unwrap();
+        let found = interrupted(home.path(), |_| false);
+        let p = &found[0].run.pipeline;
+        assert_eq!(
+            (p.name.as_str(), p.icon.as_deref(), p.color),
+            ("Renamed", Some("bug"), Some(0xe06666))
+        );
+        assert_eq!(p.stages.len(), 2);
     }
 
     #[test]
@@ -516,6 +548,8 @@ mod tests {
             folder: None,
             worktree: true,
             prompt: "Lint {ticket}.".into(),
+            jev: None,
+            keep: None,
         };
         log.push(line(
             "stage added",

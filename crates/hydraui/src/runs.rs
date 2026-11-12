@@ -196,6 +196,15 @@ pub struct Run {
     pub asking: Option<Ask>,
     /// A send-back queued until the stage at work reports.
     pub fix_after: Option<Fix>,
+    /// A stage waiting on a person whose session was woken to look again (core spec §60): it
+    /// may report once more, and that report counts.
+    pub looking: Option<usize>,
+    /// A stage below its bar that keeps checking (core spec §62): still running, looking again
+    /// on its step's timetable until it passes or its hours run out.
+    pub rechecking: Option<usize>,
+    /// A stage waiting on a person who has stepped into its session or resumed it (core spec
+    /// §72): they're at it, so the run reads "With you", not "Needs you".
+    pub with_you: Option<usize>,
     /// What it's about, as a link: the pull request a Slack-triggered run reviews (`{pr}`).
     pub link: Option<String>,
 }
@@ -241,6 +250,9 @@ pub enum Decided {
     Reopened,
     /// A person worked on this stopped stage in its own session and asked it to score again.
     Rescoring,
+    /// It reported below its bar, and its step keeps checking (core spec §62): it stays at
+    /// work, its session told to look again on the step's timetable.
+    Rechecking(String),
     /// A stage asked a person to check something by hand, and they say it works: it passes,
     /// with their note.
     Checked(String),
@@ -352,6 +364,20 @@ pub enum Choice {
     /// The waiting stage asked for a check by hand (`Outcome::Check`) and the person did it:
     /// it works. The stage passes and the run goes on; `note` (may be empty) says what they saw.
     Checked { note: String },
+}
+
+/// The stage a run waiting on you stopped at, and its latest session's token: what **Open
+/// session** shows, or **Resume session** reopens when its terminal is gone. `None` unless the
+/// run needs you.
+pub fn waiting_session(r: &Run) -> Option<(usize, String)> {
+    if !matches!(r.state, RunState::NeedsYou(_)) {
+        return None;
+    }
+    let si = r
+        .stages
+        .iter()
+        .position(|s| s.status == StageStatus::Stopped)?;
+    Some((si, r.stages[si].latest()?.session.clone()?))
 }
 
 /// Whether `used`, a skill a session invoked, is `wanted`: the same name, ignoring case, or a
@@ -523,6 +549,9 @@ impl Runs {
             week_used: None,
             asking: None,
             fix_after: None,
+            looking: None,
+            rechecking: None,
+            with_you: None,
             link: None,
         });
         Ok(self.runs.last().expect("just pushed"))
@@ -746,6 +775,17 @@ impl Runs {
         }
     }
 
+    /// A person stepped into stage `stage` of `run`, or resumed its session, while the run waits
+    /// on them (core spec §72). Nothing else: what they do there decides what happens next.
+    pub fn person_in(&mut self, run: &str, stage: usize) {
+        if let Some(r) = self.index(run).map(|ri| &mut self.runs[ri])
+            && matches!(r.state, RunState::NeedsYou(_))
+            && stage < r.stages.len()
+        {
+            r.with_you = Some(stage);
+        }
+    }
+
     /// A starting stage's terminal or worktree couldn't be made.
     pub fn start_failed(&mut self, run: &str, stage: usize, why: &str) -> Vec<Change> {
         match self.index(run) {
@@ -830,7 +870,8 @@ impl Runs {
             return Err("only a running stage's own session reports".into());
         };
         let r = &mut self.runs[ri];
-        if r.stages[si].status != StageStatus::Running {
+        let relooked = r.stages[si].status == StageStatus::Stopped && r.looking == Some(si);
+        if r.stages[si].status != StageStatus::Running && !relooked {
             return Err("this stage has already reported, or isn't running".into());
         }
         // The skill the pipeline set must have been used by this session (§4).
@@ -865,7 +906,18 @@ impl Runs {
         let bar = r.pipeline.bar_for(si);
         let id = r.pipeline.stages[si].id.clone();
         let passed = passes(&rating, bar);
+        // A Jev stage's category this pipeline doesn't take ends the run there.
+        let ended = r.pipeline.stages[si]
+            .jev
+            .as_ref()
+            .and_then(|j| crate::jev_stage::ended_by(j, &rating.handoff));
         let why = match rating.outcome {
+            // What the person must do leads, wherever the reason is shown.
+            _ if !passed && !rating.ask.is_empty() => format!(
+                "{} (stage {id}: {}, bar {bar})",
+                rating.ask.trim_end_matches('.'),
+                rating.score
+            ),
             crate::rating::Outcome::Blocked => format!("stage {id} is blocked: {}", rating.summary),
             crate::rating::Outcome::Check => {
                 format!("stage {id} needs a person to check: {}", rating.check)
@@ -877,9 +929,27 @@ impl Runs {
                 )
             }
         };
+        r.looking = None;
+        r.rechecking = None;
+        r.with_you = None;
+        // Below its bar, with nothing a person must do: a step that keeps checking stays at
+        // work and looks again later (core spec §62).
+        let keep = !passed
+            && r.fix_after.is_none()
+            && r.pipeline.stages[si].keep.is_some()
+            && rating.outcome == crate::rating::Outcome::Done
+            && rating.ask.trim().is_empty();
         let s = &mut r.stages[si];
         if let Some(a) = s.attempts.last_mut() {
             a.rating = Some(rating);
+        }
+        if keep {
+            r.rechecking = Some(si);
+            return Ok(vec![Change {
+                run: r.id.clone(),
+                stage: Some(si),
+                what: Decided::Rechecking(why),
+            }]);
         }
         let run = r.id.clone();
         // A person's send-back waited for this report: the run goes back whatever it says.
@@ -908,12 +978,27 @@ impl Runs {
                 stage: Some(si),
                 what: Decided::Passed,
             }];
-            if si + 1 == r.stages.len() {
+            if let Some(why) = ended {
+                r.state = RunState::Stopped(why.clone());
+                changes.push(Change {
+                    run,
+                    stage: None,
+                    what: Decided::RunStopped(why),
+                });
+            } else if si + 1 == r.stages.len() {
                 r.state = RunState::Finished;
                 changes.push(Change {
                     run,
                     stage: None,
                     what: Decided::RunFinished,
+                });
+            } else if relooked {
+                // It waited on a person and passed on its own: the run goes on.
+                r.state = RunState::Running;
+                changes.push(Change {
+                    run,
+                    stage: None,
+                    what: Decided::RunResumed,
                 });
             }
             Ok(changes)
@@ -934,8 +1019,17 @@ impl Runs {
     /// resumed or stopped (core spec §52). A set-aside run's stages closing change nothing.
     pub fn session_gone(&mut self, token: &str) -> Vec<Change> {
         let mut changes = Vec::new();
+        // The person closed the stage's session they were in: it's theirs to act on again.
+        if let Some((ri, si)) = self.stage_of(token)
+            && self.runs[ri].with_you == Some(si)
+        {
+            self.runs[ri].with_you = None;
+        }
+        // A run that has ended (its pull request merged, say) closing its stage's session is
+        // hydraui's doing, not a failure.
         if let Some((ri, si)) = self.stage_of(token)
             && self.runs[ri].orchestrator != crate::run_resume::REPLAYED
+            && self.runs[ri].state.open()
             && self.runs[ri].stages[si].status.busy()
         {
             changes.extend(self.fail_stage(ri, si, "its session ended without reporting"));
@@ -986,15 +1080,18 @@ impl Runs {
     /// to report): open runs of it take its name, its bar, and each stage's settings for the
     /// stages they share. Their stage lists stay as they started (§2).
     pub fn refresh_from_file(&mut self, file: &str, now: &Pipeline) -> Vec<Added> {
+        // How it looks follows Save at once on every card of the pipeline, ended runs too, so
+        // no card keeps an old name, colour or icon (core spec §64).
+        for r in self.runs.iter_mut().filter(|r| r.pipeline.file == file) {
+            r.pipeline.take_look(now);
+        }
         for r in self
             .runs
             .iter_mut()
             .filter(|r| r.pipeline.file == file && r.state.open())
         {
-            r.pipeline.name = now.name.clone();
             r.pipeline.bar = now.bar;
-            // How it looks and how it asks product follow Save at once too.
-            r.pipeline.color = now.color;
+            // How it asks product follows Save at once too.
             r.pipeline.product_channel = now.product_channel.clone();
             r.pipeline.product_style = now.product_style.clone();
             // A stage's own settings reach it from its next start; removing and reordering
@@ -1232,6 +1329,10 @@ impl Runs {
         let Some(ri) = self.index(run) else {
             return Err(format!("no run {run}"));
         };
+        // A person acting ends any look in progress: its report wouldn't count.
+        self.runs[ri].looking = None;
+        self.runs[ri].rechecking = None;
+        self.runs[ri].with_you = None;
         let r = &self.runs[ri];
         let waiting = r
             .stages
@@ -1306,10 +1407,18 @@ impl Runs {
         else {
             return Err(format!("run {} has nothing left to do", r.id));
         };
+        let ended = r.stages[si]
+            .rating()
+            .zip(r.pipeline.stages[si].jev.as_ref())
+            .and_then(|(x, j)| crate::jev_stage::ended_by(j, &x.handoff));
         let s = &mut r.stages[si];
+        // A stage that asked a person to check something by hand, or that held back on purpose
+        // and said what a person must do (`ask`), passes once they say they did it.
         let asked = s.status == StageStatus::Stopped
-            && s.rating()
-                .is_some_and(|x| x.outcome == crate::rating::Outcome::Check);
+            && s.rating().is_some_and(|x| {
+                x.outcome == crate::rating::Outcome::Check
+                    || (x.outcome == crate::rating::Outcome::Done && !x.ask.is_empty())
+            });
         if !asked {
             return Err(
                 "only a stage that asked a person to check something by hand can pass this way"
@@ -1323,7 +1432,14 @@ impl Runs {
             stage: Some(si),
             what: Decided::Checked(note.to_string()),
         }];
-        if si + 1 == r.stages.len() {
+        if let Some(why) = ended {
+            r.state = RunState::Stopped(why.clone());
+            changes.push(Change {
+                run: id,
+                stage: None,
+                what: Decided::RunStopped(why),
+            });
+        } else if si + 1 == r.stages.len() {
             r.state = RunState::Finished;
             changes.push(Change {
                 run: id,
@@ -1563,6 +1679,58 @@ impl Runs {
             });
         }
         Ok(changes)
+    }
+
+    /// A step that kept checking ran out of time (core spec §62): it stops at its gate, as a
+    /// step that doesn't keep checking would have, and the run asks you. Nothing when it
+    /// isn't checking.
+    pub fn stop_checking(&mut self, run: &str) -> Vec<Change> {
+        let Some(ri) = self.index(run) else {
+            return Vec::new();
+        };
+        let r = &mut self.runs[ri];
+        let Some(si) = r.rechecking.take() else {
+            return Vec::new();
+        };
+        if r.stages[si].status != StageStatus::Running {
+            return Vec::new();
+        }
+        let spec = &r.pipeline.stages[si];
+        let hours = spec.keep.map_or(0, |k| k.hours);
+        let bar = r.pipeline.bar_for(si);
+        let why = match r.stages[si].rating() {
+            Some(x) => format!(
+                "stage {}: {}, bar {bar}. It kept checking for {hours} hours. {}",
+                spec.id, x.score, x.summary
+            ),
+            None => format!("stage {}: it kept checking for {hours} hours", spec.id),
+        };
+        r.stages[si].status = StageStatus::Stopped;
+        let mut changes = vec![Change {
+            run: r.id.clone(),
+            stage: Some(si),
+            what: Decided::Stopped(why.clone()),
+        }];
+        changes.extend(self.needs_you(ri, why));
+        changes
+    }
+
+    /// A stage waiting on a person is woken to look again (core spec §60): it stays waiting,
+    /// and its session may report once more. Refused unless the run waits on a person at that
+    /// stage and its session is known.
+    pub fn look_again(&mut self, run: &str, stage: usize) -> Result<(), String> {
+        let ri = self.index(run).ok_or_else(|| format!("no run {run}"))?;
+        let r = &mut self.runs[ri];
+        if !matches!(r.state, RunState::NeedsYou(_)) || r.fix_after.is_some() {
+            return Err(format!("run {run} isn't waiting for you"));
+        }
+        let s = r.stages.get(stage).ok_or("no such stage")?;
+        if s.status != StageStatus::Stopped || s.latest().and_then(|a| a.session.as_ref()).is_none()
+        {
+            return Err("only a stopped stage with its session can look again".into());
+        }
+        r.looking = Some(stage);
+        Ok(())
     }
 
     /// A person's **Score again**: the stopped stage's own session, which they worked in since
@@ -1911,6 +2079,38 @@ mod tests {
     }
 
     #[test]
+    fn a_run_is_with_you_while_you_are_in_its_waiting_stage() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b"]);
+        started(&mut runs, &id, "a", "tok-a");
+        // Not waiting on anyone: stepping in changes nothing.
+        runs.person_in(&id, 0);
+        assert_eq!(runs.run(&id).unwrap().with_you, None);
+        runs.report("tok-a", rated(40)).unwrap();
+        assert!(matches!(
+            runs.run(&id).unwrap().state,
+            RunState::NeedsYou(_)
+        ));
+        runs.person_in(&id, 0);
+        assert_eq!(runs.run(&id).unwrap().with_you, Some(0));
+        assert_eq!(
+            crate::pipeline_card::card(runs.run(&id).unwrap()).state,
+            crate::pipeline_card::CardState::WithYou
+        );
+        // Closing the session they were in hands it back to them.
+        runs.session_gone("tok-a");
+        assert_eq!(runs.run(&id).unwrap().with_you, None);
+        assert_eq!(
+            crate::pipeline_card::card(runs.run(&id).unwrap()).state,
+            crate::pipeline_card::CardState::NeedsYou
+        );
+        // A choice of theirs ends it too.
+        runs.person_in(&id, 0);
+        runs.person(&id, retry("again")).unwrap();
+        assert_eq!(runs.run(&id).unwrap().with_you, None);
+    }
+
+    #[test]
     fn a_run_starts_its_first_stage_and_links_its_session() {
         let mut runs = Runs::default();
         let id = run(&mut runs, &["a", "b"]);
@@ -2174,6 +2374,193 @@ mod tests {
         let changes = runs.person(&id, checked("")).unwrap();
         assert!(changes.iter().any(|c| c.what == Decided::RunFinished));
         assert_eq!(runs.run(&id).unwrap().state, RunState::Finished);
+    }
+
+    #[test]
+    fn a_stage_held_back_for_a_person_says_what_and_passes_once_they_have() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b"]);
+        started(&mut runs, &id, "a", "t1");
+        runs.skill_used("t1", "qa");
+        let mut held = rated(40);
+        held.ask = "Approve PR #5 on GitHub as a code owner".into();
+        runs.report("t1", held).unwrap();
+        let RunState::NeedsYou(why) = &runs.run(&id).unwrap().state else {
+            panic!("waits for a person");
+        };
+        // What it needs leads, so every place that shows the reason says it first.
+        assert!(
+            why.starts_with("Approve PR #5 on GitHub as a code owner"),
+            "{why}"
+        );
+        assert!(why.contains("40") && why.contains("bar"), "{why}");
+        runs.person(&id, checked("Approved on GitHub")).unwrap();
+        assert_eq!(status(&runs, &id, 0), StageStatus::Passed);
+        assert_eq!(runs.run(&id).unwrap().state, RunState::Running);
+    }
+
+    #[test]
+    fn a_stage_waiting_on_you_names_its_session_and_takes_a_resumed_one() {
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        assert_eq!(
+            waiting_session(runs.run(&id).unwrap()),
+            Some((1, "t2".to_string()))
+        );
+        // Its terminal closed; a person resumes its conversation in a new one.
+        runs.relink(&id, 1, "t9", "2. B");
+        assert_eq!(
+            waiting_session(runs.run(&id).unwrap()),
+            Some((1, "t9".to_string()))
+        );
+        assert_eq!(status(&runs, &id, 1), StageStatus::Stopped);
+        assert!(matches!(
+            runs.run(&id).unwrap().state,
+            RunState::NeedsYou(_)
+        ));
+        // The resumed session is the stage's now: it can look again and report.
+        runs.look_again(&id, 1).unwrap();
+        assert!(runs.report("t9", rated(90)).is_ok());
+        // Nothing waits: no session to open.
+        assert_eq!(waiting_session(runs.run(&id).unwrap()), None);
+        // A ticket a person stopped still has its stopped stage, but waits on nobody.
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        runs.person(&id, Choice::Stop).unwrap();
+        assert_eq!(waiting_session(runs.run(&id).unwrap()), None);
+    }
+
+    /// A run whose stage `a` keeps checking below its bar, then `b`.
+    fn keeping(runs: &mut Runs) -> String {
+        let mut p = pipeline(&["a", "b"]);
+        p.stages[0].keep = Some(crate::pipeline::KeepChecking {
+            every: 10,
+            hours: 8,
+        });
+        let id = runs.start_run("orch", p, "INTH-1", "x").unwrap().id.clone();
+        started(runs, &id, "a", "t1");
+        runs.skill_used("t1", "qa");
+        id
+    }
+
+    #[test]
+    fn a_step_that_keeps_checking_stays_at_work_below_its_bar() {
+        let mut runs = Runs::default();
+        let id = keeping(&mut runs);
+        let changes = runs.report("t1", rated(40)).unwrap();
+        assert!(
+            changes
+                .iter()
+                .any(|c| matches!(&c.what, Decided::Rechecking(why) if why.contains("40"))),
+            "{changes:?}"
+        );
+        let r = runs.run(&id).unwrap();
+        assert_eq!(r.state, RunState::Running);
+        assert_eq!(r.rechecking, Some(0));
+        assert_eq!(status(&runs, &id, 0), StageStatus::Running);
+        // Still short when it looks again: still at work, its new report kept.
+        runs.report("t1", rated(60)).unwrap();
+        assert_eq!(runs.run(&id).unwrap().stages[0].rating().unwrap().score, 60);
+        assert_eq!(runs.run(&id).unwrap().state, RunState::Running);
+        // Now it clears the bar: it passes and the run goes on.
+        let changes = runs.report("t1", rated(90)).unwrap();
+        assert!(changes.iter().any(|c| c.what == Decided::Passed));
+        assert_eq!(runs.run(&id).unwrap().rechecking, None);
+        assert!(runs.begin("orch", &id, "b", "", 30).is_ok());
+    }
+
+    #[test]
+    fn a_step_that_keeps_checking_asks_you_when_its_time_is_up_or_a_person_must_act() {
+        let mut runs = Runs::default();
+        let id = keeping(&mut runs);
+        runs.report("t1", rated(40)).unwrap();
+        let changes = runs.stop_checking(&id);
+        assert!(
+            changes
+                .iter()
+                .any(|c| matches!(c.what, Decided::Stopped(_)))
+        );
+        let RunState::NeedsYou(why) = &runs.run(&id).unwrap().state else {
+            panic!("asks you");
+        };
+        assert!(why.contains("kept checking for 8 hours"), "{why}");
+        assert_eq!(status(&runs, &id, 0), StageStatus::Stopped);
+        assert!(runs.stop_checking(&id).is_empty(), "only once");
+
+        // A person must act (it says what): you're asked at once.
+        let mut runs = Runs::default();
+        let id = keeping(&mut runs);
+        let mut held = rated(40);
+        held.ask = "Approve PR #5 on GitHub as a code owner".into();
+        runs.report("t1", held).unwrap();
+        assert!(matches!(
+            runs.run(&id).unwrap().state,
+            RunState::NeedsYou(_)
+        ));
+        assert_eq!(runs.run(&id).unwrap().rechecking, None);
+
+        // A person stopping it while it checks ends the checking.
+        let mut runs = Runs::default();
+        let id = keeping(&mut runs);
+        runs.report("t1", rated(40)).unwrap();
+        runs.person(&id, Choice::Stop).unwrap();
+        assert_eq!(runs.run(&id).unwrap().rechecking, None);
+    }
+
+    #[test]
+    fn a_run_ended_by_its_merged_pr_doesnt_fail_its_closing_stage() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b"]);
+        started(&mut runs, &id, "a", "t1");
+        runs.settle(&id, "its pull request was merged").unwrap();
+        // hydraui closes the stage's session: nothing to retry, nothing to tell.
+        assert!(runs.session_gone("t1").is_empty());
+        assert_eq!(runs.run(&id).unwrap().state, RunState::Finished);
+    }
+
+    #[test]
+    fn a_stage_waiting_on_you_may_look_again_and_report_anew() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a", "b"]);
+        started(&mut runs, &id, "a", "t1");
+        runs.skill_used("t1", "qa");
+        runs.report("t1", rated(40)).unwrap();
+        assert!(matches!(
+            runs.run(&id).unwrap().state,
+            RunState::NeedsYou(_)
+        ));
+        // A report out of turn is refused, as before.
+        assert!(runs.report("t1", rated(90)).is_err());
+        // Woken to look: still waiting on you while it looks.
+        runs.look_again(&id, 0).unwrap();
+        assert!(matches!(
+            runs.run(&id).unwrap().state,
+            RunState::NeedsYou(_)
+        ));
+        assert_eq!(status(&runs, &id, 0), StageStatus::Stopped);
+        // Still short: a fresh reason, still waiting.
+        runs.report("t1", rated(60)).unwrap();
+        let RunState::NeedsYou(why) = &runs.run(&id).unwrap().state else {
+            panic!("still waits");
+        };
+        assert!(why.contains("60"), "{why}");
+        assert!(runs.report("t1", rated(90)).is_err(), "one report per look");
+        // Something changed: it passes on its own and the run goes on.
+        runs.look_again(&id, 0).unwrap();
+        let changes = runs.report("t1", rated(90)).unwrap();
+        assert!(changes.iter().any(|c| c.what == Decided::Passed));
+        assert!(changes.iter().any(|c| c.what == Decided::RunResumed));
+        assert_eq!(runs.run(&id).unwrap().state, RunState::Running);
+        assert!(runs.begin("orch", &id, "b", "", 30).is_ok());
+        // Nothing waits now: no look.
+        assert!(runs.look_again(&id, 0).is_err());
+
+        // A person acting while a look is out: its late report doesn't count.
+        let mut runs = Runs::default();
+        let id = b_stopped(&mut runs);
+        runs.look_again(&id, 1).unwrap();
+        runs.person(&id, Choice::Stop).unwrap();
+        assert!(runs.report("t2", rated(90)).is_err());
     }
 
     #[test]
@@ -3003,11 +3390,16 @@ mod tests {
         now.stages[1].bar = Some(95);
         now.name = "Renamed".into();
         now.color = Some(0xd8c35a);
+        now.icon = Some("mail".into());
         now.product_style = Some("Keep it short.".into());
         runs.refresh_from_file("t", &now);
-        // A new name and colour show at once (the design: the card follows Save).
+        // A new name, colour and icon show at once (the design: the card follows Save).
         assert_eq!(runs.run(&id).unwrap().pipeline.name, "Renamed");
         assert_eq!(runs.run(&id).unwrap().pipeline.color, Some(0xd8c35a));
+        assert_eq!(
+            runs.run(&id).unwrap().pipeline.icon.as_deref(),
+            Some("mail")
+        );
         assert_eq!(
             runs.run(&id).unwrap().pipeline.product_style.as_deref(),
             Some("Keep it short.")
@@ -3023,6 +3415,25 @@ mod tests {
         other.stages[0].bar = Some(10);
         runs.refresh_from_file("other", &other);
         assert_eq!(runs.run(&id).unwrap().pipeline.bar_for(0), 95);
+    }
+
+    #[test]
+    fn an_ended_runs_card_takes_a_new_look_too() {
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a"]);
+        runs.person(&id, Choice::Stop).unwrap();
+        let mut now = pipeline(&["a"]);
+        now.icon = Some("bug".into());
+        now.color = Some(0xe06666);
+        now.stages[0].bar = Some(10);
+        runs.refresh_from_file("t", &now);
+        let r = runs.run(&id).unwrap();
+        assert_eq!(
+            (r.pipeline.icon.as_deref(), r.pipeline.color),
+            (Some("bug"), Some(0xe06666))
+        );
+        // What it ran stays as it was.
+        assert_ne!(r.pipeline.bar_for(0), 10);
     }
 
     #[test]

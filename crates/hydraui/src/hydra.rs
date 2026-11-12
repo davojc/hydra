@@ -752,6 +752,16 @@ impl Hydra {
 
     /// Stores a secret through hydra's store, which also keeps secrets.toml's index. The
     /// value is kept exactly as typed; an empty or blank one is refused.
+    /// The stored Gmail sign-in (refresh token) for `env`, from **Connect Gmail**.
+    pub fn gmail_sign_in(&self, env: &str) -> Result<String, String> {
+        let r = SecretRef::parse_path(&format!("{env}/gmail")).map_err(|e| e.to_string())?;
+        self.store
+            .get(&r)
+            .map_err(|e| e.to_string())?
+            .filter(|t| !t.trim().is_empty())
+            .ok_or_else(|| format!("Gmail isn't connected for {env}: use Connect Gmail"))
+    }
+
     pub fn set_secret(&self, path: &str, value: &str) -> Result<(), String> {
         let r = SecretRef::parse_path(path.trim()).map_err(|e| e.to_string())?;
         if value.trim().is_empty() {
@@ -1688,6 +1698,16 @@ email = \"p@example.com\"
         assert_eq!(f.hydra.missing_secrets("keyed"), vec!["keyed/linear"]);
         assert!(f.hydra.missing_secrets("work").is_empty());
         assert!(f.hydra.missing_secrets("nobody").is_empty());
+    }
+
+    #[test]
+    fn the_gmail_sign_in_is_the_envs_gmail_secret() {
+        let f = fx("");
+        let err = f.hydra.gmail_sign_in("work").unwrap_err();
+        assert!(err.contains("Connect Gmail"), "{err}");
+        f.hydra.set_secret("work/gmail", "1//r").unwrap();
+        assert_eq!(f.hydra.gmail_sign_in("work").unwrap(), "1//r");
+        assert!(f.hydra.gmail_sign_in("keyed").is_err());
     }
 
     #[test]

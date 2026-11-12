@@ -7,12 +7,15 @@ mod asking;
 mod busy;
 mod claims_page;
 mod finder;
+mod gmail;
 mod history_tab;
 mod inbox_panel;
+mod jev_run;
 mod launcher;
 mod layout_file;
 mod linear;
 mod machines_page;
+mod mail;
 mod orchestrator;
 mod phone;
 mod phone_page;
@@ -222,6 +225,9 @@ pub struct Workspace {
     history: Option<history_tab::HistoryTab>,
     /// The notifications panel under the bell, while open (core spec §57).
     inbox: Option<inbox_panel::InboxPanel>,
+    /// What Export to share or Share to a swarm just did, by pipeline file: a line under those
+    /// buttons in its settings for a while (core spec §71), and the seq that set it.
+    share_said: HashMap<String, (crate::inbox::Kind, String, u64)>,
     /// Tickets (core spec §53), when shown.
     tickets: Option<tickets_tab::TicketsTab>,
     /// Every environment's projects, as last read.
@@ -273,6 +279,12 @@ pub struct Workspace {
     wake_told: HashMap<PaneId, String>,
     /// When each run waiting on product last had its stage look in the Slack thread.
     ask_checks: HashMap<String, std::time::SystemTime>,
+    /// Runs waiting on you that look again (core spec §60): when the wait began, the last
+    /// look, and whether looking is over.
+    wait_looks: HashMap<String, (std::time::SystemTime, Option<std::time::SystemTime>, bool)>,
+    /// Steps below their bar that keep checking (core spec §62): when it began and the last
+    /// look, by run.
+    keep_looks: HashMap<String, (std::time::SystemTime, Option<std::time::SystemTime>)>,
     /// When open runs about pull requests were last checked on GitHub, and whether a check is
     /// out (a merged or closed one ends its run).
     pr_checked: Option<std::time::Instant>,
@@ -299,6 +311,16 @@ pub struct Workspace {
     park_checked: Option<std::time::Instant>,
     /// When scheduled pipelines were last looked at (core spec §58).
     schedule_checked: Option<std::time::Instant>,
+    /// `[mail]` pipelines looking at their mailbox now, by file (email triage spec §3).
+    mail_looking: std::collections::HashSet<String>,
+    /// `[mail]` pipelines letting go of claims now, by file.
+    mail_releasing: std::collections::HashSet<String>,
+    /// The thread each `[mail]` pipeline last handed over, until it's a run.
+    mail_inflight: HashMap<String, (String, std::time::Instant)>,
+    /// Pipelines imported from a swarm that has a newer version, by file (core spec §70).
+    pipeline_updates: HashMap<String, crate::pipeline_share::Update>,
+    /// The `<file> <version>` updates already announced, so each is told once.
+    updates_told: std::collections::HashSet<String>,
     /// Runs' tickets as Linear last said, by identifier: the card's SLA and link (phase 2 §5).
     linear_tickets: HashMap<String, crate::linear::Ticket>,
     /// Cards being offered or just sent, so one card never goes to two sessions.
@@ -404,6 +426,7 @@ impl Workspace {
                         ws.projects_tick(window, cx);
                         // A stage waiting on product looks in its Slack thread.
                         ws.asking_tick(window, cx);
+                        ws.waiting_tick(window, cx);
                         // A wake-up that didn't take is sent again.
                         ws.recheck_wakes(window, cx);
                         // Orchestrators idle for hours are parked to resume later.
@@ -549,6 +572,7 @@ impl Workspace {
             projects: None,
             history: None,
             inbox: None,
+            share_said: HashMap::new(),
             tickets: None,
             projects_data: Default::default(),
             tasks_tabs: HashMap::new(),
@@ -571,6 +595,8 @@ impl Workspace {
             wake_tries: HashMap::new(),
             wake_told: HashMap::new(),
             ask_checks: HashMap::new(),
+            wait_looks: HashMap::new(),
+            keep_looks: HashMap::new(),
             pr_checked: None,
             pr_checking: false,
             linear_watch: HashMap::new(),
@@ -582,6 +608,11 @@ impl Workspace {
             starting_up: HashMap::new(),
             park_checked: None,
             schedule_checked: None,
+            mail_looking: Default::default(),
+            mail_releasing: Default::default(),
+            mail_inflight: HashMap::new(),
+            pipeline_updates: HashMap::new(),
+            updates_told: std::collections::HashSet::new(),
             linear_tickets: HashMap::new(),
             in_flight: Default::default(),
             _mcp_pump: mcp_pump,
@@ -2113,19 +2144,9 @@ impl Workspace {
                 }
                 _ => None,
             };
-            // The orchestrator's state (the design's status text), red when it needs you.
-            let orchestrator = self.shown_run(cx).map(|(_, run)| {
-                let (text, red) = crate::pipeline_card::status_text(&run);
-                div()
-                    .flex_none()
-                    .max_w(px(520.))
-                    .truncate()
-                    .when(red, |d| d.text_color(cx.theme().danger))
-                    .child(text)
-            });
+            // No orchestrator line: what needs you is in the inbox and its notifications.
             bar = bar
                 .child(env_name)
-                .children(orchestrator)
                 .child(div().flex_1().min_w_0().overflow_hidden().child(accounts))
                 .when_some(usage, |b, u| b.child(u))
                 .when_some(git, |b, line| b.child(line))

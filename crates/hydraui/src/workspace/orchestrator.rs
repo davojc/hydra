@@ -30,7 +30,7 @@ pub(super) type Lane = (Run, Card, Vec<PaneId>);
 pub fn orchestrator_prompt(pipeline: &str, from_linear: bool) -> String {
     let ticket = if from_linear {
         "Tickets reach you from hydraui, which picks them (from Linear, pull requests posted in \
-         Slack, or the pipeline's schedule) and sends you one, or from me. Don't ask me for one: say you're ready and \
+         Slack, the pipeline's schedule, or its mailbox) and sends you one, or from me. Don't ask me for one: say you're ready and \
          wait."
     } else {
         "Ask me which ticket to run."
@@ -106,6 +106,7 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
     let mut settled = None;
     let (mut retrying, mut run_resumed, mut resumed) = (None, false, false);
     let (mut reopened, mut rescoring) = (None, None);
+    let mut rechecking = None;
     let (mut asked, mut answered) = (None, None);
     for c in changes.iter().filter(|c| &c.run == id) {
         match (&c.what, c.stage) {
@@ -118,6 +119,7 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
             (Decided::Retrying, Some(i)) => retrying = Some(i),
             (Decided::Reopened, Some(i)) => reopened = Some(i),
             (Decided::Rescoring, Some(i)) => rescoring = Some(i),
+            (Decided::Rechecking(_), Some(i)) => rechecking = Some(i),
             (Decided::RunResumed, _) => run_resumed = true,
             (Decided::Resumed, _) => resumed = true,
             (Decided::Asked(q), Some(i)) => asked = Some((i, q)),
@@ -146,6 +148,14 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
             "Run {id} needs a person: {why}. Tell the user why and wait: nothing you can call \
              moves it on."
         )
+    } else if let Some(i) = rechecking {
+        let every = run.pipeline.stages[i].keep.map_or(0, |k| k.every);
+        format!(
+            "Run {id}: stage {} reported below its bar and keeps checking: hydraui has its \
+             session look again every {every} minutes. Do nothing meanwhile, and don't start the \
+             next stage: hydraui tells you when it passes or needs a person.",
+            stage(i)
+        )
     } else if let Some((i, question)) = asked {
         let author = run
             .asking
@@ -154,9 +164,10 @@ pub fn wake_message(run: &Run, changes: &[Change]) -> Option<String> {
         if author {
             format!(
                 "Run {id}: stage {} waits on the pull request's author: {question} Do nothing \
-                 meanwhile: hydraui has the stage look again every 5 minutes and tells you when \
+                 meanwhile: hydraui has the stage look again every {} minutes and tells you when \
                  it moves on.",
-                stage(i)
+                stage(i),
+                run.pipeline.waiting.look_every
             )
         } else {
             format!(
@@ -406,6 +417,12 @@ impl Workspace {
         let Some((env, cwd)) = orchestrator else {
             return stage_failed(&s, "its orchestrator's terminal is gone".into());
         };
+        // A Jev stage opens no terminal: Jev answers it (email triage spec §4).
+        let jev =
+            server::get().and_then(|sv| crate::jev_stage::of(&server::lock(sv.registry()), &s));
+        if let Some((stage, bar, ticket)) = jev {
+            return self.run_jev_stage(s, stage, bar, ticket, window, cx);
+        }
         // The skill set in the pipeline must be one its session can use (§4): checked where
         // the session will look, before anything opens.
         if let Some(skill) = s.skill.clone() {
@@ -623,6 +640,86 @@ impl Workspace {
                 }
             }
         }
+        cx.notify();
+    }
+
+    /// **Resume session** on a run waiting on you whose stage's terminal is gone: its stage's
+    /// last conversation reopens with `claude --resume`, in its folder, for the person to talk
+    /// to. The stage stays where it was; the new terminal is its session now (`Runs::relink`),
+    /// so a look, Score again or its next report still count.
+    pub(super) fn resume_stage_session(
+        &mut self,
+        run: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = "Resume session";
+        let Some(sv) = server::get() else {
+            return;
+        };
+        let (r, root) = {
+            let reg = server::lock(sv.registry());
+            (reg.runs.run(run).cloned(), reg.hydra_root.clone())
+        };
+        let (Some(r), Some(root)) = (r, root) else {
+            return;
+        };
+        let Some((stage, _)) = crate::runs::waiting_session(&r) else {
+            window.push_note(
+                Note::info("This ticket isn't waiting on you any more.").title(title),
+                cx,
+            );
+            return;
+        };
+        let Some(attempt) = r.stages[stage].latest().cloned() else {
+            return;
+        };
+        let (folder, claude) = crate::run_resume::logged_session(&root, run, &attempt.label);
+        let env = self.panes.values().find_map(|v| {
+            let v = v.read(cx);
+            (v.mcp_token() == Some(r.orchestrator.as_str())).then(|| v.request.env.clone())
+        });
+        let (Some(env), Some(dir), Some(claude)) = (env, folder.filter(|d| d.is_dir()), claude)
+        else {
+            window.push_note(
+                Note::warning(
+                    "Its conversation can't be reopened: the run's log doesn't have it, or its \
+                     orchestrator is closed. Use Re-run with a note to start the stage afresh.",
+                )
+                .title(title),
+                cx,
+            );
+            return;
+        };
+        let shell = self.shell();
+        let mut request = PaneRequest::new(&env, dir.clone(), shell);
+        let mut argv = r.pipeline.stage_claude();
+        argv.extend(["--resume".into(), claude]);
+        request.command = Some(command_line(shell, &argv));
+        let name = attempt.session_name.clone().unwrap_or_else(|| {
+            crate::runs::session_name(stage, &r.pipeline.stages[stage].title, 0)
+        });
+        let Some(id) = self.open_terminal_beside(&env, request, window, cx) else {
+            window.push_note(Note::error("Its terminal didn't open.").title(title), cx);
+            return;
+        };
+        let Some(view) = self.panes.get(&id).cloned() else {
+            return;
+        };
+        view.update(cx, |v, cx| v.set_name(Some(name.clone()), cx));
+        if let Some(token) = view.read(cx).mcp_token().map(str::to_string) {
+            let mut reg = server::lock(sv.registry());
+            reg.runs.relink(run, stage, &token, &name);
+            // You're in it now: the card says With you, not Needs you (§72).
+            reg.runs.person_in(run, stage);
+        }
+        note_run(
+            run,
+            "session resumed",
+            serde_json::json!({"stage": r.pipeline.stages[stage].id, "label": attempt.label}),
+        );
+        crate::action_log::write(format!("run {run}: {name} resumed by a person"));
+        self.show_terminal(id, window, cx);
         cx.notify();
     }
 
@@ -871,7 +968,11 @@ impl Workspace {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().text_xs().text_color(color(theme::AMBER)).child("◆"))
+                    .child(crate::pipeline_icon::mark(
+                        i.run.pipeline.icon.as_deref(),
+                        theme::AMBER,
+                        13.,
+                    ))
                     .child(
                         div()
                             .flex_1()
@@ -1407,6 +1508,96 @@ impl Workspace {
         });
     }
 
+    /// **Delete pipeline…** (core spec §68): asks first, saying what stops, then ends the
+    /// pipeline and moves its file (`file`) to the Trash.
+    pub(super) fn delete_pipeline_dialog(
+        &mut self,
+        orch: PaneId,
+        file: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = crate::pipeline::load(self.hydra.paths.root(), &file)
+            .map_or_else(|_| file.clone(), |p| p.name);
+        let slots = self.slots(orch, cx);
+        let open: usize = slots.iter().map(|s| self.open_runs_of(*s, cx).len()).sum();
+        let tickets = match open {
+            0 => String::new(),
+            1 => "Its ticket in progress is stopped and its sessions close. ".to_string(),
+            n => format!("Its {n} tickets in progress are stopped and their sessions close. "),
+        };
+        let body = format!(
+            "{tickets}The pipeline moves to the Trash, so you can put it back from there. Its \
+             past runs stay in History."
+        );
+        let ws = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (ws, file) = (ws.clone(), file.clone());
+            dialog
+                .title(format!("Delete {name}?"))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(color(theme::TEXT))
+                        .child(body.clone()),
+                )
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("delete-pipeline-cancel")
+                                .label("Cancel")
+                                .ghost()
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("delete-pipeline-go")
+                                .label("Delete pipeline")
+                                .danger()
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let file = file.clone();
+                                    ws.update(cx, |ws, cx| {
+                                        ws.delete_pipeline(orch, &file, window, cx)
+                                    });
+                                }),
+                        ),
+                )
+        });
+    }
+
+    fn delete_pipeline(
+        &mut self,
+        orch: PaneId,
+        file: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = crate::pipeline::load(self.hydra.paths.root(), file)
+            .map_or_else(|_| file.to_string(), |p| p.name);
+        self.end_pipeline(orch, window, cx);
+        self.pipeline_settings.remove(&orch);
+        let note = match crate::pipeline::delete(
+            self.hydra.paths.root(),
+            file,
+            crate::file_ops::to_recycle_bin,
+        ) {
+            Ok(path) => {
+                crate::action_log::write(format!(
+                    "deleted pipeline {file}: {} moved to the Trash",
+                    path.display()
+                ));
+                Note::success("Moved to the Trash. Put it back from there if you need it.")
+                    .title(format!("Deleted {name}"))
+            }
+            Err(e) => Note::error(format!("It was ended, but not deleted: {e}"))
+                .title(format!("Couldn't delete {name}")),
+        };
+        window.push_note(note, cx);
+        cx.notify();
+    }
+
     /// Asks before stopping one ticket of orchestrator `orch` (its run `run`, shown as `title`).
     pub(super) fn stop_ticket_dialog(
         &mut self,
@@ -1597,10 +1788,15 @@ impl Workspace {
 
     /// The name and colour of the pipeline terminal `pane` belongs to, when it belongs to one.
     pub(super) fn pipeline_of(&self, pane: PaneId, cx: &gpui::App) -> Option<(String, u32)> {
+        self.pipeline_card_of(pane, cx).map(|c| (c.name, c.accent))
+    }
+
+    /// The card of the pipeline terminal `pane` belongs to.
+    pub(super) fn pipeline_card_of(&self, pane: PaneId, cx: &gpui::App) -> Option<Card> {
         self.pipeline_cards(cx)
             .into_iter()
             .find(|(_, _, panes)| panes.contains(&pane))
-            .map(|(_, c, _)| (c.name, c.accent))
+            .map(|(_, c, _)| c)
     }
 
     /// The selected environment's pipeline cards (§7.1): for each terminal that started a run,
@@ -1920,7 +2116,7 @@ impl Workspace {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().text_xs().text_color(color(c.accent)).child("◆"))
+                    .child(crate::pipeline_icon::mark(c.icon.as_deref(), c.accent, 13.))
                     .child(
                         div()
                             .flex_1()
@@ -1931,6 +2127,7 @@ impl Workspace {
                             .text_color(color(theme::TEXT))
                             .child(c.name.clone()),
                     )
+                    .children(self.update_pill(orchestrator, cx))
                     .child(self.collapse_toggle(orchestrator, false, cx)),
             )
             .child(
@@ -1993,7 +2190,6 @@ impl Workspace {
         };
         let id = run.id.clone();
         let title = crate::pipeline_card::ticket_title(&run.ticket, run.link.as_deref());
-        let stop_title = title.clone();
         let prs = crate::linear_watch::pr_links(run);
         // A pull request's own link is its title; a Linear ticket's link and PRs show below.
         let link = (!run.link.as_deref().is_some_and(|l| l.contains("/pull/")))
@@ -2042,29 +2238,6 @@ impl Workspace {
                                 .text_color(fg)
                                 .child(c.state.word()),
                         )
-                    })
-                    .child({
-                        let (run_id, label) = (run.id.clone(), stop_title);
-                        Button::new(SharedString::from(format!(
-                            "lane-stop-{orchestrator}-{}",
-                            run.id
-                        )))
-                        .label("×")
-                        .ghost()
-                        .xsmall()
-                        .tooltip("Stop this ticket and close its sessions")
-                        .on_click(cx.listener(
-                            move |ws, _, window, cx| {
-                                cx.stop_propagation();
-                                ws.stop_ticket_dialog(
-                                    orchestrator,
-                                    run_id.clone(),
-                                    label.clone(),
-                                    window,
-                                    cx,
-                                )
-                            },
-                        ))
                     }),
             )
             .children(self.render_question(orchestrator, Some(&run.id), cx))
@@ -2183,7 +2356,9 @@ pub(super) fn pill_colors(state: CardState, accent: u32) -> (gpui::Hsla, gpui::H
         CardState::Working | CardState::Done => (color(accent), color(accent).opacity(0.16)),
         CardState::Ready | CardState::Stopped => pair(theme::TEXT_SECONDARY, theme::RAISED),
         // Someone else's move: calm, not a call for the user.
-        CardState::Waiting => (color(accent), color(accent).opacity(0.16)),
+        CardState::Waiting | CardState::Rechecking => (color(accent), color(accent).opacity(0.16)),
+        // The user is at it: calm, in the pipeline's colour.
+        CardState::WithYou => (color(accent), color(accent).opacity(0.16)),
         CardState::NeedsYou => pair(theme::RED, theme::RED_TINT),
         CardState::Asking | CardState::Checking | CardState::Paused => {
             pair(theme::AMBER, theme::AMBER_TINT)

@@ -95,8 +95,84 @@ pub struct TriggerFacts<'a> {
     pub every_minutes: u32,
     /// What it runs, `ticket` or `PR`.
     pub noun: &'a str,
+    /// Where it looks, `Linear` or `Slack`.
+    pub service: &'a str,
     /// Picked already and waiting their turn (a Slack message can bring several).
     pub waiting: usize,
+}
+
+/// Why a trigger stopped by itself, as a person reads it (core spec §65): a short headline, one
+/// line on what to do, and whether signing in again is the fix. The error itself goes on hover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stopped {
+    pub title: String,
+    pub hint: String,
+    /// Signing in again (Connect Slack, a new Linear key) is the fix, not trying again.
+    pub sign_in: bool,
+}
+
+/// `why`, a stop's raw reason from `service` (`Slack`, `Linear`), in words.
+pub fn stopped(service: &str, why: &str) -> Stopped {
+    let w = why.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|x| w.contains(x));
+    let (title, hint, sign_in) = if has(&[
+        "rejected",
+        "isn't connected",
+        "invalid_auth",
+        "not_authed",
+        "token_revoked",
+        "token_expired",
+        "account_inactive",
+        "api key",
+        "http 401",
+        "http 403",
+    ]) {
+        (
+            format!("{service} needs you to sign in again"),
+            if service == "Slack" {
+                "Connect Slack, and checking starts again.".to_string()
+            } else {
+                format!("Set a new {service} API key, then try again.")
+            },
+            true,
+        )
+    } else if has(&["rate limit"]) {
+        (
+            format!("{service} asked hydraui to slow down"),
+            "Wait a few minutes, then try again.".to_string(),
+            false,
+        )
+    } else if has(&["http 5"]) {
+        (
+            format!("{service} is having problems"),
+            "It's on their side. Try again in a while.".to_string(),
+            false,
+        )
+    } else if has(&[
+        "isn't reachable",
+        "timed out",
+        "network",
+        "dns",
+        "connection",
+        "reply",
+    ]) {
+        (
+            format!("Couldn't reach {service}"),
+            "Check your internet connection, then try again.".to_string(),
+            false,
+        )
+    } else {
+        (
+            format!("Stopped checking {service}"),
+            "Something went wrong. Try again, or hover for details.".to_string(),
+            false,
+        )
+    };
+    Stopped {
+        title,
+        hint,
+        sign_in,
+    }
 }
 
 /// The card's mode and one short line saying what it means right now; the card is narrow, so
@@ -112,7 +188,7 @@ pub fn trigger(f: &TriggerFacts) -> (Mode, String) {
         return (mode, f.looking.to_string());
     }
     if let Some(why) = f.stopped.filter(|_| !f.on) {
-        return (Mode::Stopped, format!("Stopped: {why}"));
+        return (Mode::Stopped, stopped(f.service, why).title);
     }
     if !f.on {
         return (Mode::Manual, "Only runs tickets you give it".to_string());
@@ -731,6 +807,7 @@ mod tests {
             looking: "Looking in Linear for the next INTH ticket…",
             every_minutes: settings.every_minutes,
             noun: "ticket",
+            service: "Linear",
             waiting: 0,
         }
     }
@@ -761,6 +838,47 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_reads_as_what_happened_and_what_to_do() {
+        let timeout = "Slack isn't reachable: https://slack.com/api/conversations.history\
+             ?channel=C0C217CER6G&oldest=1794385962&limit=200: Network Error: Network Error: \
+             Error encountered in a header: timed out reading response (3 checks in a row failed)";
+        let s = stopped("Slack", timeout);
+        assert_eq!(s.title, "Couldn't reach Slack");
+        assert!(!s.sign_in);
+        assert!(!s.hint.contains("http"), "no addresses: {}", s.hint);
+
+        let s = stopped(
+            "Slack",
+            "Slack isn't connected for iov42: press Connect Slack",
+        );
+        assert_eq!(
+            (s.title.as_str(), s.sign_in),
+            ("Slack needs you to sign in again", true)
+        );
+        assert!(s.hint.contains("Connect Slack"));
+        let s = stopped("Linear", "Linear rejected the API key (HTTP 401)");
+        assert!(s.sign_in && s.hint.contains("API key"), "{s:?}");
+
+        assert_eq!(
+            stopped("Slack", "Slack is rate limiting (3 checks in a row failed)").title,
+            "Slack asked hydraui to slow down"
+        );
+        assert_eq!(
+            stopped(
+                "Linear",
+                "Linear answered HTTP 502 (3 checks in a row failed)"
+            )
+            .title,
+            "Linear is having problems"
+        );
+        let other = stopped("Slack", "something odd");
+        assert_eq!(
+            (other.title.as_str(), other.sign_in),
+            ("Stopped checking Slack", false)
+        );
+    }
+
+    #[test]
     fn off_is_manual_and_a_stop_by_itself_says_why() {
         let s = inth();
         let mut f = facts(&s);
@@ -769,12 +887,12 @@ mod tests {
             trigger(&f),
             (Mode::Manual, "Only runs tickets you give it".to_string())
         );
-        f.stopped = Some("the API key was rejected");
+        f.stopped = Some("Linear rejected the API key (HTTP 401)");
         assert_eq!(
             trigger(&f),
             (
                 Mode::Stopped,
-                "Stopped: the API key was rejected".to_string()
+                "Linear needs you to sign in again".to_string()
             )
         );
         // Back on, an old stop no longer counts.

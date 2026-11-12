@@ -152,9 +152,187 @@ pub fn panel_for(run: Option<&Run>, selected: Option<&str>) -> Panel {
     }
 }
 
+/// What a run waiting for a person says at a glance (core spec §59): a pill, the one thing to
+/// do, and at most two sentences of why. The full report stays under Details.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Glance {
+    pub pill: &'static str,
+    /// Starts with a verb: what to do now.
+    pub ask: String,
+    pub why: String,
+    /// The stage passes once the person says they did it (`Choice::Checked`).
+    pub person_passes: bool,
+}
+
+/// The first `n` sentences of `text`, on one line, cut to `max` characters.
+fn sentences(text: &str, n: usize, max: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut end = flat.len();
+    let mut seen = 0;
+    for (i, _) in flat.match_indices(". ") {
+        seen += 1;
+        if seen == n {
+            end = i + 1;
+            break;
+        }
+    }
+    let cut = &flat[..end];
+    if cut.chars().count() <= max {
+        return cut.to_string();
+    }
+    let short: String = cut.chars().take(max.saturating_sub(1)).collect();
+    format!("{}…", short.trim_end())
+}
+
+/// The glance for a stage `title` waiting on a person with report `rating` (its latest),
+/// else the run's `reason`.
+pub fn glance(rating: Option<&Rating>, reason: &str, title: &str) -> Glance {
+    const WHY: usize = 240;
+    let Some(r) = rating else {
+        return Glance {
+            pill: "Needs you",
+            ask: sentences(&sentence(reason), 1, 160),
+            why: String::new(),
+            person_passes: false,
+        };
+    };
+    let own = (!r.ask.trim().is_empty()).then(|| r.ask.trim().to_string());
+    match r.outcome {
+        Outcome::Check => Glance {
+            pill: "Check by hand",
+            ask: own.unwrap_or_else(|| format!("Check {title} by hand")),
+            why: sentences(&r.check, 2, WHY),
+            person_passes: true,
+        },
+        Outcome::Blocked => Glance {
+            pill: "Blocked",
+            ask: own.unwrap_or_else(|| format!("Unblock {title}")),
+            why: sentences(&r.summary, 2, WHY),
+            person_passes: false,
+        },
+        Outcome::Done => Glance {
+            pill: "Needs you",
+            person_passes: own.is_some(),
+            ask: own.unwrap_or_else(|| format!("Decide what {title} does next")),
+            why: sentences(&r.summary, 2, WHY),
+        },
+    }
+}
+
+/// What the main button says for a run's link.
+pub fn link_label(url: &str) -> &'static str {
+    if url.contains("github.com/") && url.contains("/pull/") {
+        "Open PR on GitHub"
+    } else if url.contains("linear.app/") {
+        "Open in Linear"
+    } else {
+        "Open link"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, SystemTime};
+
+    fn report(outcome: &str, summary: &str, ask: &str, check: &str) -> Rating {
+        crate::rating::from_args(&serde_json::json!({
+            "outcome": outcome, "score": 88, "summary": summary, "ask": ask, "check": check,
+            "evidence": [{"kind": "note", "detail": "d"}],
+            "reasons": [{"side": "for", "text": "r"}]}))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_glance_leads_with_what_to_do() {
+        let long = "Reviewed svc-data-ingestion #5. I found two bugs and one minor issue, and the \
+                    author fixed all three in 2638ba9 with tests, verified, CI green. The PR is \
+                    RED under POL-SEC-002, so I didn't approve it.";
+        let g = glance(
+            Some(&report(
+                "done",
+                long,
+                "Approve PR #5 on GitHub as a code owner",
+                "",
+            )),
+            "",
+            "Review PR",
+        );
+        assert_eq!(g.pill, "Needs you");
+        assert_eq!(g.ask, "Approve PR #5 on GitHub as a code owner");
+        // Two sentences at most.
+        assert!(
+            g.why
+                .starts_with("Reviewed svc-data-ingestion #5. I found two bugs")
+        );
+        assert!(!g.why.contains("POL-SEC-002"), "{}", g.why);
+        assert!(g.person_passes);
+
+        // No ask: a below-bar report asks for a decision, and a person can't pass it.
+        let g = glance(
+            Some(&report("done", "Two tests fail.", "", "")),
+            "",
+            "Review PR",
+        );
+        assert_eq!(g.ask, "Decide what Review PR does next");
+        assert_eq!(g.why, "Two tests fail.");
+        assert!(!g.person_passes);
+
+        let g = glance(
+            Some(&report(
+                "check",
+                "Built it.",
+                "",
+                "Open the share dialog. It should list 3 groups.",
+            )),
+            "",
+            "Verify",
+        );
+        assert_eq!(
+            (g.pill, g.ask.as_str()),
+            ("Check by hand", "Check Verify by hand")
+        );
+        assert_eq!(g.why, "Open the share dialog. It should list 3 groups.");
+        assert!(g.person_passes);
+
+        let g = glance(
+            Some(&report("blocked", "No access to the repo.", "", "")),
+            "",
+            "Develop",
+        );
+        assert_eq!((g.pill, g.ask.as_str()), ("Blocked", "Unblock Develop"));
+
+        // No report: the run's reason, first sentence as the ask.
+        let g = glance(
+            None,
+            "Stage a failed 3 times: the session closed. Try again later.",
+            "A",
+        );
+        assert_eq!(g.ask, "Stage a failed 3 times: the session closed.");
+        assert!(!g.person_passes);
+    }
+
+    #[test]
+    fn long_whys_are_cut_and_links_name_what_they_open() {
+        let g = glance(
+            Some(&report("done", &"word ".repeat(100), "Do it", "")),
+            "",
+            "S",
+        );
+        assert!(
+            g.why.chars().count() <= 240 && g.why.ends_with('…'),
+            "{}",
+            g.why
+        );
+        assert_eq!(
+            link_label("https://github.com/iov42/a/pull/5"),
+            "Open PR on GitHub"
+        );
+        assert_eq!(
+            link_label("https://linear.app/iov42/issue/PRE-1"),
+            "Open in Linear"
+        );
+        assert_eq!(link_label("https://example.com/x"), "Open link");
+    }
 
     use serde_json::json;
 

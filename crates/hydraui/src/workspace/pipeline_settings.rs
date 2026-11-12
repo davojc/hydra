@@ -7,25 +7,21 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{
-    AnyElement, App, Context, Entity, FontWeight, SharedString, Subscription, Window, div, px,
-};
+use gpui::{AnyElement, App, Context, Entity, SharedString, Subscription, Window, div, px};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandItem, CommandState};
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_component::select::{Select, SelectEvent, SelectState};
-use gpui_component::slider::{Slider, SliderEvent, SliderState};
-use gpui_component::{Disableable, Sizable, WindowExt, h_flex, v_flex};
+use gpui_component::select::{SelectEvent, SelectState};
+use gpui_component::slider::{SliderEvent, SliderState};
+use gpui_component::{Sizable, WindowExt, h_flex, v_flex};
 
 use super::Workspace;
 use crate::envs::PaneId;
 use crate::mcp::server;
 use crate::orchestrator_theme::{self as theme, color};
 use crate::pipeline::{self, Assignee, Edit, EditStage, LinearSettings, SlackSettings, validate};
-use crate::runs::MAX_ATTEMPTS;
 
-/// The width of a stage row's up/down arrows, so the prompt can line up under the title.
-const ARROWS_W: f32 = 44.;
+mod view;
 
 struct DraftStage {
     /// Keys its row's elements, stable while rows move.
@@ -40,6 +36,48 @@ struct DraftStage {
     own: bool,
     /// What its session is asked, before hydraui's note.
     prompt: Entity<TextareaState>,
+    /// A Jev stage's question: shown, not edited here.
+    jev: Option<JevDraft>,
+    /// Keeps checking below its bar (core spec §62).
+    keep: Option<pipeline::KeepChecking>,
+    /// Its card is unfolded (core spec §63).
+    open: bool,
+    /// Its More options are unfolded.
+    more: bool,
+}
+
+/// A Jev step being edited (email triage spec §4): its question, its categories as rows, the
+/// file it reads and the model.
+struct JevDraft {
+    instructions: Entity<TextareaState>,
+    /// Each category's row key, name and meaning, and whether it ends the run.
+    options: Vec<(u64, Entity<InputState>, Entity<InputState>, bool)>,
+    input: Entity<InputState>,
+    model: Entity<InputState>,
+}
+
+impl JevDraft {
+    fn edit(&self, cx: &App) -> crate::jev_stage::JevStage {
+        let text = |i: &Entity<InputState>| i.read(cx).value().trim().to_string();
+        crate::jev_stage::JevStage {
+            input: text(&self.input),
+            model: Some(text(&self.model)).filter(|m| !m.is_empty()),
+            instructions: self.instructions.read(cx).value().trim().to_string(),
+            options: self
+                .options
+                .iter()
+                .map(|(_, k, v, _)| (text(k), text(v)))
+                .filter(|(k, v)| !(k.is_empty() && v.is_empty()))
+                .collect(),
+            ends: self
+                .options
+                .iter()
+                .filter(|(_, _, _, end)| *end)
+                .map(|(_, k, _, _)| text(k))
+                .filter(|k| !k.is_empty())
+                .collect(),
+        }
+    }
 }
 
 /// The settings being edited for one orchestrator's pipeline file.
@@ -57,10 +95,23 @@ pub(super) struct SettingsDraft {
     product_asks: bool,
     /// The card's accent; `None`: the default teal.
     color: Option<u32>,
+    /// Its icon; `None`: the ◆ (core spec §64).
+    icon: Option<String>,
+    /// The colour and icon picker is open.
+    look_open: bool,
     /// Tickets run at once, each with its own orchestrator.
     runs: u8,
+    /// What a waiting stage's session does (core spec §60).
+    waiting: pipeline::WaitingSettings,
     /// The Advanced part is unfolded.
     advanced: bool,
+    /// The source card is unfolded, and its More options (core spec §63).
+    source_open: bool,
+    source_more: bool,
+    /// **Add a stage** shows its two kinds to pick from.
+    adding: bool,
+    /// The page's scroll, so the setup checklist can take you to a part.
+    scroll: gpui::ScrollHandle,
     bar: Entity<SliderState>,
     stages: Vec<DraftStage>,
     skills: Vec<String>,
@@ -68,13 +119,44 @@ pub(super) struct SettingsDraft {
     linear: LinearDraft,
     slack: SlackDraft,
     schedule: ScheduleDraft,
-    /// The Trigger dropdown: None, Linear, Slack or Schedule.
+    mail: MailDraft,
+    /// The Trigger dropdown: None, Linear, Slack, Schedule or Mail.
     trigger: Entity<SelectState<Vec<&'static str>>>,
     _subs: Vec<Subscription>,
 }
 
 /// The Trigger dropdown's choices, in order.
-const TRIGGERS: [&str; 4] = ["None", "Linear", "Slack", "Schedule"];
+const TRIGGERS: [&str; 5] = ["None", "Linear", "Slack", "Schedule", "Mail"];
+
+/// The Mail section (email triage spec §3): off saves the pipeline without a `[mail]` table.
+struct MailDraft {
+    on: bool,
+    /// When it looks: days and a time, e.g. `weekdays 09:00`.
+    check: Entity<InputState>,
+    /// Days each look covers.
+    look_back: Entity<InputState>,
+    /// A Gmail search narrowing it; empty: `in:inbox`.
+    query: Entity<InputState>,
+    /// The team swarm claims show in; empty: the labels alone.
+    swarm: Entity<InputState>,
+    env: Entity<InputState>,
+}
+
+impl MailDraft {
+    fn edit(&self, cx: &App) -> Option<pipeline::MailSettings> {
+        let text = |i: &Entity<InputState>| i.read(cx).value().trim().to_string();
+        self.on.then(|| pipeline::MailSettings {
+            check: text(&self.check),
+            // Not a number: 0, which the save bar names.
+            look_back_days: text(&self.look_back).parse().unwrap_or(0),
+            query: Some(text(&self.query))
+                .filter(|q| !q.is_empty())
+                .unwrap_or_else(|| "in:inbox".to_string()),
+            env: Some(text(&self.env)).filter(|e| !e.is_empty()),
+            swarm: Some(text(&self.swarm)).filter(|e| !e.is_empty()),
+        })
+    }
+}
 
 /// The Schedule section (core spec §58): off saves the pipeline without a `[schedule]` table.
 struct ScheduleDraft {
@@ -185,6 +267,11 @@ fn text(size: f32, hex: u32) -> gpui::Div {
 }
 
 impl SettingsDraft {
+    /// The pipeline file it edits.
+    pub(super) fn file(&self) -> &str {
+        &self.file
+    }
+
     fn edit(&self, cx: &App) -> Edit {
         Edit {
             name: self.name.read(cx).value().to_string(),
@@ -194,6 +281,7 @@ impl SettingsDraft {
             linear: self.linear.edit(cx),
             slack: self.slack.edit(cx),
             schedule: self.schedule.edit(cx),
+            mail: self.mail.edit(cx),
             autostart: self.saved.autostart.clone(),
             product_channel: Some(self.product.read(cx).value().trim().to_string())
                 .filter(|c| !c.is_empty()),
@@ -201,7 +289,9 @@ impl SettingsDraft {
                 .filter(|c| !c.is_empty()),
             product_asks: self.product_asks,
             color: self.color,
+            icon: self.icon.clone(),
             runs_at_once: self.runs,
+            waiting: self.waiting,
             bar: slider_value(&self.bar, cx),
             stages: self
                 .stages
@@ -213,6 +303,8 @@ impl SettingsDraft {
                     folder: s.folder.clone(),
                     bar: s.own.then(|| slider_value(&s.bar, cx)),
                     prompt: s.prompt.read(cx).value().to_string(),
+                    jev: s.jev.as_ref().map(|j| j.edit(cx)),
+                    keep: s.keep,
                 })
                 .collect(),
         }
@@ -412,7 +504,36 @@ impl Workspace {
                 "Environment; empty: the default",
             ),
         };
-        let chosen = if saved.schedule.is_some() {
+        let ml = saved.mail.clone();
+        let mail = MailDraft {
+            on: ml.is_some(),
+            check: input(
+                ml.as_ref()
+                    .map_or("weekdays 09:00".to_string(), |m| m.check.clone()),
+                "weekdays 09:00 · mon 09:00 · daily 08:30",
+            ),
+            look_back: input(ml.as_ref().map_or(7, |m| m.look_back_days).to_string(), "7"),
+            query: input(
+                ml.as_ref()
+                    .map(|m| m.query.clone())
+                    .filter(|q| q != "in:inbox")
+                    .unwrap_or_default(),
+                "Gmail search; empty: in:inbox",
+            ),
+            swarm: input(
+                ml.as_ref()
+                    .and_then(|m| m.swarm.clone())
+                    .unwrap_or_default(),
+                "Team swarm for claims; empty: Gmail labels alone",
+            ),
+            env: input(
+                ml.as_ref().and_then(|m| m.env.clone()).unwrap_or_default(),
+                "Environment; empty: the default",
+            ),
+        };
+        let chosen = if saved.mail.is_some() {
+            4
+        } else if saved.schedule.is_some() {
             3
         } else if saved.slack.is_some() {
             2
@@ -442,6 +563,7 @@ impl Workspace {
                     d.linear.on = choice == "Linear";
                     d.slack.on = choice == "Slack";
                     d.schedule.on = choice == "Schedule";
+                    d.mail.on = choice == "Mail";
                 })
             },
         ));
@@ -454,8 +576,15 @@ impl Workspace {
             product_style,
             product_asks: saved.product_asks,
             color: saved.color,
+            icon: saved.icon.clone(),
+            look_open: false,
             runs: saved.runs_at_once,
+            waiting: saved.waiting,
             advanced: false,
+            source_open: false,
+            source_more: false,
+            adding: false,
+            scroll: gpui::ScrollHandle::new(),
             bar,
             stages: Vec::new(),
             skills,
@@ -463,6 +592,7 @@ impl Workspace {
             linear,
             slack,
             schedule,
+            mail,
             trigger,
             _subs: Vec::new(),
         };
@@ -471,6 +601,23 @@ impl Workspace {
             draft.stages.push(stage);
         }
         draft._subs = subs;
+        // Unfold what needs doing; a one-step pipeline shows its step.
+        let edit = draft.edit(cx);
+        for (part, _) in pipeline::problems(&edit) {
+            match part {
+                pipeline::Part::Source => draft.source_open = true,
+                pipeline::Part::Step(i) => {
+                    if let Some(s) = draft.stages.get_mut(i) {
+                        s.open = true;
+                    }
+                }
+                pipeline::Part::Advanced => draft.advanced = true,
+                pipeline::Part::Name | pipeline::Part::Steps => {}
+            }
+        }
+        if let [only] = draft.stages.as_mut_slice() {
+            only.open = true;
+        }
         draft
     }
 
@@ -489,7 +636,7 @@ impl Workspace {
         draft.next_key += 1;
         let title = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Stage name")
+                .placeholder("Step name")
                 .default_value(s.title.clone())
         });
         let bar = slider(s.bar.unwrap_or(default), cx);
@@ -514,6 +661,53 @@ impl Workspace {
                 cx.notify();
             }),
         );
+        let jev = s.jev.as_ref().map(|j| {
+            let instructions = cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .auto_grow(2, 8)
+                    .placeholder(
+                        "e.g. A customer email to our integrations team. What are they asking for?",
+                    )
+                    .default_value(j.instructions.clone())
+            });
+            subs.push(
+                cx.subscribe_in(&instructions, window, |_, _, _: &InputEvent, _, cx| {
+                    cx.notify()
+                }),
+            );
+            let mut line = |value: String, placeholder: &'static str| {
+                let i = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder(placeholder)
+                        .default_value(value)
+                });
+                subs.push(cx.subscribe_in(&i, window, |_, _, _: &InputEvent, _, cx| cx.notify()));
+                i
+            };
+            let mut options = Vec::new();
+            // `none` is always offered: its row shows only when it says something else.
+            for (k, v) in j.options.iter().filter(|(k, v)| {
+                !(k.as_str() == crate::jev::NONE && v.as_str() == crate::jev_stage::NONE_TEXT)
+            }) {
+                let row_key = draft.next_key;
+                draft.next_key += 1;
+                options.push((
+                    row_key,
+                    line(k.clone(), "how_to"),
+                    line(v.clone(), "Asks how to do something with the platform"),
+                    j.ends.contains(k),
+                ));
+            }
+            JevDraft {
+                instructions,
+                options,
+                input: line(j.input.clone(), crate::jev_stage::DEFAULT_INPUT),
+                model: line(
+                    j.model.clone().unwrap_or_default(),
+                    "jev-latest: pin a version",
+                ),
+            }
+        });
         DraftStage {
             key,
             id: s.id.clone(),
@@ -523,6 +717,10 @@ impl Workspace {
             bar,
             own: s.bar.is_some(),
             prompt,
+            jev,
+            keep: s.keep,
+            open: false,
+            more: false,
         }
     }
 
@@ -544,168 +742,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The Linear section (phase 2 spec §2): where the pipeline's tickets come from.
-    fn render_linear_settings(
-        &self,
-        orch: PaneId,
-        draft: &SettingsDraft,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let l = &draft.linear;
-        let row = |label: &str, input: &Entity<InputState>| {
-            h_flex()
-                .gap_3()
-                .child(
-                    text(12.5, theme::TEXT_SECONDARY)
-                        .w(px(170.))
-                        .flex_none()
-                        .child(label.to_string()),
-                )
-                .child(div().w(px(300.)).child(Input::new(input).small()))
-        };
-        let mut body = v_flex().gap_2();
-        if l.on {
-            let who = |any: bool, label: &'static str| {
-                Button::new(SharedString::from(format!("linear-any-{any}-{orch}")))
-                    .label(label)
-                    .when(l.any == any, |b| b.primary())
-                    .when(l.any != any, |b| b.ghost())
-                    .xsmall()
-                    .on_click(cx.listener(move |ws, _, _, cx| {
-                        ws.with_draft(orch, cx, |d| d.linear.any = any)
-                    }))
-            };
-            let sla = |no_sla: bool, label: &'static str| {
-                Button::new(SharedString::from(format!("linear-sla-{no_sla}-{orch}")))
-                    .label(label)
-                    .when(l.no_sla == no_sla, |b| b.primary())
-                    .when(l.no_sla != no_sla, |b| b.ghost())
-                    .xsmall()
-                    .on_click(cx.listener(move |ws, _, _, cx| {
-                        ws.with_draft(orch, cx, |d| d.linear.no_sla = no_sla)
-                    }))
-            };
-            body = body
-                .child(row("Team", &l.team))
-                .child(row("Pick tickets in", &l.pick))
-                .child(row("With one of the labels", &l.labels))
-                .child(
-                    h_flex()
-                        .gap_3()
-                        .child(
-                            text(12.5, theme::TEXT_SECONDARY)
-                                .w(px(170.))
-                                .flex_none()
-                                .child("Which tickets"),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_1()
-                                .child(sla(false, "With an SLA"))
-                                .child(sla(true, "All, by priority")),
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .gap_3()
-                        .child(
-                            text(12.5, theme::TEXT_SECONDARY)
-                                .w(px(170.))
-                                .flex_none()
-                                .child("Whose tickets"),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_1()
-                                .child(who(false, "Unassigned"))
-                                .child(who(true, "Any")),
-                        ),
-                )
-                .child(row("Then move it to", &l.claim))
-                .child(row("When done, move it to", &l.passed))
-                .child(row("Check every (minutes)", &l.every));
-        }
-        body
-    }
-
-    /// The Slack trigger's options: pull requests posted in a channel.
-    fn render_slack_settings(&self, draft: &SettingsDraft) -> impl IntoElement + use<> {
-        let sl = &draft.slack;
-        let row = |label: &str, input: &Entity<InputState>| {
-            h_flex()
-                .gap_3()
-                .child(
-                    text(12.5, theme::TEXT_SECONDARY)
-                        .w(px(170.))
-                        .flex_none()
-                        .child(label.to_string()),
-                )
-                .child(div().w(px(300.)).child(Input::new(input).small()))
-        };
-        let mut body = v_flex().gap_2();
-        if sl.on {
-            body = body
-                .child(row("Channel name", &sl.label))
-                .child(row("Channel ID", &sl.channel))
-                .child(row("Mark taken with", &sl.reaction))
-                .child(row("Mark done with", &sl.done_reaction))
-                .child(row("Check every (minutes)", &sl.every))
-                .child(row("Look back (hours)", &sl.lookback));
-        }
-        body
-    }
-
-    /// The Schedule trigger's options (core spec §58): when, where, and how that reads.
-    fn render_schedule_settings(
-        &self,
-        draft: &SettingsDraft,
-        cx: &App,
-    ) -> impl IntoElement + use<> {
-        let sc = &draft.schedule;
-        let mut body = v_flex().gap_2();
-        if sc.on {
-            let row = |label: &str, input: &Entity<InputState>| {
-                h_flex()
-                    .gap_3()
-                    .child(
-                        text(12.5, theme::TEXT_SECONDARY)
-                            .w(px(170.))
-                            .flex_none()
-                            .child(label.to_string()),
-                    )
-                    .child(div().w(px(300.)).child(Input::new(input).small()))
-            };
-            let every = sc.every.read(cx).value().to_string();
-            let reads = match crate::schedule::parse(&every) {
-                Ok(w) => (
-                    format!(
-                        "{}, while hydraui is open; once when it next opens that day if it \
-                         wasn't. Each run is named like {}.",
-                        w.text(),
-                        crate::schedule::ticket(&draft.file, "2026-11-16")
-                    ),
-                    theme::TEXT_SECONDARY,
-                ),
-                Err(_) if every.trim().is_empty() => (
-                    "Days and a time: mon 18:00, weekdays 09:00, daily 08:30, mon,thu 17:00"
-                        .to_string(),
-                    theme::TEXT_MUTED,
-                ),
-                Err(e) => (e.replace("[schedule] ", ""), theme::AMBER),
-            };
-            body = body
-                .child(row("Runs", &sc.every))
-                .child(row("In environment", &sc.env))
-                .child(
-                    text(12., reads.1)
-                        .pl(px(182.))
-                        .whitespace_normal()
-                        .child(reads.0),
-                );
-        }
-        body
-    }
-
     fn with_draft(
         &mut self,
         orch: PaneId,
@@ -718,7 +754,8 @@ impl Workspace {
         cx.notify();
     }
 
-    fn add_stage(&mut self, orch: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+    /// **Add a step**: a Claude step, or a Jev sort step (`jev`), last and unfolded to fill in.
+    fn add_stage(&mut self, orch: PaneId, jev: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(mut draft) = self.pipeline_settings.remove(&orch) else {
             return;
         };
@@ -728,13 +765,34 @@ impl Workspace {
         let stage = self.new_stage(
             orch,
             &mut draft,
-            &EditStage {
-                id: None,
-                title: "New stage".into(),
-                skill,
-                folder: None,
-                bar: None,
-                prompt: String::new(),
+            &if jev {
+                EditStage {
+                    id: None,
+                    title: "Classify".into(),
+                    skill: None,
+                    folder: None,
+                    bar: Some(70),
+                    prompt: String::new(),
+                    jev: Some(crate::jev_stage::JevStage {
+                        input: crate::jev_stage::DEFAULT_INPUT.into(),
+                        model: None,
+                        instructions: String::new(),
+                        options: [("".to_string(), "".to_string())].into(),
+                        ends: Default::default(),
+                    }),
+                    keep: None,
+                }
+            } else {
+                EditStage {
+                    id: None,
+                    title: "New step".into(),
+                    skill,
+                    folder: None,
+                    bar: None,
+                    prompt: String::new(),
+                    jev: None,
+                    keep: None,
+                }
             },
             default,
             window,
@@ -742,8 +800,50 @@ impl Workspace {
             &mut subs,
         );
         draft.stages.push(stage);
+        if let Some(s) = draft.stages.last_mut() {
+            s.open = true;
+        }
+        draft.scroll.scroll_to_top_of_item(view::row_of(
+            pipeline::Part::Step(draft.stages.len() - 1),
+            draft.stages.len(),
+        ));
         draft._subs.extend(subs);
         self.pipeline_settings.insert(orch, draft);
+        cx.notify();
+    }
+
+    /// **+ Category** on Jev step `key`: an empty row to name and describe.
+    fn add_jev_option(
+        &mut self,
+        orch: PaneId,
+        key: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(draft) = self.pipeline_settings.get_mut(&orch) else {
+            return;
+        };
+        let row_key = draft.next_key;
+        draft.next_key += 1;
+        let mut subs = Vec::new();
+        let mut line = |placeholder: &'static str| {
+            let i = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+            subs.push(cx.subscribe_in(&i, window, |_, _, _: &InputEvent, _, cx| cx.notify()));
+            i
+        };
+        let (name, means) = (line("category_name"), line("What it means, for Jev"));
+        let Some(draft) = self.pipeline_settings.get_mut(&orch) else {
+            return;
+        };
+        if let Some(j) = draft
+            .stages
+            .iter_mut()
+            .find(|s| s.key == key)
+            .and_then(|s| s.jev.as_mut())
+        {
+            j.options.push((row_key, name, means, false));
+        }
+        draft._subs.extend(subs);
         cx.notify();
     }
 
@@ -898,6 +998,8 @@ impl Workspace {
         let tone = if ok { theme::TEAL } else { theme::AMBER };
         Some(
             h_flex()
+                .w_full()
+                .min_w_0()
                 .gap_2()
                 .items_start()
                 .px(px(12.))
@@ -913,450 +1015,12 @@ impl Workspace {
                 .child(
                     text(12.5, theme::TEXT_SECONDARY)
                         .flex_1()
+                        .min_w_0()
                         .whitespace_normal()
                         .child(note),
                 )
                 .into_any_element(),
         )
-    }
-
-    /// The Settings view for orchestrator `orch`.
-    pub(super) fn render_pipeline_settings(
-        &self,
-        orch: PaneId,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let Some(draft) = self.pipeline_settings.get(&orch) else {
-            return v_flex().into_any_element();
-        };
-        let edit = draft.edit(cx);
-        let dirty = edit != draft.saved;
-        let invalid = validate(&edit).err();
-        let default = edit.bar;
-        let floor = server::get().map_or(crate::runs::MIN_WEEK_LEFT, |sv| {
-            server::lock(sv.registry()).min_week_left
-        });
-        let count = draft.stages.len();
-        let router_on = self.router_state(orch, cx).is_some_and(|(_, _, ok)| ok);
-        // Product questions sit under Advanced: most pipelines never ask product.
-        let product = draft
-            .advanced
-            .then(|| self.render_product_settings(orch, draft, cx));
-        let section = |title: &str| text(11., theme::TEXT_MUTED).child(title.to_uppercase());
-        let mut stages = v_flex().gap_2();
-        for (i, s) in draft.stages.iter().enumerate() {
-            let key = s.key;
-            let value = slider_value(&s.bar, cx);
-            stages = stages.child(
-                v_flex()
-                    .id(SharedString::from(format!("settings-stage-{orch}-{key}")))
-                    .gap_2()
-                    .px(px(14.))
-                    .py(px(12.))
-                    .rounded(px(10.))
-                    .bg(color(0x131616))
-                    .border_1()
-                    .border_color(color(0x1f2524))
-                    .child(
-                        h_flex()
-                            .gap(px(10.))
-                            .child(
-                                div()
-                                    .size(px(24.))
-                                    .flex_none()
-                                    .rounded_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .border_1()
-                                    .border_color(color(theme::BORDER_STRONG))
-                                    .child(
-                                        text(11.5, theme::TEXT_SECONDARY)
-                                            .child(format!("{}", i + 1)),
-                                    ),
-                            )
-                            .child(
-                                h_flex()
-                                    .flex_none()
-                                    .w(px(ARROWS_W))
-                                    .child(
-                                        Button::new(SharedString::from(format!("up-{key}")))
-                                            .label("↑")
-                                            .ghost()
-                                            .xsmall()
-                                            .disabled(i == 0)
-                                            .on_click(cx.listener(move |ws, _, _, cx| {
-                                                ws.with_draft(orch, cx, |d| d.stages.swap(i, i - 1))
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new(SharedString::from(format!("down-{key}")))
-                                            .label("↓")
-                                            .ghost()
-                                            .xsmall()
-                                            .disabled(i + 1 == count)
-                                            .on_click(cx.listener(move |ws, _, _, cx| {
-                                                ws.with_draft(orch, cx, |d| d.stages.swap(i, i + 1))
-                                            })),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(120.))
-                                    .child(Input::new(&s.title).small()),
-                            )
-                            .child(
-                                Button::new(SharedString::from(format!("skill-{key}")))
-                                    .label(crate::setup::stage_skill_label(
-                                        s.skill.as_deref(),
-                                        router_on,
-                                    ))
-                                    .tooltip(if router_on {
-                                        "The skill this step must use before it reports. The \
-                                         team skills router adds the skills its changes need."
-                                    } else {
-                                        "The skill this step must use before it reports"
-                                    })
-                                    .dropdown_caret(true)
-                                    .outline()
-                                    .small()
-                                    .w(px(120.))
-                                    .flex_none()
-                                    .on_click(cx.listener(move |ws, _, window, cx| {
-                                        ws.pick_skill(orch, key, window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new(SharedString::from(format!("folder-{key}")))
-                                    .label(match &s.folder {
-                                        Some(f) => format!(
-                                            "in {}",
-                                            std::path::Path::new(f)
-                                                .file_name()
-                                                .map_or(f.clone(), |n| n
-                                                    .to_string_lossy()
-                                                    .into_owned())
-                                        ),
-                                        None => "Orchestrator's folder".into(),
-                                    })
-                                    .dropdown_caret(true)
-                                    .outline()
-                                    .small()
-                                    .w(px(165.))
-                                    .flex_none()
-                                    .tooltip("The folder this stage's session starts in")
-                                    .on_click(cx.listener(move |ws, _, window, cx| {
-                                        ws.pick_folder(orch, key, window, cx)
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .w(px(24.))
-                                    .flex_none()
-                                    .when(s.folder.is_some(), |slot| {
-                                        slot.child(
-                                            Button::new(SharedString::from(format!(
-                                                "folder-clear-{key}"
-                                            )))
-                                            .label("↺")
-                                            .ghost()
-                                            .xsmall()
-                                            .tooltip("Start in the orchestrator's folder")
-                                            .on_click(cx.listener(move |ws, _, _, cx| {
-                                                ws.with_draft(orch, cx, |d| {
-                                                    if let Some(s) =
-                                                        d.stages.iter_mut().find(|s| s.key == key)
-                                                    {
-                                                        s.folder = None;
-                                                    }
-                                                })
-                                            })),
-                                        )
-                                    }),
-                            )
-                            .child(div().w(px(120.)).flex_none().child(Slider::new(&s.bar)))
-                            .child(
-                                text(
-                                    12.5,
-                                    if s.own {
-                                        theme::AMBER
-                                    } else {
-                                        theme::TEXT_SECONDARY
-                                    },
-                                )
-                                .w(px(36.))
-                                .flex_none()
-                                .child(format!("{value}%")),
-                            )
-                            .child(div().w(px(44.)).flex_none().when(s.own, |d| {
-                                d.child(
-                                    Button::new(SharedString::from(format!("reset-{key}")))
-                                        .label("Reset")
-                                        .ghost()
-                                        .xsmall()
-                                        .on_click(cx.listener(move |ws, _, window, cx| {
-                                            ws.reset_bar(orch, key, window, cx)
-                                        })),
-                                )
-                            }))
-                            .child(
-                                Button::new(SharedString::from(format!("remove-{key}")))
-                                    .label("×")
-                                    .ghost()
-                                    .xsmall()
-                                    .disabled(count == 1)
-                                    .on_click(cx.listener(move |ws, _, _, cx| {
-                                        ws.with_draft(orch, cx, |d| {
-                                            d.stages.retain(|s| s.key != key);
-                                        })
-                                    })),
-                            ),
-                    )
-                    // What the stage's session is asked; hydraui's note follows it.
-                    .child(
-                        // Lined up under the title: past the number, the arrows and their gaps.
-                        div().pl(px(24. + 10. + ARROWS_W + 10.)).child(
-                            v_flex()
-                                .gap_1()
-                                .child(text(11.5, theme::TEXT_MUTED).child("Prompt"))
-                                .child(Textarea::new(&s.prompt)),
-                        ),
-                    ),
-            );
-        }
-        let save_bar =
-            if dirty {
-                let (message, hex) = match invalid {
-                    Some(why) => (why.to_string(), theme::RED),
-                    None => (
-                        format!("Unsaved changes · {count} stages"),
-                        theme::TEXT_SECONDARY,
-                    ),
-                };
-                h_flex()
-                    .px(px(28.))
-                    .py(px(12.))
-                    .gap_3()
-                    .border_t_1()
-                    .border_color(color(theme::BORDER_SUBTLE))
-                    .bg(color(theme::SURFACE))
-                    .child(div().size(px(8.)).rounded_full().bg(color(theme::AMBER)))
-                    .child(text(12.5, hex).flex_1().child(message))
-                    .child(
-                        Button::new("settings-discard")
-                            .label("Discard")
-                            .ghost()
-                            .on_click(cx.listener(move |ws, _, window, cx| {
-                                ws.discard_settings(orch, window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("settings-save")
-                            .label("Save changes")
-                            .primary()
-                            .disabled(invalid.is_some())
-                            .on_click(cx.listener(move |ws, _, window, cx| {
-                                ws.save_settings(orch, window, cx)
-                            })),
-                    )
-            } else {
-                h_flex()
-            };
-        v_flex()
-            .size_full()
-            .bg(color(theme::PANEL))
-            .child(
-                div()
-                    .id(SharedString::from(format!("settings-{orch}")))
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(
-                        v_flex()
-                            .px(px(36.))
-                            .py(px(28.))
-                            .gap(px(28.))
-                            .child(
-                                h_flex()
-                                    .justify_between()
-                                    .child(
-                                        text(20., theme::TEXT)
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .child("Pipeline settings"),
-                                    )
-                                    .child({
-                                        let file = draft.file.clone();
-                                        Button::new(SharedString::from(format!("export-{orch}")))
-                                            .label("Export…")
-                                            .ghost()
-                                            .tooltip(
-                                                "Save this pipeline as a file to send someone. \
-                                                 Saved settings only; it holds no secrets.",
-                                            )
-                                            .on_click(cx.listener(move |ws, _, window, cx| {
-                                                ws.export_pipeline(file.clone(), window, cx)
-                                            }))
-                                    }),
-                            )
-                            // 1. What it's called and how it looks in the sidebar.
-                            .child(
-                                v_flex()
-                                    .gap_2()
-                                    .child(section("Name"))
-                                    .child(div().max_w(px(480.)).child(Input::new(&draft.name)))
-                                    .child(color_swatches(orch, draft.color, cx)),
-                            )
-                            // 2. Where its work comes from.
-                            .child(
-                                v_flex()
-                                    .gap_2()
-                                    .child(section_tip(
-                                        "Where work comes from",
-                                        "Linear: picks tickets from a team. Slack: takes pull \
-                                         requests posted in a channel. Schedule: starts a run \
-                                         on set days at a set time. None: you give it work.",
-                                    ))
-                                    // A row like the options under it: label, then the choice.
-                                    .child(
-                                        h_flex()
-                                            .gap_3()
-                                            .child(
-                                                text(12.5, theme::TEXT_SECONDARY)
-                                                    .w(px(170.))
-                                                    .flex_none()
-                                                    .child("Source"),
-                                            )
-                                            .child(
-                                                div().w(px(300.)).child(
-                                                    Select::new(&draft.trigger)
-                                                        .small()
-                                                        .menu_width(px(300.)),
-                                                ),
-                                            ),
-                                    )
-                                    .child(self.render_linear_settings(orch, draft, cx))
-                                    .child(self.render_slack_settings(draft))
-                                    .child(self.render_schedule_settings(draft, cx)),
-                            )
-                            // 3. What it does, step by step.
-                            .child(
-                                v_flex()
-                                    .gap_2()
-                                    .child(section_tip(
-                                        "Steps",
-                                        "Each step is a Claude session, run top to bottom; the \
-                                         next starts when one passes its bar. In a prompt, \
-                                         {ticket} is the ticket, {pr} the pull request link, \
-                                         {handoff} what the step before handed over.",
-                                    ))
-                                    .children(self.render_router_note(orch, cx))
-                                    .child(stages)
-                                    .child(
-                                        div()
-                                            .id(SharedString::from(format!("settings-add-{orch}")))
-                                            .px(px(14.))
-                                            .py(px(10.))
-                                            .rounded(px(10.))
-                                            .border_1()
-                                            .border_dashed()
-                                            .border_color(color(0x2f7d6f))
-                                            .bg(color(0x0f2622))
-                                            .hover(|d| d.bg(color(0x133630)))
-                                            .cursor_pointer()
-                                            .text_center()
-                                            .text_color(color(theme::TEAL))
-                                            .text_size(px(13.5))
-                                            .child("+ Add step")
-                                            .on_click(cx.listener(move |ws, _, window, cx| {
-                                                ws.add_stage(orch, window, cx)
-                                            })),
-                                    ),
-                            )
-                            // 4. Everything else, folded away: how it asks product first.
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("settings-advanced-{orch}")))
-                                    .cursor_pointer()
-                                    .text_size(px(12.5))
-                                    .text_color(color(theme::TEXT_SECONDARY))
-                                    .hover(|d| d.text_color(color(theme::TEXT)))
-                                    .child(if draft.advanced {
-                                        "▾ Advanced"
-                                    } else {
-                                        "▸ Advanced"
-                                    })
-                                    .on_click(cx.listener(move |ws, _, _, cx| {
-                                        ws.with_draft(orch, cx, |d| d.advanced = !d.advanced)
-                                    })),
-                            )
-                            .when(draft.advanced, |d| {
-                                d.child(
-                                    v_flex()
-                                        .gap(px(20.))
-                                        .pl(px(14.))
-                                        .border_l_2()
-                                        .border_color(color(theme::BORDER_SUBTLE))
-                                        .children(product)
-                                        .child(
-                                            v_flex()
-                                                .gap_2()
-                                                .child(section_tip(
-                                                    "Tickets at once",
-                                                    "One at a time: one ticket after another. Up \
-                                                     to N: the orchestrator runs up to N tickets \
-                                                     side by side, each with its own sessions \
-                                                     under it, so it sees how they relate.",
-                                                ))
-                                                .child(runs_buttons(orch, draft.runs, cx)),
-                                        )
-                                        .child(
-                                            v_flex()
-                                                .gap_2()
-                                                .child(section_tip(
-                                                    "Pass mark",
-                                                    "How confident a step must be to move on. A \
-                                                     step can set its own.",
-                                                ))
-                                                .child(
-                                                    h_flex()
-                                                        .max_w(px(480.))
-                                                        .gap_3()
-                                                        .child(
-                                                            div()
-                                                                .flex_1()
-                                                                .child(Slider::new(&draft.bar)),
-                                                        )
-                                                        .child(
-                                                            text(13., theme::TEXT)
-                                                                .child(format!("{default}%")),
-                                                        ),
-                                                ),
-                                        )
-                                        .child(
-                                            v_flex()
-                                                .gap_2()
-                                                .child(section_tip(
-                                                    "Branch name",
-                                                    "The branch every step must use, e.g. \
-                                                     {ticket}. Empty: any branch.",
-                                                ))
-                                                .child(
-                                                    div()
-                                                        .max_w(px(480.))
-                                                        .child(Input::new(&draft.branch)),
-                                                ),
-                                        )
-                                        .child(text(12., theme::TEXT_MUTED).child(format!(
-                                            "A step that fails is retried up to {MAX_ATTEMPTS} \
-                                             times. Steps pause below {floor}% of the Claude week."
-                                        ))),
-                                )
-                            }),
-                    ),
-            )
-            .child(save_bar)
-            .into_any_element()
     }
 }
 
@@ -1369,6 +1033,7 @@ fn color_swatches(
     let chosen = chosen.unwrap_or(theme::TEAL);
     h_flex()
         .gap_2()
+        .flex_wrap()
         .children(pipeline::COLORS.iter().map(|(name, hex)| {
             let (name, hex) = (*name, *hex);
             let on = hex == chosen;
@@ -1503,24 +1168,6 @@ impl Workspace {
             );
         body.into_any_element()
     }
-}
-
-/// The Runs at once row: 1 to `pipeline::MAX_RUNS_AT_ONCE`, the chosen one filled.
-fn runs_buttons(orch: PaneId, chosen: u8, cx: &mut Context<Workspace>) -> gpui::AnyElement {
-    h_flex()
-        .gap_1()
-        .children((1..=pipeline::MAX_RUNS_AT_ONCE).map(|n| {
-            let b = Button::new(SharedString::from(format!("pipeline-runs-{orch}-{n}")))
-                .label(if n == 1 {
-                    "One at a time".to_string()
-                } else {
-                    format!("Up to {n}")
-                })
-                .small()
-                .on_click(cx.listener(move |ws, _, _, cx| ws.with_draft(orch, cx, |d| d.runs = n)));
-            if n == chosen { b.primary() } else { b.ghost() }
-        }))
-        .into_any_element()
 }
 
 /// A section heading with its explanation on hover (ⓘ), so the page stays short.

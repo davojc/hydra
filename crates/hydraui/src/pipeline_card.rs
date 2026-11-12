@@ -68,6 +68,8 @@ pub struct Card {
     pub segments: Vec<Segment>,
     /// Its pipeline's colour (`color`), else the default teal.
     pub accent: u32,
+    /// Its pipeline's icon (`icon`), else the ◆.
+    pub icon: Option<String>,
 }
 
 /// A collapsed pipeline's one line in the sidebar: how many sessions it has open, and how its
@@ -180,6 +182,7 @@ pub fn card(run: &Run) -> Card {
         state,
         segments,
         accent: accent(&run.pipeline),
+        icon: run.pipeline.icon.clone(),
     }
 }
 
@@ -192,6 +195,7 @@ pub fn ready_card(pipeline: &crate::pipeline::Pipeline) -> Card {
         state: CardState::Ready,
         segments: vec![Segment::Pending; pipeline.stages.len()],
         accent: accent(pipeline),
+        icon: pipeline.icon.clone(),
     }
 }
 
@@ -242,6 +246,7 @@ pub fn group_card(runs: &[&Card]) -> Card {
         accent: runs
             .first()
             .map_or(crate::orchestrator_theme::TEAL, |c| c.accent),
+        icon: runs.first().and_then(|c| c.icon.clone()),
     }
 }
 
@@ -463,6 +468,7 @@ mod tests {
             state,
             segments: vec![Segment::Pending],
             accent: 0x123456,
+            icon: None,
         };
         let (ready, working, needs) = (
             c(CardState::Ready),

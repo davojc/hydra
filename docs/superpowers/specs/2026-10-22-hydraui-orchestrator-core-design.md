@@ -1333,3 +1333,22 @@ Pipeline settings had grown into one long form. Rows of chips sat under every pr
 - **Headings.** Name, Trigger and Stages each have a large heading with one line under it saying what the section is for. The team skills note wraps inside the page.
 - **Colours.** There are 16 to pick from: Teal, Cyan, Blue, Indigo, Violet, Purple, Pink, Rose, Red, Coral, Orange, Amber, Yellow, Lime, Green and Slate. The first eight keep their values, so saved pipelines look the same.
 - **Status bar.** It no longer shows the orchestrator's line ("INTH Development · INTH-184 · needs you: …", red when a run needs you). The inbox and its notifications say what needs you now; the bar keeps the environment, accounts, usage, git and folder.
+
+## 64. A pipeline's icon (added 2026-11-12)
+
+Colour alone wasn't enough to tell pipelines apart at a glance, so a pipeline can also have an icon.
+
+```toml
+icon = "git-pull-request"
+```
+
+- **Where it shows.** The icon replaces the ◆ wherever the pipeline's mark appeared, in the pipeline's colour:
+  - the sidebar card;
+  - the grouped card of a pipeline running several tickets;
+  - an interrupted run's card, which stays amber;
+  - the strip at the head of a pipeline's tabs.
+
+  Left out, the mark is the ◆, as before.
+- **The choices.** There are 30 Lucide icons (`pipeline_icon::ICONS`), each with a plain name in settings: Pull request, Branch, Code, Bug, Ticket, Checklist, Test, Search, Shield, Rocket, Lightning, Sparkles, Mail, Inbox, Message, Bell, People, Bot, Calendar, Clock, Book, Database, Package, Layers, Wrench, Globe, Target, Flag, Star and Heart. `crate::assets` bundles those the default set lacks. A test checks that every one loads.
+- **Errors.** A name that isn't one of them is a file error that says where to pick one.
+- **Pipeline settings.** Under the colours, a row of tiles shows the ◆ and each icon in the pipeline's colour. Each is named on hover, and the chosen one is ringed. Saving writes `icon`, or removes it when the ◆ is chosen.

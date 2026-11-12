@@ -95,6 +95,8 @@ pub(super) struct SettingsDraft {
     product_asks: bool,
     /// The card's accent; `None`: the default teal.
     color: Option<u32>,
+    /// Its icon; `None`: the ◆ (core spec §64).
+    icon: Option<String>,
     /// Tickets run at once, each with its own orchestrator.
     runs: u8,
     /// What a waiting stage's session does (core spec §60).
@@ -280,6 +282,7 @@ impl SettingsDraft {
                 .filter(|c| !c.is_empty()),
             product_asks: self.product_asks,
             color: self.color,
+            icon: self.icon.clone(),
             runs_at_once: self.runs,
             waiting: self.waiting,
             bar: slider_value(&self.bar, cx),
@@ -566,6 +569,7 @@ impl Workspace {
             product_style,
             product_asks: saved.product_asks,
             color: saved.color,
+            icon: saved.icon.clone(),
             runs: saved.runs_at_once,
             waiting: saved.waiting,
             advanced: false,

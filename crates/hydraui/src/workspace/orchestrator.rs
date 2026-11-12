@@ -889,7 +889,11 @@ impl Workspace {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().text_xs().text_color(color(theme::AMBER)).child("◆"))
+                    .child(crate::pipeline_icon::mark(
+                        i.run.pipeline.icon.as_deref(),
+                        theme::AMBER,
+                        13.,
+                    ))
                     .child(
                         div()
                             .flex_1()
@@ -1578,10 +1582,15 @@ impl Workspace {
 
     /// The name and colour of the pipeline terminal `pane` belongs to, when it belongs to one.
     pub(super) fn pipeline_of(&self, pane: PaneId, cx: &gpui::App) -> Option<(String, u32)> {
+        self.pipeline_card_of(pane, cx).map(|c| (c.name, c.accent))
+    }
+
+    /// The card of the pipeline terminal `pane` belongs to.
+    pub(super) fn pipeline_card_of(&self, pane: PaneId, cx: &gpui::App) -> Option<Card> {
         self.pipeline_cards(cx)
             .into_iter()
             .find(|(_, _, panes)| panes.contains(&pane))
-            .map(|(_, c, _)| (c.name, c.accent))
+            .map(|(_, c, _)| c)
     }
 
     /// The selected environment's pipeline cards (§7.1): for each terminal that started a run,
@@ -1901,7 +1910,7 @@ impl Workspace {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().text_xs().text_color(color(c.accent)).child("◆"))
+                    .child(crate::pipeline_icon::mark(c.icon.as_deref(), c.accent, 13.))
                     .child(
                         div()
                             .flex_1()

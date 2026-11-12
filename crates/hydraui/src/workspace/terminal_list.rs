@@ -416,7 +416,7 @@ impl Workspace {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().text_xs().text_color(color(c.accent)).child("◆"))
+                    .child(crate::pipeline_icon::mark(c.icon.as_deref(), c.accent, 13.))
                     .child(
                         div()
                             .flex_1()

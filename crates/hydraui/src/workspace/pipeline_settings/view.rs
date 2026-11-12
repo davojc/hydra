@@ -282,10 +282,11 @@ impl Workspace {
                     .gap(px(10.))
                     .child(heading(
                         "Name",
-                        "What it's called in the sidebar, and its colour.",
+                        "What it's called in the sidebar, and the colour and icon that tell it apart.",
                     ))
                     .child(div().max_w(px(480.)).child(Input::new(&draft.name)))
-                    .child(color_swatches(orch, draft.color, cx)),
+                    .child(color_swatches(orch, draft.color, cx))
+                    .child(icon_picker(orch, draft.icon.as_deref(), draft.color, cx)),
             )
             // 3. What starts a run.
             .child(
@@ -723,6 +724,55 @@ impl Workspace {
         );
         body.into_any_element()
     }
+}
+
+/// The icon row (core spec §64): the ◆ and each of `pipeline_icon::ICONS`, in the pipeline's
+/// colour, the chosen one ringed and named on hover.
+fn icon_picker(
+    orch: PaneId,
+    chosen: Option<&str>,
+    accent: Option<u32>,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let accent = accent.unwrap_or(theme::TEAL);
+    let choices = std::iter::once((None, "Diamond (the default)")).chain(
+        crate::pipeline_icon::ICONS
+            .iter()
+            .map(|(n, l)| (Some(*n), *l)),
+    );
+    h_flex()
+        .flex_wrap()
+        .gap_1()
+        .children(choices.map(|(icon, label)| {
+            let on = icon == chosen;
+            div()
+                .id(SharedString::from(format!(
+                    "pipeline-icon-{orch}-{}",
+                    icon.unwrap_or("diamond")
+                )))
+                .size(px(30.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(7.))
+                .border_1()
+                .border_color(if on {
+                    color(theme::TEXT)
+                } else {
+                    color(theme::BORDER_SUBTLE)
+                })
+                .when(on, |d| d.bg(color(accent).opacity(0.12)))
+                .hover(|d| d.border_color(color(accent)))
+                .cursor_pointer()
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(label).build(window, cx)
+                })
+                .child(crate::pipeline_icon::mark(icon, accent, 15.))
+                .on_click(cx.listener(move |ws, _, _, cx| {
+                    ws.with_draft(orch, cx, |d| d.icon = icon.map(str::to_string))
+                }))
+        }))
+        .into_any_element()
 }
 
 fn runs_label(n: u8) -> String {

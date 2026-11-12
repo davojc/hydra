@@ -47,6 +47,9 @@ pub struct Pipeline {
     /// Its accent on the card and the frame round its sessions (`color = "#rrggbb"`), so
     /// pipelines are told apart at a glance; `None`: the default teal.
     pub color: Option<u32>,
+    /// Its icon in place of the ◆ (`icon = "mail"`, one of `pipeline_icon::ICONS`, core spec
+    /// §64); `None`: the ◆.
+    pub icon: Option<String>,
     /// Where its work comes from in Slack instead (`[slack]`): pull requests posted in a
     /// channel. A pipeline has one trigger, this or `linear`.
     pub slack: Option<SlackSettings>,
@@ -376,6 +379,7 @@ struct File {
     schedule: Option<FileSchedule>,
     mail: Option<FileMail>,
     color: Option<String>,
+    icon: Option<String>,
     runs_at_once: Option<u8>,
     waiting: Option<FileWaiting>,
 }
@@ -868,6 +872,11 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
         schedule: file.schedule.map(schedule_settings).transpose()?,
         mail: file.mail.map(mail_settings).transpose()?,
         color: file.color.as_deref().map(parse_color).transpose()?,
+        icon: file
+            .icon
+            .as_deref()
+            .map(crate::pipeline_icon::check)
+            .transpose()?,
         waiting: file
             .waiting
             .map(waiting_settings)
@@ -903,6 +912,7 @@ pub struct Edit {
     pub product_style: Option<String>,
     pub product_asks: bool,
     pub color: Option<u32>,
+    pub icon: Option<String>,
     pub slack: Option<SlackSettings>,
     pub schedule: Option<ScheduleSettings>,
     /// `[mail]`, kept as the file has it: Pipeline settings doesn't edit it yet.
@@ -957,6 +967,7 @@ impl From<&Pipeline> for Edit {
             product_style: p.product_style.clone(),
             product_asks: p.product_asks,
             color: p.color,
+            icon: p.icon.clone(),
             slack: p.slack.clone(),
             schedule: p.schedule.clone(),
             mail: p.mail.clone(),
@@ -1355,6 +1366,12 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
         Some(c) => doc["color"] = value(color_text(c)),
         None => {
             doc.remove("color");
+        }
+    }
+    match &edit.icon {
+        Some(i) => doc["icon"] = value(i.as_str()),
+        None => {
+            doc.remove("icon");
         }
     }
     let old: Vec<Table> = doc
@@ -2203,6 +2220,30 @@ mod tests {
         edit.color = None;
         save(d.path(), "prs", &edit).unwrap();
         assert_eq!(load(d.path(), "prs").unwrap().color, None);
+    }
+
+    #[test]
+    fn a_pipelines_icon_is_read_and_saved() {
+        let base = "name = \"P\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n";
+        assert_eq!(parse(base).unwrap().icon, None);
+        let p = parse(&format!("icon = \"mail\"\n{base}")).unwrap();
+        assert_eq!(p.icon.as_deref(), Some("mail"));
+        assert!(
+            parse(&format!("icon = \"kettle\"\n{base}"))
+                .unwrap_err()
+                .contains("kettle")
+        );
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(folder(d.path()).join("p.toml"), base).unwrap();
+        let mut edit = Edit::from(&load(d.path(), "p").unwrap());
+        edit.icon = Some("bug".into());
+        save(d.path(), "p", &edit).unwrap();
+        assert_eq!(load(d.path(), "p").unwrap().icon.as_deref(), Some("bug"));
+        edit.icon = None;
+        save(d.path(), "p", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("p.toml")).unwrap();
+        assert!(!text.contains("icon"), "{text}");
     }
 
     #[test]

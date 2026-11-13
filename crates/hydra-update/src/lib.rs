@@ -242,6 +242,13 @@ fn swap_keeping_old(swap: &Swap) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Where exe `path` really is: a link (`~/.local/bin/hydra` into `Hydra.app`) followed to
+/// the file it names, so an update replaces that file and the link keeps working. A path
+/// that can't be followed is taken as given.
+pub fn real_exe(path: PathBuf) -> PathBuf {
+    std::fs::canonicalize(&path).unwrap_or(path)
+}
+
 /// One exe: swap it, then delete the old one (which fails while it is still running; the
 /// next start removes it).
 pub fn replace(swap: &Swap) -> anyhow::Result<()> {
@@ -300,6 +307,24 @@ pub fn running_hydra_pids() -> Result<Vec<u32>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_exe_is_updated_where_it_really_is() {
+        // ~/.local/bin/hydra links into Hydra.app: the update replaces the app's copy, and
+        // the link keeps pointing at it.
+        let d = tempfile::tempdir().unwrap();
+        let app = d.path().join("Hydra.app/Contents/MacOS");
+        let bin = d.path().join("bin");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(app.join("hydra"), "old").unwrap();
+        std::os::unix::fs::symlink(app.join("hydra"), bin.join("hydra")).unwrap();
+        let real = real_exe(bin.join("hydra"));
+        assert_eq!(real, app.join("hydra").canonicalize().unwrap());
+        // Not there: as given.
+        assert_eq!(real_exe(d.path().join("gone")), d.path().join("gone"));
+    }
 
     fn swap_in(dir: &Path, name: &str) -> Swap {
         let stem = name.trim_end_matches(".exe");

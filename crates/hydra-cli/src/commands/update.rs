@@ -63,6 +63,8 @@ pub fn run(check: bool, force: bool) -> anyhow::Result<i32> {
         Some(p) => PathBuf::from(p),
         None => std::env::current_exe().context("can't find the running hydra exe")?,
     };
+    // Run through ~/.local/bin's link into Hydra.app, the app's copy is the one to replace.
+    let target = hydra_update::real_exe(target);
     let dir = target.parent().context("the hydra exe has no folder")?;
     let new = dir.join(NEW_EXE);
     if let Err(e) = download_verified(&build, &new, &user_agent()) {

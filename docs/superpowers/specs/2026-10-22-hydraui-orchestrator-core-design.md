@@ -1674,3 +1674,10 @@ The shared fix for any pipeline that several people run. It uses the swarm claim
 - **Shared pipelines** (§70).
   - **On a running card:** a pipeline imported from a swarm already showed a small pill when its owner shared a newer version. The pill now reads **Update available**, and its tooltip says what it means.
   - **On the Start pipeline card:** the card now shows "Newer version in Engineering" with **Update**, which opens the same update dialog. People see it before they start a run on an old version.
+
+## 89. Pipeline settings says what the last mail look found (added 2026-11-13)
+
+A mail look that found nothing said so only in hydraui.log, so it looked as if the trigger never ran.
+
+- **What's kept.** Each look keeps what it found in `schedule.json`, under `found:mail:<file>`. That's "no new emails", "1 new: "Sharing"", "3 new" or "couldn't look: …", and how many were someone else's.
+- **What's shown.** The line under **Check** shows it: "Saved. Last look today at 14:28 (no new emails) · next look Monday at 14:28."

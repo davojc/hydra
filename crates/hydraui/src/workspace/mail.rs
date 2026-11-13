@@ -22,6 +22,11 @@ fn look_key(file: &str) -> String {
     format!("mail:{file}")
 }
 
+/// What `schedule.json` keeps a pipeline's last look's finding under (core spec §89).
+pub(super) fn found_key(file: &str) -> String {
+    format!("found:mail:{file}")
+}
+
 impl Workspace {
     /// Each `[mail]` pipeline: a look when its time has come (every one when `now`), then the
     /// next waiting thread to its orchestrator once the last one handed over has started.
@@ -232,6 +237,12 @@ impl Workspace {
             Ok(f) => f,
             Err(e) => {
                 crate::action_log::write(format!("mail {}: look failed: {e}", p.file));
+                // Shown under Check in Pipeline settings (§89).
+                let _ = crate::schedule::mark_run(
+                    &root,
+                    &found_key(&p.file),
+                    &format!("couldn't look: {e}"),
+                );
                 window.push_note(
                     Note::error(format!("Couldn't look in the mailbox: {e}")).title(p.name.clone()),
                     cx,
@@ -258,6 +269,15 @@ impl Workspace {
         state.queue.extend(new.iter().cloned());
         if let Err(e) = mail_watch::save(&root, &p.file, &state) {
             crate::action_log::write(format!("mail {}: can't keep what it took: {e}", p.file));
+        }
+        // What it found, under Check in Pipeline settings (§89).
+        let subjects: Vec<&str> = new.iter().map(|m| m.subject.as_str()).collect();
+        if let Err(e) = crate::schedule::mark_run(
+            &root,
+            &found_key(&p.file),
+            &mail_watch::found_line(&subjects, others),
+        ) {
+            crate::action_log::write(format!("mail {}: can't note what it found: {e}", p.file));
         }
         crate::action_log::write(format!(
             "mail {}: {me}: {} new: {}",

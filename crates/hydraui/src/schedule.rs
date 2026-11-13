@@ -275,13 +275,15 @@ pub fn status(
     typed: &str,
     now: &str,
     last: Option<&str>,
+    found: Option<&str>,
 ) -> (String, bool) {
     let when = saved.and_then(|s| parse(s).ok());
     match when {
         Some(w) if saved.map(str::trim) == Some(typed.trim()) => (
             format!(
-                "Saved. Last {noun} {} · next {noun} {}.",
+                "Saved. Last {noun} {}{} · next {noun} {}.",
                 last_text(last, now),
+                found.map_or(String::new(), |f| format!(" ({f})")),
                 w.next_text(now, last)
             ),
             false,
@@ -540,12 +542,32 @@ mod tests {
     fn the_status_says_whether_it_saved_and_when_it_next_looks() {
         let now = "2026-11-13 10:10:00.000";
         let last = Some("2026-11-13 09:01:42.740");
-        let (line, unsaved) = status("look", Some("weekdays 09:53"), "weekdays 09:53", now, last);
+        let (line, unsaved) = status(
+            "look",
+            Some("weekdays 09:53"),
+            "weekdays 09:53",
+            now,
+            last,
+            None,
+        );
         assert!(!unsaved);
         assert_eq!(line, "Saved. Last look today at 09:01 · next look now.");
-        let (line, unsaved) = status("run", Some("mon 18:00"), "tue 18:00", now, None);
+        // What it found, when the look said.
+        let (line, _) = status(
+            "look",
+            Some("weekdays 09:53"),
+            "weekdays 09:53",
+            now,
+            last,
+            Some("no new emails"),
+        );
+        assert_eq!(
+            line,
+            "Saved. Last look today at 09:01 (no new emails) · next look now."
+        );
+        let (line, unsaved) = status("run", Some("mon 18:00"), "tue 18:00", now, None, None);
         assert!(unsaved && line.contains("Mondays at 18:00"), "{line}");
-        assert!(status("run", None, "mon 18:00", now, None).1);
+        assert!(status("run", None, "mon 18:00", now, None, None).1);
     }
 
     #[test]

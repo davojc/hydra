@@ -207,12 +207,17 @@ impl Workspace {
                 _ => p.mail.map(|m| m.check),
             });
         let last = crate::schedule::last_runs(root);
+        // A mail look notes what it found (§89).
+        let found = (noun == "look")
+            .then(|| last.get(&crate::workspace::mail::found_key(file)))
+            .flatten();
         let (line, unsaved) = crate::schedule::status(
             noun,
             saved.as_deref(),
             typed,
             &crate::action_log::now(),
             last.get(key).map(String::as_str),
+            found.map(String::as_str),
         );
         text(
             12.,

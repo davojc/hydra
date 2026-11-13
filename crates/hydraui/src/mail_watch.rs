@@ -195,8 +195,32 @@ pub fn save(hydra_root: &Path, file: &str, state: &MailState) -> std::io::Result
     )
 }
 
+/// What a look found, in a few words for Pipeline settings (core spec §89): "no new emails",
+/// "1 new: \"Sharing\"", "3 new", and how many were someone else's.
+pub fn found_line(subjects: &[&str], others: usize) -> String {
+    let mut line = match subjects {
+        [] => "no new emails".to_string(),
+        [one] => format!("1 new: \"{one}\""),
+        many => format!("{} new", many.len()),
+    };
+    match others {
+        0 => {}
+        1 => line.push_str(", 1 someone else's"),
+        n => line.push_str(&format!(", {n} someone else's")),
+    }
+    line
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn what_a_look_found_reads_in_a_few_words() {
+        assert_eq!(found_line(&[], 0), "no new emails");
+        assert_eq!(found_line(&["Sharing"], 0), "1 new: \"Sharing\"");
+        assert_eq!(found_line(&["a", "b", "c"], 2), "3 new, 2 someone else's");
+        assert_eq!(found_line(&[], 1), "no new emails, 1 someone else's");
+    }
+
     use super::*;
 
     fn settings() -> MailSettings {

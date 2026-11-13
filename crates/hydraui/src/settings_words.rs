@@ -34,6 +34,43 @@ pub fn days(d: u32) -> String {
     }
 }
 
+/// The shares of the seven-day Claude limit Settings offers as a stage's floor (orchestrator
+/// spec §5.1); 0 turns the check off.
+pub const WEEK_LEFT_CHOICES: [u8; 6] = [0, 10, 20, 30, 40, 50];
+
+/// The week-limit choices, with `current` added in order when the file set another.
+pub fn week_left_choices(current: u8) -> Vec<u8> {
+    let mut all = WEEK_LEFT_CHOICES.to_vec();
+    if !all.contains(&current) {
+        all.push(current);
+        all.sort_unstable();
+    }
+    all
+}
+
+/// A week-limit choice as its button says it: "Off", "20%", "30% (default)".
+pub fn week_left(n: u8) -> String {
+    match n {
+        0 => "Off".into(),
+        n if n == crate::runs::MIN_WEEK_LEFT => format!("{n}% (default)"),
+        n => format!("{n}%"),
+    }
+}
+
+/// What the week-limit setting does, at `n`.
+pub fn week_left_about(n: u8) -> String {
+    match n {
+        0 => "Off: a pipeline's stages start however little of the seven-day Claude limit is \
+              left."
+            .into(),
+        n => format!(
+            "A pipeline's next stage starts only while at least {n}% of the seven-day Claude \
+             limit is left, so pipelines don't use up the week you need yourself. Below it, the \
+             ticket waits for you."
+        ),
+    }
+}
+
 /// `options`, with `current` added in order when it isn't one (a value set in the file).
 pub fn with_current(options: &[u32], current: u32) -> Vec<u32> {
     let mut all = options.to_vec();
@@ -246,6 +283,17 @@ fn lower_first(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_week_limit_reads_as_its_choices_say_it() {
+        assert_eq!(week_left(0), "Off");
+        assert_eq!(week_left(20), "20%");
+        assert_eq!(week_left(crate::runs::MIN_WEEK_LEFT), "30% (default)");
+        assert_eq!(week_left_choices(30), WEEK_LEFT_CHOICES.to_vec());
+        assert_eq!(week_left_choices(25), vec![0, 10, 20, 25, 30, 40, 50]);
+        assert!(week_left_about(0).starts_with("Off"));
+        assert!(week_left_about(25).contains("at least 25%"));
+    }
     use crate::pipeline::{self, KeepChecking};
 
     fn edit(toml: &str) -> Edit {

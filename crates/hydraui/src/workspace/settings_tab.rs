@@ -32,6 +32,8 @@ pub(super) enum Section {
 
 pub(super) struct SettingsTab {
     section: Section,
+    /// The Claude week limit's row is marked: General was opened from the status bar's usage.
+    week_spot: bool,
     /// You and this machine's name fields, while that page shows.
     pub(super) you: Option<super::swarms_page::IdentityFields>,
 }
@@ -58,13 +60,25 @@ impl Workspace {
             self.recheck_accounts(env, cx);
         }
         let you = (section == Section::You).then(|| self.identity_fields(window, cx));
-        self.settings = Some(SettingsTab { section, you });
+        self.settings = Some(SettingsTab {
+            section,
+            you,
+            week_spot: false,
+        });
         self.projects = None;
         self.history = None;
         self.tickets = None;
         self.actions = None;
         window.focus(&self.focus, cx);
         cx.notify();
+    }
+
+    /// General, with the Claude week limit's row marked: where the status bar's usage leads.
+    pub(super) fn open_week_limit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings(Section::General, window, cx);
+        if let Some(tab) = &mut self.settings {
+            tab.week_spot = true;
+        }
     }
 
     pub(super) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -616,6 +630,43 @@ impl Workspace {
         )
         .into_any_element();
         let jev = matches!(JevKey::app().get(), Ok(Some(_)));
+        let left = ui.min_week_left;
+        let spot = self.settings.as_ref().is_some_and(|t| t.week_spot);
+        let week = v_flex()
+            .id("week-limit")
+            .gap_1()
+            .when(spot, |d| {
+                d.p_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(cx.theme().primary)
+            })
+            .child(
+                h_flex().gap_1().flex_wrap().children(
+                    crate::settings_words::week_left_choices(left)
+                        .into_iter()
+                        .map(|n| {
+                            Button::new(SharedString::from(format!("week-left-{n}")))
+                                .label(crate::settings_words::week_left(n))
+                                .small()
+                                .when(n == left, |b| b.primary())
+                                .on_click(cx.listener(move |ws, _, window, cx| {
+                                    ws.set_ui(
+                                        "min_week_left",
+                                        Some(i64::from(n).into()),
+                                        window,
+                                        cx,
+                                    )
+                                }))
+                        }),
+                ),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child(crate::settings_words::week_left_about(left)),
+            );
         v_flex()
             .gap_5()
             .child(page_title(
@@ -639,6 +690,12 @@ impl Workspace {
                     .child(action_button("reload-config", "Reload config", cx, |ws, w, cx| {
                         ws.run(Action::ReloadConfig, w, cx)
                     })),
+                cx,
+            ))
+            .child(group(
+                "Pipelines",
+                None,
+                vec![setting("Claude week limit", week.into_any_element(), cx)],
                 cx,
             ))
             .child(group(

@@ -106,7 +106,10 @@ impl Workspace {
             p if p >= WARN => cx.theme().warning,
             _ => cx.theme().muted_foreground,
         };
-        let tip = usage_tooltip(&u, account.as_deref(), now_secs());
+        let tip = format!(
+            "{}\n\nClick to set how much of the week pipelines leave you.",
+            usage_tooltip(&u, account.as_deref(), now_secs())
+        );
         Some(
             div()
                 .id("claude-usage")
@@ -115,12 +118,8 @@ impl Workspace {
                 .cursor_pointer()
                 .child(format!("claude {text}"))
                 .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                .on_click(cx.listener({
-                    let env = env.to_string();
-                    move |ws, _, window, cx| {
-                        ws.open_settings(super::settings_tab::Section::Env(env.clone()), window, cx)
-                    }
-                }))
+                // Straight to how much of the week pipelines leave you.
+                .on_click(cx.listener(|ws, _, window, cx| ws.open_week_limit(window, cx)))
                 .into_any_element(),
         )
     }

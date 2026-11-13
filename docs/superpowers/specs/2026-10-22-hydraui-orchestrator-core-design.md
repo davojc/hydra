@@ -1575,3 +1575,10 @@ A stage can draft something a person must approve before it goes anywhere: a rep
   - **Reject**: asks for an optional reason. The stage is told it was rejected and why, saves nothing, and reports done, naming the rejection.
   - **Edit**: asks what to change, as a prompt. The stage is told, revises the draft, and calls `action_propose` again. The row shows "Changing…" until the new draft arrives.
 - **Where it's kept.** Each action is kept as `<hydra home>/hydraui/actions/<id>.json`, so a restart keeps them.
+
+## 81. The Claude week limit is a setting (added 2026-11-13)
+
+How much of the seven-day Claude limit a stage needs left (`min_week_left`, orchestrator spec §5.1) could only be changed in config.toml.
+
+- **Settings › General › Pipelines** has a **Claude week limit** row, with the choices Off, 10%, 20%, 30% (the default), 40% and 50%. A value set in the file shows as a choice too. Under the choices, a line says what the current value means.
+- **The status bar's usage** ("claude 5h 42% · 7d 18%") opens General with that row marked, so the limit is one click from the number it limits. The usage's tooltip says so. Before, it opened the environment's page.

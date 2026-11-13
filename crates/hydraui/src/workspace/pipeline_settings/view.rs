@@ -118,6 +118,9 @@ fn fold(
 
 type Pick = Rc<dyn Fn(usize, &mut Workspace, &mut Window, &mut Context<Workspace>)>;
 
+/// Sets a Team swarm in the draft: the swarm picked, or `None`.
+type SetSwarm = Rc<dyn Fn(Option<String>, &mut Workspace, &mut Context<Workspace>)>;
+
 /// A dropdown: `label` on the button, one ticked item per choice; picking one runs `pick`.
 fn dropdown(
     id: SharedString,
@@ -195,6 +198,46 @@ fn numbers_in(
 }
 
 impl Workspace {
+    /// A Team swarm dropdown (core spec §87): None, the swarms this machine is in, and a saved
+    /// one it has left, kept as "(not joined)". With none joined, it says where to join one.
+    fn swarm_dropdown(
+        &self,
+        id: SharedString,
+        saved: Option<&str>,
+        ws: Entity<Workspace>,
+        set: SetSwarm,
+    ) -> AnyElement {
+        let joined: Vec<String> = self
+            .swarms
+            .iter()
+            .filter(|s| !s.removed)
+            .map(|s| s.name.clone())
+            .collect();
+        let choices = words::swarm_choices(&joined, saved);
+        let label = words::swarm_label(&joined, saved);
+        let items: Vec<(String, bool)> = choices
+            .iter()
+            .map(|(l, v)| (l.clone(), v.as_deref() == saved))
+            .collect();
+        let values: Vec<Option<String>> = choices.into_iter().map(|(_, v)| v).collect();
+        let pick: Pick = Rc::new(move |i, ws, _, cx| {
+            if let Some(v) = values.get(i) {
+                set(v.clone(), ws, cx)
+            }
+        });
+        v_flex()
+            .gap_1()
+            .child(dropdown(id, label, items, ws, pick))
+            .when(joined.is_empty(), |d| {
+                d.child(
+                    text(12., theme::TEXT_MUTED)
+                        .whitespace_normal()
+                        .child("You're not in a swarm yet: join one in Swarms settings."),
+                )
+            })
+            .into_any_element()
+    }
+
     /// Under a timetable: whether it's saved, when it last ran (or looked) and when it next
     /// will, from the file and `schedule.json` (core spec §82). `noun` "run" reads
     /// `[schedule] every`, "look" `[mail] check`; `key` is its entry in `schedule.json`.
@@ -755,7 +798,7 @@ impl Workspace {
             }
             // Without a team swarm, claims stay in each person's own mailbox: two people
             // reading a group's copies would take the same email (email triage spec §5.1).
-            if m.swarm.read(cx).value().trim().is_empty() {
+            if m.swarm.is_none() {
                 main = main.child(
                     text(12., theme::TEXT_MUTED)
                         .pl(px(182.))
@@ -769,7 +812,17 @@ impl Workspace {
             }
             extra = extra
                 .child(input_field("Gmail search", &m.query))
-                .child(input_field("Team swarm", &m.swarm))
+                .child(field(
+                    "Team swarm",
+                    self.swarm_dropdown(
+                        SharedString::from(format!("mail-swarm-{orch}")),
+                        m.swarm.as_deref(),
+                        ws.clone(),
+                        Rc::new(move |value, ws, cx| {
+                            ws.with_draft(orch, cx, |d| d.mail.swarm = value)
+                        }),
+                    ),
+                ))
                 .child(input_field("In environment", &m.env));
             folded.push("search, swarm, environment");
         }
@@ -893,7 +946,14 @@ impl Workspace {
                                  each pull request or ticket is taken through it first, so two \
                                  people never take the same one.",
                             ))
-                            .child(div().max_w(px(480.)).child(Input::new(&draft.claims_swarm)))
+                            .child(self.swarm_dropdown(
+                                SharedString::from(format!("claims-swarm-{orch}")),
+                                draft.claims_swarm.as_deref(),
+                                ws.clone(),
+                                Rc::new(move |value, ws, cx| {
+                                    ws.with_draft(orch, cx, |d| d.claims_swarm = value)
+                                }),
+                            ))
                             .child(text(12., theme::TEXT_MUTED).whitespace_normal().child(
                                 "A swarm owner creates its claims context once, named after \
                                  this pipeline's file, in Swarms settings.",

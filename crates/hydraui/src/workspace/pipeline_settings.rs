@@ -106,7 +106,7 @@ pub(super) struct SettingsDraft {
     /// A started ticket finishes below the Claude week limit (core spec §83).
     pub(super) finish_started: bool,
     /// The team swarm Slack and Linear jobs are taken through (core spec §87).
-    pub(super) claims_swarm: Entity<InputState>,
+    pub(super) claims_swarm: Option<String>,
     /// What a waiting stage's session does (core spec §60).
     waiting: pipeline::WaitingSettings,
     /// The Advanced part is unfolded.
@@ -143,8 +143,8 @@ struct MailDraft {
     look_back: Entity<InputState>,
     /// A Gmail search narrowing it; empty: `in:inbox`.
     query: Entity<InputState>,
-    /// The team swarm claims show in; empty: the labels alone.
-    swarm: Entity<InputState>,
+    /// The team swarm claims show in; `None`: the labels alone.
+    swarm: Option<String>,
     env: Entity<InputState>,
 }
 
@@ -159,7 +159,7 @@ impl MailDraft {
                 .filter(|q| !q.is_empty())
                 .unwrap_or_else(|| "in:inbox".to_string()),
             env: Some(text(&self.env)).filter(|e| !e.is_empty()),
-            swarm: Some(text(&self.swarm)).filter(|e| !e.is_empty()),
+            swarm: self.swarm.clone(),
         })
     }
 }
@@ -298,8 +298,7 @@ impl SettingsDraft {
             icon: self.icon.clone(),
             runs_at_once: self.runs,
             finish_started: self.finish_started,
-            claims_swarm: Some(self.claims_swarm.read(cx).value().trim().to_string())
-                .filter(|s| !s.is_empty()),
+            claims_swarm: self.claims_swarm.clone(),
             waiting: self.waiting,
             bar: slider_value(&self.bar, cx),
             stages: self
@@ -513,10 +512,6 @@ impl Workspace {
                 "Environment; empty: the default",
             ),
         };
-        let claims_swarm = input(
-            saved.claims_swarm.clone().unwrap_or_default(),
-            "Team swarm, e.g. iov42; empty: none",
-        );
         let ml = saved.mail.clone();
         let mail = MailDraft {
             on: ml.is_some(),
@@ -533,12 +528,7 @@ impl Workspace {
                     .unwrap_or_default(),
                 "Gmail search; empty: in:inbox",
             ),
-            swarm: input(
-                ml.as_ref()
-                    .and_then(|m| m.swarm.clone())
-                    .unwrap_or_default(),
-                "Team swarm for claims; empty: Gmail labels alone",
-            ),
+            swarm: ml.as_ref().and_then(|m| m.swarm.clone()),
             env: input(
                 ml.as_ref().and_then(|m| m.env.clone()).unwrap_or_default(),
                 "Environment; empty: the default",
@@ -593,7 +583,7 @@ impl Workspace {
             look_open: false,
             runs: saved.runs_at_once,
             finish_started: saved.finish_started,
-            claims_swarm,
+            claims_swarm: saved.claims_swarm.clone(),
             waiting: saved.waiting,
             advanced: false,
             source_open: false,

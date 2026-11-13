@@ -329,6 +329,20 @@ impl Failures {
     }
 }
 
+/// What a trigger's line says after a look that failed but didn't stop it (core spec §90):
+/// "Last look failed: " and the error's first part, short enough for the card; the whole
+/// error shows on hover.
+pub fn failed_line(why: &str) -> String {
+    const MOST: usize = 70;
+    let first = why.split(" (").next().unwrap_or(why).trim();
+    let short = if first.chars().count() > MOST {
+        format!("{}…", first.chars().take(MOST - 1).collect::<String>())
+    } else {
+        first.to_string()
+    };
+    format!("Last look failed: {short}")
+}
+
 /// Whether `ticket` (`INTH-170`) belongs to `team` (`INTH`), so its run writes back (§4).
 pub fn in_team(ticket: &str, team: &str) -> bool {
     ticket
@@ -700,6 +714,20 @@ pub fn inside_sla(breaches_at: &str, at: SystemTime) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_failed_look_says_why_in_a_few_words() {
+        assert_eq!(
+            super::failed_line("can't ask GitHub who you are: gh: not logged in (exit 1)"),
+            "Last look failed: can't ask GitHub who you are: gh: not logged in"
+        );
+        let long = "x".repeat(200);
+        let line = super::failed_line(&long);
+        assert!(
+            line.ends_with('…') && line.chars().count() == 18 + 70,
+            "{line}"
+        );
+    }
+
     #[test]
     fn a_service_never_connected_says_so_not_sign_in_again() {
         let s = super::stopped(

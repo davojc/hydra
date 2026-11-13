@@ -315,6 +315,7 @@ impl Workspace {
         match found {
             Ok(prs) if !prs.is_empty() => {
                 w.failures.clear();
+                w.failed = None;
                 let names: Vec<&str> = prs.iter().map(|p| p.ticket.as_str()).collect();
                 crate::action_log::write(format!(
                     "slack: {}: took {} from {}",
@@ -341,6 +342,7 @@ impl Workspace {
             }
             Ok(_) => {
                 w.failures.clear();
+                w.failed = None;
                 w.status = Some(lost.unwrap_or_else(|| "Nothing new".to_string()));
                 crate::action_log::write(format!("slack: {}: nothing new", pipeline.file));
                 if by_hand {
@@ -377,7 +379,12 @@ impl Workspace {
                             cx,
                         );
                     }
-                    None => w.status = Some("Last look failed".to_string()),
+                    // What went wrong in a few words; the whole error on hover (§90).
+                    None => {
+                        let why = e.to_string();
+                        w.status = Some(crate::linear_watch::failed_line(&why));
+                        w.failed = Some(why);
+                    }
                 }
             }
         }
@@ -496,6 +503,7 @@ impl Workspace {
                                 w.stopped = None;
                                 w.last = None;
                                 w.failures.clear();
+                                w.failed = None;
                             }
                         }
                         window.push_note(

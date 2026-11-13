@@ -1691,3 +1691,12 @@ A mail look that found nothing said so only in hydraui.log, so it looked as if t
 - **None** first, then each swarm this machine is in.
 - **A saved swarm you've left** stays listed, as "Ops (not joined)", instead of being cleared unseen.
 - **With no swarms**, the dropdown says "You're not in a swarm yet: join one in Swarms settings."
+
+## 90. A failed look says why (added 2026-11-13)
+
+When a Slack or Linear trigger's look failed without stopping it, the card said only "Last look failed", and the reason was only in hydraui.log. That happened to Aadam.
+
+- **On the card.** It now shows the error's first part, in up to 70 characters: "Last look failed: can't ask GitHub who you are · next look in 2:30".
+- **On hover.** The whole error shows on hover over the line.
+- **Clearing.** The next look that works clears it.
+- **Stopped triggers** are unchanged (§65): several failures in a row still stop the trigger, with Try again or Connect Slack.

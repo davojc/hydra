@@ -36,6 +36,8 @@ pub(super) struct Watch {
     pub status: Option<String>,
     /// Why it switched itself off, until a person switches it again.
     pub stopped: Option<String>,
+    /// The whole error of the last look, when it failed without stopping: on hover (§90).
+    pub failed: Option<String>,
     /// The check out was asked for with **Pick next ticket**, so its result is announced.
     pub by_hand: bool,
     /// A `[slack]` pipeline's pull request the orchestrator was told to start, and when: none
@@ -102,6 +104,8 @@ pub(super) struct TriggerView {
     pub(super) checking: bool,
     /// Holding off new work below the Claude week's floor (§83).
     pub(super) held: bool,
+    /// The last look's whole error, when it failed without stopping (§90).
+    pub(super) failed: Option<String>,
     /// Why it stopped by itself, as the error said it (shown on hover).
     pub(super) stopped: Option<String>,
     pub(super) source: Source,
@@ -357,6 +361,7 @@ impl Workspace {
         w.on = true;
         w.last = None;
         w.failures.clear();
+        w.failed = None;
         w.status = None;
         w.stopped = None;
         crate::action_log::write(format!("linear: {file}: switched to automatic"));
@@ -664,6 +669,7 @@ impl Workspace {
                 }
                 let ticket = check.claimed.expect("matched Some");
                 w.failures.clear();
+                w.failed = None;
                 w.status = Some(format!("Picked {}", ticket.identifier));
                 self.linear_tickets
                     .insert(ticket.identifier.to_ascii_uppercase(), ticket.clone());
@@ -691,6 +697,7 @@ impl Workspace {
             }
             Ok(check) => {
                 w.failures.clear();
+                w.failed = None;
                 w.status = Some("Nothing new".to_string());
                 crate::action_log::write(format!(
                     "linear: {}: nothing to pick{}",
@@ -714,8 +721,12 @@ impl Workspace {
                             cx,
                         );
                     }
-                    // The reason is in the log; the card has room for the fact.
-                    None => w.status = Some("Last look failed".to_string()),
+                    // What went wrong in a few words; the whole error on hover (§90).
+                    None => {
+                        let why = e.to_string();
+                        w.status = Some(linear_watch::failed_line(&why));
+                        w.failed = Some(why);
+                    }
                 }
             }
         }
@@ -1080,6 +1091,7 @@ impl Workspace {
             mode,
             line,
             held: held.is_some(),
+            failed: w.and_then(|w| w.failed.clone()),
             progress,
             last: w.and_then(|w| w.last),
             open_run,
@@ -1116,6 +1128,7 @@ impl Workspace {
             mode,
             line,
             held,
+            failed,
             progress,
             last,
             open_run,
@@ -1169,9 +1182,17 @@ impl Workspace {
                 .when(stop.is_none(), |d| {
                     d.child(
                         div()
+                            .id(SharedString::from(format!("trigger-line-{orch}")))
                             .text_xs()
                             .text_color(color(theme::TEXT_SECONDARY))
-                            .child(line),
+                            .child(line)
+                            // A look that failed: the whole error on hover (§90).
+                            .when_some(failed, |d, why| {
+                                d.tooltip(move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(why.clone())
+                                        .build(window, cx)
+                                })
+                            }),
                     )
                 })
                 .when_some(source.waiting_line.clone(), |d, waiting| {

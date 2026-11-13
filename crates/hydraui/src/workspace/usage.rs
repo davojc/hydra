@@ -91,6 +91,26 @@ impl Workspace {
         }
     }
 
+    /// Whether triggers in `env` hold off new work (core spec §83): the percent of the Claude
+    /// week left, when it's below hydraui's floor.
+    pub(super) fn week_held(&self, env: &str) -> Option<u8> {
+        let floor = crate::mcp::server::get().map_or(crate::runs::MIN_WEEK_LEFT, |sv| {
+            crate::mcp::server::lock(sv.registry()).min_week_left
+        });
+        let reported = self
+            .usage
+            .get(env)
+            .and_then(|u| u.seven_day)
+            .map(|l| (l.used, l.resets_at));
+        crate::runs::week_hold(reported, now_secs(), floor)
+    }
+
+    /// `week_held` for orchestrator `orch`'s environment.
+    pub(super) fn week_held_for(&self, orch: crate::envs::PaneId, cx: &gpui::App) -> Option<u8> {
+        let env = self.panes.get(&orch)?.read(cx).env().to_string();
+        self.week_held(&env)
+    }
+
     /// The status bar's usage for `env`, if its sessions have reported any.
     pub(super) fn render_usage(&self, env: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
         let u = *self.usage.get(env)?;

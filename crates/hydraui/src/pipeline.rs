@@ -42,6 +42,10 @@ pub struct Pipeline {
     /// How many tickets it runs at once (`runs_at_once`, 1 to `MAX_RUNS_AT_ONCE`): each has
     /// its own orchestrator and card, and the trigger hands work to whichever is free.
     pub runs_at_once: u8,
+    /// A ticket that has started finishes even once less of the seven-day Claude limit is left
+    /// than a stage needs (`finish_started`, core spec §83): the share holds only its first
+    /// stage. Off, every stage needs it, and a ticket can stop part-way for a person.
+    pub finish_started: bool,
     /// What a waiting stage's session does while it waits (`[waiting]`, core spec §60).
     pub waiting: WaitingSettings,
     /// Its accent on the card and the frame round its sessions (`color = "#rrggbb"`), so
@@ -393,6 +397,7 @@ struct File {
     icon: Option<String>,
     shared: Option<FileShared>,
     runs_at_once: Option<u8>,
+    finish_started: Option<bool>,
     waiting: Option<FileWaiting>,
 }
 
@@ -934,6 +939,7 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
                 ));
             }
         },
+        finish_started: file.finish_started.unwrap_or(true),
     })
 }
 
@@ -962,6 +968,7 @@ pub struct Edit {
     /// `[mail]`, kept as the file has it: Pipeline settings doesn't edit it yet.
     pub mail: Option<MailSettings>,
     pub runs_at_once: u8,
+    pub finish_started: bool,
     /// What a waiting stage's session does while it waits (`[waiting]`, core spec §60).
     pub waiting: WaitingSettings,
 }
@@ -1016,6 +1023,7 @@ impl From<&Pipeline> for Edit {
             schedule: p.schedule.clone(),
             mail: p.mail.clone(),
             runs_at_once: p.runs_at_once,
+            finish_started: p.finish_started,
             waiting: p.waiting,
         }
     }
@@ -1405,6 +1413,11 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
         doc["runs_at_once"] = value(i64::from(edit.runs_at_once));
     } else {
         doc.remove("runs_at_once");
+    }
+    if edit.finish_started {
+        doc.remove("finish_started");
+    } else {
+        doc["finish_started"] = value(false);
     }
     match edit.color {
         Some(c) => doc["color"] = value(color_text(c)),
@@ -2060,6 +2073,28 @@ mod tests {
         save(d.path(), "p", &edit).unwrap();
         let text = std::fs::read_to_string(folder(d.path()).join("p.toml")).unwrap();
         assert!(!text.contains("[waiting]"), "{text}");
+    }
+
+    #[test]
+    fn finish_started_is_on_unless_set_off_and_saved_only_when_off() {
+        let base = "name = \"PRs\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n";
+        assert!(parse(base).unwrap().finish_started);
+        assert!(
+            !parse(&format!("finish_started = false\n{base}"))
+                .unwrap()
+                .finish_started
+        );
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(folder(d.path()).join("prs.toml"), base).unwrap();
+        let mut edit = Edit::from(&load(d.path(), "prs").unwrap());
+        edit.finish_started = false;
+        save(d.path(), "prs", &edit).unwrap();
+        assert!(!load(d.path(), "prs").unwrap().finish_started);
+        edit.finish_started = true;
+        save(d.path(), "prs", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("prs.toml")).unwrap();
+        assert!(!text.contains("finish_started"), "{text}");
     }
 
     #[test]

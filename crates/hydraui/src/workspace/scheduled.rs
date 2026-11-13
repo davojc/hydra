@@ -57,6 +57,22 @@ impl Workspace {
             if !when.due(&now, last.get(&file).map(String::as_str)) {
                 continue;
             }
+            // Below the Claude week's floor it doesn't start, and isn't marked: it starts when
+            // enough is left again that day (core spec §83).
+            let would_run = self.orchestrators.iter().find_map(|(id, f)| {
+                (*f == file).then(|| self.panes.get(id).map(|v| v.read(cx).env().to_string()))?
+            });
+            if crate::schedule::pick_env(
+                sc.env.as_deref(),
+                p.autostart.as_deref(),
+                would_run.as_deref(),
+                self.ui.default_env.as_deref(),
+                &envs,
+            )
+            .is_some_and(|env| self.week_held(&env).is_some())
+            {
+                continue;
+            }
             if let Err(e) = crate::schedule::mark_run(&root, &file, &now) {
                 crate::action_log::write(format!("schedule {file}: can't note the run: {e}"));
                 continue;
@@ -143,7 +159,17 @@ impl Workspace {
                     div()
                         .text_xs()
                         .text_color(color(theme::TEXT_SECONDARY))
-                        .child(schedule_line(&when, wait)),
+                        .child(match self.week_held_for(orch, cx) {
+                            // Due, but held below the Claude week's floor (§83).
+                            Some(left) if wait.left == 0 => crate::runs::week_hold_line(
+                                left,
+                                crate::mcp::server::get()
+                                    .map_or(crate::runs::MIN_WEEK_LEFT, |sv| {
+                                        crate::mcp::server::lock(sv.registry()).min_week_left
+                                    }),
+                            ),
+                            _ => schedule_line(&when, wait),
+                        }),
                 )
                 .child(super::linear::look_bar(
                     SharedString::from(format!("schedule-bar-{orch}")),

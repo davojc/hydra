@@ -13,6 +13,27 @@ use crate::rating::{Rating, Side, passes};
 /// Attempts a failed stage gets before it waits for a person (§5.2, the user's decision).
 pub const MAX_ATTEMPTS: usize = 3;
 
+/// Whether a trigger holds off new work (core spec §83): the percent of the seven-day Claude
+/// limit left, when it's below `floor`. `reported` is the environment's last report, as
+/// (percent used, when its week resets in Unix seconds): one from a week that has since reset
+/// no longer counts, and with none there's nothing to hold for. `floor` 0 is off.
+pub fn week_hold(reported: Option<(f64, Option<i64>)>, now: i64, floor: u8) -> Option<u8> {
+    let (used, resets) = reported?;
+    if floor == 0 || resets.is_some_and(|r| now >= r) {
+        return None;
+    }
+    let left = (100.0 - used).clamp(0.0, 100.0);
+    (left < f64::from(floor)).then_some(left.floor() as u8)
+}
+
+/// What a held trigger says.
+pub fn week_hold_line(left: u8, floor: u8) -> String {
+    format!(
+        "Waiting for Claude: {left}% of your week is left, and new tickets start at {floor}% or \
+         more"
+    )
+}
+
 /// The share of the seven-day Claude limit a stage needs left, in percent, unless hydraui's
 /// config sets `min_week_left` (§5.1, the user's decision).
 pub const MIN_WEEK_LEFT: u8 = 30;
@@ -618,7 +639,12 @@ impl Runs {
             }
             _ => return no(format!("stage {stage} is already done")),
         }
-        if let Some(used) = r.week_used {
+        // A ticket that has started finishes, unless its pipeline says to stop (§83).
+        let started = r.stages.iter().any(|s| s.status != StageStatus::Waiting);
+        if let Some(used) = r
+            .week_used
+            .filter(|_| !(started && r.pipeline.finish_started))
+        {
             let left = 100.0 - used;
             if left < f64::from(min_week_left) {
                 return Err((
@@ -3307,9 +3333,30 @@ mod tests {
     }
 
     #[test]
-    fn less_than_the_weekly_share_left_needs_a_person() {
+    fn a_started_ticket_finishes_below_the_weekly_share_unless_its_pipeline_says_stop() {
+        // finish_started (the default): the share holds only the first stage.
         let mut runs = Runs::default();
         let id = run(&mut runs, &["a", "b"]);
+        runs.usage("orch", 75.0);
+        let refused = runs.begin("orch", &id, "a", "", 30).unwrap_err();
+        assert!(refused.why.contains("25%"), "{}", refused.why);
+        runs.person(&id, retry("Limit reset.")).unwrap();
+        runs.usage("orch", 10.0);
+        started(&mut runs, &id, "a", "tok-a");
+        runs.report("tok-a", rated(90)).unwrap();
+        runs.usage("orch", 80.0);
+        assert!(
+            runs.begin("orch", &id, "b", "", 30).is_ok(),
+            "started: it finishes"
+        );
+    }
+
+    #[test]
+    fn less_than_the_weekly_share_left_needs_a_person() {
+        let mut runs = Runs::default();
+        let mut p = pipeline(&["a", "b"]);
+        p.finish_started = false;
+        let id = runs.start_run("orch", p, "INTH-1", "x").unwrap().id.clone();
         // No usage report yet: allowed.
         started(&mut runs, &id, "a", "tok-a");
         runs.usage("tok-a", 70.0);
@@ -3332,6 +3379,20 @@ mod tests {
         runs.person(&id, retry("Limit reset.")).unwrap();
         runs.usage("orch", 10.0);
         assert!(runs.begin("orch", &id, "b", "", 30).is_ok());
+    }
+
+    #[test]
+    fn a_trigger_holds_below_the_weekly_share_until_the_week_resets() {
+        // 78% used of a week that resets at 1000: 22% left, below 30.
+        assert_eq!(week_hold(Some((78.0, Some(1_000))), 500, 30), Some(22));
+        assert_eq!(week_hold(Some((60.0, Some(1_000))), 500, 30), None);
+        // Reset since that report: it no longer counts.
+        assert_eq!(week_hold(Some((78.0, Some(1_000))), 1_001, 30), None);
+        // Nothing reported yet, or the check off: no hold.
+        assert_eq!(week_hold(None, 500, 30), None);
+        assert_eq!(week_hold(Some((99.0, None)), 500, 0), None);
+        assert!(week_hold_line(22, 30).contains("22%"));
+        assert!(week_hold_line(22, 30).contains("30%"));
     }
 
     #[test]

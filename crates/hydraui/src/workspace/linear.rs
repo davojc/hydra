@@ -9,7 +9,7 @@ use gpui::prelude::*;
 use gpui::{Animation, AnimationExt, AnyElement, Context, SharedString, Window, div, px, relative};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::switch::Switch;
-use gpui_component::{Sizable, h_flex, v_flex};
+use gpui_component::{Disableable, Sizable, h_flex, v_flex};
 
 use super::Workspace;
 use crate::envs::PaneId;
@@ -100,6 +100,8 @@ pub(super) struct TriggerView {
     pub(super) last: Option<SystemTime>,
     pub(super) open_run: Option<String>,
     pub(super) checking: bool,
+    /// Holding off new work below the Claude week's floor (§83).
+    pub(super) held: bool,
     /// Why it stopped by itself, as the error said it (shown on hover).
     pub(super) stopped: Option<String>,
     pub(super) source: Source,
@@ -368,6 +370,20 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(left) = self.week_held_for(orch, cx) {
+            let floor = server::get().map_or(crate::runs::MIN_WEEK_LEFT, |sv| {
+                server::lock(sv.registry()).min_week_left
+            });
+            window.push_note(
+                Note::info(crate::runs::week_hold_line(left, floor)).title(self.toast_title(
+                    orch,
+                    "Check Linear",
+                    cx,
+                )),
+                cx,
+            );
+            return;
+        }
         let Some(slot) = self.slot_for_work(orch, window, cx) else {
             window.push_note(
                 Note::info("Every run is busy: the next is picked when one ends.")
@@ -420,11 +436,13 @@ impl Workspace {
             cx.notify();
         }
         // A Slack watcher starts what it took before it looks again.
+        // Below the Claude week's floor nothing new is taken or started (§83).
         let slack: Vec<PaneId> = self
             .linear_watch
             .iter()
             .filter(|(id, w)| w.on && !w.checking && self.panes.contains_key(id))
             .map(|(id, _)| *id)
+            .filter(|id| self.week_held_for(*id, cx).is_none())
             .collect();
         let mut held: Vec<PaneId> = Vec::new();
         for orch in slack {
@@ -437,7 +455,7 @@ impl Workspace {
             .iter()
             .filter(|(id, w)| w.on && !w.checking && self.panes.contains_key(id))
             .map(|(id, _)| *id)
-            .filter(|id| !held.contains(id))
+            .filter(|id| !held.contains(id) && self.week_held_for(*id, cx).is_none())
             .filter(|id| {
                 let every = match self.linear_of(*id, cx) {
                     Some((_, s, _)) => s.every_minutes,
@@ -970,10 +988,26 @@ impl Workspace {
             waiting: source.waiting,
         });
         let checking = w.is_some_and(|w| w.checking);
+        // Below the Claude week's floor it takes nothing new, and says so (§83).
+        let held = self
+            .week_held_for(orch, cx)
+            .filter(|_| open_run.is_none() && !checking);
+        let line = match held {
+            Some(left) => crate::runs::week_hold_line(
+                left,
+                server::get().map_or(crate::runs::MIN_WEEK_LEFT, |sv| {
+                    server::lock(sv.registry()).min_week_left
+                }),
+            ),
+            None => line,
+        };
         // How far through the wait for the next look, while it's waiting to look.
         // Shown the whole time it waits for work, so the row never jumps: full while it looks,
         // empty before its first look.
-        let progress = (mode == linear_watch::Mode::Automatic && open_run.is_none()).then(|| {
+        let progress = (mode == linear_watch::Mode::Automatic
+            && open_run.is_none()
+            && held.is_none())
+        .then(|| {
             if checking {
                 1.0
             } else {
@@ -988,6 +1022,7 @@ impl Workspace {
         Some(Trigger::Lead(Box::new(TriggerView {
             mode,
             line,
+            held: held.is_some(),
             progress,
             last: w.and_then(|w| w.last),
             open_run,
@@ -1023,6 +1058,7 @@ impl Workspace {
         let TriggerView {
             mode,
             line,
+            held,
             progress,
             last,
             open_run,
@@ -1205,7 +1241,14 @@ impl Workspace {
                                 .outline()
                                 .xsmall()
                                 .loading(checking)
-                                .tooltip(source.pick_tooltip)
+                                .disabled(held)
+                                .tooltip(if held {
+                                    "Not below the Claude week limit: the line above says how \
+                                     much is left"
+                                        .to_string()
+                                } else {
+                                    source.pick_tooltip
+                                })
                                 .on_click(cx.listener(move |ws, _, window, cx| {
                                     ws.check_linear_now(orch, window, cx)
                                 })),

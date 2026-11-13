@@ -1590,3 +1590,17 @@ A scheduled run or a mailbox look (§58, email triage spec §3) kept only the da
 - **Each run or look keeps its time** in `schedule.json`: `2026-11-13 09:01:42.740`, not `2026-11-13`.
 - **When it's due:** on one of its days, once its time has passed, if nothing ran since that time today. So a time moved later the same day gets its own run, and one time never runs twice. A date alone, written before this change, still counts as the whole day.
 - **A line under Runs and under Check** reads the timetable from the saved file, not from what's typed: "Saved. Last look today at 09:01 · next look Monday at 09:53." While what's typed differs from the file, it says so in amber: "Not saved yet: Save changes to use it. Until then it's Weekdays at 09:00."
+
+## 83. Below the Claude week limit, nothing new starts, and a started ticket finishes (added 2026-11-13)
+
+The week limit (`min_week_left`, §81) was checked only when a stage started. A trigger therefore took work below it. A Slack PR got its 👀, so nobody else would take it, and its first stage was then refused. The ticket sat claimed and blocked. Daniel's run at 22% of 30% is an example.
+
+- **Triggers hold.** While less than the limit is left in a pipeline's environment, its trigger takes nothing new:
+  - Linear doesn't look or claim;
+  - Slack neither marks nor starts a PR, and those already queued wait;
+  - a `[mail]` look neither labels nor starts an email;
+  - a scheduled run doesn't start and isn't marked, so it starts later that day if enough comes back.
+- **What's shown.** The card's trigger line says "Waiting for Claude: 22% of your week is left, and new tickets start at 30% or more". **Pick next ticket** / **Take next PR** are disabled, with that reason. **Check mail now** says it in its notice.
+- **Which report counts.** The hold reads the environment's latest seven-day report. One from before the week's reset no longer counts, and with no report there's nothing to hold for.
+- **A started ticket finishes** (`finish_started`, on by default, under Pipeline settings › Advanced › Claude week limit). The limit applies to a ticket's first stage only. Once a ticket has started, its stages carry on to the end, so a claimed ticket is never left half done.
+- **"Stop for you"** (`finish_started = false`) keeps the old rule. Every stage needs the limit, and a ticket below it waits for a person, still claimed.

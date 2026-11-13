@@ -1030,8 +1030,7 @@ mod tests {
     }
 
     #[test]
-    fn usage_reports_feed_the_weekly_check() {
-        use crate::runs::Decided;
+    fn usage_reports_reach_the_run_and_a_started_ticket_finishes() {
         let (_home, reg, orch) = with_pipeline();
         let stage = first_stage_open(&reg, &orch);
         let usage = r#"{"jsonrpc":"2.0","method":"hydraui/usage","params":{"rate_limits":{"seven_day":{"used_percentage":75}}}}"#;
@@ -1049,10 +1048,12 @@ mod tests {
             "stage_start",
             json!({"run": "INTH-7-1", "stage": "b"}),
         );
-        assert!(err && text.contains("25%"), "{text}");
-        assert!(
-            matches!(&event, Some(McpEvent::RunChanged(c)) if c.iter().any(|c| matches!(c.what, Decided::RunNeedsYou(_))))
-        );
+        // 25% left is below the 30% floor, but the ticket has started: it finishes (§83).
+        assert!(!err, "{text}");
+        assert!(event.is_some());
+        let st: Value =
+            serde_json::from_str(&call(&reg, &orch, "run_status", json!({})).0).unwrap();
+        assert_eq!(st["week_used"], 75.0);
     }
 
     #[test]

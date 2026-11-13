@@ -808,7 +808,7 @@ impl Workspace {
             "Advanced settings",
             Some(
                 "While a stage waits · Tickets at once · Default pass mark · Branch · Product \
-                 questions"
+                 questions · Claude week limit"
                     .into(),
             ),
         )
@@ -877,9 +877,49 @@ impl Workspace {
                         .child(div().max_w(px(480.)).child(Input::new(&draft.branch))),
                 )
                 .child(self.render_product_settings(orch, draft, cx))
+                .child({
+                    let finish = draft.finish_started;
+                    let choice = |on: bool, label: &'static str| {
+                        let b =
+                            Button::new(SharedString::from(format!("finish-started-{on}-{orch}")))
+                                .label(label)
+                                .xsmall()
+                                .on_click(cx.listener(move |ws, _, _, cx| {
+                                    ws.with_draft(orch, cx, |d| d.finish_started = on)
+                                }));
+                        if finish == on { b.primary() } else { b.ghost() }
+                    };
+                    v_flex()
+                        .gap_2()
+                        .child(section_tip(
+                            "Claude week limit",
+                            "New tickets start only while enough of your seven-day Claude limit \
+                             is left. Set how much in Settings › General.",
+                        ))
+                        .child(text(12., theme::TEXT_SECONDARY).whitespace_normal().child(
+                            format!(
+                                "New tickets wait while less than {floor}% is left. When a \
+                                 ticket already started drops below it:"
+                            ),
+                        ))
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(choice(true, "Finish it"))
+                                .child(choice(false, "Stop for you")),
+                        )
+                        .child(
+                            text(12., theme::TEXT_MUTED).whitespace_normal().child(if finish {
+                                "Its stages carry on to the end, so a ticket that's been claimed \
+                                 is never left half done."
+                            } else {
+                                "Its next stage waits for you, and the ticket stays claimed until \
+                                 you resume or stop it."
+                            }),
+                        )
+                })
                 .child(text(12., theme::TEXT_MUTED).child(format!(
-                    "A stage that fails is retried up to {MAX_ATTEMPTS} times. Stages pause below \
-                     {floor}% of the Claude week."
+                    "A stage that fails is retried up to {MAX_ATTEMPTS} times."
                 ))),
         );
         body.into_any_element()

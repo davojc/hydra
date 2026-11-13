@@ -38,6 +38,24 @@ impl Workspace {
                 continue;
             };
             any = true;
+            // Below the Claude week's floor no email is taken or started (core spec §83).
+            if let Some(left) = self
+                .mail_env(&p, &m, cx)
+                .and_then(|env| self.week_held(&env))
+            {
+                if now {
+                    let floor = crate::mcp::server::get()
+                        .map_or(crate::runs::MIN_WEEK_LEFT, |sv| {
+                            crate::mcp::server::lock(sv.registry()).min_week_left
+                        });
+                    window.push_note(
+                        Note::info(crate::runs::week_hold_line(left, floor)).title("Check mail"),
+                        cx,
+                    );
+                }
+                self.release_mail(&p, &m, window, cx);
+                continue;
+            }
             let due = now
                 || m.when()
                     .is_some_and(|w| w.due(&at, last.get(&look_key(&file)).map(String::as_str)));

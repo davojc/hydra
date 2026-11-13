@@ -1582,3 +1582,11 @@ How much of the seven-day Claude limit a stage needs left (`min_week_left`, orch
 
 - **Settings › General › Pipelines** has a **Claude week limit** row, with the choices Off, 10%, 20%, 30% (the default), 40% and 50%. A value set in the file shows as a choice too. Under the choices, a line says what the current value means.
 - **The status bar's usage** ("claude 5h 42% · 7d 18%") opens General with that row marked, so the limit is one click from the number it limits. The usage's tooltip says so. Before, it opened the environment's page.
+
+## 82. A timetable moved later the same day still runs, and says when (added 2026-11-13)
+
+A scheduled run or a mailbox look (§58, email triage spec §3) kept only the date it last happened. So moving a pipeline's time later in a day it had already run did nothing until the next day, and Pipeline settings never said so. A time moved from 09:00 to 09:53 after the 09:01 look is an example.
+
+- **Each run or look keeps its time** in `schedule.json`: `2026-11-13 09:01:42.740`, not `2026-11-13`.
+- **When it's due:** on one of its days, once its time has passed, if nothing ran since that time today. So a time moved later the same day gets its own run, and one time never runs twice. A date alone, written before this change, still counts as the whole day.
+- **A line under Runs and under Check** reads the timetable from the saved file, not from what's typed: "Saved. Last look today at 09:01 · next look Monday at 09:53." While what's typed differs from the file, it says so in amber: "Not saved yet: Save changes to use it. Until then it's Weekdays at 09:00."

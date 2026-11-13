@@ -195,6 +195,39 @@ fn numbers_in(
 }
 
 impl Workspace {
+    /// Under a timetable: whether it's saved, when it last ran (or looked) and when it next
+    /// will, from the file and `schedule.json` (core spec §82). `noun` "run" reads
+    /// `[schedule] every`, "look" `[mail] check`; `key` is its entry in `schedule.json`.
+    fn timetable_status(&self, noun: &str, file: &str, key: &str, typed: &str) -> AnyElement {
+        let root = self.hydra.paths.root();
+        let saved = crate::pipeline::load(root, file)
+            .ok()
+            .and_then(|p| match noun {
+                "run" => p.schedule.map(|s| s.every),
+                _ => p.mail.map(|m| m.check),
+            });
+        let last = crate::schedule::last_runs(root);
+        let (line, unsaved) = crate::schedule::status(
+            noun,
+            saved.as_deref(),
+            typed,
+            &crate::action_log::now(),
+            last.get(key).map(String::as_str),
+        );
+        text(
+            12.,
+            if unsaved {
+                theme::AMBER
+            } else {
+                theme::TEXT_SECONDARY
+            },
+        )
+        .pl(px(182.))
+        .whitespace_normal()
+        .child(line)
+        .into_any_element()
+    }
+
     /// The setup checklist's **Go to**: unfold `part` and scroll to it.
     fn settings_go_to(&mut self, orch: PaneId, part: Part, cx: &mut Context<Self>) {
         let Some(d) = self.pipeline_settings.get_mut(&orch) else {
@@ -666,22 +699,32 @@ impl Workspace {
                     .whitespace_normal()
                     .child(reads.0),
             );
+            main = main.child(self.timetable_status("run", &draft.file, &draft.file, &every));
             extra = extra.child(input_field("In environment", &sc.env));
             folded.push("environment");
         }
         if draft.mail.on {
             let m = &draft.mail;
-            main = main.child(input_field("Check", &m.check)).child(field(
-                "Look back",
-                numbers_in(
-                    format!("mail-back-{orch}"),
-                    &m.look_back,
-                    &words::LOOK_BACK_DAYS,
-                    words::days,
-                    ws.clone(),
-                    cx,
-                ),
-            ));
+            let check = m.check.read(cx).value().to_string();
+            main = main
+                .child(input_field("Check", &m.check))
+                .child(self.timetable_status(
+                    "look",
+                    &draft.file,
+                    &format!("mail:{}", draft.file),
+                    &check,
+                ))
+                .child(field(
+                    "Look back",
+                    numbers_in(
+                        format!("mail-back-{orch}"),
+                        &m.look_back,
+                        &words::LOOK_BACK_DAYS,
+                        words::days,
+                        ws.clone(),
+                        cx,
+                    ),
+                ));
             let mut missing = Vec::new();
             if self.ui.gmail_client().is_none() {
                 missing.push(

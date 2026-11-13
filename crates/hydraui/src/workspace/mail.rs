@@ -28,9 +28,6 @@ impl Workspace {
     pub(super) fn mail_tick(&mut self, now: bool, window: &mut Window, cx: &mut Context<Self>) {
         let root = self.hydra.paths.root().to_path_buf();
         let at = crate::action_log::now();
-        let Some(date) = at.split(' ').next().map(str::to_string) else {
-            return;
-        };
         let last = crate::schedule::last_runs(&root);
         let mut any = false;
         for file in crate::pipeline::names(&root) {
@@ -45,7 +42,7 @@ impl Workspace {
                 || m.when()
                     .is_some_and(|w| w.due(&at, last.get(&look_key(&file)).map(String::as_str)));
             if due && !self.mail_looking.contains(&file) {
-                if let Err(e) = crate::schedule::mark_run(&root, &look_key(&file), &date) {
+                if let Err(e) = crate::schedule::mark_run(&root, &look_key(&file), &at) {
                     crate::action_log::write(format!("mail {file}: can't note the look: {e}"));
                     continue;
                 }

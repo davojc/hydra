@@ -57,7 +57,7 @@ impl Workspace {
             if !when.due(&now, last.get(&file).map(String::as_str)) {
                 continue;
             }
-            if let Err(e) = crate::schedule::mark_run(&root, &file, &date) {
+            if let Err(e) = crate::schedule::mark_run(&root, &file, &now) {
                 crate::action_log::write(format!("schedule {file}: can't note the run: {e}"));
                 continue;
             }

@@ -92,6 +92,52 @@ pub fn reviewed(runs: &[crate::run_history::Entry]) -> Vec<String> {
     out
 }
 
+/// What marking a pull request started by hand did (core spec §85).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Marked {
+    /// Its message now has the reaction.
+    Marked,
+    /// Its message had the reaction already: someone has it.
+    TakenAlready,
+    /// No message in the channel's look-back links to it.
+    NotFound,
+}
+
+/// Marks the message that posted pull request `ticket` (`svc-usage-60`), or `link`, as taken,
+/// as a look would have: for a run started by hand rather than by the trigger, so nobody else
+/// picks it up.
+pub fn mark_started(
+    api: &dyn SlackApi,
+    settings: &SlackSettings,
+    now: SystemTime,
+    ticket: &str,
+    link: &str,
+) -> Result<Marked, LinearError> {
+    let since = now
+        .checked_sub(Duration::from_secs(
+            u64::from(settings.lookback_hours) * 3600,
+        ))
+        .unwrap_or(UNIX_EPOCH)
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let link = link.trim().trim_end_matches('/');
+    let ours = |m: &Message| {
+        pr_links(&m.text).iter().any(|p| {
+            p.ticket().eq_ignore_ascii_case(ticket.trim())
+                || (!link.is_empty() && p.url.trim_end_matches('/') == link)
+        })
+    };
+    let messages = api.history(&settings.channel, since)?;
+    let Some(m) = messages.iter().find(|m| ours(m)) else {
+        return Ok(Marked::NotFound);
+    };
+    if m.reactions.iter().any(|r| r == &settings.reaction) {
+        return Ok(Marked::TakenAlready);
+    }
+    api.react(&settings.channel, &m.ts, &settings.reaction)?;
+    Ok(Marked::Marked)
+}
+
 /// What a look found: the pull requests to run, the ones passed over because the person
 /// watching opened them (GitHub won't let an author approve their own), and the messages it
 /// ticked done.
@@ -392,6 +438,44 @@ mod tests {
     }
 
     const PR: &str = "<https://github.com/iov42/svc-usage/pull/";
+
+    #[test]
+    fn a_pull_request_started_by_hand_gets_its_mark() {
+        let api = Fake {
+            messages: vec![
+                msg("1", &format!("{PR}60|a>"), &[]),
+                msg("2", &format!("{PR}61|a>"), &["eyes"]),
+            ],
+            reacted: RefCell::default(),
+            fail_react: false,
+        };
+        let s = settings();
+        let now = SystemTime::now();
+        // Found by its ticket, or by its link: marked.
+        assert_eq!(
+            mark_started(&api, &s, now, "svc-usage-60", "").unwrap(),
+            Marked::Marked
+        );
+        assert_eq!(*api.reacted.borrow(), ["1:eyes"]);
+        // Someone's mark is on it already: left alone, and said.
+        assert_eq!(
+            mark_started(
+                &api,
+                &s,
+                now,
+                "x",
+                "https://github.com/iov42/svc-usage/pull/61"
+            )
+            .unwrap(),
+            Marked::TakenAlready
+        );
+        assert_eq!(api.reacted.borrow().len(), 1);
+        // Not posted in the channel (or longer ago than it looks back).
+        assert_eq!(
+            mark_started(&api, &s, now, "svc-usage-99", "").unwrap(),
+            Marked::NotFound
+        );
+    }
 
     #[test]
     fn a_taken_message_is_ticked_once_every_pull_request_in_it_was_reviewed() {

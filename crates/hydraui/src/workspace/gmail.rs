@@ -98,6 +98,7 @@ impl Workspace {
                 .await;
             let _ = cx.update(|window, cx| match done {
                 Ok((env, address)) => {
+                    super::services::note(&env, crate::pipeline::Service::Gmail, true);
                     crate::action_log::write(format!("gmail: {env} connected as {address}"));
                     window.push_note(
                         Note::success(format!("Gmail is connected for {env} as {address}."))

@@ -26,6 +26,7 @@ mod pipeline_settings;
 mod pipeline_tab;
 mod projects_tab;
 mod scheduled;
+mod services;
 mod settings_tab;
 mod shortcuts;
 mod slack;
@@ -226,6 +227,8 @@ pub struct Workspace {
     history: Option<history_tab::HistoryTab>,
     /// Actions (core spec §80), when shown.
     actions: Option<actions_page::ActionsPage>,
+    /// When the services connected in each environment were last read (core spec §85).
+    services_checked: Option<std::time::Instant>,
     /// General's changes not saved yet, in the order made (core spec §84).
     general_draft: Vec<crate::config::Change>,
     /// What General's last Save did: (went wrong, text).
@@ -310,6 +313,9 @@ pub struct Workspace {
     slack_mine: std::collections::HashSet<String>,
     /// The pull request each orchestrator was handed and hasn't started yet, to retry once.
     slack_inflight: HashMap<PaneId, crate::slack_watch::Queued>,
+    /// Tickets a Slack trigger handed to an orchestrator, lowercased: their runs were marked
+    /// when taken, so a run starting is not one started by hand (core spec §85).
+    slack_handed: std::collections::HashSet<String>,
     /// Orchestrators whose Claude hasn't finished its first turn: a prompt typed then is lost,
     /// so nothing is handed to them until it has.
     /// (When it opened: after 90 seconds it counts as ready anyway.)
@@ -582,6 +588,7 @@ impl Workspace {
             history: None,
             actions: None,
             general_draft: Vec::new(),
+            services_checked: None,
             general_said: None,
             inbox: None,
             share_said: HashMap::new(),
@@ -617,6 +624,7 @@ impl Workspace {
             slack_queues: HashMap::new(),
             slack_mine: std::collections::HashSet::new(),
             slack_inflight: HashMap::new(),
+            slack_handed: Default::default(),
             starting_up: HashMap::new(),
             park_checked: None,
             schedule_checked: None,

@@ -1096,6 +1096,40 @@ mod tests {
     }
 
     #[test]
+    fn a_run_needs_the_service_its_pipeline_takes_work_from() {
+        use crate::pipeline::Service;
+        let (home, reg, _) = with_pipeline();
+        std::fs::write(
+            crate::pipeline::folder(home.path()).join("prs.toml"),
+            "name = \"PRs\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n[slack]\nchannel = \"C0C217CER6G\"\n",
+        )
+        .unwrap();
+        let orch = reg.lock().unwrap().register_in(
+            "orchestrator",
+            home.path().to_path_buf(),
+            Some("iov42".into()),
+        );
+        let start = json!({"pipeline": "prs", "ticket": "svc-usage-60", "summary": "x"});
+        reg.lock()
+            .unwrap()
+            .connected
+            .lock()
+            .unwrap()
+            .insert(("iov42".into(), Service::Slack), false);
+        let (text, err, _) = call(&reg, &orch, "run_start", start.clone());
+        assert!(err && text.contains("Connect Slack"), "{text}");
+        // Connected: it starts.
+        reg.lock()
+            .unwrap()
+            .connected
+            .lock()
+            .unwrap()
+            .insert(("iov42".into(), Service::Slack), true);
+        let (text, err, _) = call(&reg, &orch, "run_start", start);
+        assert!(!err, "{text}");
+    }
+
+    #[test]
     fn a_stage_proposes_an_action_and_waits_for_a_person() {
         use crate::runs::Decided;
         let (home, reg, orch) = with_pipeline();

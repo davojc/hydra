@@ -1615,3 +1615,16 @@ Settings › General wrote `config.toml` the moment a value changed, and nothing
 - **Leaving General** keeps the draft until Save or Discard.
 - **Editor and Terminal font** dialogs set the value in the draft: their button says **Set**.
 - **Other Settings pages** (environments, Phone, Swarms) still save as they did.
+
+## 85. A pipeline needs the service its trigger uses (added 2026-11-13)
+
+A new teammate imported the PR review pipeline and gave a PR to its orchestrator by hand, with Slack not set up. The run started, but nothing marked the PR's message with 👀, so anyone else's trigger could take the same PR. The pipeline's stages also expected Slack.
+
+- **What it needs.** A pipeline needs the service its trigger names: `[slack]` needs Slack, `[linear]` needs Linear, `[mail]` needs Gmail (`Pipeline::needs`). Nothing is specific to one pipeline.
+- **What's connected.** hydraui reads which services are connected in each environment from the stored secrets, off the UI thread, at start and every 10 minutes. A successful **Connect Slack** or **Connect Gmail** marks its service connected at once.
+- **No run without it.** `run_start` refuses a run whose pipeline needs a service that isn't connected where it runs. The refusal names the service and what connects it, and tells the orchestrator to tell the user. A service not read yet counts as connected.
+- **It shows before anyone tries.**
+  - The pipeline's card shows "Slack isn't connected yet" with **Connect Slack**, or for Linear, set it up.
+  - The **Start pipeline** card says "Needs Slack connected".
+  - A trigger stopped by a missing token says "isn't connected yet", not "sign in again".
+- **A PR started by hand is marked.** When a Slack pipeline's run starts on a PR its trigger didn't hand over, hydraui finds the PR's message in the channel, by ticket or link, and adds the trigger's reaction, as the trigger would. A message someone has already marked, or one not in the channel's look-back, is left alone, and a notice says so.

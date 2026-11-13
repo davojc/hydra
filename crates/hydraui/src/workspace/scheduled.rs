@@ -29,6 +29,8 @@ impl Workspace {
     /// isn't tried again every 30 seconds, then handed to its orchestrator as a Tickets pick
     /// is (a free one of the pipeline's in that environment, else a new one).
     pub(super) fn schedule_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Which services each environment has, for pipelines that need one (§85).
+        self.services_tick(cx);
         if self
             .schedule_checked
             .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(30))

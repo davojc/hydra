@@ -1146,6 +1146,8 @@ impl Workspace {
                     "orchestrator",
                     serde_json::json!({"env": env, "folder": folder, "pid": std::process::id()}),
                 );
+                // Started by hand in a Slack pipeline: marked there as the trigger would (§85).
+                self.mark_hand_started(&run, &env, window, cx);
             }
         }
         let mut wakes = Vec::new();

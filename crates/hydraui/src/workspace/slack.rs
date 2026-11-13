@@ -129,6 +129,7 @@ impl Workspace {
         self.save_slack_queue(&pipeline.file);
         self.linear_watch.entry(slot).or_default().starting =
             Some((pr.ticket.clone(), SystemTime::now()));
+        self.slack_handed.insert(pr.ticket.to_lowercase());
         self.slack_inflight.insert(slot, pr.clone());
         self.linear_watch.entry(orch).or_default().status = Some(format!("Started {}", pr.ticket));
         crate::action_log::write(format!(
@@ -435,6 +436,7 @@ impl Workspace {
                 match done {
                     Ok((env, c)) => {
                         ws.slack_connecting.remove(&env);
+                        super::services::note(&env, crate::pipeline::Service::Slack, true);
                         crate::action_log::write(format!(
                             "slack: {env} connected as {} in {}",
                             c.user, c.team
@@ -495,4 +497,75 @@ pub(in crate::workspace) enum SlackConnecting {
     Waiting(String),
     /// It couldn't connect, and why.
     Failed(String),
+}
+
+impl Workspace {
+    /// A run of a Slack pipeline started by hand, not taken by its trigger: its pull request's
+    /// message gets the trigger's reaction, so nobody else picks it up (core spec §85). Off the
+    /// UI thread; a message someone already marked, or one not in the channel, is said.
+    pub(super) fn mark_hand_started(
+        &mut self,
+        run: &str,
+        env: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((ticket, link, settings, name)) = crate::mcp::server::get().and_then(|sv| {
+            let reg = crate::mcp::server::lock(sv.registry());
+            let r = reg.runs.run(run)?;
+            Some((
+                r.ticket.clone(),
+                r.link.clone().unwrap_or_default(),
+                r.pipeline.slack.clone()?,
+                r.pipeline.name.clone(),
+            ))
+        }) else {
+            return;
+        };
+        // Taken by the trigger: marked when it was taken.
+        if self.slack_handed.contains(&ticket.to_lowercase()) {
+            return;
+        }
+        let (hydra, env, run) = (self.hydra.clone(), env.to_string(), run.to_string());
+        let label = settings.label.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            let marked = cx
+                .background_spawn(async move {
+                    let token = hydra.slack_token(&env).map_err(|e| e.to_string())?;
+                    crate::slack_watch::mark_started(
+                        &crate::slack::Http { token },
+                        &settings,
+                        SystemTime::now(),
+                        &ticket,
+                        &link,
+                    )
+                    .map_err(|e| e.to_string())
+                })
+                .await;
+            let _ = cx.update(|window, cx| {
+                use crate::slack_watch::Marked;
+                let said = match &marked {
+                    Ok(Marked::Marked) => None,
+                    Ok(Marked::TakenAlready) => Some(format!(
+                        "{run} was started by hand, but its message in {label} already has a \
+                         reaction: someone may be reviewing it too."
+                    )),
+                    Ok(Marked::NotFound) => Some(format!(
+                        "{run} was started by hand, and its message isn't in {label} (or is \
+                         older than the look-back), so it isn't marked there: tell the team \
+                         you have it."
+                    )),
+                    Err(e) => Some(format!("{run}: couldn't mark its message in {label}: {e}")),
+                };
+                crate::action_log::write(format!(
+                    "slack: {run} started by hand: {}",
+                    said.as_deref().unwrap_or("marked its message")
+                ));
+                if let Some(said) = said {
+                    window.push_note(Note::warning(said).title(name.clone()), cx);
+                }
+            });
+        })
+        .detach();
+    }
 }

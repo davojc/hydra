@@ -988,6 +988,30 @@ impl Workspace {
             waiting: source.waiting,
         });
         let checking = w.is_some_and(|w| w.checking);
+        // Not connected where it runs: it says so, with what connects it (§85).
+        let service = if source.service == "Slack" {
+            crate::pipeline::Service::Slack
+        } else {
+            crate::pipeline::Service::Linear
+        };
+        let env = self
+            .panes
+            .get(&orch)
+            .map(|v| v.read(cx).env().to_string())
+            .unwrap_or_default();
+        let unconnected = super::services::connected(&env, service) == Some(false);
+        let (mode, stopped) = if unconnected && !checking {
+            (
+                linear_watch::Mode::Stopped,
+                Some(format!(
+                    "{} isn't connected for {env}: press {}",
+                    service.name(),
+                    service.how()
+                )),
+            )
+        } else {
+            (mode, w.and_then(|w| w.stopped.clone()))
+        };
         // Below the Claude week's floor it takes nothing new, and says so (§83).
         let held = self
             .week_held_for(orch, cx)
@@ -1006,19 +1030,20 @@ impl Workspace {
         // empty before its first look.
         let progress = (mode == linear_watch::Mode::Automatic
             && open_run.is_none()
-            && held.is_none())
-        .then(|| {
-            if checking {
-                1.0
-            } else {
-                linear_watch::look_progress(
-                    w.and_then(|w| w.last),
-                    SystemTime::now(),
-                    source.every_minutes,
-                )
-                .unwrap_or(0.0)
-            }
-        });
+            && held.is_none()
+            && !unconnected)
+            .then(|| {
+                if checking {
+                    1.0
+                } else {
+                    linear_watch::look_progress(
+                        w.and_then(|w| w.last),
+                        SystemTime::now(),
+                        source.every_minutes,
+                    )
+                    .unwrap_or(0.0)
+                }
+            });
         Some(Trigger::Lead(Box::new(TriggerView {
             mode,
             line,
@@ -1027,7 +1052,7 @@ impl Workspace {
             last: w.and_then(|w| w.last),
             open_run,
             checking,
-            stopped: w.and_then(|w| w.stopped.clone()),
+            stopped,
             source,
         })))
     }

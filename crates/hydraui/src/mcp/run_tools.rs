@@ -310,6 +310,25 @@ fn run_start(
             );
         }
     };
+    // It needs the services its trigger takes work from, connected where it runs (§85).
+    if let Some(env) = reg.get(token).and_then(|t| t.env) {
+        let missing: Vec<pipeline::Service> = {
+            let known = reg.connected.lock().unwrap_or_else(|e| e.into_inner());
+            p.needs()
+                .into_iter()
+                .filter(|s| known.get(&(env.clone(), *s)) == Some(&false))
+                .collect()
+        };
+        if !missing.is_empty() {
+            return (
+                Outcome::err(format!(
+                    "{} Don't start it: tell the user, then wait for them to connect it.",
+                    pipeline::needs_line(&p.name, &env, &missing)
+                )),
+                None,
+            );
+        }
+    }
     let logged = |id: &str| run_log::file_for(root, id).exists();
     let (id, reply) = match reg
         .runs

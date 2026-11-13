@@ -21,6 +21,15 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v5
+      # The release builds Hydra.app with the Liquid Glass icon; building it here means a
+      # .icon that actool rejects fails the pull request, not the release.
+      - name: Build Hydra.app's icon
+        if: runner.os == 'macOS'
+        env:
+          HYDRA_REQUIRE_GLASS_ICON: 1
+        run: |
+          scripts/macos/use-xcode-26.sh
+          scripts/macos/make-app.sh /usr/bin/true /usr/bin/true 0.0.0 "$RUNNER_TEMP/app-check"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -145,7 +154,11 @@ jobs:
         env:
           HYDRA_VERSION: ${{ env.VERSION }}
         run: cargo build --release -p hydra-cli -p hydraui
+      - name: Use Xcode 26 or later
+        run: scripts/macos/use-xcode-26.sh
       - name: Package
+        env:
+          HYDRA_REQUIRE_GLASS_ICON: 1
         run: |
           mkdir -p dist
           for bin in hydra hydraui; do

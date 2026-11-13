@@ -18,7 +18,8 @@ hydra=$2
 version=$3
 out=$4
 here=$(cd "$(dirname "$0")" && pwd)
-icon_png="$here/../../assets/hydra.png"
+icon_png="$here/../../assets/hydra-macos.png"
+icon_src="$here/../../assets/hydra.icon"
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -28,18 +29,44 @@ cp "$hydraui" "$app/Contents/MacOS/hydraui"
 cp "$hydra" "$app/Contents/MacOS/hydra"
 chmod 755 "$app/Contents/MacOS/hydraui" "$app/Contents/MacOS/hydra"
 
-# The icon: every size macOS asks for, from the 512 px PNG.
+# The icon for macOS before 26: every size, from the 1024 px PNG on Apple's grid.
 set_dir="$work/hydra.iconset"
 mkdir -p "$set_dir"
 for size in 16 32 128 256 512; do
     sips -z "$size" "$size" "$icon_png" --out "$set_dir/icon_${size}x${size}.png" >/dev/null
     double=$((size * 2))
-    if [ "$double" -le 512 ]; then
-        sips -z "$double" "$double" "$icon_png" --out "$set_dir/icon_${size}x${size}@2x.png" >/dev/null
-    fi
+    sips -z "$double" "$double" "$icon_png" --out "$set_dir/icon_${size}x${size}@2x.png" >/dev/null
 done
-cp "$icon_png" "$set_dir/icon_512x512@2x.png"
 iconutil -c icns "$set_dir" -o "$app/Contents/Resources/hydra.icns"
+
+# The Liquid Glass icon for macOS 26+: actool (Xcode 26 or later) compiles the Icon Composer
+# bundle into Assets.car, and CFBundleIconName points macOS at it. Without an actool that can
+# compile it, the app keeps the .icns alone; HYDRA_REQUIRE_GLASS_ICON=1 (CI) makes that an
+# error instead.
+icon_name_plist=""
+if xcrun actool --version >/dev/null 2>&1; then
+    mkdir -p "$work/icon-out"
+    if xcrun actool "$icon_src" --compile "$work/icon-out" \
+        --platform macosx --target-device mac --minimum-deployment-target 11.0 \
+        --app-icon hydra --output-partial-info-plist "$work/icon-info.plist" \
+        --output-format human-readable-text --errors --warnings &&
+        [ -f "$work/icon-out/Assets.car" ]; then
+        cp "$work/icon-out/Assets.car" "$app/Contents/Resources/Assets.car"
+        icon_name_plist="    <key>CFBundleIconName</key>
+    <string>hydra</string>"
+        echo "Liquid Glass icon compiled"
+    elif [ "${HYDRA_REQUIRE_GLASS_ICON:-}" = 1 ]; then
+        echo "error: actool couldn't compile assets/hydra.icon" >&2
+        exit 1
+    else
+        echo "warning: actool couldn't compile assets/hydra.icon (it needs Xcode 26+), so Hydra.app has the .icns icon only" >&2
+    fi
+elif [ "${HYDRA_REQUIRE_GLASS_ICON:-}" = 1 ]; then
+    echo "error: compiling assets/hydra.icon needs actool from Xcode 26 or later" >&2
+    exit 1
+else
+    echo "warning: no actool from Xcode 26+, so Hydra.app has the .icns icon only" >&2
+fi
 
 cat >"$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -56,6 +83,7 @@ cat >"$app/Contents/Info.plist" <<PLIST
     <string>hydraui</string>
     <key>CFBundleIconFile</key>
     <string>hydra</string>
+$icon_name_plist
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

@@ -172,6 +172,10 @@ impl Workspace {
         ));
         let hydra = self.hydra.clone();
         let s = settings.clone();
+        // Taken through the swarm first when the pipeline names one (§87).
+        let shared = pipeline.claims_in();
+        let claims_api = super::jobs::claims_api();
+        let label = pipeline.name.clone();
         cx.spawn_in(window, async move |this, cx| {
             let found = cx
                 .background_spawn(async move {
@@ -208,7 +212,18 @@ impl Workspace {
                             })?;
                         Ok(author.eq_ignore_ascii_case(&me))
                     };
-                    slack_watch::find_and_mark(
+                    let take = |key: &str| match &shared {
+                        Some((swarm, context)) => {
+                            super::jobs::take(claims_api.as_ref(), swarm, context, key, &label)
+                        }
+                        None => crate::jobs::Taken::Unsettled(String::new()),
+                    };
+                    let give_back = |holder: u64| {
+                        if let Some(api) = &claims_api {
+                            let _ = api.release(holder);
+                        }
+                    };
+                    slack_watch::find_and_mark_taking(
                         &crate::slack::Http { token },
                         &s,
                         SystemTime::now(),
@@ -216,6 +231,10 @@ impl Workspace {
                         &queued,
                         &reviewed,
                         &mine,
+                        &slack_watch::Claims {
+                            take: &take,
+                            give_back: &give_back,
+                        },
                     )
                 })
                 .await;
@@ -266,10 +285,32 @@ impl Workspace {
                     pipeline.file
                 ));
             }
+            // Taken through the swarm: kept while their runs are open (§87).
+            self.hold_claims(f.claims.clone());
+            for (ticket, who) in &f.held {
+                crate::action_log::write(format!(
+                    "slack: {}: {ticket}: {who} has it in the swarm; left to them",
+                    pipeline.file
+                ));
+            }
+            if let Some(why) = &f.unsettled {
+                crate::action_log::write(format!("slack: {}: claims: {why}", pipeline.file));
+            }
+            // Someone marked the same message in the same moment and was first (§87).
+            for (ticket, who) in &f.lost {
+                crate::action_log::write(format!(
+                    "slack: {}: {ticket}: Slack user {who} marked it first; left to them",
+                    pipeline.file
+                ));
+            }
         }
         let Some(w) = self.linear_watch.get_mut(&orch) else {
             return;
         };
+        let lost: Option<String> = found.as_ref().ok().filter(|f| !f.lost.is_empty()).map(|f| {
+            let names: Vec<&str> = f.lost.iter().map(|(t, _)| t.as_str()).collect();
+            format!("{} taken by someone else first", names.join(", "))
+        });
         let found = found.map(|f| f.queued);
         match found {
             Ok(prs) if !prs.is_empty() => {
@@ -300,7 +341,7 @@ impl Workspace {
             }
             Ok(_) => {
                 w.failures.clear();
-                w.status = Some("Nothing new".to_string());
+                w.status = Some(lost.unwrap_or_else(|| "Nothing new".to_string()));
                 crate::action_log::write(format!("slack: {}: nothing new", pipeline.file));
                 if by_hand {
                     window.push_note(

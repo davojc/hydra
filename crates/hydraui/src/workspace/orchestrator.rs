@@ -1120,6 +1120,8 @@ impl Workspace {
                 self.reopen_stage(&c.run, stage, window, cx);
             }
         }
+        // A run that ended finishes or gives back its job's swarm claim (§87).
+        self.settle_claims(&changes);
         // Where a new run's orchestrator is, and which hydraui drives it (§13).
         let started: Vec<(String, String)> = server::get()
             .map(|sv| {

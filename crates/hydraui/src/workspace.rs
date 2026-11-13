@@ -12,6 +12,7 @@ mod gmail;
 mod history_tab;
 mod inbox_panel;
 mod jev_run;
+mod jobs;
 mod launcher;
 mod layout_file;
 mod linear;
@@ -206,6 +207,8 @@ pub struct Workspace {
     /// The title bar's Update button (spec §7.11).
     update: crate::updater::UpdateState,
     _update_checks: Option<Task<()>>,
+    /// When GitHub was last asked for a newer release (core spec §86).
+    update_checked: Option<std::time::Instant>,
     /// The keys bound at startup, for the shortcuts list ([keys] changes wait for a restart).
     keymap: Vec<(crate::keys::Command, String)>,
     /// The layout file this window keeps saved (spec §7.12); `None` while untitled.
@@ -227,6 +230,8 @@ pub struct Workspace {
     history: Option<history_tab::HistoryTab>,
     /// Actions (core spec §80), when shown.
     actions: Option<actions_page::ActionsPage>,
+    /// The swarm claims taken for open runs' jobs, by ticket lowercased (core spec §87).
+    job_claims: HashMap<String, u64>,
     /// When the services connected in each environment were last read (core spec §85).
     services_checked: Option<std::time::Instant>,
     /// General's changes not saved yet, in the order made (core spec §84).
@@ -486,6 +491,10 @@ impl Workspace {
         // A session created a board file (spec §5): ask the same question the Tasks tab does. A
         // Claude hook said what its session is doing: the terminal's dot shows it.
         let activation = cx.observe_window_activation(window, |ws: &mut Self, window, cx| {
+            // Back at the window: a release out meanwhile shows on its Update button (§86).
+            if window.is_window_active() {
+                ws.update_check_on_return(cx);
+            }
             if window.is_window_active()
                 && let Some(id) = ws.envs.active().and_then(|t| t.shown)
                 && ws.attention.remove(&id)
@@ -578,6 +587,7 @@ impl Workspace {
             usage: HashMap::new(),
             update: Default::default(),
             _update_checks: None,
+            update_checked: None,
             layout: None,
             claim: None,
             unopened: Default::default(),
@@ -589,6 +599,7 @@ impl Workspace {
             actions: None,
             general_draft: Vec::new(),
             services_checked: None,
+            job_claims: HashMap::new(),
             general_said: None,
             inbox: None,
             share_said: HashMap::new(),

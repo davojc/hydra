@@ -12,7 +12,9 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::command::{Command, CommandItem, CommandState};
 use gpui_component::input::{Input, InputState};
-use gpui_component::{ActiveTheme, Disableable, Theme, ThemeMode, WindowExt, h_flex, v_flex};
+use gpui_component::{
+    ActiveTheme, Disableable, Sizable, Theme, ThemeMode, WindowExt, h_flex, v_flex,
+};
 use hydra_core::envedit::ToolValues;
 
 use super::{Workspace, env_item};
@@ -437,7 +439,14 @@ impl Workspace {
         if let Err(e) = crate::pipeline::ensure_example(&root) {
             crate::action_log::write(format!("example pipeline: {e}"));
         }
-        let mine = my_pipelines(&root);
+        let mut mine = my_pipelines(&root);
+        // A newer version in its swarm shows on its card (core spec §70, §88).
+        for m in &mut mine {
+            m.update = self
+                .pipeline_updates
+                .get(&m.file)
+                .map(|u| u.swarm_name.clone());
+        }
         let workspace = cx.entity();
         let scroll = gpui::ScrollHandle::new();
         window.open_dialog(cx, move |dialog, _, cx| {
@@ -950,10 +959,11 @@ impl Workspace {
                 .bg(rgb(crate::orchestrator_theme::TEAL).opacity(0.16))
                 .text_color(rgb(crate::orchestrator_theme::TEAL))
                 .cursor_pointer()
-                .child("Update")
+                .child("Update available")
                 .tooltip(|window, cx| {
                     gpui_component::tooltip::Tooltip::new(
-                        "Its swarm has a newer version of this pipeline",
+                        "Its owner shared a newer version of this pipeline to the swarm: click to \
+                         see what changed and update",
                     )
                     .build(window, cx)
                 })
@@ -1785,6 +1795,8 @@ struct Mine {
     source: String,
     /// The services its trigger needs connected (core spec §85).
     needs: Vec<crate::pipeline::Service>,
+    /// The swarm with a newer version of it, when there is one (core spec §70).
+    update: Option<String>,
 }
 
 /// Every pipeline that loads, by file name.
@@ -1796,6 +1808,7 @@ fn my_pipelines(root: &std::path::Path) -> Vec<Mine> {
             Some(Mine {
                 source: crate::settings_words::source_short(&p),
                 needs: p.needs(),
+                update: None,
                 file,
                 name: p.name,
                 color: p.color,
@@ -1901,6 +1914,34 @@ fn start_cards(
                             .child(crate::settings_words::stages(m.stages)),
                     ),
             )
+            // A newer version its owner shared: update before starting (§88).
+            .children(m.update.clone().map(|swarm| {
+                let (workspace, file) = (workspace.clone(), m.file.clone());
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .flex_wrap()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(color(theme::TEAL))
+                            .child(format!("Newer version in {swarm}")),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("start-update-{}", m.file)))
+                            .label("Update")
+                            .xsmall()
+                            .primary()
+                            .on_click(move |_, window, cx| {
+                                cx.stop_propagation();
+                                window.close_dialog(cx);
+                                let file = file.clone();
+                                workspace.update(cx, |ws, cx| {
+                                    ws.update_pipeline_dialog(file, window, cx)
+                                });
+                            }),
+                    )
+            }))
             // What it can't run without here, before anyone tries (§85).
             .children({
                 let missing = super::services::missing(&m.needs, env.as_str());

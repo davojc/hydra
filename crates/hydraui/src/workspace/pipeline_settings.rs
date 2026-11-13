@@ -105,6 +105,8 @@ pub(super) struct SettingsDraft {
     runs: u8,
     /// A started ticket finishes below the Claude week limit (core spec §83).
     pub(super) finish_started: bool,
+    /// The team swarm Slack and Linear jobs are taken through (core spec §87).
+    pub(super) claims_swarm: Entity<InputState>,
     /// What a waiting stage's session does (core spec §60).
     waiting: pipeline::WaitingSettings,
     /// The Advanced part is unfolded.
@@ -296,6 +298,8 @@ impl SettingsDraft {
             icon: self.icon.clone(),
             runs_at_once: self.runs,
             finish_started: self.finish_started,
+            claims_swarm: Some(self.claims_swarm.read(cx).value().trim().to_string())
+                .filter(|s| !s.is_empty()),
             waiting: self.waiting,
             bar: slider_value(&self.bar, cx),
             stages: self
@@ -509,6 +513,10 @@ impl Workspace {
                 "Environment; empty: the default",
             ),
         };
+        let claims_swarm = input(
+            saved.claims_swarm.clone().unwrap_or_default(),
+            "Team swarm, e.g. iov42; empty: none",
+        );
         let ml = saved.mail.clone();
         let mail = MailDraft {
             on: ml.is_some(),
@@ -585,6 +593,7 @@ impl Workspace {
             look_open: false,
             runs: saved.runs_at_once,
             finish_started: saved.finish_started,
+            claims_swarm,
             waiting: saved.waiting,
             advanced: false,
             source_open: false,

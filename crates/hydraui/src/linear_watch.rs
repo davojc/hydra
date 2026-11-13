@@ -487,6 +487,12 @@ fn claim(
 pub struct Check {
     pub claimed: Option<Ticket>,
     pub skipped: Vec<String>,
+    /// The swarm claim taken for `claimed`, to finish or give back when its run ends (§87).
+    pub holder: Option<u64>,
+    /// Tickets a teammate holds in the swarm, as (ticket, their name): passed over.
+    pub held: Vec<(String, String)>,
+    /// Why the swarm couldn't settle a take, if it couldn't.
+    pub unsettled: Option<String>,
 }
 
 pub fn find_and_claim(
@@ -495,6 +501,18 @@ pub fn find_and_claim(
     pipeline: &Pipeline,
     already_ran: &[String],
 ) -> Result<Check, LinearError> {
+    find_and_claim_taking(api, settings, pipeline, already_ran, &crate::jobs::UNSHARED)
+}
+
+/// `find_and_claim`, each ticket taken through the swarm before Linear is told (§87).
+pub fn find_and_claim_taking(
+    api: &dyn LinearApi,
+    settings: &LinearSettings,
+    pipeline: &Pipeline,
+    already_ran: &[String],
+    claims: &crate::jobs::Claims,
+) -> Result<Check, LinearError> {
+    let mut found = Check::default();
     let ran = |id: &str| already_ran.iter().any(|r| r.eq_ignore_ascii_case(id));
     let mut skipped: Vec<String> = Vec::new();
     let team = settings.team.as_str();
@@ -526,10 +544,7 @@ pub fn find_and_claim(
             settings.sla_only,
             &settings.labels,
         ) else {
-            return Ok(Check {
-                claimed: None,
-                skipped,
-            });
+            return Ok(Check { skipped, ..found });
         };
         // As it is now: someone may have moved or taken it since the list.
         let still = api.ticket(&next.identifier)?.filter(|t| {
@@ -541,16 +556,38 @@ pub fn find_and_claim(
             passed_over.push(next.identifier.clone());
             continue;
         };
-        claim(api, &ticket, &claim_state, pipeline)?;
+        // Taken through the swarm first, so a teammate's hydra never claims it too (§87).
+        use crate::jobs::Taken;
+        let holder = match (claims.take)(&crate::jobs::linear_key(&ticket.identifier)) {
+            Taken::Yours(h) => Some(h),
+            Taken::Theirs { person, .. } | Taken::Done { person } => {
+                found.held.push((ticket.identifier.clone(), person));
+                passed_over.push(ticket.identifier.clone());
+                continue;
+            }
+            Taken::Wait(why) => {
+                found.unsettled = Some(why);
+                return Ok(Check { skipped, ..found });
+            }
+            Taken::Unsettled(why) => {
+                found.unsettled = Some(why).filter(|w| !w.is_empty());
+                None
+            }
+        };
+        if let Err(e) = claim(api, &ticket, &claim_state, pipeline) {
+            if let Some(h) = holder {
+                (claims.give_back)(h);
+            }
+            return Err(e);
+        }
         return Ok(Check {
             claimed: Some(ticket),
             skipped,
+            holder,
+            ..found
         });
     }
-    Ok(Check {
-        claimed: None,
-        skipped,
-    })
+    Ok(Check { skipped, ..found })
 }
 
 /// Claims ticket `identifier` for a run started by hand (§4); `false` when Linear has no such
@@ -951,6 +988,7 @@ mod tests {
         let picked = Ok(Check {
             claimed: Some(t("INTH-170", "2026-11-04T14:00:00.000Z", None)),
             skipped: vec![],
+            ..Default::default()
         });
         assert_eq!(
             pick_result(&s, &picked),
@@ -962,6 +1000,7 @@ mod tests {
         let none = Ok(Check {
             claimed: None,
             skipped: vec!["INTH-165".into(), "INTH-166".into()],
+            ..Default::default()
         });
         assert_eq!(
             pick_result(&s, &none).1,
@@ -1303,6 +1342,39 @@ mod tests {
                  working on this: Replicate → Develop.",
             ]
         );
+    }
+
+    #[test]
+    fn a_ticket_a_teammate_holds_in_the_swarm_is_passed_over() {
+        let api = fake_with(vec![
+            t("INTH-1", "2026-11-04T00:00:00.000Z", None),
+            t("INTH-2", "2026-11-02T00:00:00.000Z", None),
+        ]);
+        let take = |key: &str| {
+            if key == "linear:INTH-2" {
+                crate::jobs::Taken::Theirs {
+                    person: "Kris".into(),
+                    ours: false,
+                }
+            } else {
+                crate::jobs::Taken::Yours(5)
+            }
+        };
+        let got = find_and_claim_taking(
+            &api,
+            &settings(),
+            &pipeline(),
+            &[],
+            &crate::jobs::Claims {
+                take: &take,
+                give_back: &|_| {},
+            },
+        )
+        .unwrap();
+        assert_eq!(got.claimed.unwrap().identifier, "INTH-1");
+        assert_eq!(got.holder, Some(5));
+        assert_eq!(got.held, [("INTH-2".to_string(), "Kris".to_string())]);
+        assert!(api.writes.borrow().iter().all(|w| !w.contains("INTH-2")));
     }
 
     #[test]

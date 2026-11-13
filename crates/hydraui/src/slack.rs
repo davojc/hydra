@@ -144,6 +144,30 @@ pub trait SlackApi {
     fn history(&self, channel: &str, oldest: u64) -> Result<Vec<Message>, LinearError>;
     /// Adds reaction `name` to message `ts`; one already there counts as added.
     fn react(&self, channel: &str, ts: &str, name: &str) -> Result<(), LinearError>;
+    /// Who put reaction `name` on message `ts` first (a user id); `None` when nobody has.
+    fn first_to_react(
+        &self,
+        channel: &str,
+        ts: &str,
+        name: &str,
+    ) -> Result<Option<String>, LinearError>;
+    /// Takes this person's reaction `name` off message `ts`; one not there counts as gone.
+    fn unreact(&self, channel: &str, ts: &str, name: &str) -> Result<(), LinearError>;
+    /// This token's person (a user id).
+    fn me(&self) -> Result<String, LinearError>;
+}
+
+/// From `reactions.get`'s reply: the first user who reacted with `name`. Slack lists a
+/// reaction's users in the order they reacted.
+pub fn first_reactor(reply: &Value, name: &str) -> Option<String> {
+    reply["message"]["reactions"]
+        .as_array()?
+        .iter()
+        .find(|r| r["name"].as_str() == Some(name))?["users"]
+        .as_array()?
+        .first()?
+        .as_str()
+        .map(str::to_string)
 }
 
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -194,6 +218,52 @@ impl SlackApi for Http {
         read_history(&self.call(req, None)?)
     }
 
+    fn first_to_react(
+        &self,
+        channel: &str,
+        ts: &str,
+        name: &str,
+    ) -> Result<Option<String>, LinearError> {
+        let agent = ureq::AgentBuilder::new().timeout(TIMEOUT).build();
+        let req = agent
+            .get(&format!("{API}/reactions.get"))
+            .query("channel", channel)
+            .query("timestamp", ts)
+            .query("full", "true");
+        let reply = self.call(req, None)?;
+        if let Some(e) = reply_error(&reply) {
+            return Err(e);
+        }
+        Ok(first_reactor(&reply, name))
+    }
+
+    fn unreact(&self, channel: &str, ts: &str, name: &str) -> Result<(), LinearError> {
+        let agent = ureq::AgentBuilder::new().timeout(TIMEOUT).build();
+        let reply = self.call(
+            agent.post(&format!("{API}/reactions.remove")),
+            Some(json!({"channel": channel, "timestamp": ts, "name": name})),
+        )?;
+        if reply.get("error").and_then(Value::as_str) == Some("no_reaction") {
+            return Ok(());
+        }
+        match reply_error(&reply) {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    fn me(&self) -> Result<String, LinearError> {
+        let agent = ureq::AgentBuilder::new().timeout(TIMEOUT).build();
+        let reply = self.call(agent.post(&format!("{API}/auth.test")), Some(json!({})))?;
+        if let Some(e) = reply_error(&reply) {
+            return Err(e);
+        }
+        reply["user_id"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| LinearError::Failed("Slack didn't say who this token is".into()))
+    }
+
     fn react(&self, channel: &str, ts: &str, name: &str) -> Result<(), LinearError> {
         let agent = ureq::AgentBuilder::new().timeout(TIMEOUT).build();
         let reply = self.call(
@@ -213,6 +283,20 @@ impl SlackApi for Http {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_first_to_react_is_the_first_user_slack_lists() {
+        let reply = json!({"ok": true, "message": {"reactions": [
+            {"name": "thumbsup", "users": ["U9"]},
+            {"name": "eyes", "users": ["U2", "U1"]}
+        ]}});
+        assert_eq!(first_reactor(&reply, "eyes").as_deref(), Some("U2"));
+        assert_eq!(first_reactor(&reply, "white_check_mark"), None);
+        assert_eq!(
+            first_reactor(&json!({"ok": true, "message": {}}), "eyes"),
+            None
+        );
+    }
 
     #[test]
     fn pull_requests_are_read_from_slack_links_and_bare_urls() {

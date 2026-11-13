@@ -135,6 +135,15 @@ pub fn mark_started(
         return Ok(Marked::TakenAlready);
     }
     api.react(&settings.channel, &m.ts, &settings.reaction)?;
+    // Someone else's mark landed first in the same moment: theirs (§87).
+    let me = api.me()?;
+    if api
+        .first_to_react(&settings.channel, &m.ts, &settings.reaction)?
+        .is_some_and(|first| first != me)
+    {
+        api.unreact(&settings.channel, &m.ts, &settings.reaction)?;
+        return Ok(Marked::TakenAlready);
+    }
     Ok(Marked::Marked)
 }
 
@@ -149,7 +158,20 @@ pub struct Found {
     pub ticked: Vec<String>,
     /// Why a tick failed, if one did; the next look tries again.
     pub tick_failed: Option<String>,
+    /// Pull requests someone else marked first in the same moment, as (ticket, their Slack
+    /// user id): this look took its mark back off and left them (core spec §87).
+    pub lost: Vec<(String, String)>,
+    /// Pull requests a teammate holds in the swarm, as (ticket, their name): left unmarked.
+    pub held: Vec<(String, String)>,
+    /// The swarm claims taken for what was queued, as (ticket, holder id), to finish or give
+    /// back when its run ends.
+    pub claims: Vec<(String, u64)>,
+    /// Why the swarm couldn't settle a take, if it couldn't: the source's own check decided.
+    pub unsettled: Option<String>,
 }
+
+pub use crate::jobs::Claims;
+use crate::jobs::UNSHARED;
 
 /// One look: the channel's messages from the last `lookback_hours`, each one to take marked
 /// with the reaction, and their pull requests in order. `ran` are tickets with a run still
@@ -166,6 +188,21 @@ pub fn find_and_mark(
     reviewed: &[String],
     mine: &dyn Fn(&Pr) -> Result<bool, LinearError>,
 ) -> Result<Found, LinearError> {
+    find_and_mark_taking(api, settings, now, ran, queued, reviewed, mine, &UNSHARED)
+}
+
+/// `find_and_mark`, each message taken through the swarm first (core spec §87).
+#[allow(clippy::too_many_arguments)] // find_and_mark's, plus how it claims
+pub fn find_and_mark_taking(
+    api: &dyn SlackApi,
+    settings: &SlackSettings,
+    now: SystemTime,
+    ran: &[String],
+    queued: &[String],
+    reviewed: &[String],
+    mine: &dyn Fn(&Pr) -> Result<bool, LinearError>,
+    claims: &Claims,
+) -> Result<Found, LinearError> {
     let since = now
         .checked_sub(Duration::from_secs(
             u64::from(settings.lookback_hours) * 3600,
@@ -176,6 +213,7 @@ pub fn find_and_mark(
     let messages = api.history(&settings.channel, since)?;
     let taken = |t: &str| ran.iter().chain(queued).any(|r| r.eq_ignore_ascii_case(t));
     let mut found = Found::default();
+    let mut me: Option<String> = None;
     for (m, prs) in pick(&messages, &settings.reaction, taken) {
         let mut theirs = Vec::new();
         for p in prs {
@@ -188,8 +226,70 @@ pub fn find_and_mark(
         if theirs.is_empty() {
             continue;
         }
-        // Marked first: if that fails, nothing is queued, and the next look tries again.
-        api.react(&settings.channel, &m.ts, &settings.reaction)?;
+        // Taken through the swarm first, so a teammate's hydra never takes it too (§87).
+        use crate::jobs::Taken;
+        let holder = match (claims.take)(&crate::jobs::slack_key(&settings.channel, &m.ts)) {
+            Taken::Yours(h) => Some(h),
+            Taken::Theirs { person, .. } | Taken::Done { person } => {
+                found
+                    .held
+                    .extend(theirs.iter().map(|p| (p.ticket(), person.clone())));
+                continue;
+            }
+            Taken::Wait(why) => {
+                found.unsettled = Some(why);
+                continue;
+            }
+            Taken::Unsettled(why) => {
+                if !why.is_empty() {
+                    found.unsettled = Some(why);
+                }
+                None
+            }
+        };
+        let give_back = || {
+            if let Some(h) = holder {
+                (claims.give_back)(h);
+            }
+        };
+        // Marked next: if that fails, nothing is queued, and the next look tries again.
+        if let Err(e) = api.react(&settings.channel, &m.ts, &settings.reaction) {
+            give_back();
+            return Err(e);
+        }
+        // Two people can mark it in the same moment: Slack lists who reacted in order, and the
+        // first one has it. Anyone else takes their mark back off and leaves it (§87).
+        let me = match &me {
+            Some(me) => me.clone(),
+            None => match api.me() {
+                Ok(id) => {
+                    me = Some(id.clone());
+                    id
+                }
+                Err(e) => {
+                    give_back();
+                    return Err(e);
+                }
+            },
+        };
+        let first = match api.first_to_react(&settings.channel, &m.ts, &settings.reaction) {
+            Ok(first) => first,
+            Err(e) => {
+                give_back();
+                return Err(e);
+            }
+        };
+        if let Some(first) = first.filter(|f| *f != me) {
+            give_back();
+            api.unreact(&settings.channel, &m.ts, &settings.reaction)?;
+            found
+                .lost
+                .extend(theirs.iter().map(|p| (p.ticket(), first.clone())));
+            continue;
+        }
+        if let Some(h) = holder {
+            found.claims.extend(theirs.iter().map(|p| (p.ticket(), h)));
+        }
         // One reaction for the message, a run for each pull request in it, each told the others.
         found.queued.extend(theirs.iter().map(|p| {
             let mut q = Queued::of(p, &m.user);
@@ -418,10 +518,15 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
     struct Fake {
         messages: Vec<Message>,
         reacted: RefCell<Vec<String>>,
         fail_react: bool,
+        /// Messages someone else reacted to first, by `ts`, with who.
+        beaten: Vec<(&'static str, &'static str)>,
+        /// Reactions taken off, as `ts:name`.
+        unreacted: RefCell<Vec<String>>,
     }
 
     impl SlackApi for Fake {
@@ -435,9 +540,125 @@ mod tests {
             self.reacted.borrow_mut().push(format!("{ts}:{name}"));
             Ok(())
         }
+        fn first_to_react(
+            &self,
+            _: &str,
+            ts: &str,
+            _: &str,
+        ) -> Result<Option<String>, LinearError> {
+            Ok(Some(
+                self.beaten
+                    .iter()
+                    .find(|(t, _)| *t == ts)
+                    .map_or("UME", |(_, who)| *who)
+                    .to_string(),
+            ))
+        }
+        fn unreact(&self, _: &str, ts: &str, name: &str) -> Result<(), LinearError> {
+            self.unreacted.borrow_mut().push(format!("{ts}:{name}"));
+            Ok(())
+        }
+        fn me(&self) -> Result<String, LinearError> {
+            Ok("UME".into())
+        }
     }
 
     const PR: &str = "<https://github.com/iov42/svc-usage/pull/";
+
+    #[test]
+    fn a_message_someone_holds_in_the_swarm_is_left_unmarked() {
+        let api = Fake {
+            messages: vec![
+                msg("1", &format!("{PR}80|a>"), &[]),
+                msg("2", &format!("{PR}81|a>"), &[]),
+            ],
+            ..Default::default()
+        };
+        // The swarm says Kris has message 1; message 2 is ours, held as claim 9.
+        let take = |key: &str| {
+            if key.ends_with(":1") {
+                crate::jobs::Taken::Theirs {
+                    person: "Kris".into(),
+                    ours: false,
+                }
+            } else {
+                crate::jobs::Taken::Yours(9)
+            }
+        };
+        let found = find_and_mark_taking(
+            &api,
+            &settings(),
+            SystemTime::now(),
+            &[],
+            &[],
+            &[],
+            &|_| Ok(false),
+            &Claims {
+                take: &take,
+                give_back: &|_| {},
+            },
+        )
+        .unwrap();
+        assert_eq!(*api.reacted.borrow(), ["2:eyes"]);
+        let tickets: Vec<&str> = found.queued.iter().map(|q| q.ticket.as_str()).collect();
+        assert_eq!(tickets, ["svc-usage-81"]);
+        assert_eq!(found.claims, [("svc-usage-81".to_string(), 9)]);
+        assert_eq!(
+            found.held,
+            [("svc-usage-80".to_string(), "Kris".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_claim_whose_mark_lost_in_slack_is_given_back() {
+        let api = Fake {
+            messages: vec![msg("1", &format!("{PR}82|a>"), &[])],
+            beaten: vec![("1", "UKRIS")],
+            ..Default::default()
+        };
+        let given = RefCell::new(Vec::new());
+        let found = find_and_mark_taking(
+            &api,
+            &settings(),
+            SystemTime::now(),
+            &[],
+            &[],
+            &[],
+            &|_| Ok(false),
+            &Claims {
+                take: &|_| crate::jobs::Taken::Yours(4),
+                give_back: &|h| given.borrow_mut().push(h),
+            },
+        )
+        .unwrap();
+        assert!(found.queued.is_empty());
+        assert!(found.claims.is_empty());
+        assert_eq!(*given.borrow(), [4]);
+    }
+
+    #[test]
+    fn two_takers_at_once_the_second_takes_its_mark_off_and_leaves_it() {
+        let api = Fake {
+            messages: vec![
+                msg("1", &format!("{PR}70|a>"), &[]),
+                msg("2", &format!("{PR}71|a>"), &[]),
+            ],
+            // Kris's 👀 landed on 1 just before ours.
+            beaten: vec![("1", "UKRIS")],
+            ..Default::default()
+        };
+        let found = find_and_mark(&api, &settings(), SystemTime::now(), &[], &[], &[], &|_| {
+            Ok(false)
+        })
+        .unwrap();
+        let tickets: Vec<&str> = found.queued.iter().map(|q| q.ticket.as_str()).collect();
+        assert_eq!(tickets, ["svc-usage-71"]);
+        assert_eq!(*api.unreacted.borrow(), ["1:eyes"]);
+        assert_eq!(
+            found.lost,
+            [("svc-usage-70".to_string(), "UKRIS".to_string())]
+        );
+    }
 
     #[test]
     fn a_pull_request_started_by_hand_gets_its_mark() {
@@ -448,6 +669,7 @@ mod tests {
             ],
             reacted: RefCell::default(),
             fail_react: false,
+            ..Default::default()
         };
         let s = settings();
         let now = SystemTime::now();
@@ -491,6 +713,7 @@ mod tests {
             ],
             reacted: RefCell::default(),
             fail_react: false,
+            ..Default::default()
         };
         let reviewed: Vec<String> = [
             "svc-usage-50",
@@ -520,6 +743,7 @@ mod tests {
             messages: api.messages.clone(),
             reacted: RefCell::default(),
             fail_react: false,
+            ..Default::default()
         };
         find_and_mark(
             &api,
@@ -564,6 +788,7 @@ mod tests {
             ],
             reacted: RefCell::default(),
             fail_react: false,
+            ..Default::default()
         };
         let found = find_and_mark(
             &api,
@@ -606,6 +831,7 @@ mod tests {
             ],
             reacted: RefCell::default(),
             fail_react: false,
+            ..Default::default()
         };
         let mine = |p: &Pr| Ok(p.number != 72);
         let found =
@@ -634,6 +860,7 @@ mod tests {
             messages: vec![msg("1", &format!("{PR}60|x>"), &[])],
             reacted: RefCell::default(),
             fail_react: true,
+            ..Default::default()
         };
         assert!(
             find_and_mark(

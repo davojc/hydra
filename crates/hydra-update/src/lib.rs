@@ -8,6 +8,7 @@ use std::time::Duration;
 use anyhow::Context;
 use sha2::{Digest, Sha256};
 
+pub mod bundle;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
 pub mod release;

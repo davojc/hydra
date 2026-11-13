@@ -1,9 +1,10 @@
 //! hydraui's updates (spec §7.11): whether to offer one, finding hydra.exe, installing
-//! both exes, and cleaning up after. No UI.
+//! both exes (on macOS, the whole Hydra.app they run from), and cleaning up after. No UI.
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use hydra_update::bundle;
 use hydra_update::release::is_newer;
 use hydra_update::{
     HYDRA_ASSET, HYDRAUI_ASSET, Swap, download_verified, fetch_latest, replace_all,
@@ -105,12 +106,25 @@ fn swap_for(exe: &Path) -> Swap {
 
 /// Updates hydraui (and hydra, when given) to the latest release: refused while hydra runs
 /// (`running` lists its processes); everything is downloaded and checked before anything
-/// is replaced, and a failed replace puts back what was done.
+/// is replaced, and a failed replace puts back what was done. On a Mac, a hydraui inside an
+/// app gets the release's whole Hydra.app (hydra included), so its Info.plist and icon are
+/// updated too.
 pub fn install(
     url: &str,
     hydraui_exe: &Path,
     hydra_exe: Option<&Path>,
     running: &dyn Fn() -> Result<Vec<u32>, String>,
+) -> anyhow::Result<Installed> {
+    install_with(url, hydraui_exe, hydra_exe, running, bundle::APP_ASSET)
+}
+
+/// `install`, with the release's zipped app (None: this platform has none).
+fn install_with(
+    url: &str,
+    hydraui_exe: &Path,
+    hydra_exe: Option<&Path>,
+    running: &dyn Fn() -> Result<Vec<u32>, String>,
+    app_asset: Option<&str>,
 ) -> anyhow::Result<Installed> {
     let pids = running().map_err(|why| {
         anyhow::anyhow!("can't check whether hydra is running ({why}) - not updating")
@@ -124,6 +138,15 @@ pub fn install(
     }
     let release = fetch_latest(url, &user_agent())?;
     let version = release.version()?;
+    if let (Some(asset), Some(app)) = (app_asset, bundle::app_of(hydraui_exe)) {
+        bundle::update_app(&release, asset, &app, &user_agent())
+            .context("the update couldn't be installed")?;
+        // The app holds hydra too; the ~/.local/bin link names it, so it follows.
+        return Ok(Installed {
+            version,
+            hydra_updated: true,
+        });
+    }
     let mut planned = vec![(release.windows_build(HYDRAUI_ASSET)?, swap_for(hydraui_exe))];
     if let Some(cli) = hydra_exe {
         planned.push((release.windows_build(HYDRA_ASSET)?, swap_for(cli)));
@@ -144,9 +167,12 @@ pub fn install(
     })
 }
 
-/// Deletes the exes a previous update replaced; they may still be running, so failures are
-/// ignored.
+/// Deletes the exes (or the app) a previous update replaced; they may still be running, so
+/// failures are ignored.
 pub fn clean_old(hydraui_exe: &Path, hydra_exe: Option<&Path>) {
+    if let Some(app) = bundle::app_of(hydraui_exe) {
+        bundle::clean_old(&app);
+    }
     for exe in std::iter::once(hydraui_exe).chain(hydra_exe) {
         let _ = std::fs::remove_file(swap_for(exe).old);
     }
@@ -464,6 +490,183 @@ mod tests {
         assert!(!d.path().join(exe("hydraui.old")).exists());
         assert!(!d.path().join(exe("hydra.old")).exists());
         clean_old(&ui, None); // nothing there: no panic
+    }
+
+    /// A Mac app update: the release's zipped Hydra.app, as scripts/macos/make-app.sh makes it.
+    #[cfg(target_os = "macos")]
+    mod app {
+        use super::*;
+
+        const ZIP: &str = "hydra-macos-aarch64.zip";
+
+        /// A Hydra.app in `dir` whose files all say `tag`; `with_hydra` false leaves hydra out.
+        fn make_app(dir: &Path, tag: &str, with_hydra: bool) -> PathBuf {
+            let app = dir.join("Hydra.app");
+            std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+            std::fs::create_dir_all(app.join("Contents/Resources")).unwrap();
+            std::fs::write(app.join("Contents/MacOS/hydraui"), format!("{tag} ui")).unwrap();
+            if with_hydra {
+                std::fs::write(app.join("Contents/MacOS/hydra"), format!("{tag} cli")).unwrap();
+            }
+            std::fs::write(app.join("Contents/Info.plist"), format!("{tag} plist")).unwrap();
+            std::fs::write(
+                app.join("Contents/Resources/hydra.icns"),
+                format!("{tag} icon"),
+            )
+            .unwrap();
+            app
+        }
+
+        /// The release's zip of a Hydra.app saying `tag`.
+        fn zipped(tag: &str, with_hydra: bool) -> Vec<u8> {
+            let d = tempfile::tempdir().unwrap();
+            let app = make_app(d.path(), tag, with_hydra);
+            std::fs::write(app.join("Contents/Resources/Assets.car"), "new assets").unwrap();
+            let zip = d.path().join(ZIP);
+            let ok = std::process::Command::new("ditto")
+                .args(["-c", "-k", "--keepParent"])
+                .arg(&app)
+                .arg(&zip)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "ditto zipped the app");
+            std::fs::read(zip).unwrap()
+        }
+
+        /// An installed Hydra.app saying "old" in `dir/Applications`, and its hydraui.
+        fn installed(dir: &Path) -> (PathBuf, PathBuf) {
+            let apps = dir.join("Applications");
+            let app = make_app(&apps, "old", true);
+            let ui = app.join("Contents/MacOS/hydraui");
+            (app, ui)
+        }
+
+        fn read(p: &Path) -> String {
+            std::fs::read_to_string(p).unwrap()
+        }
+
+        /// What sits beside the app: only the app itself, nothing an update left.
+        fn beside(app: &Path) -> Vec<std::ffi::OsString> {
+            std::fs::read_dir(app.parent().unwrap())
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name())
+                .collect()
+        }
+
+        #[test]
+        fn the_whole_app_is_updated() {
+            let zip = zipped("new", true);
+            let gh = FakeGitHub::serve(
+                "v0.7.0",
+                &[
+                    (ZIP, &zip),
+                    (HYDRAUI_ASSET, b"loose ui"),
+                    (HYDRA_ASSET, b"loose cli"),
+                ],
+            );
+            let d = tempfile::tempdir().unwrap();
+            let (app, ui) = installed(d.path());
+            // install.sh's link to the app's hydra.
+            let bin = d.path().join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::os::unix::fs::symlink(app.join("Contents/MacOS/hydra"), bin.join("hydra"))
+                .unwrap();
+            let cli = app.join("Contents/MacOS/hydra");
+            let done =
+                install_with(&gh.latest_url(), &ui, Some(&cli), &none_running, Some(ZIP)).unwrap();
+            assert_eq!(done.version, v("0.7.0"));
+            assert!(done.hydra_updated);
+            assert_eq!(read(&app.join("Contents/Info.plist")), "new plist");
+            assert_eq!(read(&app.join("Contents/Resources/hydra.icns")), "new icon");
+            assert_eq!(
+                read(&app.join("Contents/Resources/Assets.car")),
+                "new assets"
+            );
+            assert_eq!(read(&ui), "new ui", "from the app, not the loose build");
+            assert_eq!(read(&bin.join("hydra")), "new cli", "the link still works");
+            assert_eq!(beside(&app), vec![std::ffi::OsString::from("Hydra.app")]);
+        }
+
+        #[test]
+        fn a_bad_app_checksum_changes_nothing() {
+            let zip = zipped("new", true);
+            let bad = format!("{}  {ZIP}\n", "0".repeat(64));
+            let sha = format!("{ZIP}.sha256");
+            let gh = FakeGitHub::serve("v0.7.0", &[(ZIP, &zip), (&sha, bad.as_bytes())]);
+            let d = tempfile::tempdir().unwrap();
+            let (app, ui) = installed(d.path());
+            let err =
+                install_with(&gh.latest_url(), &ui, None, &none_running, Some(ZIP)).unwrap_err();
+            assert!(format!("{err:#}").contains("checksum"), "{err:#}");
+            assert_eq!(read(&app.join("Contents/Info.plist")), "old plist");
+            assert_eq!(read(&ui), "old ui");
+            assert_eq!(beside(&app), vec![std::ffi::OsString::from("Hydra.app")]);
+        }
+
+        #[test]
+        fn an_app_without_hydra_changes_nothing() {
+            // hydra is checked before anything moves: the link into the app must keep working.
+            let zip = zipped("new", false);
+            let gh = FakeGitHub::serve("v0.7.0", &[(ZIP, &zip)]);
+            let d = tempfile::tempdir().unwrap();
+            let (app, ui) = installed(d.path());
+            let err =
+                install_with(&gh.latest_url(), &ui, None, &none_running, Some(ZIP)).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("Contents/MacOS/hydra"),
+                "{err:#}"
+            );
+            assert_eq!(read(&app.join("Contents/Info.plist")), "old plist");
+            assert_eq!(read(&app.join("Contents/MacOS/hydra")), "old cli");
+            assert_eq!(beside(&app), vec![std::ffi::OsString::from("Hydra.app")]);
+        }
+
+        #[test]
+        fn a_failure_partway_puts_the_old_app_back() {
+            let d = tempfile::tempdir().unwrap();
+            let (app, _) = installed(d.path());
+            let swap = bundle::AppSwap::for_app(&app);
+            // The old app is moved aside, then the new one can't be moved in.
+            let err =
+                bundle::replace_app(&app, &d.path().join("gone/Hydra.app"), &swap.old).unwrap_err();
+            assert!(format!("{err:#}").contains("back in place"), "{err:#}");
+            assert_eq!(read(&app.join("Contents/Info.plist")), "old plist");
+            assert_eq!(read(&app.join("Contents/MacOS/hydraui")), "old ui");
+            assert_eq!(beside(&app), vec![std::ffi::OsString::from("Hydra.app")]);
+        }
+
+        #[test]
+        fn a_bare_hydraui_still_swaps_its_exes() {
+            let zip = zipped("new", true);
+            let gh = FakeGitHub::serve(
+                "v0.7.0",
+                &[
+                    (ZIP, &zip),
+                    (HYDRAUI_ASSET, b"new ui"),
+                    (HYDRA_ASSET, b"new cli"),
+                ],
+            );
+            let d = tempfile::tempdir().unwrap();
+            let (ui, cli) = (d.path().join("hydraui"), d.path().join("hydra"));
+            std::fs::write(&ui, "old ui").unwrap();
+            std::fs::write(&cli, "old cli").unwrap();
+            install_with(&gh.latest_url(), &ui, Some(&cli), &none_running, Some(ZIP)).unwrap();
+            assert_eq!(read(&ui), "new ui");
+            assert_eq!(read(&cli), "new cli");
+        }
+
+        #[test]
+        fn an_old_app_left_by_an_update_is_cleaned_up() {
+            let d = tempfile::tempdir().unwrap();
+            let (app, ui) = installed(d.path());
+            let old = app.parent().unwrap().join(".Hydra.app.old");
+            std::fs::create_dir_all(&old).unwrap();
+            clean_old(&ui, None);
+            assert!(!old.exists());
+            assert!(app.exists());
+        }
     }
 
     // The install folder comes from the Windows installer's Settings entry.

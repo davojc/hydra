@@ -4,9 +4,10 @@
 #   scripts/macos/make-app.sh <hydraui> <hydra> <version> <out dir>
 #
 # Writes <out dir>/hydra-macos-aarch64.zip (Hydra.app inside) and its .sha256. Both programs
-# sit in Contents/MacOS, so hydraui finds hydra beside it and its updater replaces both there.
-# The app isn't signed as a bundle: each program keeps the signature its build gave it, so an
-# update that swaps one in place doesn't break a seal over the rest.
+# sit in Contents/MacOS, so hydraui finds hydra beside it. Updates (hydraui's Update button,
+# `hydra update`) download this zip and replace the whole app, so everything in it, Info.plist
+# and icon included, reaches installed copies. The app isn't signed as a bundle: each program
+# keeps the signature its build gave it.
 set -eu
 
 if [ "$#" -ne 4 ]; then

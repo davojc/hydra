@@ -1,10 +1,11 @@
-//! `hydra update`: install the latest GitHub release over the running exe.
+//! `hydra update`: install the latest GitHub release over the running exe (on macOS, over
+//! the Hydra.app it runs from).
 
 use std::path::PathBuf;
 
 use anyhow::Context;
-use hydra_update::release;
 use hydra_update::{HYDRA_ASSET, Swap, download_verified, fetch_latest, latest_url, replace};
+use hydra_update::{bundle, release};
 use semver::Version;
 
 use crate::VERSION;
@@ -58,13 +59,19 @@ pub fn run(check: bool, force: bool) -> anyhow::Result<i32> {
         return Ok(1);
     }
 
-    let build = release.windows_build(HYDRA_ASSET)?;
     let target = match std::env::var_os("HYDRA_UPDATE_EXE") {
         Some(p) => PathBuf::from(p),
         None => std::env::current_exe().context("can't find the running hydra exe")?,
     };
     // Run through ~/.local/bin's link into Hydra.app, the app's copy is the one to replace.
     let target = hydra_update::real_exe(target);
+    // In Hydra.app the whole app is replaced, so its Info.plist and icon are updated too.
+    if let (Some(asset), Some(app)) = (bundle::APP_ASSET, bundle::app_of(&target)) {
+        bundle::update_app(&release, asset, &app, &user_agent())?;
+        anstream::println!("{}", style::ok(format!("updated to {latest}")));
+        return Ok(0);
+    }
+    let build = release.windows_build(HYDRA_ASSET)?;
     let dir = target.parent().context("the hydra exe has no folder")?;
     let new = dir.join(NEW_EXE);
     if let Err(e) = download_verified(&build, &new, &user_agent()) {

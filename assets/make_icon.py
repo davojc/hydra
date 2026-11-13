@@ -132,7 +132,7 @@ def draw_macos() -> Image.Image:
     glyph = Image.new("RGBA", (n, n), (0, 0, 0, 0))
     gp = lambda p: (off + glass_point(p)[0] * tile, off + glass_point(p)[1] * tile)
     draw_glyph(ImageDraw.Draw(glyph), gp, tile * GLASS_SCALE)
-    sheen = vertical_gradient(n, n, (255, 255, 255), (255, 255, 255))
+    sheen = Image.new("RGBA", (n, n), (255, 255, 255, 0))
     sheen_alpha = Image.linear_gradient("L").rotate(180).point(lambda a: max(0, a - 128) * 0.55)
     sheen.putalpha(ImageChops.multiply(sheen_alpha.resize((n, n)), glyph.getchannel("A")))
     img.alpha_composite(glyph)

@@ -59,8 +59,12 @@ mod tests {
     #[test]
     fn only_a_bundled_executable_leaves_the_icon_to_its_bundle() {
         use std::path::Path;
-        assert!(in_app_bundle(Path::new("/Applications/Hydra.app/Contents/MacOS/hydraui")));
-        assert!(!in_app_bundle(Path::new("/Users/me/hydra/target/release/hydraui")));
+        assert!(in_app_bundle(Path::new(
+            "/Applications/Hydra.app/Contents/MacOS/hydraui"
+        )));
+        assert!(!in_app_bundle(Path::new(
+            "/Users/me/hydra/target/release/hydraui"
+        )));
         assert!(!in_app_bundle(Path::new("/opt/Contents/MacOS/hydraui")));
     }
 }

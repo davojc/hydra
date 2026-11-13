@@ -40,22 +40,29 @@ done
 iconutil -c icns "$set_dir" -o "$app/Contents/Resources/hydra.icns"
 
 # The Liquid Glass icon for macOS 26+: actool (Xcode 26 or later) compiles the Icon Composer
-# bundle into Assets.car, and CFBundleIconName points macOS at it. Without that actool the app
-# keeps the .icns alone; HYDRA_REQUIRE_GLASS_ICON=1 (CI) makes that an error instead.
+# bundle into Assets.car, and CFBundleIconName points macOS at it. Without an actool that can
+# compile it, the app keeps the .icns alone; HYDRA_REQUIRE_GLASS_ICON=1 (CI) makes that an
+# error instead.
 icon_name_plist=""
-mkdir -p "$work/icon-out"
-if xcrun actool --version >/dev/null 2>&1 && \
-    xcrun actool "$icon_src" --compile "$work/icon-out" \
+if xcrun actool --version >/dev/null 2>&1; then
+    mkdir -p "$work/icon-out"
+    if xcrun actool "$icon_src" --compile "$work/icon-out" \
         --platform macosx --target-device mac --minimum-deployment-target 11.0 \
         --app-icon hydra --output-partial-info-plist "$work/icon-info.plist" \
-        --output-format human-readable-text --errors --warnings 2>&1 && \
-    [ -f "$work/icon-out/Assets.car" ]; then
-    cp "$work/icon-out/Assets.car" "$app/Contents/Resources/Assets.car"
-    icon_name_plist="    <key>CFBundleIconName</key>
+        --output-format human-readable-text --errors --warnings &&
+        [ -f "$work/icon-out/Assets.car" ]; then
+        cp "$work/icon-out/Assets.car" "$app/Contents/Resources/Assets.car"
+        icon_name_plist="    <key>CFBundleIconName</key>
     <string>hydra</string>"
-    echo "Liquid Glass icon compiled"
+        echo "Liquid Glass icon compiled"
+    elif [ "${HYDRA_REQUIRE_GLASS_ICON:-}" = 1 ]; then
+        echo "error: actool couldn't compile assets/hydra.icon" >&2
+        exit 1
+    else
+        echo "warning: actool couldn't compile assets/hydra.icon (it needs Xcode 26+), so Hydra.app has the .icns icon only" >&2
+    fi
 elif [ "${HYDRA_REQUIRE_GLASS_ICON:-}" = 1 ]; then
-    echo "error: couldn't compile assets/hydra.icon: actool from Xcode 26 or later is needed" >&2
+    echo "error: compiling assets/hydra.icon needs actool from Xcode 26 or later" >&2
     exit 1
 else
     echo "warning: no actool from Xcode 26+, so Hydra.app has the .icns icon only" >&2

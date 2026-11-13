@@ -266,6 +266,19 @@ pub fn last_text(last: Option<&str>, now: &str) -> String {
     format!("{day}{at}")
 }
 
+/// A mail pipeline's line under its card (core spec §89): when it looks, its last look and
+/// what that found, and its next. "Weekdays at 14:28 · last look today at 14:28 (no new
+/// emails) · next look Monday at 14:28".
+pub fn look_line(when: &When, now: &str, last: Option<&str>, found: Option<&str>) -> String {
+    format!(
+        "{} · last look {}{} · next look {}",
+        when.text(),
+        last_text(last, now),
+        found.map_or(String::new(), |f| format!(" ({f})")),
+        when.next_text(now, last)
+    )
+}
+
 /// The line under a timetable in Pipeline settings: what the file has, when it last ran (a
 /// `noun`: "run", "look") and when it next will; or that what's typed isn't saved yet.
 /// `saved` and `typed` are `every`/`check` as saved and as typed. True: not saved yet.
@@ -275,13 +288,15 @@ pub fn status(
     typed: &str,
     now: &str,
     last: Option<&str>,
+    found: Option<&str>,
 ) -> (String, bool) {
     let when = saved.and_then(|s| parse(s).ok());
     match when {
         Some(w) if saved.map(str::trim) == Some(typed.trim()) => (
             format!(
-                "Saved. Last {noun} {} · next {noun} {}.",
+                "Saved. Last {noun} {}{} · next {noun} {}.",
                 last_text(last, now),
+                found.map_or(String::new(), |f| format!(" ({f})")),
                 w.next_text(now, last)
             ),
             false,
@@ -537,15 +552,51 @@ mod tests {
     }
 
     #[test]
+    fn a_mail_cards_line_says_when_it_looked_what_it_found_and_when_next() {
+        let w = parse("weekdays 14:28").unwrap();
+        let now = "2026-11-13 14:40:00.000";
+        let last = Some("2026-11-13 14:28:00.130");
+        assert_eq!(
+            look_line(&w, now, last, Some("no new emails")),
+            "Weekdays at 14:28 · last look today at 14:28 (no new emails) · next look Monday at \
+             14:28"
+        );
+        assert_eq!(
+            look_line(&w, now, None, None),
+            "Weekdays at 14:28 · last look not yet · next look now"
+        );
+    }
+
+    #[test]
     fn the_status_says_whether_it_saved_and_when_it_next_looks() {
         let now = "2026-11-13 10:10:00.000";
         let last = Some("2026-11-13 09:01:42.740");
-        let (line, unsaved) = status("look", Some("weekdays 09:53"), "weekdays 09:53", now, last);
+        let (line, unsaved) = status(
+            "look",
+            Some("weekdays 09:53"),
+            "weekdays 09:53",
+            now,
+            last,
+            None,
+        );
         assert!(!unsaved);
         assert_eq!(line, "Saved. Last look today at 09:01 · next look now.");
-        let (line, unsaved) = status("run", Some("mon 18:00"), "tue 18:00", now, None);
+        // What it found, when the look said.
+        let (line, _) = status(
+            "look",
+            Some("weekdays 09:53"),
+            "weekdays 09:53",
+            now,
+            last,
+            Some("no new emails"),
+        );
+        assert_eq!(
+            line,
+            "Saved. Last look today at 09:01 (no new emails) · next look now."
+        );
+        let (line, unsaved) = status("run", Some("mon 18:00"), "tue 18:00", now, None, None);
         assert!(unsaved && line.contains("Mondays at 18:00"), "{line}");
-        assert!(status("run", None, "mon 18:00", now, None).1);
+        assert!(status("run", None, "mon 18:00", now, None, None).1);
     }
 
     #[test]

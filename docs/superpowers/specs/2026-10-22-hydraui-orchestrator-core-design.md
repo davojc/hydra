@@ -1681,3 +1681,4 @@ A mail look that found nothing said so only in hydraui.log, so it looked as if t
 
 - **What's kept.** Each look keeps what it found in `schedule.json`, under `found:mail:<file>`. That's "no new emails", "1 new: "Sharing"", "3 new" or "couldn't look: …", and how many were someone else's.
 - **What's shown.** The line under **Check** shows it: "Saved. Last look today at 14:28 (no new emails) · next look Monday at 14:28."
+- **On the card.** Every mail pipeline's card in the sidebar has the same, under the card that holds its trigger: "Mail · Weekdays at 14:28 · last look today at 14:28 (no new emails) · next look Monday at 14:28". It's where Linear and Slack pipelines show "Nothing new".

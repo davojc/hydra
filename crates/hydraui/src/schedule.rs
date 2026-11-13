@@ -266,6 +266,19 @@ pub fn last_text(last: Option<&str>, now: &str) -> String {
     format!("{day}{at}")
 }
 
+/// A mail pipeline's line under its card (core spec §89): when it looks, its last look and
+/// what that found, and its next. "Weekdays at 14:28 · last look today at 14:28 (no new
+/// emails) · next look Monday at 14:28".
+pub fn look_line(when: &When, now: &str, last: Option<&str>, found: Option<&str>) -> String {
+    format!(
+        "{} · last look {}{} · next look {}",
+        when.text(),
+        last_text(last, now),
+        found.map_or(String::new(), |f| format!(" ({f})")),
+        when.next_text(now, last)
+    )
+}
+
 /// The line under a timetable in Pipeline settings: what the file has, when it last ran (a
 /// `noun`: "run", "look") and when it next will; or that what's typed isn't saved yet.
 /// `saved` and `typed` are `every`/`check` as saved and as typed. True: not saved yet.
@@ -536,6 +549,22 @@ mod tests {
         );
         assert_eq!(last_text(Some("2026-11-13"), now), "today");
         assert_eq!(last_text(None, now), "not yet");
+    }
+
+    #[test]
+    fn a_mail_cards_line_says_when_it_looked_what_it_found_and_when_next() {
+        let w = parse("weekdays 14:28").unwrap();
+        let now = "2026-11-13 14:40:00.000";
+        let last = Some("2026-11-13 14:28:00.130");
+        assert_eq!(
+            look_line(&w, now, last, Some("no new emails")),
+            "Weekdays at 14:28 · last look today at 14:28 (no new emails) · next look Monday at \
+             14:28"
+        );
+        assert_eq!(
+            look_line(&w, now, None, None),
+            "Weekdays at 14:28 · last look not yet · next look now"
+        );
     }
 
     #[test]

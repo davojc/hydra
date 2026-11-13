@@ -145,7 +145,18 @@ jobs:
         env:
           HYDRA_VERSION: ${{ env.VERSION }}
         run: cargo build --release -p hydra-cli -p hydraui
+      - name: Use Xcode 26 or later
+        # actool from Xcode 26+ compiles the Liquid Glass icon (assets/hydra.icon).
+        run: |
+          major="$(xcodebuild -version | awk 'NR==1 {split($2, v, "."); print v[1]}')"
+          if [ "$major" -lt 26 ]; then
+            xcode="$(ls -d /Applications/Xcode_2[6-9]*.app | sort -V | tail -1)"
+            sudo xcode-select -s "$xcode"
+          fi
+          xcodebuild -version
       - name: Package
+        env:
+          HYDRA_REQUIRE_GLASS_ICON: 1
         run: |
           mkdir -p dist
           for bin in hydra hydraui; do

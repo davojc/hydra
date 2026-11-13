@@ -220,11 +220,7 @@ pub fn parse(text: &str) -> (UiConfig, Vec<String>) {
                 Ok(())
             }),
             "slack_connect_url" => get::<String>(value).and_then(|u| {
-                let u = u.trim().trim_end_matches('/').to_string();
-                if !u.starts_with("https://") {
-                    return Err(format!("{u:?} must be an https:// address"));
-                }
-                cfg.slack_connect_url = Some(u);
+                cfg.slack_connect_url = Some(slack_connect_url(&u)?);
                 Ok(())
             }),
             "gmail_client_id" => get::<String>(value).and_then(|id| {
@@ -362,15 +358,64 @@ pub fn with_setting(
     }
 }
 
+/// `slack_connect_url` as written: the team's Canopy, an https:// address, without a trailing
+/// `/`.
+pub fn slack_connect_url(u: &str) -> Result<String, String> {
+    let u = u.trim().trim_end_matches('/').to_string();
+    if u.is_empty() {
+        return Err("Paste your team's Canopy address, e.g. https://canopy.example.com".into());
+    }
+    if !u.starts_with("https://") || u.len() <= "https://".len() {
+        return Err(format!("{u:?} must be an https:// address"));
+    }
+    Ok(u)
+}
+
 /// Writes one setting to `paths`' config.toml (made if missing), as `with_setting` does.
 pub fn set(paths: &HydraPaths, key: &str, value: Option<toml_edit::Value>) -> Result<(), String> {
+    set_all(paths, &[(key.to_string(), value)])
+}
+
+/// A change to one setting: its key and new value (`None`: removed, back to its default).
+pub type Change = (String, Option<toml_edit::Value>);
+
+/// `text` with each of `changes` made, in order: what Save writes. One that fails stops it.
+pub fn with_settings(text: &str, changes: &[Change]) -> Result<String, String> {
+    changes
+        .iter()
+        .try_fold(text.to_string(), |t, (key, value)| {
+            with_setting(&t, key, value.clone())
+        })
+}
+
+/// The changes in `draft` that would change what `text` means: one set back to what's saved
+/// (or to a default the file leaves out) is dropped.
+pub fn real_changes(text: &str, draft: &[Change]) -> Vec<Change> {
+    let saved = parse(text).0;
+    draft
+        .iter()
+        .filter(|c| {
+            with_settings(text, std::slice::from_ref(*c)).is_ok_and(|t| parse(&t).0 != saved)
+        })
+        .cloned()
+        .collect()
+}
+
+/// The file as it is now, or empty when there's none.
+pub fn read_text(paths: &HydraPaths) -> Result<String, String> {
     let path = config_file(paths);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(format!("can't read {}: {e}", path.display())),
-    };
-    let out = with_setting(&text, key, value)?;
+    match std::fs::read_to_string(&path) {
+        Ok(t) => Ok(t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("can't read {}: {e}", path.display())),
+    }
+}
+
+/// Makes every one of `changes` in config.toml, in one write.
+pub fn set_all(paths: &HydraPaths, changes: &[Change]) -> Result<(), String> {
+    let path = config_file(paths);
+    let text = read_text(paths)?;
+    let out = with_settings(&text, changes)?;
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -388,6 +433,46 @@ pub fn set(paths: &HydraPaths, key: &str, value: Option<toml_edit::Value>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_change_back_to_what_is_saved_is_no_change() {
+        let text = "theme = \"dark\"\n";
+        let draft = vec![
+            ("theme".to_string(), Some("dark".into())),
+            // The default, which the file leaves out.
+            (
+                "min_week_left".to_string(),
+                Some(i64::from(crate::runs::MIN_WEEK_LEFT).into()),
+            ),
+            ("font_size".to_string(), Some(16.0.into())),
+        ];
+        let kept: Vec<String> = real_changes(text, &draft)
+            .into_iter()
+            .map(|c| c.0)
+            .collect();
+        assert_eq!(kept, vec!["font_size".to_string()]);
+    }
+
+    #[test]
+    fn several_changes_are_written_together_or_not_at_all() {
+        let text = "# mine\ntheme = \"dark\"\nfont_size = 14\neditor = \"code\"\n";
+        let out = with_settings(
+            text,
+            &[
+                ("theme".into(), Some("light".into())),
+                ("font_size".into(), Some(16.0.into())),
+                ("editor".into(), None),
+            ],
+        )
+        .unwrap();
+        let (cfg, problems) = parse(&out);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(cfg.theme, ThemeChoice::Light);
+        assert_eq!(cfg.font_size, 16.0);
+        assert_eq!(cfg.editor, None);
+        assert!(out.contains("# mine"), "comments kept: {out}");
+        assert_eq!(with_settings(text, &[]).unwrap(), text);
+    }
 
     #[test]
     fn a_setting_changes_in_place_and_a_bad_one_is_refused() {
@@ -547,6 +632,17 @@ new_terminal = "ctrl-alt-d"
         assert_eq!(cfg.colors.background.as_deref(), Some("#101010"));
         assert_eq!(cfg.colors.palette.as_ref().map(Vec::len), Some(2));
         assert_eq!(cfg.keys["new_terminal"], "ctrl-alt-d");
+    }
+
+    #[test]
+    fn a_canopy_address_is_https_without_a_trailing_slash() {
+        assert_eq!(
+            slack_connect_url(" https://canopy.dev.iov42.net/ ").as_deref(),
+            Ok("https://canopy.dev.iov42.net")
+        );
+        assert!(slack_connect_url("").unwrap_err().contains("Canopy"));
+        assert!(slack_connect_url("http://canopy").is_err());
+        assert!(slack_connect_url("https://").is_err());
     }
 
     #[test]

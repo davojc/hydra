@@ -9,7 +9,7 @@ use gpui::prelude::*;
 use gpui::{Animation, AnimationExt, AnyElement, Context, SharedString, Window, div, px, relative};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::switch::Switch;
-use gpui_component::{Sizable, h_flex, v_flex};
+use gpui_component::{Disableable, Sizable, h_flex, v_flex};
 
 use super::Workspace;
 use crate::envs::PaneId;
@@ -100,6 +100,8 @@ pub(super) struct TriggerView {
     pub(super) last: Option<SystemTime>,
     pub(super) open_run: Option<String>,
     pub(super) checking: bool,
+    /// Holding off new work below the Claude week's floor (§83).
+    pub(super) held: bool,
     /// Why it stopped by itself, as the error said it (shown on hover).
     pub(super) stopped: Option<String>,
     pub(super) source: Source,
@@ -111,7 +113,7 @@ pub(super) fn look_bar(
     key: SharedString,
     p: f32,
     last: Option<SystemTime>,
-    every: u32,
+    every: Duration,
     checking: bool,
     accent: u32,
 ) -> AnyElement {
@@ -151,7 +153,7 @@ pub(super) fn look_bar(
                         .repeat()
                         .with_max_fps(30.),
                     move |d, _| {
-                        let p = linear_watch::look_progress(last, SystemTime::now(), every)
+                        let p = linear_watch::progress_over(last, SystemTime::now(), every)
                             .unwrap_or(p);
                         d.w(relative(p))
                     },
@@ -368,6 +370,20 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(left) = self.week_held_for(orch, cx) {
+            let floor = server::get().map_or(crate::runs::MIN_WEEK_LEFT, |sv| {
+                server::lock(sv.registry()).min_week_left
+            });
+            window.push_note(
+                Note::info(crate::runs::week_hold_line(left, floor)).title(self.toast_title(
+                    orch,
+                    "Check Linear",
+                    cx,
+                )),
+                cx,
+            );
+            return;
+        }
         let Some(slot) = self.slot_for_work(orch, window, cx) else {
             window.push_note(
                 Note::info("Every run is busy: the next is picked when one ends.")
@@ -420,11 +436,13 @@ impl Workspace {
             cx.notify();
         }
         // A Slack watcher starts what it took before it looks again.
+        // Below the Claude week's floor nothing new is taken or started (§83).
         let slack: Vec<PaneId> = self
             .linear_watch
             .iter()
             .filter(|(id, w)| w.on && !w.checking && self.panes.contains_key(id))
             .map(|(id, _)| *id)
+            .filter(|id| self.week_held_for(*id, cx).is_none())
             .collect();
         let mut held: Vec<PaneId> = Vec::new();
         for orch in slack {
@@ -437,7 +455,7 @@ impl Workspace {
             .iter()
             .filter(|(id, w)| w.on && !w.checking && self.panes.contains_key(id))
             .map(|(id, _)| *id)
-            .filter(|id| !held.contains(id))
+            .filter(|id| !held.contains(id) && self.week_held_for(*id, cx).is_none())
             .filter(|id| {
                 let every = match self.linear_of(*id, cx) {
                     Some((_, s, _)) => s.every_minutes,
@@ -970,29 +988,71 @@ impl Workspace {
             waiting: source.waiting,
         });
         let checking = w.is_some_and(|w| w.checking);
+        // Not connected where it runs: it says so, with what connects it (§85).
+        let service = if source.service == "Slack" {
+            crate::pipeline::Service::Slack
+        } else {
+            crate::pipeline::Service::Linear
+        };
+        let env = self
+            .panes
+            .get(&orch)
+            .map(|v| v.read(cx).env().to_string())
+            .unwrap_or_default();
+        let unconnected = super::services::connected(&env, service) == Some(false);
+        let (mode, stopped) = if unconnected && !checking {
+            (
+                linear_watch::Mode::Stopped,
+                Some(format!(
+                    "{} isn't connected for {env}: press {}",
+                    service.name(),
+                    service.how()
+                )),
+            )
+        } else {
+            (mode, w.and_then(|w| w.stopped.clone()))
+        };
+        // Below the Claude week's floor it takes nothing new, and says so (§83).
+        let held = self
+            .week_held_for(orch, cx)
+            .filter(|_| open_run.is_none() && !checking);
+        let line = match held {
+            Some(left) => crate::runs::week_hold_line(
+                left,
+                server::get().map_or(crate::runs::MIN_WEEK_LEFT, |sv| {
+                    server::lock(sv.registry()).min_week_left
+                }),
+            ),
+            None => line,
+        };
         // How far through the wait for the next look, while it's waiting to look.
         // Shown the whole time it waits for work, so the row never jumps: full while it looks,
         // empty before its first look.
-        let progress = (mode == linear_watch::Mode::Automatic && open_run.is_none()).then(|| {
-            if checking {
-                1.0
-            } else {
-                linear_watch::look_progress(
-                    w.and_then(|w| w.last),
-                    SystemTime::now(),
-                    source.every_minutes,
-                )
-                .unwrap_or(0.0)
-            }
-        });
+        let progress = (mode == linear_watch::Mode::Automatic
+            && open_run.is_none()
+            && held.is_none()
+            && !unconnected)
+            .then(|| {
+                if checking {
+                    1.0
+                } else {
+                    linear_watch::look_progress(
+                        w.and_then(|w| w.last),
+                        SystemTime::now(),
+                        source.every_minutes,
+                    )
+                    .unwrap_or(0.0)
+                }
+            });
         Some(Trigger::Lead(Box::new(TriggerView {
             mode,
             line,
+            held: held.is_some(),
             progress,
             last: w.and_then(|w| w.last),
             open_run,
             checking,
-            stopped: w.and_then(|w| w.stopped.clone()),
+            stopped,
             source,
         })))
     }
@@ -1023,6 +1083,7 @@ impl Workspace {
         let TriggerView {
             mode,
             line,
+            held,
             progress,
             last,
             open_run,
@@ -1041,7 +1102,7 @@ impl Workspace {
         };
         let on = mode == linear_watch::Mode::Automatic;
         let tooltip = source.tooltip;
-        let every = source.every_minutes;
+        let every = Duration::from_secs(u64::from(source.every_minutes.max(1)) * 60);
         Some(
             v_flex()
                 .id(SharedString::from(format!("linear-row-{orch}")))
@@ -1133,6 +1194,39 @@ impl Workspace {
                                 ws.toggle_linear_watch(orch, window, cx)
                             })),
                     };
+                    // Where a Connect Slack already pressed has got to (§73).
+                    let connecting = source
+                        .env
+                        .as_deref()
+                        .filter(|_| s.sign_in)
+                        .and_then(|e| self.slack_connecting_of(e).cloned());
+                    let progress = connecting.map(|c| match c {
+                        super::slack::SlackConnecting::Waiting(url) => h_flex()
+                            .gap_1()
+                            .flex_wrap()
+                            .text_xs()
+                            .child(
+                                div()
+                                    .text_color(color(theme::TEXT_SECONDARY))
+                                    .child("Finish signing in in your browser."),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("slack-reopen-{orch}")))
+                                    .text_color(color(theme::TEAL))
+                                    .cursor_pointer()
+                                    .hover(|d| d.underline())
+                                    .child("Didn't open? Open it again")
+                                    .on_click(move |_, _, cx| cx.open_url(&url)),
+                            )
+                            .into_any_element(),
+                        super::slack::SlackConnecting::Failed(why) => div()
+                            .text_xs()
+                            .text_color(color(theme::RED))
+                            .whitespace_normal()
+                            .child(format!("Couldn't connect: {why}"))
+                            .into_any_element(),
+                    });
                     d.child(
                         v_flex()
                             .id(SharedString::from(format!("trigger-stopped-{orch}")))
@@ -1156,6 +1250,7 @@ impl Workspace {
                                     .child(s.hint),
                             )
                             .child(h_flex().pt_1().child(action))
+                            .children(progress)
                             .tooltip(move |window, cx| {
                                 gpui_component::tooltip::Tooltip::new(format!("Details: {why}"))
                                     .build(window, cx)
@@ -1171,7 +1266,14 @@ impl Workspace {
                                 .outline()
                                 .xsmall()
                                 .loading(checking)
-                                .tooltip(source.pick_tooltip)
+                                .disabled(held)
+                                .tooltip(if held {
+                                    "Not below the Claude week limit: the line above says how \
+                                     much is left"
+                                        .to_string()
+                                } else {
+                                    source.pick_tooltip
+                                })
                                 .on_click(cx.listener(move |ws, _, window, cx| {
                                     ws.check_linear_now(orch, window, cx)
                                 })),

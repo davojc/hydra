@@ -28,9 +28,6 @@ impl Workspace {
     pub(super) fn mail_tick(&mut self, now: bool, window: &mut Window, cx: &mut Context<Self>) {
         let root = self.hydra.paths.root().to_path_buf();
         let at = crate::action_log::now();
-        let Some(date) = at.split(' ').next().map(str::to_string) else {
-            return;
-        };
         let last = crate::schedule::last_runs(&root);
         let mut any = false;
         for file in crate::pipeline::names(&root) {
@@ -41,11 +38,29 @@ impl Workspace {
                 continue;
             };
             any = true;
+            // Below the Claude week's floor no email is taken or started (core spec §83).
+            if let Some(left) = self
+                .mail_env(&p, &m, cx)
+                .and_then(|env| self.week_held(&env))
+            {
+                if now {
+                    let floor = crate::mcp::server::get()
+                        .map_or(crate::runs::MIN_WEEK_LEFT, |sv| {
+                            crate::mcp::server::lock(sv.registry()).min_week_left
+                        });
+                    window.push_note(
+                        Note::info(crate::runs::week_hold_line(left, floor)).title("Check mail"),
+                        cx,
+                    );
+                }
+                self.release_mail(&p, &m, window, cx);
+                continue;
+            }
             let due = now
                 || m.when()
                     .is_some_and(|w| w.due(&at, last.get(&look_key(&file)).map(String::as_str)));
             if due && !self.mail_looking.contains(&file) {
-                if let Err(e) = crate::schedule::mark_run(&root, &look_key(&file), &date) {
+                if let Err(e) = crate::schedule::mark_run(&root, &look_key(&file), &at) {
                     crate::action_log::write(format!("mail {file}: can't note the look: {e}"));
                     continue;
                 }
@@ -64,7 +79,12 @@ impl Workspace {
     }
 
     /// The environment a `[mail]` pipeline runs in, as a scheduled one's (§58).
-    fn mail_env(&self, p: &Pipeline, m: &MailSettings, cx: &gpui::App) -> Option<String> {
+    pub(super) fn mail_env(
+        &self,
+        p: &Pipeline,
+        m: &MailSettings,
+        cx: &gpui::App,
+    ) -> Option<String> {
         let running = self.orchestrators.iter().find_map(|(id, f)| {
             (*f == p.file).then(|| self.panes.get(id).map(|v| v.read(cx).env().to_string()))?
         });
@@ -164,6 +184,8 @@ impl Workspace {
                             ticket: mail_watch::ticket(&t.id),
                             subject: t.subject.clone(),
                             from: t.from.clone(),
+                            // The same in every copy of a group's email (spec §5.1).
+                            key: mail_watch::claim_key(t),
                         })
                         .collect();
                     // One person per email (spec §5): only threads this person keeps run.
@@ -171,6 +193,7 @@ impl Workspace {
                         &ep,
                         &access,
                         &me,
+                        &address,
                         swarm.as_deref(),
                         fresh,
                         &crate::action_log::now,
@@ -230,6 +253,7 @@ impl Workspace {
             .collect();
         for m in &new {
             state.held.insert(m.thread.clone(), m.ticket.clone());
+            state.keys.insert(m.thread.clone(), m.key().to_string());
         }
         state.queue.extend(new.iter().cloned());
         if let Err(e) = mail_watch::save(&root, &p.file, &state) {
@@ -303,12 +327,13 @@ impl Workspace {
             return;
         }
         let root = self.hydra.paths.root().to_path_buf();
-        let held = mail_watch::load(&root, &p.file).held;
+        let state = mail_watch::load(&root, &p.file);
+        let (held, keys) = (state.held, state.keys);
         if held.is_empty() {
             return;
         }
         let history = crate::run_history::read(&root, &[]);
-        let ended: Vec<(String, bool)> = held
+        let ended: Vec<(String, String, bool)> = held
             .iter()
             .filter_map(|(thread, ticket)| {
                 let e = history
@@ -321,6 +346,7 @@ impl Workspace {
                 (!open).then(|| {
                     (
                         thread.clone(),
+                        keys.get(thread).cloned().unwrap_or_else(|| thread.clone()),
                         e.outcome == crate::run_history::Outcome::Done,
                     )
                 })
@@ -346,13 +372,14 @@ impl Workspace {
                     let ep = Endpoints::google();
                     let access = gmail::refresh(&ep, &client, &hydra.gmail_sign_in(&env)?)?;
                     let mut released = Vec::new();
-                    for (thread, finished) in ended {
+                    for (thread, key, finished) in ended {
                         crate::mail_claim::release(
                             &ep,
                             &access,
                             &me,
                             swarm.as_deref(),
                             &thread,
+                            &key,
                             finished,
                         )?;
                         released.push((thread, finished));
@@ -368,6 +395,7 @@ impl Workspace {
                         let mut state = mail_watch::load(&root, &file);
                         for (thread, finished) in &released {
                             state.held.remove(thread);
+                            state.keys.remove(thread);
                             crate::action_log::write(format!(
                                 "mail {file}: let go of {thread} ({})",
                                 if *finished { "done" } else { "freed" }

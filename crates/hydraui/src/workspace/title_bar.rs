@@ -9,7 +9,7 @@ use gpui::prelude::*;
 use gpui::{Context, Image, ImageFormat, Window, div, img, px};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_component::{ActiveTheme, Disableable, Sizable, TitleBar, h_flex};
+use gpui_component::{ActiveTheme, Sizable, TitleBar, h_flex};
 use gpui_kit_assets::IconName;
 
 use super::Workspace;
@@ -37,8 +37,16 @@ impl Workspace {
                     .await;
                 let alive = this.update(cx, |ws, cx| {
                     if let Ok(Some(version)) = found
-                        && ws.update.found(version)
+                        && ws.update.found(version.clone())
                     {
+                        // Once per release, in the bell as well as the button (§86).
+                        cx.default_global::<crate::inbox::Inbox>().add(
+                            Note::info(format!(
+                                "hydra {version} is out: Update is beside the bell."
+                            ))
+                            .title("Update"),
+                            crate::action_log::now(),
+                        );
                         cx.notify();
                     }
                 });
@@ -162,29 +170,6 @@ impl Workspace {
 
     pub(super) fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
-        let button = match &self.update {
-            UpdateState::Idle => None,
-            UpdateState::Offered(v) => Some(
-                Button::new("update-hydra")
-                    .label(format!("Update hydra {v}"))
-                    .primary()
-                    .xsmall()
-                    .on_click(cx.listener(|ws, _, window, cx| ws.start_update(window, cx))),
-            ),
-            UpdateState::Updating(_) => Some(
-                Button::new("update-hydra")
-                    .label("Updating…")
-                    .xsmall()
-                    .disabled(true),
-            ),
-            UpdateState::Ready(_) => Some(
-                Button::new("update-hydra")
-                    .label("Restart to finish")
-                    .primary()
-                    .xsmall()
-                    .on_click(cx.listener(|ws, _, window, cx| ws.restart(window, cx))),
-            ),
-        };
         // Pause/Resume the shown environment's orchestrator (orchestrator spec §5.4).
         let pause = self
             .shown_run(cx)
@@ -238,11 +223,7 @@ impl Workspace {
                                 .text_xs()
                                 .text_color(muted)
                                 .child(format!("hydra {}", crate::version::VERSION)),
-                        )
-                        // The title bar's drag area covers its children, and Windows turns a
-                        // click there into a window drag before the button sees it: occluding
-                        // stops the hit test at the button, so its clicks stay clicks.
-                        .children(button.map(|b| div().occlude().child(b))),
+                        ), // The Update button is beside the bell (core spec §86).
                 ),
         )
     }
@@ -322,5 +303,103 @@ impl Workspace {
         // Occluded so a click opens the menu instead of dragging the window (as the Update
         // button).
         Some(div().occlude().child(button))
+    }
+
+    /// Beside the bell, while there's an update (core spec §86): **Update** when a release is
+    /// out, **Updating…** while it installs, **Restart** once it's in. Each click asks first.
+    pub(super) fn update_button(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        use crate::orchestrator_theme::{self as theme, color};
+        let (label, tip): (String, String) = match &self.update {
+            UpdateState::Idle => return None,
+            UpdateState::Offered(v) => ("Update".into(), format!("hydra {v} is out: update to it")),
+            UpdateState::Updating(v) => ("Updating…".into(), format!("Installing hydra {v}")),
+            UpdateState::Ready(v) => (
+                "Restart".into(),
+                format!("hydra {v} is installed: restart to use it"),
+            ),
+        };
+        let busy = matches!(self.update, UpdateState::Updating(_));
+        Some(
+            h_flex()
+                .id("update-hydra")
+                .flex_none()
+                .gap_1p5()
+                .items_center()
+                .h(px(26.))
+                .px_2p5()
+                .mr_1()
+                .rounded_md()
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .bg(color(theme::TEAL))
+                .text_color(color(theme::PANEL))
+                .when(!busy, |d| d.cursor_pointer().hover(|s| s.opacity(0.85)))
+                .when(busy, |d| d.opacity(0.7))
+                .child(
+                    gpui::svg()
+                        .path("icons/circle-arrow-up.svg")
+                        .size(px(14.))
+                        .text_color(color(theme::PANEL)),
+                )
+                .child(label)
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                })
+                .when(!busy, |d| {
+                    d.on_click(cx.listener(|ws, _, window, cx| ws.update_dialog(window, cx)))
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// Asks before updating, or before the restart that finishes it.
+    fn update_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_component::WindowExt;
+        let (title, body, go) = match &self.update {
+            UpdateState::Offered(v) => (
+                format!("Update hydra to {v}?"),
+                format!(
+                    "hydraui downloads hydra {v}, checks it, and installs it with the hydra \
+                     command. Then restart to use it: your terminals and tickets pick back up \
+                     after."
+                ),
+                "Update now",
+            ),
+            UpdateState::Ready(v) => (
+                format!("Restart to use hydra {v}?"),
+                "hydraui closes and opens again. Your terminals and tickets pick back up after."
+                    .to_string(),
+                "Restart now",
+            ),
+            _ => return,
+        };
+        let ws = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let ws = ws.clone();
+            dialog
+                .title(title.clone())
+                .child(div().text_sm().child(body.clone()))
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("update-later")
+                                .label("Not now")
+                                .ghost()
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(Button::new("update-go").label(go).primary().on_click(
+                            move |_, window, cx| {
+                                window.close_dialog(cx);
+                                ws.update(cx, |ws, cx| match ws.update {
+                                    UpdateState::Offered(_) => ws.start_update(window, cx),
+                                    UpdateState::Ready(_) => ws.restart(window, cx),
+                                    _ => {}
+                                });
+                            },
+                        )),
+                )
+        });
     }
 }

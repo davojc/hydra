@@ -76,6 +76,7 @@ impl Workspace {
         self.projects = None;
         self.history = None;
         self.tickets = None;
+        self.actions = None;
         self.sync_lanes(&env, window, cx);
         self.sync_boards(window, cx);
         self.focus_active(window, cx);

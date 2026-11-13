@@ -320,9 +320,16 @@ pub(crate) fn endpoint_builder(machine_key: &[u8; 32], relays: bool) -> iroh::en
     let builder = if relays {
         Endpoint::builder(presets::N0)
     } else {
+        // Without relays is tests only (hydraui always relays): they find each other on
+        // loopback, so listen there alone. Bound to every interface, each freshly built test
+        // binary made macOS's firewall ask whether it may accept incoming connections. A
+        // LAN-only swarm in production would need this changed.
         Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
             .portmapper_config(PortmapperConfig::Disabled)
+            .clear_ip_transports()
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .expect("one loopback address on a cleared builder is a valid bind")
     };
     builder.secret_key(SecretKey::from_bytes(machine_key))
 }
@@ -1354,5 +1361,16 @@ mod tests {
         assert!(!coming.arrived_for_claims_alone(&hash(0)));
         assert!(coming.arrived_for_claims_alone(&hash(1)));
         assert!(coming.arrived_for_claims_alone(&hash(CONTENT_COMING)));
+    }
+
+    #[tokio::test]
+    async fn a_test_endpoint_listens_on_loopback_alone() {
+        // Without relays (tests only), nothing listens beyond this machine, so macOS's firewall
+        // never asks each freshly built test binary about incoming connections.
+        let ep = endpoint_builder(&[7; 32], false).bind().await.unwrap();
+        let bound = ep.bound_sockets();
+        assert!(!bound.is_empty());
+        assert!(bound.iter().all(|a| a.ip().is_loopback()), "{bound:?}");
+        ep.close().await;
     }
 }

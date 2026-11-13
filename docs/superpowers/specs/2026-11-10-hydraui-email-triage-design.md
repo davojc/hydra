@@ -170,6 +170,23 @@ Why it holds when a peer is offline: in step 2, both labels land in Gmail whatev
 - **The re-check just before a draft (step 5).** It belongs with drafts, which aren't built. It would also catch someone replying by hand in Gmail while a run works the thread.
 - **A History view of teammates' claims.** The swarm files are there for it.
 
+
+### 5.1 A Google group: each person's own mailbox (added 2026-11-12)
+
+integration@ turned out to be a Google group, not an account. It has no mailbox of its own. Each member gets their own copy of every email and connects their own inbox, and the claim in §5 broke on that:
+
+- **Labels didn't cross.** A `hydra/claimed/<who>` label on one person's copy never shows on another's.
+- **The swarm claim didn't match.** It was keyed by the thread id, and each copy has a different thread id in each mailbox.
+
+So two people running the pipeline would both take the same email.
+
+- **Claims are keyed by the email, not the thread.** Each look also reads the first message's `Message-ID`, which every copy shares. The swarm claim file is `claims/<key>--<who>.md`, where `key` is `m-` plus a 16-hex FNV-1a fingerprint of the lower-cased `Message-ID`, without its angle brackets (`mail_watch::claim_key`). A thread with no `Message-ID` falls back to `t-<thread id>`.
+- **A claim says which mailbox made it** (`mailbox: …`).
+  - **A claim made in another mailbox** is the only sign of it this mailbox will ever see. So it holds for as long as its file is there, which is until its run ends and releases it, not just for the 10 minutes a same-mailbox claim gets before its label lands. In the settle it counts as a rival as a label would: the earliest claim wins, then the lowest name, so every machine picks the same owner.
+  - **A claim made in the same shared mailbox,** or an older claim with no mailbox line, works as before. Labels decide, and a swarm claim covers only the moments before a label lands.
+- **What was held keeps its key.** The mail state records each held thread's key (`keys`), so releasing a claim removes the right file. State saved before this uses the thread id.
+- **Setting it up.** Everyone who runs the pipeline needs to be in one swarm that the pipeline names (`[mail] swarm`). Pipeline settings says so under the Mail source when no team swarm is set.
+
 ## 6. The reply: draft only
 
 - **Where the draft comes from.**

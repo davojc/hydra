@@ -13,6 +13,27 @@ use crate::rating::{Rating, Side, passes};
 /// Attempts a failed stage gets before it waits for a person (§5.2, the user's decision).
 pub const MAX_ATTEMPTS: usize = 3;
 
+/// Whether a trigger holds off new work (core spec §83): the percent of the seven-day Claude
+/// limit left, when it's below `floor`. `reported` is the environment's last report, as
+/// (percent used, when its week resets in Unix seconds): one from a week that has since reset
+/// no longer counts, and with none there's nothing to hold for. `floor` 0 is off.
+pub fn week_hold(reported: Option<(f64, Option<i64>)>, now: i64, floor: u8) -> Option<u8> {
+    let (used, resets) = reported?;
+    if floor == 0 || resets.is_some_and(|r| now >= r) {
+        return None;
+    }
+    let left = (100.0 - used).clamp(0.0, 100.0);
+    (left < f64::from(floor)).then_some(left.floor() as u8)
+}
+
+/// What a held trigger says.
+pub fn week_hold_line(left: u8, floor: u8) -> String {
+    format!(
+        "Waiting for Claude: {left}% of your week is left, and new tickets start at {floor}% or \
+         more"
+    )
+}
+
 /// The share of the seven-day Claude limit a stage needs left, in percent, unless hydraui's
 /// config sets `min_week_left` (§5.1, the user's decision).
 pub const MIN_WEEK_LEFT: u8 = 30;
@@ -151,6 +172,9 @@ pub enum Whom {
     /// The pull request's author (or whoever owns the change) to push fixes or reply: a review
     /// that asked for changes waits on them, which isn't a person in hydraui being needed.
     Author,
+    /// A person approving the stage's draft in Actions (core spec §80): proposed with
+    /// `action_propose`, never with `stage_ask`.
+    Approval,
 }
 
 impl Whom {
@@ -159,6 +183,7 @@ impl Whom {
         match word.trim().to_ascii_lowercase().as_str() {
             "" | "product" => Some(Whom::Product),
             "author" => Some(Whom::Author),
+            "approval" => Some(Whom::Approval),
             _ => None,
         }
     }
@@ -167,6 +192,7 @@ impl Whom {
         match self {
             Whom::Product => "product",
             Whom::Author => "author",
+            Whom::Approval => "approval",
         }
     }
 }
@@ -613,7 +639,12 @@ impl Runs {
             }
             _ => return no(format!("stage {stage} is already done")),
         }
-        if let Some(used) = r.week_used {
+        // A ticket that has started finishes, unless its pipeline says to stop (§83).
+        let started = r.stages.iter().any(|s| s.status != StageStatus::Waiting);
+        if let Some(used) = r
+            .week_used
+            .filter(|_| !(started && r.pipeline.finish_started))
+        {
             let left = 100.0 - used;
             if left < f64::from(min_week_left) {
                 return Err((
@@ -1258,7 +1289,10 @@ impl Runs {
             return Err("only a running stage's own session asks".into());
         };
         let r = &mut self.runs[ri];
-        if r.stages[si].status != StageStatus::Running {
+        // A stopped stage that was told to look again may find it waits on someone after all
+        // (geo-tool-109-1: a second review reopened the PR's findings), as it may report.
+        let relooked = r.stages[si].status == StageStatus::Stopped && r.looking == Some(si);
+        if r.stages[si].status != StageStatus::Running && !relooked {
             return Err("this stage isn't running".into());
         }
         if r.asking.is_some() {
@@ -1279,6 +1313,13 @@ impl Runs {
         if question.is_empty() {
             return Err("the question is empty".into());
         }
+        if relooked {
+            // At work again: waiting on its answer, as a stage that asked while running is.
+            r.stages[si].status = StageStatus::Running;
+            r.looking = None;
+            r.rechecking = None;
+            r.with_you = None;
+        }
         r.asking = Some(Ask {
             stage: si,
             whom,
@@ -1293,6 +1334,10 @@ impl Runs {
             ),
             Whom::Author => format!(
                 "{} is waiting on the author: {question}",
+                r.pipeline.stages[si].title
+            ),
+            Whom::Approval => format!(
+                "{} is waiting for you to approve in Actions: {question}",
                 r.pipeline.stages[si].title
             ),
         });
@@ -2248,6 +2293,50 @@ mod tests {
         // Approving after all is a report like any other.
         runs.report("s1", rated(95)).unwrap();
         assert_eq!(runs.run(&id).unwrap().state, RunState::Finished);
+    }
+
+    #[test]
+    fn a_stopped_stage_looking_again_can_go_back_to_waiting_on_the_author() {
+        // geo-tool-109-1: stopped for a code owner's approval, the stage looked again, found a
+        // second review that reopened the findings, and asked to wait on Kris. hydraui said
+        // "this stage isn't running", so it reported and the run showed Needs you instead.
+        let mut runs = Runs::default();
+        let id = run(&mut runs, &["a"]);
+        started(&mut runs, &id, "a", "s1");
+        let mut held = rated(60);
+        held.ask = "Approve it as a code owner".into();
+        runs.report("s1", held).unwrap();
+        assert_eq!(status(&runs, &id, 0), StageStatus::Stopped);
+        let link = Some("https://github.com/iov42/geo-tool/pull/109");
+        // Not looking again: still refused, as before.
+        let e = runs
+            .ask(
+                "s1",
+                "Waiting on Kris",
+                link,
+                SystemTime::now(),
+                Whom::Author,
+            )
+            .unwrap_err();
+        assert!(e.contains("isn't running"), "{e}");
+        runs.look_again(&id, 0).unwrap();
+        runs.ask(
+            "s1",
+            "Waiting on Kris",
+            link,
+            SystemTime::now(),
+            Whom::Author,
+        )
+        .unwrap();
+        let r = runs.run(&id).unwrap();
+        assert!(r.asking.as_ref().is_some_and(|a| a.whom == Whom::Author));
+        assert_eq!(r.looking, None);
+        assert_eq!(status(&runs, &id, 0), StageStatus::Running);
+        assert_eq!(
+            crate::pipeline_card::card(r).state,
+            crate::pipeline_card::CardState::Waiting,
+            "waiting on the author, not on you"
+        );
     }
 
     #[test]
@@ -3244,9 +3333,30 @@ mod tests {
     }
 
     #[test]
-    fn less_than_the_weekly_share_left_needs_a_person() {
+    fn a_started_ticket_finishes_below_the_weekly_share_unless_its_pipeline_says_stop() {
+        // finish_started (the default): the share holds only the first stage.
         let mut runs = Runs::default();
         let id = run(&mut runs, &["a", "b"]);
+        runs.usage("orch", 75.0);
+        let refused = runs.begin("orch", &id, "a", "", 30).unwrap_err();
+        assert!(refused.why.contains("25%"), "{}", refused.why);
+        runs.person(&id, retry("Limit reset.")).unwrap();
+        runs.usage("orch", 10.0);
+        started(&mut runs, &id, "a", "tok-a");
+        runs.report("tok-a", rated(90)).unwrap();
+        runs.usage("orch", 80.0);
+        assert!(
+            runs.begin("orch", &id, "b", "", 30).is_ok(),
+            "started: it finishes"
+        );
+    }
+
+    #[test]
+    fn less_than_the_weekly_share_left_needs_a_person() {
+        let mut runs = Runs::default();
+        let mut p = pipeline(&["a", "b"]);
+        p.finish_started = false;
+        let id = runs.start_run("orch", p, "INTH-1", "x").unwrap().id.clone();
         // No usage report yet: allowed.
         started(&mut runs, &id, "a", "tok-a");
         runs.usage("tok-a", 70.0);
@@ -3269,6 +3379,20 @@ mod tests {
         runs.person(&id, retry("Limit reset.")).unwrap();
         runs.usage("orch", 10.0);
         assert!(runs.begin("orch", &id, "b", "", 30).is_ok());
+    }
+
+    #[test]
+    fn a_trigger_holds_below_the_weekly_share_until_the_week_resets() {
+        // 78% used of a week that resets at 1000: 22% left, below 30.
+        assert_eq!(week_hold(Some((78.0, Some(1_000))), 500, 30), Some(22));
+        assert_eq!(week_hold(Some((60.0, Some(1_000))), 500, 30), None);
+        // Reset since that report: it no longer counts.
+        assert_eq!(week_hold(Some((78.0, Some(1_000))), 1_001, 30), None);
+        // Nothing reported yet, or the check off: no hold.
+        assert_eq!(week_hold(None, 500, 30), None);
+        assert_eq!(week_hold(Some((99.0, None)), 500, 0), None);
+        assert!(week_hold_line(22, 30).contains("22%"));
+        assert!(week_hold_line(22, 30).contains("30%"));
     }
 
     #[test]

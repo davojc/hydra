@@ -101,6 +101,8 @@ pub(super) struct SettingsDraft {
     look_open: bool,
     /// Tickets run at once, each with its own orchestrator.
     runs: u8,
+    /// A started ticket finishes below the Claude week limit (core spec §83).
+    pub(super) finish_started: bool,
     /// What a waiting stage's session does (core spec §60).
     waiting: pipeline::WaitingSettings,
     /// The Advanced part is unfolded.
@@ -291,6 +293,7 @@ impl SettingsDraft {
             color: self.color,
             icon: self.icon.clone(),
             runs_at_once: self.runs,
+            finish_started: self.finish_started,
             waiting: self.waiting,
             bar: slider_value(&self.bar, cx),
             stages: self
@@ -579,6 +582,7 @@ impl Workspace {
             icon: saved.icon.clone(),
             look_open: false,
             runs: saved.runs_at_once,
+            finish_started: saved.finish_started,
             waiting: saved.waiting,
             advanced: false,
             source_open: false,

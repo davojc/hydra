@@ -1030,8 +1030,7 @@ mod tests {
     }
 
     #[test]
-    fn usage_reports_feed_the_weekly_check() {
-        use crate::runs::Decided;
+    fn usage_reports_reach_the_run_and_a_started_ticket_finishes() {
         let (_home, reg, orch) = with_pipeline();
         let stage = first_stage_open(&reg, &orch);
         let usage = r#"{"jsonrpc":"2.0","method":"hydraui/usage","params":{"rate_limits":{"seven_day":{"used_percentage":75}}}}"#;
@@ -1049,10 +1048,12 @@ mod tests {
             "stage_start",
             json!({"run": "INTH-7-1", "stage": "b"}),
         );
-        assert!(err && text.contains("25%"), "{text}");
-        assert!(
-            matches!(&event, Some(McpEvent::RunChanged(c)) if c.iter().any(|c| matches!(c.what, Decided::RunNeedsYou(_))))
-        );
+        // 25% left is below the 30% floor, but the ticket has started: it finishes (§83).
+        assert!(!err, "{text}");
+        assert!(event.is_some());
+        let st: Value =
+            serde_json::from_str(&call(&reg, &orch, "run_status", json!({})).0).unwrap();
+        assert_eq!(st["week_used"], 75.0);
     }
 
     #[test]
@@ -1092,6 +1093,89 @@ mod tests {
             serde_json::from_str(&call(&reg, &orch, "run_status", json!({})).0).unwrap();
         assert_eq!(st["state"], "running");
         assert!(call(&reg, &stage, "stage_answer", json!({"answer": "again"})).1);
+    }
+
+    #[test]
+    fn a_run_needs_the_service_its_pipeline_takes_work_from() {
+        use crate::pipeline::Service;
+        let (home, reg, _) = with_pipeline();
+        std::fs::write(
+            crate::pipeline::folder(home.path()).join("prs.toml"),
+            "name = \"PRs\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n[slack]\nchannel = \"C0C217CER6G\"\n",
+        )
+        .unwrap();
+        let orch = reg.lock().unwrap().register_in(
+            "orchestrator",
+            home.path().to_path_buf(),
+            Some("iov42".into()),
+        );
+        let start = json!({"pipeline": "prs", "ticket": "svc-usage-60", "summary": "x"});
+        reg.lock()
+            .unwrap()
+            .connected
+            .lock()
+            .unwrap()
+            .insert(("iov42".into(), Service::Slack), false);
+        let (text, err, _) = call(&reg, &orch, "run_start", start.clone());
+        assert!(err && text.contains("Connect Slack"), "{text}");
+        // Connected: it starts.
+        reg.lock()
+            .unwrap()
+            .connected
+            .lock()
+            .unwrap()
+            .insert(("iov42".into(), Service::Slack), true);
+        let (text, err, _) = call(&reg, &orch, "run_start", start);
+        assert!(!err, "{text}");
+    }
+
+    #[test]
+    fn a_stage_proposes_an_action_and_waits_for_a_person() {
+        use crate::runs::Decided;
+        let (home, reg, orch) = with_pipeline();
+        let stage = first_stage_open(&reg, &orch);
+        let propose = json!({
+            "title": "Reply to Ann about sharing",
+            "proposal": "Hi Ann, use Share on the record.",
+            "context": "Ann asked how to share a record.",
+        });
+        assert!(
+            call(&reg, &orch, "action_propose", propose.clone()).1,
+            "not the orchestrator's"
+        );
+        // An approval is only ever proposed, never asked.
+        assert!(
+            call(
+                &reg,
+                &stage,
+                "stage_ask",
+                json!({"question": "q", "who": "approval"})
+            )
+            .1
+        );
+        let (text, err, event) = call(&reg, &stage, "action_propose", propose.clone());
+        assert!(!err && text.contains("Actions"), "{text}");
+        assert!(
+            matches!(&event, Some(McpEvent::RunChanged(c)) if matches!(&c[0].what, Decided::Asked(q) if q == "Reply to Ann about sharing"))
+        );
+        let st: Value =
+            serde_json::from_str(&call(&reg, &orch, "run_status", json!({})).0).unwrap();
+        assert_eq!(st["state"], "needs_you");
+        let listed = crate::actions::list(home.path(), &crate::action_log::now());
+        assert_eq!(listed.len(), 1);
+        let a = &listed[0];
+        assert_eq!(
+            (a.run.as_str(), a.revision, &a.state),
+            ("INTH-7-1", 1, &crate::actions::State::Waiting)
+        );
+        assert_eq!(a.context, "Ann asked how to share a record.");
+        assert!(a.email.is_none(), "no email behind this run");
+        // It waits on the user's approval, as the log says.
+        let log =
+            std::fs::read_to_string(crate::run_log::file_for(home.path(), "INTH-7-1")).unwrap();
+        assert!(log.contains(r#""who":"approval""#), "{log}");
+        // Waiting already: not again.
+        assert!(call(&reg, &stage, "action_propose", propose).1);
     }
 
     #[test]
@@ -1251,7 +1335,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 34);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 35);
         let bad: Value = serde_json::from_str(&rpc(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"tasks_delete","arguments":{}}}"#).body.unwrap()).unwrap();
         assert_eq!(bad["error"]["code"], -32602);
         let junk: Value = serde_json::from_str(&rpc("{not json").body.unwrap()).unwrap();

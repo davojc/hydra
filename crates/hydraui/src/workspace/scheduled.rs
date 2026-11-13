@@ -1,15 +1,36 @@
 //! Scheduled pipelines starting their runs (core spec §58): looked at every 30 seconds.
 
-use gpui::{Context, Window};
+use std::time::{Duration, SystemTime};
+
+use gpui::prelude::*;
+use gpui::{AnyElement, Context, SharedString, Window, div, px};
+use gpui_component::v_flex;
 
 use super::Workspace;
+use crate::envs::PaneId;
 use crate::inbox::{Note, PushNote};
+use crate::orchestrator_theme::{self as theme, color};
+
+/// What a scheduled pipeline's row under its card says: when it runs, and how long until the
+/// next run (or that it's starting now).
+pub(super) fn schedule_line(when: &crate::schedule::When, wait: crate::schedule::Wait) -> String {
+    match wait.left {
+        0 => format!("{} · starting its run now", when.text()),
+        left => format!(
+            "{} · next run in {}",
+            when.text(),
+            crate::schedule::countdown(left)
+        ),
+    }
+}
 
 impl Workspace {
     /// Starts each scheduled pipeline's run that is due: marked first, so one that can't start
     /// isn't tried again every 30 seconds, then handed to its orchestrator as a Tickets pick
     /// is (a free one of the pipeline's in that environment, else a new one).
     pub(super) fn schedule_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Which services each environment has, for pipelines that need one (§85).
+        self.services_tick(cx);
         if self
             .schedule_checked
             .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(30))
@@ -38,7 +59,23 @@ impl Workspace {
             if !when.due(&now, last.get(&file).map(String::as_str)) {
                 continue;
             }
-            if let Err(e) = crate::schedule::mark_run(&root, &file, &date) {
+            // Below the Claude week's floor it doesn't start, and isn't marked: it starts when
+            // enough is left again that day (core spec §83).
+            let would_run = self.orchestrators.iter().find_map(|(id, f)| {
+                (*f == file).then(|| self.panes.get(id).map(|v| v.read(cx).env().to_string()))?
+            });
+            if crate::schedule::pick_env(
+                sc.env.as_deref(),
+                p.autostart.as_deref(),
+                would_run.as_deref(),
+                self.ui.default_env.as_deref(),
+                &envs,
+            )
+            .is_some_and(|env| self.week_held(&env).is_some())
+            {
+                continue;
+            }
+            if let Err(e) = crate::schedule::mark_run(&root, &file, &now) {
                 crate::action_log::write(format!("schedule {file}: can't note the run: {e}"));
                 continue;
             }
@@ -89,5 +126,85 @@ impl Workspace {
                 cx,
             );
         }
+    }
+
+    /// The row under a scheduled pipeline's card (core spec §79): when it runs, the time to the
+    /// next run, and a bar filling from the run before to the next, like a trigger's wait for
+    /// its next look. Only on the card holding the pipeline's trigger; `None` without a
+    /// `[schedule]`.
+    pub(super) fn render_schedule_row(
+        &self,
+        orch: PaneId,
+        accent: u32,
+        cx: &gpui::App,
+    ) -> Option<AnyElement> {
+        if self.lead_of(orch, cx) != orch {
+            return None;
+        }
+        let file = self.orchestrators.get(&orch)?;
+        let root = self.hydra.paths.root();
+        let pipeline = crate::pipeline::load(root, file).ok()?;
+        let when = pipeline.schedule.as_ref()?.when()?;
+        let last = crate::schedule::last_runs(root);
+        let wait = when.wait(
+            &crate::action_log::now(),
+            last.get(file).map(String::as_str),
+        )?;
+        let started = SystemTime::now().checked_sub(Duration::from_secs(wait.since));
+        Some(
+            v_flex()
+                .ml(px(26.))
+                .mr_1()
+                .my_1()
+                .gap_1()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(color(theme::TEXT_SECONDARY))
+                        .child(match self.week_held_for(orch, cx) {
+                            // Due, but held below the Claude week's floor (§83).
+                            Some(left) if wait.left == 0 => crate::runs::week_hold_line(
+                                left,
+                                crate::mcp::server::get()
+                                    .map_or(crate::runs::MIN_WEEK_LEFT, |sv| {
+                                        crate::mcp::server::lock(sv.registry()).min_week_left
+                                    }),
+                            ),
+                            _ => schedule_line(&when, wait),
+                        }),
+                )
+                .child(super::linear::look_bar(
+                    SharedString::from(format!("schedule-bar-{orch}")),
+                    wait.progress(),
+                    started,
+                    Duration::from_secs(wait.since + wait.left),
+                    false,
+                    accent,
+                ))
+                .into_any_element(),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_row_says_when_it_runs_and_how_long_until_the_next() {
+        let when = crate::schedule::parse("thu 19:26").unwrap();
+        let wait = |since, left| crate::schedule::Wait { since, left };
+        assert_eq!(
+            schedule_line(&when, wait(60, 8 * 3600)),
+            "Thursdays at 19:26 · next run in 8 hours"
+        );
+        assert_eq!(
+            schedule_line(&when, wait(60, 30)),
+            "Thursdays at 19:26 · next run in 30 seconds"
+        );
+        assert_eq!(
+            schedule_line(&when, wait(10, 0)),
+            "Thursdays at 19:26 · starting its run now"
+        );
     }
 }

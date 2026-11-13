@@ -1487,3 +1487,153 @@ When a run waited on you and you went to it, with **Resume session** (§61) or *
   - The stage reports: it goes on, or waits on you again, as its report says.
   - You make a choice: pass, re-run, go back or stop.
   - You close the session you were in: it says **Needs you** again, since it's yours to act on.
+
+## 73. Connect Slack says what it's doing (added 2026-11-12)
+
+A Windows user on 0.6.49 pressed **Connect Slack**, and it seemed to do nothing. Connect Slack needs `slack_connect_url`, the team's Canopy, which finishes the Slack sign-in. A fresh install doesn't have it, and the warning went only to the bell (§57). Every other way the sign-in could stop was reported the same way.
+
+- **No Canopy address yet.** Connect Slack opens **Connect Slack: your team's Canopy**. Its one line says what the address is for and to ask whoever set up hydraui for the team. It has a box for the address.
+  - **Save** checks the address with the rule config uses (`config::slack_connect_url`: https://, no trailing slash), writes it to config.toml, and starts the sign-in at once.
+  - A wrong address is named in the dialog, which stays open.
+- **Under the button.** The card's stopped box shows where the sign-in has got to (`Workspace::slack_connecting`):
+  - while the browser is out: "Finish signing in in your browser.", with **Didn't open? Open it again**, which opens the same sign-in page;
+  - if it fails: "Couldn't connect: <why>", in red.
+  - Connecting clears it, and the trigger goes back on as before. The notices still go to the bell too.
+
+## 74. A stage looking again can wait on the author again (added 2026-11-12)
+
+geo-tool-109-1 showed the gap.
+
+- The review stage re-reviewed Kris's fix, judged it resolved, and stopped for a code owner's approval (RED zone).
+- Its keep-checking looks (§62) then found a second reviewer's findings that reopened the PR. It requested changes again and asked to wait on Kris.
+- `stage_ask` refused with "this stage isn't running", because the stage was stopped and looking again. So it reported, and the run showed **Needs you** ("Wait for krisrimar-iov42 to fix …"), not **Waiting on author**. Kris's next push would then be looked for only until its keep-checking hours ran out.
+
+**The fix.** A stopped stage that was told to look again (`Run.looking`) may ask, as it may already report. Asking puts it back to work, waiting on its answer, as a stage that asked while running is:
+
+- it goes back to Running;
+- `looking`, `rechecking` and `with_you` clear;
+- the run waits on the author.
+
+A stopped stage that isn't looking again is still refused.
+
+## 75. What a ticket waits on, under its stage (added 2026-11-12)
+
+The "⏸ Waiting on the author · 6m" line sat right under the pipeline's card, above the Automatic trigger row. So it read as the trigger's state rather than the ticket's. It was also amber, while the card's pill showed the same wait in calm green: waiting on an author is nothing for you to do (§42).
+
+- **Where it is.** On a one-ticket pipeline, the line now sits inside the orchestrator's guide line, under the stage sessions, beside the stage that's waiting. With several tickets, each ticket's line stays in its own box, as before.
+- **Its colour.** A wait on a pull request's author is in the pipeline's colour, like the pill. A question to product stays amber.
+
+## 76. A ticket's details sit with its sessions (added 2026-11-12)
+
+On a pipeline with one ticket open, the ticket's name, its state ("version-2-backend-1937 · Review · waiting on the author") and its pill were drawn in the pipeline's card, above the trigger. They looked like the pipeline's own state, far from the **1. Review PR** session they were about. With two or more tickets, each already had its own box (§46).
+
+- **One ticket gets a box too.** Under its orchestrator, the box holds the ticket's name (a pull request as `repo #N`), its state pill, what it waits on (§75), its link, and the sessions working on it. That's the same box as with several tickets, and the group view already drew one for a single ticket (`open_lanes`).
+- **The pipeline's card is the pipeline's.** While tickets are open, it shows the pipeline's name and "1 ticket in progress" (or "N tickets in progress"). It no longer shows a ticket's pill or progress bar, since the box below has them. With no ticket open, it reads as before ("No ticket yet", Ready).
+
+## 77. One line for what a ticket waits on (added 2026-11-12, revised the same day)
+
+With each ticket in its own box (§76), the box said the same thing twice: a **Waiting on author** pill, and a "⏸ Waiting on the author · 23m ›" line under it. The same happened for a question to product.
+
+- **The line stays, and the pill goes.** While a ticket waits on its author or on product, its box shows the full-width line, in the pipeline's colour for an author and amber for product. The line says how long it has waited, and a click opens the question: what's asked, its thread, **Check now** and **Answer…**. The state pill is left out, since it would only repeat the line. Every other state keeps its pill.
+- **Tried the other way first.** The pill was given the wait time and the click instead, and the line removed. That was reversed the same day at the user's request: the line reads better.
+
+## 78. Check Gmail says what it found (added 2026-11-12)
+
+**Check Gmail** reported only to the bell, so pressing it looked like nothing happened. It's the same gap Connect Slack had (§73).
+
+- **A dialog.** **Gmail for <env>** now opens with:
+  - which mailbox is connected: "Connected as …. This is the mailbox hydraui reads.";
+  - its newest inbox threads, each with its subject and sender;
+  - how to read another mailbox: Connect Gmail… and sign in as that account.
+
+  A failure opens the dialog too ("Couldn't read the mailbox: …").
+- **A missing Google client** opens the same dialog, for Check Gmail and for Connect Gmail. It says to set `gmail_client_id` and `gmail_client_secret`, then choose **Reload config**.
+- **The bell.** The notices still go there too.
+
+## 79. A scheduled pipeline counts down to its next run (added 2026-11-12)
+
+A Linear or Slack pipeline's card has a bar filling towards its next look. A scheduled pipeline (§58) had nothing, so nobody could tell when it would run next.
+
+- **A row under its card.** It reads "Thursdays at 19:26 · next run in 8 hours" and counts down: "1 day 5 hours", "1 hour 25 minutes", "30 seconds".
+- **A bar.** It fills from the run time before to the next, the same bar a trigger's look uses. It's full, with "starting its run now", while a run is due and not yet started.
+- **Only on the lead card.** With several runs at once, only the card holding the pipeline's trigger shows it.
+- **Wall clock.** The wait is counted on the local wall clock, so across a daylight-saving change that one wait is an hour out.
+
+## 80. Actions: work a person approves (added 2026-11-12)
+
+A stage can draft something a person must approve before it goes anywhere: a reply to a customer's email, first of all. The pipeline's own prompt decides when, for example "draft a reply if you think it's something we can answer, and put it in Actions". Nothing is pipeline-specific: any stage can propose an action.
+
+- **`action_propose`.** A stage session calls it with:
+  - `title`: what to approve, in a line.
+  - `proposal`: the draft itself.
+  - `context`: what it answers. Optional. When the run has an `email.md`, hydraui fills this from the email: its subject, sender and text.
+
+  The stage then waits, as for `stage_ask` (§62). The ticket says "Needs you: approve … in Actions", and the session does nothing until a person acts. If the stage calls it again after **Edit**, that revises the same action, and its revision count goes up.
+- **The Actions button.** It sits beside Projects, History and Tickets, with the number waiting. It opens the **Actions** page: one row per action, newest first, showing the pipeline's icon and colour, the title, the ticket, and how long it has waited. Approved and rejected actions stay listed, with their outcome, for 7 days.
+- **A row opens.** It shows what it answers (an email's subject, sender and text), then the proposed draft in an editable box, then three buttons:
+  - **Approve**: the draft as it stands in the box, edits included. For a run that came from an email (`[mail]`, email triage spec), hydraui saves it as a **Gmail draft reply in that email's thread**. It goes to the sender, with "Re: <subject>", from the connected mailbox. Nothing is sent: a person sends it from Gmail. The stage is told it was approved and saved, and reports done.
+  - **Reject**: asks for an optional reason. The stage is told it was rejected and why, saves nothing, and reports done, naming the rejection.
+  - **Edit**: asks what to change, as a prompt. The stage is told, revises the draft, and calls `action_propose` again. The row shows "Changing…" until the new draft arrives.
+- **Where it's kept.** Each action is kept as `<hydra home>/hydraui/actions/<id>.json`, so a restart keeps them.
+
+## 81. The Claude week limit is a setting (added 2026-11-13)
+
+How much of the seven-day Claude limit a stage needs left (`min_week_left`, orchestrator spec §5.1) could only be changed in config.toml.
+
+- **Settings › General › Pipelines** has a **Claude week limit** row: a slider from Off (0) to 100%, in 5% notches, with the value beside it ("30% (default)"). It saves when let go, not while it moves. Under it, a line says what the value means. A value in the file between notches, such as 27, shows at the nearest notch, and is saved as that notch only once the slider is moved. (Revised the same day: first it was buttons for Off and 10% to 50%.)
+- **The status bar's usage** ("claude 5h 42% · 7d 18%") opens General with that row marked, so the limit is one click from the number it limits. The usage's tooltip says so. Before, it opened the environment's page.
+
+## 82. A timetable moved later the same day still runs, and says when (added 2026-11-13)
+
+A scheduled run or a mailbox look (§58, email triage spec §3) kept only the date it last happened. So moving a pipeline's time later in a day it had already run did nothing until the next day, and Pipeline settings never said so. A time moved from 09:00 to 09:53 after the 09:01 look is an example.
+
+- **Each run or look keeps its time** in `schedule.json`: `2026-11-13 09:01:42.740`, not `2026-11-13`.
+- **When it's due:** on one of its days, once its time has passed, if nothing ran since that time today. So a time moved later the same day gets its own run, and one time never runs twice. A date alone, written before this change, still counts as the whole day.
+- **A line under Runs and under Check** reads the timetable from the saved file, not from what's typed: "Saved. Last look today at 09:01 · next look Monday at 09:53." While what's typed differs from the file, it says so in amber: "Not saved yet: Save changes to use it. Until then it's Weekdays at 09:00."
+
+## 83. Below the Claude week limit, nothing new starts, and a started ticket finishes (added 2026-11-13)
+
+The week limit (`min_week_left`, §81) was checked only when a stage started. A trigger therefore took work below it. A Slack PR got its 👀, so nobody else would take it, and its first stage was then refused. The ticket sat claimed and blocked. Daniel's run at 22% of 30% is an example.
+
+- **Triggers hold.** While less than the limit is left in a pipeline's environment, its trigger takes nothing new:
+  - Linear doesn't look or claim;
+  - Slack neither marks nor starts a PR, and those already queued wait;
+  - a `[mail]` look neither labels nor starts an email;
+  - a scheduled run doesn't start and isn't marked, so it starts later that day if enough comes back.
+- **What's shown.** The card's trigger line says "Waiting for Claude: 22% of your week is left, and new tickets start at 30% or more". **Pick next ticket** / **Take next PR** are disabled, with that reason. **Check mail now** says it in its notice.
+- **Which report counts.** The hold reads the environment's latest seven-day report. One from before the week's reset no longer counts, and with no report there's nothing to hold for.
+- **A started ticket finishes** (`finish_started`, on by default, under Pipeline settings › Advanced › Claude week limit). The limit applies to a ticket's first stage only. Once a ticket has started, its stages carry on to the end, so a claimed ticket is never left half done.
+- **"Stop for you"** (`finish_started = false`) keeps the old rule. Every stage needs the limit, and a ticket below it waits for a person, still claimed.
+
+## 84. General settings save when you click Save (added 2026-11-13)
+
+Settings › General wrote `config.toml` the moment a value changed, and nothing said whether it had saved.
+
+- **A draft.** A change shows on the page at once, and nothing is written until **Save**. That covers theme, font size, default shell, default environment, editor, terminal font and the Claude week limit (§81). A line under the title names what isn't saved yet: "Not saved yet: Theme, Claude week limit." in amber. After **Save** it says "Saved.".
+- **Save** writes every change in one go and applies them, as Reload config does. It's disabled while there's nothing to save. **Discard** puts the page back to what's saved.
+- **A change set back** to the saved value (or to a default the file leaves out) is no longer listed.
+- **Leaving General** keeps the draft until Save or Discard.
+- **Editor and Terminal font** dialogs set the value in the draft: their button says **Set**.
+- **Other Settings pages** (environments, Phone, Swarms) still save as they did.
+
+## 85. A pipeline needs the service its trigger uses (added 2026-11-13)
+
+A new teammate imported the PR review pipeline and gave a PR to its orchestrator by hand, with Slack not set up. The run started, but nothing marked the PR's message with 👀, so anyone else's trigger could take the same PR. The pipeline's stages also expected Slack.
+
+- **What it needs.** A pipeline needs the service its trigger names: `[slack]` needs Slack, `[linear]` needs Linear, `[mail]` needs Gmail (`Pipeline::needs`). Nothing is specific to one pipeline.
+- **What's connected.** hydraui reads which services are connected in each environment from the stored secrets, off the UI thread, at start and every 10 minutes. A successful **Connect Slack** or **Connect Gmail** marks its service connected at once.
+- **No run without it.** `run_start` refuses a run whose pipeline needs a service that isn't connected where it runs. The refusal names the service and what connects it, and tells the orchestrator to tell the user. A service not read yet counts as connected.
+- **It shows before anyone tries.**
+  - The pipeline's card shows "Slack isn't connected yet" with **Connect Slack**, or for Linear, set it up.
+  - The **Start pipeline** card says "Needs Slack connected".
+  - A trigger stopped by a missing token says "isn't connected yet", not "sign in again".
+- **A PR started by hand is marked.** When a Slack pipeline's run starts on a PR its trigger didn't hand over, hydraui finds the PR's message in the channel, by ticket or link, and adds the trigger's reaction, as the trigger would. A message someone has already marked, or one not in the channel's look-back, is left alone, and a notice says so.
+
+## 86. The Update button sits beside the bell (added 2026-11-13)
+
+Teammates missed updates. The offer was a button in the title bar, beside the version number, where nobody looked. Updates stay a person's choice and never install by themselves. The offer is now where people look.
+
+- **Beside the bell.** While a release is out, a filled teal **Update** button with an up-arrow icon sits beside the notifications bell. It says **Updating…** while it installs, then **Restart** once the update is in. Its tooltip names the version. The title bar keeps only the version number.
+- **It asks first.** "Update hydra to 0.6.52?" says what happens: it downloads, checks and installs hydraui and the hydra command, and the terminals and tickets pick back up after the restart. **Restart** asks the same way. **Not now** leaves the button there.
+- **One notice per release** goes to the bell: "hydra 0.6.52 is out: Update is beside the bell."
+- **The hourly check** is unchanged.

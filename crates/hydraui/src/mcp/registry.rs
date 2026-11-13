@@ -53,7 +53,14 @@ pub struct Registry {
     pub planning_done: std::sync::Mutex<Vec<(String, String)>>,
     /// Claude session ids already written to a run's log, as (run, who, id) (§13).
     logged_claude: std::collections::HashSet<(String, String, String)>,
+    /// Which services are connected in which environment, as hydraui last read them (core spec
+    /// §85): a run whose pipeline needs one that isn't is refused. Not known: allowed.
+    pub connected: Connected,
 }
+
+/// `(environment, service)` → connected, shared with the app, which fills it.
+pub type Connected =
+    std::sync::Arc<std::sync::Mutex<HashMap<(String, crate::pipeline::Service), bool>>>;
 
 impl Default for Registry {
     fn default() -> Self {
@@ -69,6 +76,7 @@ impl Default for Registry {
             hydra_exe: None,
             branch_lookup: None,
             closing: false,
+            connected: Default::default(),
         }
     }
 }

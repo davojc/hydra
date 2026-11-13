@@ -115,9 +115,19 @@ pub struct Stopped {
 pub fn stopped(service: &str, why: &str) -> Stopped {
     let w = why.to_lowercase();
     let has = |words: &[&str]| words.iter().any(|x| w.contains(x));
-    let (title, hint, sign_in) = if has(&[
+    let (title, hint, sign_in) = if has(&["isn't connected", "has no linear api key"]) {
+        // Never set up here, as a new teammate's hydraui is (core spec §85).
+        (
+            format!("{service} isn't connected yet"),
+            if service == "Slack" {
+                "Connect Slack to let this pipeline take its pull requests.".to_string()
+            } else {
+                format!("Set up {service} for this environment, then try again.")
+            },
+            true,
+        )
+    } else if has(&[
         "rejected",
-        "isn't connected",
         "invalid_auth",
         "not_authed",
         "token_revoked",
@@ -222,9 +232,17 @@ pub fn trigger(f: &TriggerFacts) -> (Mode, String) {
 /// How far through the wait for its next look a watcher is, 0.0 just after a look to 1.0 when
 /// one is due; `None` before its first look.
 pub fn look_progress(last: Option<SystemTime>, now: SystemTime, every_minutes: u32) -> Option<f32> {
+    progress_over(
+        last,
+        now,
+        Duration::from_secs(u64::from(every_minutes.max(1)) * 60),
+    )
+}
+
+/// How far through a wait of `every` that started at `last` the clock is at `now`, at most 1.0.
+pub fn progress_over(last: Option<SystemTime>, now: SystemTime, every: Duration) -> Option<f32> {
     let since = now.duration_since(last?).unwrap_or_default();
-    let every = Duration::from_secs(u64::from(every_minutes.max(1)) * 60);
-    Some((since.as_secs_f32() / every.as_secs_f32()).min(1.0))
+    Some((since.as_secs_f32() / every.as_secs_f32().max(1.0)).min(1.0))
 }
 
 /// What a **Pick next ticket** found, for the notification it ends with.
@@ -646,6 +664,18 @@ pub fn inside_sla(breaches_at: &str, at: SystemTime) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_service_never_connected_says_so_not_sign_in_again() {
+        let s = super::stopped(
+            "Slack",
+            "Slack isn't connected for iov42: press Connect Slack",
+        );
+        assert!(s.sign_in);
+        assert_eq!(s.title, "Slack isn't connected yet");
+        let s = super::stopped("Slack", "Slack rejected the token (invalid_auth)");
+        assert!(s.title.contains("sign in again"), "{}", s.title);
+    }
+
+    #[test]
     fn the_wait_fills_from_a_look_to_the_next() {
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
         assert_eq!(look_progress(None, at, 2), None);
@@ -853,7 +883,7 @@ mod tests {
         );
         assert_eq!(
             (s.title.as_str(), s.sign_in),
-            ("Slack needs you to sign in again", true)
+            ("Slack isn't connected yet", true)
         );
         assert!(s.hint.contains("Connect Slack"));
         let s = stopped("Linear", "Linear rejected the API key (HTTP 401)");

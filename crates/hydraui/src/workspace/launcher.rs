@@ -1783,6 +1783,8 @@ struct Mine {
     stages: usize,
     /// Where its work comes from, e.g. `Slack · #pull-requests`.
     source: String,
+    /// The services its trigger needs connected (core spec §85).
+    needs: Vec<crate::pipeline::Service>,
 }
 
 /// Every pipeline that loads, by file name.
@@ -1793,6 +1795,7 @@ fn my_pipelines(root: &std::path::Path) -> Vec<Mine> {
             let p = crate::pipeline::load(root, &file).ok()?;
             Some(Mine {
                 source: crate::settings_words::source_short(&p),
+                needs: p.needs(),
                 file,
                 name: p.name,
                 color: p.color,
@@ -1898,6 +1901,17 @@ fn start_cards(
                             .child(crate::settings_words::stages(m.stages)),
                     ),
             )
+            // What it can't run without here, before anyone tries (§85).
+            .children({
+                let missing = super::services::missing(&m.needs, env.as_str());
+                (!missing.is_empty()).then(|| {
+                    let names: Vec<&str> = missing.iter().map(|s| s.name()).collect();
+                    div()
+                        .text_xs()
+                        .text_color(color(theme::AMBER))
+                        .child(format!("Needs {} connected", names.join(" and ")))
+                })
+            })
             .on_click(move |_, window, cx| {
                 window.close_dialog(cx);
                 let env = env.clone();

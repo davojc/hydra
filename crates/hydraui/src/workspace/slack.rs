@@ -129,6 +129,7 @@ impl Workspace {
         self.save_slack_queue(&pipeline.file);
         self.linear_watch.entry(slot).or_default().starting =
             Some((pr.ticket.clone(), SystemTime::now()));
+        self.slack_handed.insert(pr.ticket.to_lowercase());
         self.slack_inflight.insert(slot, pr.clone());
         self.linear_watch.entry(orch).or_default().status = Some(format!("Started {}", pr.ticket));
         crate::action_log::write(format!(
@@ -342,6 +343,11 @@ impl Workspace {
         cx.notify();
     }
 
+    /// What Connect Slack is doing for an environment, under the button.
+    pub(in crate::workspace) fn slack_connecting_of(&self, env: &str) -> Option<&SlackConnecting> {
+        self.slack_connecting.get(env)
+    }
+
     /// **Connect Slack** for environment `env`: the browser signs in to Slack through the
     /// team's Canopy, which hands the token back here; it's stored as `<env>/slack`, and a
     /// Slack watcher in `env` that had stopped goes back to Automatic.
@@ -353,13 +359,30 @@ impl Workspace {
     ) {
         let title = "Connect Slack";
         let (ui, _) = crate::config::load(&self.hydra.paths);
+        // Without the team's Canopy there's no sign-in to start: ask for it here, where the
+        // button was pressed, then carry on (a notice in the bell looked like nothing happened).
         let Some(canopy) = ui.slack_connect_url else {
-            window.push_note(
-                Note::warning(
-                    "Set slack_connect_url in hydraui's config.toml to your team's Canopy (e.g. \
-                     https://canopy.dev.iov42.net): it finishes the Slack sign-in.",
-                )
-                .title(title),
+            self.text_dialog_about(
+                "Connect Slack: your team's Canopy".into(),
+                Some(
+                    "Slack sign-in goes through your team's Canopy, which hydraui needs to know \
+                     once. Ask whoever set up hydraui for your team for its address.",
+                ),
+                String::new(),
+                "https://canopy.example.com",
+                move |ws, value, window, cx| {
+                    let url = crate::config::slack_connect_url(&value)?;
+                    crate::config::set(
+                        &ws.hydra.paths,
+                        "slack_connect_url",
+                        Some(toml_edit::Value::from(url)),
+                    )?;
+                    crate::action_log::write("slack: set slack_connect_url");
+                    // Saved: start the sign-in now, as the button meant.
+                    ws.connect_slack(env.clone(), window, cx);
+                    Ok(())
+                },
+                window,
                 cx,
             );
             return;
@@ -377,12 +400,20 @@ impl Workspace {
         let (server, port, state) = match started {
             Ok(s) => s,
             Err(e) => {
+                self.slack_connecting
+                    .insert(env.clone(), SlackConnecting::Failed(e.clone()));
                 window.push_note(Note::error(e).title(title), cx);
+                cx.notify();
                 return;
             }
         };
         crate::action_log::write(format!("slack: connecting {env} through {canopy}"));
-        cx.open_url(&crate::slack_connect::start_url(&canopy, port, &state));
+        let url = crate::slack_connect::start_url(&canopy, port, &state);
+        cx.open_url(&url);
+        // Said under the button, with the page to open again if the browser didn't.
+        self.slack_connecting
+            .insert(env.clone(), SlackConnecting::Waiting(url));
+        cx.notify();
         window.push_note(
             Note::info(
                 "Finish in your browser: sign in to Canopy if asked, then Allow on Slack's page.",
@@ -391,6 +422,7 @@ impl Workspace {
             cx,
         );
         let hydra = self.hydra.clone();
+        let waited = env.clone();
         cx.spawn_in(window, async move |this, cx| {
             let done = cx
                 .background_spawn(async move {
@@ -403,6 +435,8 @@ impl Workspace {
             let _ = this.update_in(cx, |ws, window, cx| {
                 match done {
                     Ok((env, c)) => {
+                        ws.slack_connecting.remove(&env);
+                        super::services::note(&env, crate::pipeline::Service::Slack, true);
                         crate::action_log::write(format!(
                             "slack: {env} connected as {} in {}",
                             c.user, c.team
@@ -444,8 +478,91 @@ impl Workspace {
                     }
                     Err(e) => {
                         crate::action_log::write(format!("slack: connect failed: {e}"));
+                        ws.slack_connecting
+                            .insert(waited.clone(), SlackConnecting::Failed(e.clone()));
                         window.push_note(Note::error(e).title(title), cx);
+                        cx.notify();
                     }
+                }
+            });
+        })
+        .detach();
+    }
+}
+
+/// Where Connect Slack is for an environment (core spec §73).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::workspace) enum SlackConnecting {
+    /// The sign-in page is open in the browser (this address, to open again).
+    Waiting(String),
+    /// It couldn't connect, and why.
+    Failed(String),
+}
+
+impl Workspace {
+    /// A run of a Slack pipeline started by hand, not taken by its trigger: its pull request's
+    /// message gets the trigger's reaction, so nobody else picks it up (core spec §85). Off the
+    /// UI thread; a message someone already marked, or one not in the channel, is said.
+    pub(super) fn mark_hand_started(
+        &mut self,
+        run: &str,
+        env: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((ticket, link, settings, name)) = crate::mcp::server::get().and_then(|sv| {
+            let reg = crate::mcp::server::lock(sv.registry());
+            let r = reg.runs.run(run)?;
+            Some((
+                r.ticket.clone(),
+                r.link.clone().unwrap_or_default(),
+                r.pipeline.slack.clone()?,
+                r.pipeline.name.clone(),
+            ))
+        }) else {
+            return;
+        };
+        // Taken by the trigger: marked when it was taken.
+        if self.slack_handed.contains(&ticket.to_lowercase()) {
+            return;
+        }
+        let (hydra, env, run) = (self.hydra.clone(), env.to_string(), run.to_string());
+        let label = settings.label.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            let marked = cx
+                .background_spawn(async move {
+                    let token = hydra.slack_token(&env).map_err(|e| e.to_string())?;
+                    crate::slack_watch::mark_started(
+                        &crate::slack::Http { token },
+                        &settings,
+                        SystemTime::now(),
+                        &ticket,
+                        &link,
+                    )
+                    .map_err(|e| e.to_string())
+                })
+                .await;
+            let _ = cx.update(|window, cx| {
+                use crate::slack_watch::Marked;
+                let said = match &marked {
+                    Ok(Marked::Marked) => None,
+                    Ok(Marked::TakenAlready) => Some(format!(
+                        "{run} was started by hand, but its message in {label} already has a \
+                         reaction: someone may be reviewing it too."
+                    )),
+                    Ok(Marked::NotFound) => Some(format!(
+                        "{run} was started by hand, and its message isn't in {label} (or is \
+                         older than the look-back), so it isn't marked there: tell the team \
+                         you have it."
+                    )),
+                    Err(e) => Some(format!("{run}: couldn't mark its message in {label}: {e}")),
+                };
+                crate::action_log::write(format!(
+                    "slack: {run} started by hand: {}",
+                    said.as_deref().unwrap_or("marked its message")
+                ));
+                if let Some(said) = said {
+                    window.push_note(Note::warning(said).title(name.clone()), cx);
                 }
             });
         })

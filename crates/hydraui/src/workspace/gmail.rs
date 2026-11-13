@@ -3,7 +3,8 @@
 //! sign-in reads. Google is called off the UI thread; `crate::gmail` holds the calls.
 
 use gpui::prelude::*;
-use gpui::{Context, Window};
+use gpui::{App, Context, Window, div, px};
+use gpui_component::{ActiveTheme, WindowExt, v_flex};
 
 use super::Workspace;
 use crate::gmail::{self, Endpoints};
@@ -14,7 +15,7 @@ const CHECK_MAX: usize = 10;
 
 impl Workspace {
     /// The team's Google client from config, or a notice saying what to set.
-    fn gmail_client(
+    pub(super) fn gmail_client(
         &self,
         title: &str,
         window: &mut Window,
@@ -23,14 +24,11 @@ impl Workspace {
         let (ui, _) = crate::config::load(&self.hydra.paths);
         let client = ui.gmail_client();
         if client.is_none() {
-            window.push_note(
-                Note::warning(
-                    "Set gmail_client_id and gmail_client_secret in hydraui's config.toml to \
-                     the team's Desktop-type Google OAuth client first.",
-                )
-                .title(title.to_string()),
-                cx,
-            );
+            let why = "Set gmail_client_id and gmail_client_secret in hydraui's config.toml to \
+                       the team's Desktop-type Google OAuth client, then choose Reload config.";
+            window.push_note(Note::warning(why).title(title.to_string()), cx);
+            // Said where the person clicked, not only in the bell (core spec §78).
+            gmail_dialog(title.to_string(), vec![why.to_string()], window, cx);
         }
         client
     }
@@ -100,6 +98,7 @@ impl Workspace {
                 .await;
             let _ = cx.update(|window, cx| match done {
                 Ok((env, address)) => {
+                    super::services::note(&env, crate::pipeline::Service::Gmail, true);
                     crate::action_log::write(format!("gmail: {env} connected as {address}"));
                     window.push_note(
                         Note::success(format!("Gmail is connected for {env} as {address}."))
@@ -156,10 +155,23 @@ impl Workspace {
                         )
                     };
                     window.push_note(Note::success(message).title(format!("{title}: {env}")), cx);
+                    // Shown at once: which mailbox this is, and what's in it (§78).
+                    gmail_dialog(
+                        format!("Gmail for {env}"),
+                        check_lines(&address, &threads),
+                        window,
+                        cx,
+                    );
                 }
                 Err(e) => {
                     crate::action_log::write(format!("gmail: check failed: {e}"));
-                    window.push_note(Note::error(e).title(title), cx);
+                    window.push_note(Note::error(e.clone()).title(title), cx);
+                    gmail_dialog(
+                        title.to_string(),
+                        vec![format!("Couldn't read the mailbox: {e}")],
+                        window,
+                        cx,
+                    );
                 }
             });
         })
@@ -168,6 +180,50 @@ impl Workspace {
 }
 
 /// `Ann Lee <ann@x.com>` reads as `Ann Lee`; a bare address stays as it is.
+/// What **Check Gmail** shows: the mailbox it reads, then its newest threads, then how to
+/// switch to another.
+fn check_lines(address: &str, threads: &[gmail::Thread]) -> Vec<String> {
+    let mut lines = vec![format!(
+        "Connected as {address}. This is the mailbox hydraui reads."
+    )];
+    if threads.is_empty() {
+        lines.push("Its inbox has no threads.".into());
+    } else {
+        lines.push(format!("Its newest {} inbox threads:", threads.len()));
+        lines.extend(
+            threads
+                .iter()
+                .map(|t| format!("• {} ({})", t.subject, sender(&t.from))),
+        );
+    }
+    lines
+        .push("To read another mailbox, choose Connect Gmail… and sign in as that account.".into());
+    lines
+}
+
+/// A dialog of plain lines, with **Close**.
+fn gmail_dialog(title: String, lines: Vec<String>, window: &mut Window, cx: &mut App) {
+    window.open_dialog(cx, move |dialog, _, cx| {
+        let muted = cx.theme().muted_foreground;
+        dialog
+            .title(title.clone())
+            .w(px(560.))
+            .child(
+                v_flex()
+                    .gap_1()
+                    .pb_2()
+                    .children(lines.iter().enumerate().map(|(i, l)| {
+                        div()
+                            .text_sm()
+                            .whitespace_normal()
+                            .when(l.starts_with('•'), |d| d.text_color(muted))
+                            .when(i > 0 && !l.starts_with('•'), |d| d.mt_1())
+                            .child(l.clone())
+                    })),
+            )
+    });
+}
+
 fn sender(from: &str) -> &str {
     from.split_once('<')
         .map(|(name, _)| name.trim().trim_matches('"'))
@@ -177,6 +233,33 @@ fn sender(from: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn check_gmail_says_which_mailbox_and_how_to_switch() {
+        let t = |s: &str, f: &str| crate::gmail::Thread {
+            id: "1".into(),
+            subject: s.into(),
+            from: f.into(),
+            date: String::new(),
+            messages: 1,
+            message_id: String::new(),
+        };
+        let lines = super::check_lines(
+            "jm@iov42.com",
+            &[t("[hydra-test] A 401", "Ann Lee <ann@acme.com>")],
+        );
+        assert!(
+            lines[0].starts_with("Connected as jm@iov42.com"),
+            "{lines:?}"
+        );
+        assert!(
+            lines.contains(&"• [hydra-test] A 401 (Ann Lee)".to_string()),
+            "{lines:?}"
+        );
+        assert!(lines.last().unwrap().contains("Connect Gmail"));
+        let empty = super::check_lines("x@iov42.com", &[]);
+        assert!(empty.contains(&"Its inbox has no threads.".to_string()));
+    }
+
     use super::sender;
 
     #[test]

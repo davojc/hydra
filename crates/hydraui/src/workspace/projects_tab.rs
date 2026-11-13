@@ -346,6 +346,7 @@ impl Workspace {
         self.settings = None;
         self.history = None;
         self.tickets = None;
+        self.actions = None;
         if self.projects.is_none() {
             self.projects = Some(ProjectsTab {
                 page: Page::Home,

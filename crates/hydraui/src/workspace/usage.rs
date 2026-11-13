@@ -91,6 +91,26 @@ impl Workspace {
         }
     }
 
+    /// Whether triggers in `env` hold off new work (core spec §83): the percent of the Claude
+    /// week left, when it's below hydraui's floor.
+    pub(super) fn week_held(&self, env: &str) -> Option<u8> {
+        let floor = crate::mcp::server::get().map_or(crate::runs::MIN_WEEK_LEFT, |sv| {
+            crate::mcp::server::lock(sv.registry()).min_week_left
+        });
+        let reported = self
+            .usage
+            .get(env)
+            .and_then(|u| u.seven_day)
+            .map(|l| (l.used, l.resets_at));
+        crate::runs::week_hold(reported, now_secs(), floor)
+    }
+
+    /// `week_held` for orchestrator `orch`'s environment.
+    pub(super) fn week_held_for(&self, orch: crate::envs::PaneId, cx: &gpui::App) -> Option<u8> {
+        let env = self.panes.get(&orch)?.read(cx).env().to_string();
+        self.week_held(&env)
+    }
+
     /// The status bar's usage for `env`, if its sessions have reported any.
     pub(super) fn render_usage(&self, env: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
         let u = *self.usage.get(env)?;
@@ -106,7 +126,10 @@ impl Workspace {
             p if p >= WARN => cx.theme().warning,
             _ => cx.theme().muted_foreground,
         };
-        let tip = usage_tooltip(&u, account.as_deref(), now_secs());
+        let tip = format!(
+            "{}\n\nClick to set how much of the week pipelines leave you.",
+            usage_tooltip(&u, account.as_deref(), now_secs())
+        );
         Some(
             div()
                 .id("claude-usage")
@@ -115,12 +138,8 @@ impl Workspace {
                 .cursor_pointer()
                 .child(format!("claude {text}"))
                 .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                .on_click(cx.listener({
-                    let env = env.to_string();
-                    move |ws, _, window, cx| {
-                        ws.open_settings(super::settings_tab::Section::Env(env.clone()), window, cx)
-                    }
-                }))
+                // Straight to how much of the week pipelines leave you.
+                .on_click(cx.listener(|ws, _, window, cx| ws.open_week_limit(window, cx)))
                 .into_any_element(),
         )
     }

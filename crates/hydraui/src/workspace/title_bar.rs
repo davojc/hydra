@@ -337,20 +337,26 @@ impl Workspace {
                 .gap_1p5()
                 .items_center()
                 .h(px(26.))
-                .px_2p5()
+                // The same outlined pill as its neighbours, in teal (§86, restyled): a solid
+                // block was the only filled thing in the strip and shouted.
+                .px_3()
                 .mr_1()
                 .rounded_md()
+                .border_1()
                 .text_sm()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .bg(color(theme::TEAL))
-                .text_color(color(theme::PANEL))
-                .when(!busy, |d| d.cursor_pointer().hover(|s| s.opacity(0.85)))
+                .border_color(color(theme::TEAL_BORDER))
+                .bg(color(theme::TEAL_TINT))
+                .text_color(color(theme::TEAL))
+                .when(!busy, |d| {
+                    d.cursor_pointer()
+                        .hover(|s| s.border_color(color(theme::TEAL)))
+                })
                 .when(busy, |d| d.opacity(0.7))
                 .child(
                     gpui::svg()
                         .path("icons/circle-arrow-up.svg")
                         .size(px(14.))
-                        .text_color(color(theme::PANEL)),
+                        .text_color(color(theme::TEAL)),
                 )
                 .child(label)
                 .tooltip(move |window, cx| {

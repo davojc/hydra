@@ -266,17 +266,42 @@ pub fn last_text(last: Option<&str>, now: &str) -> String {
     format!("{day}{at}")
 }
 
-/// A mail pipeline's line under its card (core spec §89): when it looks, its last look and
-/// what that found, and its next. "Weekdays at 14:28 · last look today at 14:28 (no new
-/// emails) · next look Monday at 14:28".
-pub fn look_line(when: &When, now: &str, last: Option<&str>, found: Option<&str>) -> String {
-    format!(
-        "{} · last look {}{} · next look {}",
-        when.text(),
-        last_text(last, now),
-        found.map_or(String::new(), |f| format!(" ({f})")),
-        when.next_text(now, last)
-    )
+/// A mail pipeline's lines under its card (core spec §89): when it checks next, as a
+/// countdown over its bar, and what the last check found. ("Next mail check in 5h 20m",
+/// "Last checked today at 16:35: no new emails"). With its wait, for the bar.
+pub fn mail_lines(
+    when: &When,
+    now: &str,
+    last: Option<&str>,
+    found: Option<&str>,
+) -> Option<(String, String, Wait)> {
+    let wait = when.wait(now, last)?;
+    let next = match wait.left {
+        0 => "Checking mail now".to_string(),
+        left => format!("Next mail check in {}", short_countdown(left)),
+    };
+    let checked = match last {
+        None => "Not checked yet".to_string(),
+        Some(_) => format!(
+            "Last checked {}: {}",
+            last_text(last, now),
+            found.unwrap_or("nothing noted")
+        ),
+    };
+    Some((next, checked, wait))
+}
+
+/// Seconds to go, short: "45s", "12m", "5h 20m", "2d 4h".
+pub fn short_countdown(secs: u64) -> String {
+    let (d, h, m) = (secs / 86_400, secs % 86_400 / 3600, secs % 3600 / 60);
+    match (d, h, m) {
+        (0, 0, 0) => format!("{secs}s"),
+        (0, 0, m) => format!("{m}m"),
+        (0, h, 0) => format!("{h}h"),
+        (0, h, m) => format!("{h}h {m}m"),
+        (d, 0, _) => format!("{d}d"),
+        (d, h, _) => format!("{d}d {h}h"),
+    }
 }
 
 /// The line under a timetable in Pipeline settings: what the file has, when it last ran (a
@@ -552,19 +577,34 @@ mod tests {
     }
 
     #[test]
-    fn a_mail_cards_line_says_when_it_looked_what_it_found_and_when_next() {
-        let w = parse("weekdays 14:28").unwrap();
-        let now = "2026-11-13 14:40:00.000";
-        let last = Some("2026-11-13 14:28:00.130");
+    fn a_mail_card_counts_down_to_its_next_check_and_says_what_the_last_found() {
+        let w = parse("daily 22:00").unwrap();
+        let now = "2026-11-13 16:40:00.000";
+        let last = Some("2026-11-12 22:00:05.000");
+        let (next, checked, wait) = w.mail_lines_for_test(now, last, Some("no new emails"));
+        assert_eq!(next, "Next mail check in 5h 20m");
+        assert_eq!(checked, "Last checked yesterday at 22:00: no new emails");
+        assert_eq!(wait.left, 5 * 3600 + 20 * 60);
+        // Due and not done: checking now. Never checked: says so.
+        let (next, checked, _) = w.mail_lines_for_test("2026-11-13 22:00:30.000", None, None);
         assert_eq!(
-            look_line(&w, now, last, Some("no new emails")),
-            "Weekdays at 14:28 · last look today at 14:28 (no new emails) · next look Monday at \
-             14:28"
+            (next.as_str(), checked.as_str()),
+            ("Checking mail now", "Not checked yet")
         );
-        assert_eq!(
-            look_line(&w, now, None, None),
-            "Weekdays at 14:28 · last look not yet · next look now"
-        );
+        assert_eq!(short_countdown(45), "45s");
+        assert_eq!(short_countdown(2 * 86_400 + 4 * 3600), "2d 4h");
+        assert_eq!(short_countdown(3600), "1h");
+    }
+
+    impl When {
+        fn mail_lines_for_test(
+            &self,
+            now: &str,
+            last: Option<&str>,
+            found: Option<&str>,
+        ) -> (String, String, Wait) {
+            mail_lines(self, now, last, found).unwrap()
+        }
     }
 
     #[test]

@@ -51,6 +51,27 @@ pub fn unsaved_line(keys: &[&str]) -> String {
     format!("Not saved yet: {}.", names.join(", "))
 }
 
+/// The Team swarm dropdown's choices (core spec §87): "None" first, then each swarm this
+/// machine is in, then a saved one it isn't in any more, kept as "<name> (not joined)" so it
+/// isn't lost unseen. Each with the value it saves.
+pub fn swarm_choices(joined: &[String], saved: Option<&str>) -> Vec<(String, Option<String>)> {
+    let mut all = vec![("None".to_string(), None)];
+    all.extend(joined.iter().map(|n| (n.clone(), Some(n.clone()))));
+    if let Some(s) = saved.filter(|s| !joined.iter().any(|j| j == s)) {
+        all.push((format!("{s} (not joined)"), Some(s.to_string())));
+    }
+    all
+}
+
+/// What the Team swarm dropdown shows for `saved`.
+pub fn swarm_label(joined: &[String], saved: Option<&str>) -> String {
+    match saved {
+        None => "None".to_string(),
+        Some(s) if joined.iter().any(|j| j == s) => s.to_string(),
+        Some(s) => format!("{s} (not joined)"),
+    }
+}
+
 /// The week-limit slider's notches, in percent (orchestrator spec §5.1); 0 turns it off.
 pub const WEEK_LEFT_STEP: u8 = 5;
 
@@ -303,6 +324,27 @@ mod tests {
             "Not saved yet: Theme, Claude week limit."
         );
         assert_eq!(unsaved_line(&["odd"]), "Not saved yet: odd.");
+    }
+
+    #[test]
+    fn the_team_swarm_offers_none_your_swarms_and_keeps_one_you_left() {
+        let joined = vec!["Engineering".to_string(), "Integrations".to_string()];
+        let labels = |c: Vec<(String, Option<String>)>| -> Vec<String> {
+            c.into_iter().map(|(l, _)| l).collect()
+        };
+        assert_eq!(
+            labels(swarm_choices(&joined, None)),
+            ["None", "Engineering", "Integrations"]
+        );
+        let kept = swarm_choices(&joined, Some("Ops"));
+        assert_eq!(
+            kept.last(),
+            Some(&("Ops (not joined)".to_string(), Some("Ops".to_string())))
+        );
+        assert_eq!(swarm_choices(&[], None), [("None".to_string(), None)]);
+        assert_eq!(swarm_label(&joined, Some("Engineering")), "Engineering");
+        assert_eq!(swarm_label(&joined, Some("Ops")), "Ops (not joined)");
+        assert_eq!(swarm_label(&joined, None), "None");
     }
 
     #[test]

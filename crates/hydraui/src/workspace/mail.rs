@@ -28,11 +28,13 @@ pub(super) fn found_key(file: &str) -> String {
 }
 
 impl Workspace {
-    /// The line under a mail pipeline's card (core spec §89): when it looks, what its last
-    /// look found, and when it looks next. Only on the card holding the pipeline's trigger.
+    /// The lines under a mail pipeline's card (core spec §89): the countdown to its next check
+    /// over a bar filling from the last, and what the last check found. Only on the card
+    /// holding the pipeline's trigger.
     pub(super) fn render_mail_row(
         &self,
         orch: crate::envs::PaneId,
+        accent: u32,
         cx: &gpui::App,
     ) -> Option<gpui::AnyElement> {
         use crate::orchestrator_theme::{self as theme, color};
@@ -45,20 +47,39 @@ impl Workspace {
         let pipeline = crate::pipeline::load(root, file).ok()?;
         let when = pipeline.mail.as_ref()?.when()?;
         let last = crate::schedule::last_runs(root);
-        let line = crate::schedule::look_line(
+        let (next, checked, wait) = crate::schedule::mail_lines(
             &when,
             &crate::action_log::now(),
             last.get(&look_key(file)).map(String::as_str),
             last.get(&found_key(file)).map(String::as_str),
-        );
+        )?;
+        let started = std::time::SystemTime::now().checked_sub(Duration::from_secs(wait.since));
         Some(
-            gpui::div()
+            gpui_component::v_flex()
                 .ml(gpui::px(26.))
                 .mr_1()
                 .my_1()
-                .text_xs()
-                .text_color(color(theme::TEXT_SECONDARY))
-                .child(format!("Mail · {line}"))
+                .gap_1()
+                .child(
+                    gpui::div()
+                        .text_xs()
+                        .text_color(color(theme::TEXT_SECONDARY))
+                        .child(next),
+                )
+                .child(super::linear::look_bar(
+                    gpui::SharedString::from(format!("mail-bar-{orch}")),
+                    wait.progress(),
+                    started,
+                    Duration::from_secs(wait.since + wait.left),
+                    self.mail_looking.contains(file),
+                    accent,
+                ))
+                .child(
+                    gpui::div()
+                        .text_xs()
+                        .text_color(color(theme::TEXT_MUTED))
+                        .child(checked),
+                )
                 .into_any_element(),
         )
     }

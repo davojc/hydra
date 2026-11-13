@@ -5,7 +5,7 @@ use crate::inbox::{Note, PushNote};
 use std::cell::Cell;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Hsla, SharedString, Window, div, px, rgb};
+use gpui::{AnyElement, App, Context, Entity, Hsla, SharedString, Window, div, px, rgb};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_component::switch::Switch;
@@ -34,6 +34,11 @@ pub(super) struct SettingsTab {
     section: Section,
     /// The Claude week limit's row is marked: General was opened from the status bar's usage.
     week_spot: bool,
+    /// The Claude week limit's slider, while General shows, and what saves it on release.
+    week: Option<(
+        Entity<gpui_component::slider::SliderState>,
+        gpui::Subscription,
+    )>,
     /// You and this machine's name fields, while that page shows.
     pub(super) you: Option<super::swarms_page::IdentityFields>,
 }
@@ -60,10 +65,12 @@ impl Workspace {
             self.recheck_accounts(env, cx);
         }
         let you = (section == Section::You).then(|| self.identity_fields(window, cx));
+        let week = (section == Section::General).then(|| self.week_slider(window, cx));
         self.settings = Some(SettingsTab {
             section,
             you,
             week_spot: false,
+            week,
         });
         self.projects = None;
         self.history = None;
@@ -71,6 +78,41 @@ impl Workspace {
         self.actions = None;
         window.focus(&self.focus, cx);
         cx.notify();
+    }
+
+    /// The Claude week limit's slider at the saved value, in 5% notches: it shows the value as
+    /// it moves and saves it when let go.
+    fn week_slider(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (
+        Entity<gpui_component::slider::SliderState>,
+        gpui::Subscription,
+    ) {
+        use gpui_component::slider::{SliderEvent, SliderState};
+        let at = f32::from(self.ui.min_week_left);
+        let slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.)
+                .max(100.)
+                .step(f32::from(crate::settings_words::WEEK_LEFT_STEP))
+                .default_value(at)
+        });
+        let sub = cx.subscribe_in(
+            &slider,
+            window,
+            |ws, _, e: &SliderEvent, window, cx| match e {
+                SliderEvent::Change(_) => cx.notify(),
+                SliderEvent::Release(v) => {
+                    let n = crate::settings_words::week_left_snap(v.end());
+                    if n != ws.ui.min_week_left {
+                        ws.set_ui("min_week_left", Some(i64::from(n).into()), window, cx)
+                    }
+                }
+            },
+        );
+        (slider, sub)
     }
 
     /// General, with the Claude week limit's row marked: where the status bar's usage leads.
@@ -630,7 +672,15 @@ impl Workspace {
         )
         .into_any_element();
         let jev = matches!(JevKey::app().get(), Ok(Some(_)));
-        let left = ui.min_week_left;
+        let slider = self
+            .settings
+            .as_ref()
+            .and_then(|t| t.week.as_ref())
+            .map(|(s, _)| s.clone());
+        // As it moves; the saved value until General has its slider.
+        let left = slider.as_ref().map_or(ui.min_week_left, |s| {
+            crate::settings_words::week_left_snap(s.read(cx).value().end())
+        });
         let spot = self.settings.as_ref().is_some_and(|t| t.week_spot);
         let week = v_flex()
             .id("week-limit")
@@ -641,26 +691,22 @@ impl Workspace {
                     .border_1()
                     .border_color(cx.theme().primary)
             })
-            .child(
-                h_flex().gap_1().flex_wrap().children(
-                    crate::settings_words::week_left_choices(left)
-                        .into_iter()
-                        .map(|n| {
-                            Button::new(SharedString::from(format!("week-left-{n}")))
-                                .label(crate::settings_words::week_left(n))
-                                .small()
-                                .when(n == left, |b| b.primary())
-                                .on_click(cx.listener(move |ws, _, window, cx| {
-                                    ws.set_ui(
-                                        "min_week_left",
-                                        Some(i64::from(n).into()),
-                                        window,
-                                        cx,
-                                    )
-                                }))
-                        }),
-                ),
-            )
+            .children(slider.map(|s| {
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        div()
+                            .w(px(320.))
+                            .child(gpui_component::slider::Slider::new(&s)),
+                    )
+                    .child(
+                        div()
+                            .min_w(px(96.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(crate::settings_words::week_left(left)),
+                    )
+            }))
             .child(
                 div()
                     .text_sm()

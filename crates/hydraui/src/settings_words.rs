@@ -34,18 +34,13 @@ pub fn days(d: u32) -> String {
     }
 }
 
-/// The shares of the seven-day Claude limit Settings offers as a stage's floor (orchestrator
-/// spec §5.1); 0 turns the check off.
-pub const WEEK_LEFT_CHOICES: [u8; 6] = [0, 10, 20, 30, 40, 50];
+/// The week-limit slider's notches, in percent (orchestrator spec §5.1); 0 turns it off.
+pub const WEEK_LEFT_STEP: u8 = 5;
 
-/// The week-limit choices, with `current` added in order when the file set another.
-pub fn week_left_choices(current: u8) -> Vec<u8> {
-    let mut all = WEEK_LEFT_CHOICES.to_vec();
-    if !all.contains(&current) {
-        all.push(current);
-        all.sort_unstable();
-    }
-    all
+/// Where the week-limit slider settles for `v`: the nearest 5%, 0 to 100.
+pub fn week_left_snap(v: f32) -> u8 {
+    let step = f32::from(WEEK_LEFT_STEP);
+    ((v / step).round() * step).clamp(0., 100.) as u8
 }
 
 /// A week-limit choice as its button says it: "Off", "20%", "30% (default)".
@@ -289,8 +284,11 @@ mod tests {
         assert_eq!(week_left(0), "Off");
         assert_eq!(week_left(20), "20%");
         assert_eq!(week_left(crate::runs::MIN_WEEK_LEFT), "30% (default)");
-        assert_eq!(week_left_choices(30), WEEK_LEFT_CHOICES.to_vec());
-        assert_eq!(week_left_choices(25), vec![0, 10, 20, 25, 30, 40, 50]);
+        assert_eq!(week_left_snap(0.4), 0);
+        assert_eq!(week_left_snap(27.4), 25);
+        assert_eq!(week_left_snap(27.6), 30);
+        assert_eq!(week_left_snap(250.), 100);
+        assert_eq!(week_left_snap(-3.), 0);
         assert!(week_left_about(0).starts_with("Off"));
         assert!(week_left_about(25).contains("at least 25%"));
     }

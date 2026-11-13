@@ -1580,7 +1580,7 @@ A stage can draft something a person must approve before it goes anywhere: a rep
 
 How much of the seven-day Claude limit a stage needs left (`min_week_left`, orchestrator spec §5.1) could only be changed in config.toml.
 
-- **Settings › General › Pipelines** has a **Claude week limit** row, with the choices Off, 10%, 20%, 30% (the default), 40% and 50%. A value set in the file shows as a choice too. Under the choices, a line says what the current value means.
+- **Settings › General › Pipelines** has a **Claude week limit** row: a slider from Off (0) to 100%, in 5% notches, with the value beside it ("30% (default)"). It saves when let go, not while it moves. Under it, a line says what the value means. A value in the file between notches, such as 27, shows at the nearest notch, and is saved as that notch only once the slider is moved. (Revised the same day: first it was buttons for Off and 10% to 50%.)
 - **The status bar's usage** ("claude 5h 42% · 7d 18%") opens General with that row marked, so the limit is one click from the number it limits. The usage's tooltip says so. Before, it opened the environment's page.
 
 ## 82. A timetable moved later the same day still runs, and says when (added 2026-11-13)

@@ -31,6 +31,10 @@ impl Workspace {
     pub(super) fn schedule_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Which services each environment has, for pipelines that need one (§85).
         self.services_tick(cx);
+        // A countdown under a scheduled or mail pipeline's card moves each second (§79, §89).
+        if self.countdowns {
+            cx.notify();
+        }
         if self
             .schedule_checked
             .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(30))
@@ -49,6 +53,10 @@ impl Workspace {
         };
         let last = crate::schedule::last_runs(&root);
         let envs = self.hydra.env_names();
+        // Whether an open pipeline shows a countdown, for the redraw above.
+        self.countdowns = self.orchestrators.values().any(|f| {
+            crate::pipeline::load(&root, f).is_ok_and(|p| p.schedule.is_some() || p.mail.is_some())
+        });
         for file in crate::pipeline::names(&root) {
             let Ok(p) = crate::pipeline::load(&root, &file) else {
                 continue;

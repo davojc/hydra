@@ -207,6 +207,8 @@ pub struct Workspace {
     /// The title bar's Update button (spec §7.11).
     update: crate::updater::UpdateState,
     _update_checks: Option<Task<()>>,
+    /// An open pipeline shows a countdown under its card (§79, §89): redraw each second.
+    countdowns: bool,
     /// When GitHub was last asked for a newer release (core spec §86).
     update_checked: Option<std::time::Instant>,
     /// The keys bound at startup, for the shortcuts list ([keys] changes wait for a restart).
@@ -588,6 +590,7 @@ impl Workspace {
             update: Default::default(),
             _update_checks: None,
             update_checked: None,
+            countdowns: false,
             layout: None,
             claim: None,
             unopened: Default::default(),

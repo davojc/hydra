@@ -261,7 +261,7 @@ impl Workspace {
                     .child(self.render_pipeline_card(*orch, card, active, lanes.is_empty(), cx))
                     .children(self.render_linear_row(*orch, card.accent, cx))
                     .children(self.render_schedule_row(*orch, card.accent, cx))
-                    .children(self.render_mail_row(*orch, cx));
+                    .children(self.render_mail_row(*orch, card.accent, cx));
                 let orch = *orch;
                 if let Some(row) = self.terminal_row(
                     orch,
@@ -526,7 +526,7 @@ impl Workspace {
             .child(self.render_pipeline_card(lead, &group, active, false, cx))
             .children(self.render_linear_row(lead, group.accent, cx))
             .children(self.render_schedule_row(lead, group.accent, cx))
-            .children(self.render_mail_row(lead, cx));
+            .children(self.render_mail_row(lead, group.accent, cx));
         for (orch, _, panes) in members {
             let orch = *orch;
             if let Some(row) =

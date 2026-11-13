@@ -106,7 +106,7 @@ impl When {
     /// when the last one started at log time `last`: today is one of its days, its time has
     /// passed, and none started since that time today. So a day hydraui opens late still gets
     /// its one, and a time moved later the same day gets its own. A `last` that is a date alone
-    /// (`2026-11-09`, kept before looks kept their time) counts as all of that day.
+    /// (`2026-11-09`, kept before looks kept their time) counts as that day's start.
     pub fn due(&self, now: &str, last: Option<&str>) -> bool {
         let Some((date, time)) = now.split_once(' ') else {
             return false;
@@ -116,9 +116,14 @@ impl When {
         };
         let hm = time.get(..5).unwrap_or("");
         let slot = format!("{:02}:{:02}", self.hour, self.minute);
-        let done = last.is_some_and(|l| match l.split_once(' ') {
-            None => l == date,
-            Some(_) => l >= format!("{date} {slot}").as_str(),
+        // A date alone (kept before looks kept their time) counts as that day's start.
+        let done = last.is_some_and(|l| {
+            let at = if l.contains(' ') {
+                l.to_string()
+            } else {
+                format!("{l} 00:00")
+            };
+            at >= format!("{date} {slot}")
         });
         self.days[day] && hm >= slot.as_str() && !done
     }
@@ -431,7 +436,7 @@ mod tests {
         assert!(w.due("2026-11-16 18:00:00.000", None));
         // Opened late that day: still its one run.
         assert!(w.due("2026-11-16 22:15:00.000", Some("2026-11-09")));
-        assert!(!w.due("2026-11-16 22:15:00.000", Some("2026-11-16")));
+        assert!(!w.due("2026-11-16 22:15:00.000", Some("2026-11-16 18:00:05.000")));
         // Not on Tuesday, however late.
         assert!(!w.due("2026-11-17 19:00:00.000", Some("2026-11-09")));
     }
@@ -446,12 +451,12 @@ mod tests {
         assert_eq!((t.since, t.left), (23 * 3600, 3600));
         // Just after today's run started: tomorrow's is next.
         let t = w
-            .wait("2026-11-16 09:00:30.000", Some("2026-11-16"))
+            .wait("2026-11-16 09:00:30.000", Some("2026-11-16 09:00:00.000"))
             .unwrap();
         assert_eq!((t.since, t.left), (30, 24 * 3600 - 30));
         // Started on the second of its time: the next is tomorrow's, not this one.
         let t = w
-            .wait("2026-11-16 09:00:00.000", Some("2026-11-16"))
+            .wait("2026-11-16 09:00:00.000", Some("2026-11-16 09:00:00.000"))
             .unwrap();
         assert_eq!((t.since, t.left), (0, 24 * 3600));
         // Due and not started yet: nothing left to wait, the bar is full.
@@ -467,7 +472,7 @@ mod tests {
         assert!((t.progress() - 5.0 / 7.0).abs() < 1e-6);
         // Run that Thursday: a week to the next.
         let t = w
-            .wait("2026-11-12 19:27:00.000", Some("2026-11-12"))
+            .wait("2026-11-12 19:27:00.000", Some("2026-11-12 19:26:01.000"))
             .unwrap();
         assert_eq!((t.since, t.left), (60, 7 * 86_400 - 60));
         assert!(w.wait("not a time", None).is_none());
@@ -494,8 +499,10 @@ mod tests {
         assert!(w.due("2026-11-13 09:53:10.000", Some("2026-11-13 09:01:42.740")));
         // Looked at 09:53 already: not again today.
         assert!(!w.due("2026-11-13 10:30:00.000", Some("2026-11-13 09:53:10.000")));
-        // A date alone (written before looks kept their time) means done that day.
-        assert!(!w.due("2026-11-13 10:30:00.000", Some("2026-11-13")));
+        // A date alone (written before looks kept their time) counts as that day's start: a
+        // time later that day still runs (Jordan's 12:37 after the 09:01 look).
+        assert!(w.due("2026-11-13 10:30:00.000", Some("2026-11-13")));
+        assert!(!w.due("2026-11-13 09:52:00.000", Some("2026-11-13")));
     }
 
     #[test]

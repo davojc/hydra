@@ -20,6 +20,15 @@ pub const MAX_INPUT: usize = 20_000;
 /// What `none` means when the stage doesn't say.
 pub const NONE_TEXT: &str = "None of these, or it can't be told from the text";
 
+/// `options` with `none` offered, as every Jev stage has it: added with `NONE_TEXT` when left
+/// out. Pipeline settings hides that row, so what it builds goes through this too.
+pub fn with_none(mut options: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    options
+        .entry(crate::jev::NONE.to_string())
+        .or_insert_with(|| NONE_TEXT.to_string());
+    options
+}
+
 /// A Jev stage's question, as its `[[stage]]` sets it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct JevStage {
@@ -52,7 +61,6 @@ impl JevStage {
                 "stage {id}: a Jev stage needs instructions, the question Jev answers"
             ));
         }
-        let mut options = options;
         if options
             .keys()
             .filter(|k| k.as_str() != crate::jev::NONE)
@@ -77,9 +85,7 @@ impl JevStage {
                 return Err(format!("stage {id}: say what {name} means"));
             }
         }
-        options
-            .entry(crate::jev::NONE.to_string())
-            .or_insert_with(|| NONE_TEXT.to_string());
+        let options = with_none(options);
         let input = input
             .map(|i| i.trim().to_string())
             .filter(|i| !i.is_empty())
@@ -334,6 +340,14 @@ mod tests {
         assert_eq!(s.input, "email.md");
         assert_eq!(s.options.len(), 3);
         assert_eq!(s.options["none"], NONE_TEXT);
+        // What Pipeline settings builds (it hides `none`) completes to what loads.
+        let shown: BTreeMap<String, String> = s
+            .options
+            .iter()
+            .filter(|(k, _)| k.as_str() != crate::jev::NONE)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        assert_eq!(with_none(shown), s.options);
         let set = s.settings(70);
         assert_eq!(set.model, "jev-2026-10");
         assert!((set.min_confidence - 0.7).abs() < 1e-9);

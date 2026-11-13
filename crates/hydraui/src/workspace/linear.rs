@@ -573,6 +573,9 @@ impl Workspace {
         ));
         let hydra = self.hydra.clone();
         let (p, s) = (pipeline.clone(), settings.clone());
+        // Taken through the swarm first when the pipeline names one (§87).
+        let shared = pipeline.claims_in();
+        let claims_api = super::jobs::claims_api();
         cx.spawn_in(window, async move |this, cx| {
             let found = cx
                 .background_spawn(async move {
@@ -585,7 +588,27 @@ impl Workspace {
                         .filter(|e| e.outcome == crate::run_history::Outcome::InProgress)
                         .map(|e| e.ticket)
                         .collect();
-                    linear_watch::find_and_claim(&Http { key }, &s, &p, &ran)
+                    let take = |job: &str| match &shared {
+                        Some((swarm, context)) => {
+                            super::jobs::take(claims_api.as_ref(), swarm, context, job, &p.name)
+                        }
+                        None => crate::jobs::Taken::Unsettled(String::new()),
+                    };
+                    let give_back = |holder: u64| {
+                        if let Some(api) = &claims_api {
+                            let _ = api.release(holder);
+                        }
+                    };
+                    linear_watch::find_and_claim_taking(
+                        &Http { key },
+                        &s,
+                        &p,
+                        &ran,
+                        &crate::jobs::Claims {
+                            take: &take,
+                            give_back: &give_back,
+                        },
+                    )
                 })
                 .await;
             let _ = this.update_in(cx, |ws, window, cx| {
@@ -630,6 +653,15 @@ impl Workspace {
         match found {
             Ok(check) if check.claimed.is_some() => {
                 let also = skipped(&check);
+                // Kept while its run is open; finished or given back when it ends (§87).
+                if let (Some(t), Some(h)) = (&check.claimed, check.holder) {
+                    self.job_claims.insert(t.identifier.to_lowercase(), h);
+                }
+                for (t, who) in &check.held {
+                    crate::action_log::write(format!(
+                        "linear: {t}: {who} has it in the swarm; left to them"
+                    ));
+                }
                 let ticket = check.claimed.expect("matched Some");
                 w.failures.clear();
                 w.status = Some(format!("Picked {}", ticket.identifier));

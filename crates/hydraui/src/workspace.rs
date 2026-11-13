@@ -12,6 +12,7 @@ mod gmail;
 mod history_tab;
 mod inbox_panel;
 mod jev_run;
+mod jobs;
 mod launcher;
 mod layout_file;
 mod linear;
@@ -227,6 +228,8 @@ pub struct Workspace {
     history: Option<history_tab::HistoryTab>,
     /// Actions (core spec §80), when shown.
     actions: Option<actions_page::ActionsPage>,
+    /// The swarm claims taken for open runs' jobs, by ticket lowercased (core spec §87).
+    job_claims: HashMap<String, u64>,
     /// When the services connected in each environment were last read (core spec §85).
     services_checked: Option<std::time::Instant>,
     /// General's changes not saved yet, in the order made (core spec §84).
@@ -589,6 +592,7 @@ impl Workspace {
             actions: None,
             general_draft: Vec::new(),
             services_checked: None,
+            job_claims: HashMap::new(),
             general_said: None,
             inbox: None,
             share_said: HashMap::new(),

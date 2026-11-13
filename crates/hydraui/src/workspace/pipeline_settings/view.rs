@@ -877,6 +877,24 @@ impl Workspace {
                         .child(div().max_w(px(480.)).child(Input::new(&draft.branch))),
                 )
                 .child(self.render_product_settings(orch, draft, cx))
+                // Slack and Linear jobs taken through a team swarm (§87); mail has its own.
+                .when(!draft.mail.on, |d| {
+                    d.child(
+                        v_flex()
+                            .gap_2()
+                            .child(section_tip(
+                                "Team swarm",
+                                "When teammates run this pipeline too, name your shared swarm: \
+                                 each pull request or ticket is taken through it first, so two \
+                                 people never take the same one.",
+                            ))
+                            .child(div().max_w(px(480.)).child(Input::new(&draft.claims_swarm)))
+                            .child(text(12., theme::TEXT_MUTED).whitespace_normal().child(
+                                "A swarm owner creates its claims context once, named after \
+                                 this pipeline's file, in Swarms settings.",
+                            )),
+                    )
+                })
                 .child({
                     let finish = draft.finish_started;
                     let choice = |on: bool, label: &'static str| {

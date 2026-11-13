@@ -1648,3 +1648,20 @@ Three people ran the PR review pipeline on three machines. Two of them put 👀 
 ### Slack: the first 👀 has it
 
 After adding its 👀, a trigger asks Slack who reacted first (`reactions.get`, which lists a reaction's users in the order they reacted). If it was someone else, the trigger takes its own 👀 off (`reactions.remove`) and leaves the PR. Every machine applies the same rule, so exactly one keeps it. The log names the other person's Slack user id. The card says "svc-usage-70 taken by someone else first" when that was all a look found. A PR started by hand (§85) is checked the same way. This needs no extra Slack scope: `auth.test` says who the token is.
+
+### Every trigger takes through the swarm
+
+The shared fix for any pipeline that several people run. It uses the swarm claims service (swarm claims spec), as its §1 intends.
+
+- **Opting in.** A pipeline opts in with `[claims] swarm = "…"`, set as **Team swarm** under Pipeline settings › Advanced. It claims in the context named by `context`, or by default one named after its file (`review-pr-s`). A `[mail]` pipeline's own team swarm counts.
+- **One key per job.** `slack:<channel>:<message ts>`, `linear:<ISSUE-ID>`, `mail:<Message-ID>` (`jobs.rs`).
+- **The take comes first.** A trigger asks the swarm for the job's key before it marks anything:
+  - **Yours:** it marks the job (the 👀, the Linear claim) and starts. It holds the claim while the run is open, and the claims client renews it by itself.
+  - **Someone has it, or it's done:** the job is left, and the log names who has it. A Linear check moves on to its next ticket.
+  - **The context is paused, or this machine is at its limit:** nothing is taken this time.
+  - **The swarm can't say:** no such context yet, or the swarms aren't running. The source's own check decides (Slack's first 👀), and the log says what to do: "Ask a swarm owner to create it".
+- **Gave it back.** A claim whose mark then fails, or whose 👀 lost the race, is given back at once.
+- **When the run ends.** Finished, or settled when its PR was merged or closed, the claim is **done**, so nobody takes the job again for the context's keep time. Stopped, it's **released**, so someone else may take it.
+- **Setup is an owner's.** Contexts are created by swarm owners, in Swarms settings. The limit per machine (default 1) caps how many of a pipeline's jobs one machine holds at once, so an owner raises it for a pipeline running several tickets at once.
+- **Restarts.** A hydraui that quits stops renewing, and its claims lapse after the context's lapse time. Meanwhile the source's own mark keeps teammates off: a message with the 👀, or a Linear ticket already moved and assigned. A resumed run doesn't take its claim again.
+- **Mail stays on its claim files** (email triage spec §5.1). They already give each group email to one person across machines, by Message-ID. Moving them onto this service is left for later.

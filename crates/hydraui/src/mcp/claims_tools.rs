@@ -115,6 +115,11 @@ pub struct ClaimsSessions {
 }
 
 impl ClaimsSessions {
+    /// The swarms' claims, for hydraui's triggers to take jobs through (core spec §87).
+    pub fn api(&self) -> Arc<dyn ClaimsApi> {
+        Arc::clone(&self.api)
+    }
+
     pub fn new(api: Arc<dyn ClaimsApi>) -> Self {
         ClaimsSessions {
             api,

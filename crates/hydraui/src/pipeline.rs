@@ -29,6 +29,9 @@ pub struct Pipeline {
     /// The environment its orchestrator starts in when hydraui launches (`[autostart] env`);
     /// `None`: started from the launcher.
     pub autostart: Option<String>,
+    /// `[claims]`: the swarm (and context) its trigger takes each job through, so that when
+    /// several people run it, one takes each job (core spec §87).
+    pub claims: Option<ClaimSettings>,
     /// The Slack channel a stage asks a product question in, rather than deciding it
     /// (`[product] channel`); `None`: it asks the user in hydraui.
     pub product_channel: Option<String>,
@@ -356,6 +359,18 @@ pub fn needs_line(name: &str, env: &str, missing: &[Service]) -> String {
 }
 
 impl Pipeline {
+    /// The swarm and context its trigger takes each job through (core spec §87): `[claims]`,
+    /// else a `[mail]` pipeline's team swarm; `None`: each person's source marks alone.
+    pub fn claims_in(&self) -> Option<(String, String)> {
+        let swarm = self
+            .claims
+            .as_ref()
+            .map(|c| c.swarm.trim().to_string())
+            .or_else(|| self.mail.as_ref()?.swarm.clone())?;
+        let named = self.claims.as_ref().and_then(|c| c.context.as_deref());
+        Some((swarm, crate::jobs::context_for(&self.file, named)))
+    }
+
     /// The services its trigger takes work from (core spec §85): `[slack]` needs Slack,
     /// `[linear]` Linear, `[mail]` Gmail.
     pub fn needs(&self) -> Vec<Service> {
@@ -436,6 +451,16 @@ impl Pipeline {
 /// The bar when a pipeline names none (the user's decision).
 pub const DEFAULT_BAR: u8 = 80;
 
+/// A pipeline's `[claims]` table (core spec §87).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimSettings {
+    /// The swarm, by name.
+    pub swarm: String,
+    /// The context in it; `None`: the pipeline's file name (`jobs::context_for`).
+    pub context: Option<String>,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct File {
@@ -447,6 +472,7 @@ struct File {
     stages: Vec<FileStage>,
     linear: Option<FileLinear>,
     autostart: Option<FileAutostart>,
+    claims: Option<ClaimSettings>,
     product: Option<FileProduct>,
     slack: Option<FileSlack>,
     schedule: Option<FileSchedule>,
@@ -951,6 +977,7 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
             Some(a) => Some(a.env.trim().to_string()),
             None => None,
         },
+        claims: file.claims.filter(|c| !c.swarm.trim().is_empty()),
         product_channel: match file.product.as_ref().and_then(|p| p.channel.as_deref()) {
             Some(c) if c.trim().is_empty() => {
                 return Err(
@@ -1027,6 +1054,8 @@ pub struct Edit {
     pub mail: Option<MailSettings>,
     pub runs_at_once: u8,
     pub finish_started: bool,
+    /// `[claims] swarm`: the swarm its trigger takes jobs through (core spec §87); `None`: none.
+    pub claims_swarm: Option<String>,
     /// What a waiting stage's session does while it waits (`[waiting]`, core spec §60).
     pub waiting: WaitingSettings,
 }
@@ -1082,6 +1111,7 @@ impl From<&Pipeline> for Edit {
             mail: p.mail.clone(),
             runs_at_once: p.runs_at_once,
             finish_started: p.finish_started,
+            claims_swarm: p.claims.as_ref().map(|c| c.swarm.clone()),
             waiting: p.waiting,
         }
     }
@@ -1476,6 +1506,23 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
         doc.remove("finish_started");
     } else {
         doc["finish_started"] = value(false);
+    }
+    // `[claims]`: its swarm as set here; a context named in the file stays.
+    match edit
+        .claims_swarm
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(swarm) => {
+            if !doc.contains_table("claims") {
+                doc["claims"] = Item::Table(toml_edit::Table::new());
+            }
+            doc["claims"]["swarm"] = value(swarm);
+        }
+        None => {
+            doc.remove("claims");
+        }
     }
     match edit.color {
         Some(c) => doc["color"] = value(color_text(c)),
@@ -2131,6 +2178,58 @@ mod tests {
         save(d.path(), "p", &edit).unwrap();
         let text = std::fs::read_to_string(folder(d.path()).join("p.toml")).unwrap();
         assert!(!text.contains("[waiting]"), "{text}");
+    }
+
+    #[test]
+    fn a_pipeline_claims_in_its_swarm_or_its_mail_team_swarm() {
+        let base = "name = \"P\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n";
+        let mut p = parse(base).unwrap();
+        p.file = "review-pr-s".into();
+        assert_eq!(p.claims_in(), None);
+        let mut p = parse(&format!("{base}[claims]\nswarm = \"iov42\"\n")).unwrap();
+        p.file = "review-pr-s".into();
+        assert_eq!(
+            p.claims_in(),
+            Some(("iov42".to_string(), "review-pr-s".to_string()))
+        );
+        let named = format!("{base}[claims]\nswarm = \"iov42\"\ncontext = \"prs\"\n");
+        assert_eq!(parse(&named).unwrap().claims_in().unwrap().1, "prs");
+        let mail = format!("{base}[mail]\ncheck = \"weekdays 09:00\"\nswarm = \"integrations\"\n");
+        let mut p = parse(&mail).unwrap();
+        p.file = "integrations-emails".into();
+        assert_eq!(
+            p.claims_in(),
+            Some((
+                "integrations".to_string(),
+                "integrations-emails".to_string()
+            ))
+        );
+        assert!(parse(&format!("{base}[claims]\nswarm = \"x\"\nodd = 1\n")).is_err());
+    }
+
+    #[test]
+    fn the_team_swarm_is_saved_as_claims_keeping_a_named_context() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        let base = "name = \"PRs\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n";
+        std::fs::write(
+            folder(d.path()).join("prs.toml"),
+            format!("{base}[claims]\nswarm = \"old\"\ncontext = \"prs\"\n"),
+        )
+        .unwrap();
+        let mut edit = Edit::from(&load(d.path(), "prs").unwrap());
+        assert_eq!(edit.claims_swarm.as_deref(), Some("old"));
+        edit.claims_swarm = Some("iov42".into());
+        save(d.path(), "prs", &edit).unwrap();
+        let p = load(d.path(), "prs").unwrap();
+        assert_eq!(
+            p.claims_in(),
+            Some(("iov42".to_string(), "prs".to_string()))
+        );
+        edit.claims_swarm = None;
+        save(d.path(), "prs", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("prs.toml")).unwrap();
+        assert!(!text.contains("[claims]"), "{text}");
     }
 
     #[test]

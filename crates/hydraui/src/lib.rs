@@ -27,6 +27,7 @@ pub mod inbox;
 pub mod input;
 pub mod jev;
 pub mod jev_stage;
+pub mod jobs;
 pub mod keys;
 pub mod launcher;
 pub mod linear;

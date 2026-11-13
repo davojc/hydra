@@ -63,12 +63,14 @@ impl JevDraft {
             input: text(&self.input),
             model: Some(text(&self.model)).filter(|m| !m.is_empty()),
             instructions: self.instructions.read(cx).value().trim().to_string(),
-            options: self
-                .options
-                .iter()
-                .map(|(_, k, v, _)| (text(k), text(v)))
-                .filter(|(k, v)| !(k.is_empty() && v.is_empty()))
-                .collect(),
+            // `none` isn't shown, but every Jev stage has it, as the file loads (§86 fix).
+            options: crate::jev_stage::with_none(
+                self.options
+                    .iter()
+                    .map(|(_, k, v, _)| (text(k), text(v)))
+                    .filter(|(k, v)| !(k.is_empty() && v.is_empty()))
+                    .collect(),
+            ),
             ends: self
                 .options
                 .iter()

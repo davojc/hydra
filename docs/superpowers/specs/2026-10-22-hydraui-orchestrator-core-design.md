@@ -1588,7 +1588,7 @@ How much of the seven-day Claude limit a stage needs left (`min_week_left`, orch
 A scheduled run or a mailbox look (§58, email triage spec §3) kept only the date it last happened. So moving a pipeline's time later in a day it had already run did nothing until the next day, and Pipeline settings never said so. A time moved from 09:00 to 09:53 after the 09:01 look is an example.
 
 - **Each run or look keeps its time** in `schedule.json`: `2026-11-13 09:01:42.740`, not `2026-11-13`.
-- **When it's due:** on one of its days, once its time has passed, if nothing ran since that time today. So a time moved later the same day gets its own run, and one time never runs twice. A date alone, written before this change, still counts as the whole day.
+- **When it's due:** on one of its days, once its time has passed, if nothing ran since that time today. So a time moved later the same day gets its own run, and one time never runs twice. A date alone, written before this change, counts as the start of that day, so a time later that day still runs. (Revised the same day: it first counted as the whole day, so a pipeline that had looked that morning never ran again that day.)
 - **A line under Runs and under Check** reads the timetable from the saved file, not from what's typed: "Saved. Last look today at 09:01 · next look Monday at 09:53." While what's typed differs from the file, it says so in amber: "Not saved yet: Save changes to use it. Until then it's Weekdays at 09:00."
 
 ## 83. Below the Claude week limit, nothing new starts, and a started ticket finishes (added 2026-11-13)
@@ -1637,3 +1637,6 @@ Teammates missed updates. The offer was a button in the title bar, beside the ve
 - **It asks first.** "Update hydra to 0.6.52?" says what happens: it downloads, checks and installs hydraui and the hydra command, and the terminals and tickets pick back up after the restart. **Restart** asks the same way. **Not now** leaves the button there.
 - **One notice per release** goes to the bell: "hydra 0.6.52 is out: Update is beside the bell."
 - **The hourly check** is unchanged.
+
+**Fixed with §86's build:** Pipeline settings for a pipeline with a Jev step always said "Unsaved changes", even straight after Save. The page hides Jev's built-in `none` category, but every Jev stage gets `none` when it loads, so the page's values never matched what was saved. The page now adds `none` back the same way loading does (`jev_stage::with_none`).
+

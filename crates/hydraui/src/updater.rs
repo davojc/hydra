@@ -89,6 +89,8 @@ pub struct Installed {
 /// The swap for `exe`: `<stem>.new.exe` takes its place, it moves to `<stem>.old.exe`
 /// (no `.exe` outside Windows).
 fn swap_for(exe: &Path) -> Swap {
+    // A link (found on PATH) is followed to the exe it names, which is the one to replace.
+    let exe = &hydra_update::real_exe(exe.to_path_buf());
     let dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
     let stem = exe
         .file_stem()

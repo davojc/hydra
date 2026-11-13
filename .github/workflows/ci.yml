@@ -153,6 +153,11 @@ jobs:
             cp "target/release/$bin" "dist/$asset"
             (cd dist && shasum -a 256 "$asset" > "$asset.sha256" && cat "$asset.sha256")
           done
+          # Hydra.app, zipped, and the one-line installer that fetches it.
+          scripts/macos/make-app.sh target/release/hydraui target/release/hydra "$VERSION" dist
+          cp scripts/macos/install.sh dist/install.sh
+      - name: Test the Mac installer
+        run: scripts/macos/test-install.sh dist
       - name: Check the version
         run: |
           got="$(dist/hydra-aarch64-apple-darwin --version)"

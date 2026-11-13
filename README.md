@@ -39,15 +39,23 @@ Typical uses:
 hydra init        # creates ~/.hydra
 ```
 
-**macOS:** download `hydraui-aarch64-apple-darwin` and/or `hydra-aarch64-apple-darwin` from the [latest release](https://github.com/davojc/hydra/releases/latest) (each has a `.sha256`). Rename them to `hydraui` / `hydra`, put `hydra` in a folder on your `PATH`, and make both runnable. The builds aren't signed yet, so clear the quarantine your browser adds:
+**macOS (Apple silicon):** in Terminal, run
 
 ```sh
-chmod +x hydra hydraui
-xattr -d com.apple.quarantine hydra hydraui
+curl -fsSL https://github.com/davojc/hydra/releases/latest/download/install.sh | sh
+```
+
+It downloads the latest **Hydra.app**, checks its SHA-256, puts it in `~/Applications`, links `~/.local/bin/hydra` to the `hydra` inside it (adding `~/.local/bin` to your `PATH` if it isn't there), and runs `hydra init`. Open Hydra from Applications, Launchpad or Spotlight. There's no sudo and no unsigned-app prompt, because files `curl` downloads aren't quarantined. Run it again to reinstall. [`install.sh`](scripts/macos/install.sh) is short; read it first if you like.
+
+**macOS by hand:** download `hydra-macos-aarch64.zip` (Hydra.app) or the bare `hydraui-aarch64-apple-darwin` / `hydra-aarch64-apple-darwin` from the [latest release](https://github.com/davojc/hydra/releases/latest) (each has a `.sha256`). The builds aren't signed yet, so clear the quarantine your browser adds:
+
+```sh
+xattr -dr com.apple.quarantine Hydra.app        # or, for the bare builds:
+chmod +x hydra hydraui && xattr -d com.apple.quarantine hydra hydraui
 hydra init        # creates ~/.hydra
 ```
 
-**Updating:** `hydra update` installs the latest release after checking its SHA-256 checksum. `hydra update --check` only reports. It won't update while another hydra terminal is open. hydraui shows an **Update** button beside the notifications bell when a release is out (it asks first); it updates both `hydraui.exe` and `hydra.exe` the same way, then offers a restart. On macOS it updates `hydraui` and `hydra` the same way.
+**Updating:** `hydra update` installs the latest release after checking its SHA-256 checksum. `hydra update --check` only reports. It won't update while another hydra terminal is open. hydraui shows an **Update** button beside the notifications bell when a release is out (it asks first); it updates both `hydraui.exe` and `hydra.exe` the same way, then offers a restart. On macOS it updates `hydraui` and `hydra` the same way, inside Hydra.app when that's where they are; `hydra update` run through the `~/.local/bin` link updates the copy in the app.
 
 **From source:** install Rust from <https://rustup.rs>, then `git clone https://github.com/davojc/hydra.git` and `cargo build --release`. Local builds report a `-dev` version (e.g. `0.5.0-dev`), so `hydra update` replaces them with the real release. `scripts\deploy.ps1` builds and installs to `E:\Tools`, or another folder with `-Target`.
 

@@ -246,7 +246,8 @@ impl Workspace {
                     continue;
                 }
                 let active = panes.iter().any(|p| Some(*p) == shown);
-                let lanes = self.lanes(*orch, cx);
+                // Each open ticket is a box under the orchestrator, one ticket or several (§76).
+                let lanes = self.open_lanes(*orch, cx);
                 let mut block = v_flex()
                     .id(SharedString::from(format!("pipeline-block-{orch}")))
                     .mx_1()
@@ -257,15 +258,9 @@ impl Workspace {
                     .border_1()
                     // The pipeline's own colour, so pipelines are told apart at a glance.
                     .border_color(color(card.accent).opacity(if active { 0.55 } else { 0.3 }))
-                    .child(self.render_pipeline_card(*orch, card, active, true, cx))
-                    // With several tickets, each one's question is in its own box.
-                    .children(
-                        lanes
-                            .is_empty()
-                            .then(|| self.render_question(*orch, None, cx))
-                            .flatten(),
-                    )
-                    .children(self.render_linear_row(*orch, card.accent, cx));
+                    .child(self.render_pipeline_card(*orch, card, active, lanes.is_empty(), cx))
+                    .children(self.render_linear_row(*orch, card.accent, cx))
+                    .children(self.render_schedule_row(*orch, card.accent, cx));
                 let orch = *orch;
                 if let Some(row) = self.terminal_row(
                     orch,
@@ -297,7 +292,13 @@ impl Workspace {
                         )
                     })
                     .collect();
-                if !stage_rows.is_empty() {
+                // What the ticket waits on, under the stage that's waiting: not up by the trigger,
+                // where it read as the pipeline's own state. With several tickets, each one's is
+                // in its own box.
+                let question = (!several)
+                    .then(|| self.render_question(orch, None, card.accent, cx))
+                    .flatten();
+                if !stage_rows.is_empty() || question.is_some() {
                     // A guide line down from the orchestrator ties its sessions to it.
                     block = block.child(
                         v_flex()
@@ -307,7 +308,8 @@ impl Workspace {
                             .gap_0p5()
                             .border_l_2()
                             .border_color(color(card.accent).opacity(0.45))
-                            .children(stage_rows),
+                            .children(stage_rows)
+                            .children(question),
                     );
                 }
                 list = list.child(block);
@@ -521,7 +523,8 @@ impl Workspace {
             .border_1()
             .border_color(accent.opacity(if active { 0.55 } else { 0.3 }))
             .child(self.render_pipeline_card(lead, &group, active, false, cx))
-            .children(self.render_linear_row(lead, group.accent, cx));
+            .children(self.render_linear_row(lead, group.accent, cx))
+            .children(self.render_schedule_row(lead, group.accent, cx));
         for (orch, _, panes) in members {
             let orch = *orch;
             if let Some(row) =

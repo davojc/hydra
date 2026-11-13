@@ -25,6 +25,42 @@ pub struct Mailed {
     pub ticket: String,
     pub subject: String,
     pub from: String,
+    /// What a swarm claim on it is keyed by (`claim_key`): the same in every member's copy of a
+    /// group's email. Empty in state saved before claims were keyed so: its thread id stands in.
+    #[serde(default)]
+    pub key: String,
+}
+
+impl Mailed {
+    /// Its claim key, or its thread id when it was saved without one.
+    pub fn key(&self) -> &str {
+        if self.key.is_empty() {
+            &self.thread
+        } else {
+            &self.key
+        }
+    }
+}
+
+/// What a swarm claim on `t` is keyed by (email triage spec §5.1): a short fingerprint of its
+/// first message's `Message-ID`, which every copy shares; its thread id without one. A file name
+/// can't hold `<…@…>`, and the fingerprint is the same on every machine.
+pub fn claim_key(t: &Thread) -> String {
+    let id = t
+        .message_id
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .to_ascii_lowercase();
+    if id.is_empty() {
+        return format!("t-{}", t.id);
+    }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in id.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("m-{h:016x}")
 }
 
 /// What a pipeline's looks have seen, and what waits to run.
@@ -39,6 +75,10 @@ pub struct MailState {
     /// run ends (spec §5).
     #[serde(default)]
     pub held: std::collections::BTreeMap<String, String>,
+    /// Each held thread's claim key (`claim_key`), for its swarm claim; a thread missing here
+    /// was claimed by thread id.
+    #[serde(default)]
+    pub keys: std::collections::BTreeMap<String, String>,
 }
 
 /// The Gmail search for a look: the pipeline's query, the last `look_back_days`, and nothing
@@ -176,7 +216,30 @@ mod tests {
             from: from.into(),
             date: String::new(),
             messages: 1,
+            message_id: String::new(),
         }
+    }
+
+    #[test]
+    fn every_copy_of_an_email_has_the_same_claim_key() {
+        // A group delivers one email to each member: a different thread id in each mailbox,
+        // the same Message-ID.
+        let mut mine = thread("18c2aaaa", "Ann <ann@acme.com>");
+        let mut davids = thread("19f7bbbb", "Ann <ann@acme.com>");
+        mine.message_id = "<CAB123@mail.gmail.com>".into();
+        davids.message_id = " <cab123@mail.gmail.com> ".into();
+        assert_eq!(claim_key(&mine), claim_key(&davids));
+        assert!(claim_key(&mine).starts_with("m-"), "{}", claim_key(&mine));
+        let mut other = mine.clone();
+        other.message_id = "<OTHER@mail.gmail.com>".into();
+        assert_ne!(claim_key(&mine), claim_key(&other));
+        // No Message-ID: the thread id, as before.
+        assert_eq!(claim_key(&thread("t9", "x")), "t-t9");
+        // Saved before keys: the thread id stands in.
+        let old: Mailed =
+            serde_json::from_str(r#"{"thread":"t1","ticket":"MAIL-T1","subject":"S","from":"F"}"#)
+                .unwrap();
+        assert_eq!(old.key(), "t1");
     }
 
     #[test]
@@ -229,6 +292,7 @@ mod tests {
             subject: "Sharing".into(),
             body: body.into(),
             attachments: files.iter().map(|f| f.to_string()).collect(),
+            ..Default::default()
         };
         let md = email_md(&[
             m("Ann <ann@acme.com>", "How do I share?", &["log.pdf"]),
@@ -259,6 +323,7 @@ mod tests {
             ticket: "MAIL-18C2".into(),
             subject: "Sharing".into(),
             from: "Ann <ann@acme.com>".into(),
+            key: String::new(),
         };
         let text = start_prompt(&p, &m, Path::new("/h/hydraui/mail/MAIL-18C2/email.md"));
         for part in [
@@ -284,6 +349,7 @@ mod tests {
             ticket: "MAIL-T1".into(),
             subject: "S".into(),
             from: "F".into(),
+            key: "m-0123".into(),
         });
         s.held.insert("t1".into(), "MAIL-T1".into());
         save(home.path(), "mail", &s).unwrap();

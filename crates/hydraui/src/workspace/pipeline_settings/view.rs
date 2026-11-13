@@ -195,6 +195,39 @@ fn numbers_in(
 }
 
 impl Workspace {
+    /// Under a timetable: whether it's saved, when it last ran (or looked) and when it next
+    /// will, from the file and `schedule.json` (core spec §82). `noun` "run" reads
+    /// `[schedule] every`, "look" `[mail] check`; `key` is its entry in `schedule.json`.
+    fn timetable_status(&self, noun: &str, file: &str, key: &str, typed: &str) -> AnyElement {
+        let root = self.hydra.paths.root();
+        let saved = crate::pipeline::load(root, file)
+            .ok()
+            .and_then(|p| match noun {
+                "run" => p.schedule.map(|s| s.every),
+                _ => p.mail.map(|m| m.check),
+            });
+        let last = crate::schedule::last_runs(root);
+        let (line, unsaved) = crate::schedule::status(
+            noun,
+            saved.as_deref(),
+            typed,
+            &crate::action_log::now(),
+            last.get(key).map(String::as_str),
+        );
+        text(
+            12.,
+            if unsaved {
+                theme::AMBER
+            } else {
+                theme::TEXT_SECONDARY
+            },
+        )
+        .pl(px(182.))
+        .whitespace_normal()
+        .child(line)
+        .into_any_element()
+    }
+
     /// The setup checklist's **Go to**: unfold `part` and scroll to it.
     fn settings_go_to(&mut self, orch: PaneId, part: Part, cx: &mut Context<Self>) {
         let Some(d) = self.pipeline_settings.get_mut(&orch) else {
@@ -666,22 +699,32 @@ impl Workspace {
                     .whitespace_normal()
                     .child(reads.0),
             );
+            main = main.child(self.timetable_status("run", &draft.file, &draft.file, &every));
             extra = extra.child(input_field("In environment", &sc.env));
             folded.push("environment");
         }
         if draft.mail.on {
             let m = &draft.mail;
-            main = main.child(input_field("Check", &m.check)).child(field(
-                "Look back",
-                numbers_in(
-                    format!("mail-back-{orch}"),
-                    &m.look_back,
-                    &words::LOOK_BACK_DAYS,
-                    words::days,
-                    ws.clone(),
-                    cx,
-                ),
-            ));
+            let check = m.check.read(cx).value().to_string();
+            main = main
+                .child(input_field("Check", &m.check))
+                .child(self.timetable_status(
+                    "look",
+                    &draft.file,
+                    &format!("mail:{}", draft.file),
+                    &check,
+                ))
+                .child(field(
+                    "Look back",
+                    numbers_in(
+                        format!("mail-back-{orch}"),
+                        &m.look_back,
+                        &words::LOOK_BACK_DAYS,
+                        words::days,
+                        ws.clone(),
+                        cx,
+                    ),
+                ));
             let mut missing = Vec::new();
             if self.ui.gmail_client().is_none() {
                 missing.push(
@@ -703,6 +746,20 @@ impl Workspace {
                         .pl(px(182.))
                         .whitespace_normal()
                         .child(format!("Before it can read mail: {}.", missing.join("; "))),
+                );
+            }
+            // Without a team swarm, claims stay in each person's own mailbox: two people
+            // reading a group's copies would take the same email (email triage spec §5.1).
+            if m.swarm.read(cx).value().trim().is_empty() {
+                main = main.child(
+                    text(12., theme::TEXT_MUTED)
+                        .pl(px(182.))
+                        .whitespace_normal()
+                        .child(
+                            "No team swarm set: only you are kept off emails you've taken. If \
+                             teammates run this pipeline too, set Team swarm under More options \
+                             so you never both take the same email.",
+                        ),
                 );
             }
             extra = extra
@@ -751,7 +808,7 @@ impl Workspace {
             "Advanced settings",
             Some(
                 "While a stage waits · Tickets at once · Default pass mark · Branch · Product \
-                 questions"
+                 questions · Claude week limit"
                     .into(),
             ),
         )
@@ -820,9 +877,49 @@ impl Workspace {
                         .child(div().max_w(px(480.)).child(Input::new(&draft.branch))),
                 )
                 .child(self.render_product_settings(orch, draft, cx))
+                .child({
+                    let finish = draft.finish_started;
+                    let choice = |on: bool, label: &'static str| {
+                        let b =
+                            Button::new(SharedString::from(format!("finish-started-{on}-{orch}")))
+                                .label(label)
+                                .xsmall()
+                                .on_click(cx.listener(move |ws, _, _, cx| {
+                                    ws.with_draft(orch, cx, |d| d.finish_started = on)
+                                }));
+                        if finish == on { b.primary() } else { b.ghost() }
+                    };
+                    v_flex()
+                        .gap_2()
+                        .child(section_tip(
+                            "Claude week limit",
+                            "New tickets start only while enough of your seven-day Claude limit \
+                             is left. Set how much in Settings › General.",
+                        ))
+                        .child(text(12., theme::TEXT_SECONDARY).whitespace_normal().child(
+                            format!(
+                                "New tickets wait while less than {floor}% is left. When a \
+                                 ticket already started drops below it:"
+                            ),
+                        ))
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(choice(true, "Finish it"))
+                                .child(choice(false, "Stop for you")),
+                        )
+                        .child(
+                            text(12., theme::TEXT_MUTED).whitespace_normal().child(if finish {
+                                "Its stages carry on to the end, so a ticket that's been claimed \
+                                 is never left half done."
+                            } else {
+                                "Its next stage waits for you, and the ticket stays claimed until \
+                                 you resume or stop it."
+                            }),
+                        )
+                })
                 .child(text(12., theme::TEXT_MUTED).child(format!(
-                    "A stage that fails is retried up to {MAX_ATTEMPTS} times. Stages pause below \
-                     {floor}% of the Claude week."
+                    "A stage that fails is retried up to {MAX_ATTEMPTS} times."
                 ))),
         );
         body.into_any_element()

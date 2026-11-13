@@ -34,6 +34,55 @@ pub fn days(d: u32) -> String {
     }
 }
 
+/// General's unsaved changes, in a line: "Not saved yet: Theme, Font size." Keys are
+/// config.toml's; one General doesn't name is shown as its key.
+pub fn unsaved_line(keys: &[&str]) -> String {
+    let name = |k: &str| match k {
+        "theme" => "Theme".to_string(),
+        "font" => "Terminal font".to_string(),
+        "font_size" => "Font size".to_string(),
+        "default_env" => "Default environment".to_string(),
+        "default_shell" => "Default shell".to_string(),
+        "editor" => "Editor".to_string(),
+        "min_week_left" => "Claude week limit".to_string(),
+        other => other.to_string(),
+    };
+    let names: Vec<String> = keys.iter().map(|k| name(k)).collect();
+    format!("Not saved yet: {}.", names.join(", "))
+}
+
+/// The week-limit slider's notches, in percent (orchestrator spec §5.1); 0 turns it off.
+pub const WEEK_LEFT_STEP: u8 = 5;
+
+/// Where the week-limit slider settles for `v`: the nearest 5%, 0 to 100.
+pub fn week_left_snap(v: f32) -> u8 {
+    let step = f32::from(WEEK_LEFT_STEP);
+    ((v / step).round() * step).clamp(0., 100.) as u8
+}
+
+/// A week-limit choice as its button says it: "Off", "20%", "30% (default)".
+pub fn week_left(n: u8) -> String {
+    match n {
+        0 => "Off".into(),
+        n if n == crate::runs::MIN_WEEK_LEFT => format!("{n}% (default)"),
+        n => format!("{n}%"),
+    }
+}
+
+/// What the week-limit setting does, at `n`.
+pub fn week_left_about(n: u8) -> String {
+    match n {
+        0 => "Off: a pipeline's stages start however little of the seven-day Claude limit is \
+              left."
+            .into(),
+        n => format!(
+            "A pipeline's next stage starts only while at least {n}% of the seven-day Claude \
+             limit is left, so pipelines don't use up the week you need yourself. Below it, the \
+             ticket waits for you."
+        ),
+    }
+}
+
 /// `options`, with `current` added in order when it isn't one (a value set in the file).
 pub fn with_current(options: &[u32], current: u32) -> Vec<u32> {
     let mut all = options.to_vec();
@@ -246,6 +295,29 @@ fn lower_first(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsaved_changes_are_named_as_the_page_names_them() {
+        assert_eq!(
+            unsaved_line(&["theme", "min_week_left"]),
+            "Not saved yet: Theme, Claude week limit."
+        );
+        assert_eq!(unsaved_line(&["odd"]), "Not saved yet: odd.");
+    }
+
+    #[test]
+    fn the_week_limit_reads_as_its_choices_say_it() {
+        assert_eq!(week_left(0), "Off");
+        assert_eq!(week_left(20), "20%");
+        assert_eq!(week_left(crate::runs::MIN_WEEK_LEFT), "30% (default)");
+        assert_eq!(week_left_snap(0.4), 0);
+        assert_eq!(week_left_snap(27.4), 25);
+        assert_eq!(week_left_snap(27.6), 30);
+        assert_eq!(week_left_snap(250.), 100);
+        assert_eq!(week_left_snap(-3.), 0);
+        assert!(week_left_about(0).starts_with("Off"));
+        assert!(week_left_about(25).contains("at least 25%"));
+    }
     use crate::pipeline::{self, KeepChecking};
 
     fn edit(toml: &str) -> Edit {

@@ -42,6 +42,10 @@ pub struct Pipeline {
     /// How many tickets it runs at once (`runs_at_once`, 1 to `MAX_RUNS_AT_ONCE`): each has
     /// its own orchestrator and card, and the trigger hands work to whichever is free.
     pub runs_at_once: u8,
+    /// A ticket that has started finishes even once less of the seven-day Claude limit is left
+    /// than a stage needs (`finish_started`, core spec §83): the share holds only its first
+    /// stage. Off, every stage needs it, and a ticket can stop part-way for a person.
+    pub finish_started: bool,
     /// What a waiting stage's session does while it waits (`[waiting]`, core spec §60).
     pub waiting: WaitingSettings,
     /// Its accent on the card and the frame round its sessions (`color = "#rrggbb"`), so
@@ -309,7 +313,65 @@ pub const PRODUCT_STYLES: [(&str, &str); 2] = [
 pub const PRODUCT_TOOLS: &str =
     "mcp__claude_ai_Slack__slack_send_message,mcp__claude_ai_Slack__slack_read_thread";
 
+/// A service a pipeline takes its work from (core spec §85): it needs that service connected
+/// in the environment it runs in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Service {
+    Slack,
+    Linear,
+    Gmail,
+}
+
+impl Service {
+    pub const ALL: [Service; 3] = [Service::Slack, Service::Linear, Service::Gmail];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Service::Slack => "Slack",
+            Service::Linear => "Linear",
+            Service::Gmail => "Gmail",
+        }
+    }
+
+    /// What connects it, as the app names it.
+    pub fn how(self) -> &'static str {
+        match self {
+            Service::Slack => "Connect Slack",
+            Service::Linear => "Set up Linear…",
+            Service::Gmail => "Connect Gmail",
+        }
+    }
+}
+
+/// Why pipeline `name` can't run in `env`: the services it needs that aren't connected there.
+pub fn needs_line(name: &str, env: &str, missing: &[Service]) -> String {
+    let names: Vec<&str> = missing.iter().map(|s| s.name()).collect();
+    let hows: Vec<&str> = missing.iter().map(|s| s.how()).collect();
+    format!(
+        "Pipeline \"{name}\" takes its work from {}, which isn't connected in {env}: use {} \
+         first.",
+        names.join(" and "),
+        hows.join(" and ")
+    )
+}
+
 impl Pipeline {
+    /// The services its trigger takes work from (core spec §85): `[slack]` needs Slack,
+    /// `[linear]` Linear, `[mail]` Gmail.
+    pub fn needs(&self) -> Vec<Service> {
+        let mut all = Vec::new();
+        if self.slack.is_some() {
+            all.push(Service::Slack);
+        }
+        if self.linear.is_some() {
+            all.push(Service::Linear);
+        }
+        if self.mail.is_some() {
+            all.push(Service::Gmail);
+        }
+        all
+    }
+
     /// Takes `now`'s name, colour and icon: how a pipeline looks follows its file at once on
     /// every run, whatever the run started with (core spec §64).
     pub fn take_look(&mut self, now: &Pipeline) {
@@ -393,6 +455,7 @@ struct File {
     icon: Option<String>,
     shared: Option<FileShared>,
     runs_at_once: Option<u8>,
+    finish_started: Option<bool>,
     waiting: Option<FileWaiting>,
 }
 
@@ -934,6 +997,7 @@ pub fn parse(text: &str) -> Result<Pipeline, String> {
                 ));
             }
         },
+        finish_started: file.finish_started.unwrap_or(true),
     })
 }
 
@@ -962,6 +1026,7 @@ pub struct Edit {
     /// `[mail]`, kept as the file has it: Pipeline settings doesn't edit it yet.
     pub mail: Option<MailSettings>,
     pub runs_at_once: u8,
+    pub finish_started: bool,
     /// What a waiting stage's session does while it waits (`[waiting]`, core spec §60).
     pub waiting: WaitingSettings,
 }
@@ -1016,6 +1081,7 @@ impl From<&Pipeline> for Edit {
             schedule: p.schedule.clone(),
             mail: p.mail.clone(),
             runs_at_once: p.runs_at_once,
+            finish_started: p.finish_started,
             waiting: p.waiting,
         }
     }
@@ -1405,6 +1471,11 @@ pub fn save(hydra_root: &Path, name: &str, edit: &Edit) -> std::io::Result<()> {
         doc["runs_at_once"] = value(i64::from(edit.runs_at_once));
     } else {
         doc.remove("runs_at_once");
+    }
+    if edit.finish_started {
+        doc.remove("finish_started");
+    } else {
+        doc["finish_started"] = value(false);
     }
     match edit.color {
         Some(c) => doc["color"] = value(color_text(c)),
@@ -2060,6 +2131,45 @@ mod tests {
         save(d.path(), "p", &edit).unwrap();
         let text = std::fs::read_to_string(folder(d.path()).join("p.toml")).unwrap();
         assert!(!text.contains("[waiting]"), "{text}");
+    }
+
+    #[test]
+    fn a_pipeline_needs_the_service_its_trigger_uses() {
+        let base = "name = \"P\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n";
+        assert!(parse(base).unwrap().needs().is_empty());
+        let slack = format!("{base}[slack]\nchannel = \"C0C217CER6G\"\n");
+        assert_eq!(parse(&slack).unwrap().needs(), vec![Service::Slack]);
+        let linear = format!("{base}[linear]\nteam = \"PRE\"\n");
+        assert_eq!(parse(&linear).unwrap().needs(), vec![Service::Linear]);
+        let mail = format!("{base}[mail]\ncheck = \"weekdays 09:00\"\n");
+        assert_eq!(parse(&mail).unwrap().needs(), vec![Service::Gmail]);
+        let why = needs_line("Review PRs", "iov42", &[Service::Slack]);
+        assert!(
+            why.contains("Slack") && why.contains("iov42") && why.contains("Connect Slack"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn finish_started_is_on_unless_set_off_and_saved_only_when_off() {
+        let base = "name = \"PRs\"\n[[stage]]\nid = \"a\"\ntitle = \"A\"\n";
+        assert!(parse(base).unwrap().finish_started);
+        assert!(
+            !parse(&format!("finish_started = false\n{base}"))
+                .unwrap()
+                .finish_started
+        );
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(folder(d.path())).unwrap();
+        std::fs::write(folder(d.path()).join("prs.toml"), base).unwrap();
+        let mut edit = Edit::from(&load(d.path(), "prs").unwrap());
+        edit.finish_started = false;
+        save(d.path(), "prs", &edit).unwrap();
+        assert!(!load(d.path(), "prs").unwrap().finish_started);
+        edit.finish_started = true;
+        save(d.path(), "prs", &edit).unwrap();
+        let text = std::fs::read_to_string(folder(d.path()).join("prs.toml")).unwrap();
+        assert!(!text.contains("finish_started"), "{text}");
     }
 
     #[test]

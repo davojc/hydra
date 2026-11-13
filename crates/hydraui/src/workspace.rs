@@ -2,6 +2,7 @@
 //! the selected environment's shown terminal beside its file pane, the status bar, and the
 //! commands bound to keys.
 mod accounts;
+mod actions_page;
 mod all_tasks;
 mod asking;
 mod busy;
@@ -25,6 +26,7 @@ mod pipeline_settings;
 mod pipeline_tab;
 mod projects_tab;
 mod scheduled;
+mod services;
 mod settings_tab;
 mod shortcuts;
 mod slack;
@@ -223,6 +225,14 @@ pub struct Workspace {
     projects: Option<projects_tab::ProjectsTab>,
     /// History (core spec §50), when shown.
     history: Option<history_tab::HistoryTab>,
+    /// Actions (core spec §80), when shown.
+    actions: Option<actions_page::ActionsPage>,
+    /// When the services connected in each environment were last read (core spec §85).
+    services_checked: Option<std::time::Instant>,
+    /// General's changes not saved yet, in the order made (core spec §84).
+    general_draft: Vec<crate::config::Change>,
+    /// What General's last Save did: (went wrong, text).
+    general_said: Option<(bool, String)>,
     /// The notifications panel under the bell, while open (core spec §57).
     inbox: Option<inbox_panel::InboxPanel>,
     /// What Export to share or Share to a swarm just did, by pipeline file: a line under those
@@ -303,6 +313,9 @@ pub struct Workspace {
     slack_mine: std::collections::HashSet<String>,
     /// The pull request each orchestrator was handed and hasn't started yet, to retry once.
     slack_inflight: HashMap<PaneId, crate::slack_watch::Queued>,
+    /// Tickets a Slack trigger handed to an orchestrator, lowercased: their runs were marked
+    /// when taken, so a run starting is not one started by hand (core spec §85).
+    slack_handed: std::collections::HashSet<String>,
     /// Orchestrators whose Claude hasn't finished its first turn: a prompt typed then is lost,
     /// so nothing is handed to them until it has.
     /// (When it opened: after 90 seconds it counts as ready anyway.)
@@ -317,6 +330,8 @@ pub struct Workspace {
     mail_releasing: std::collections::HashSet<String>,
     /// The thread each `[mail]` pipeline last handed over, until it's a run.
     mail_inflight: HashMap<String, (String, std::time::Instant)>,
+    /// Where Connect Slack is for each environment, shown under the button (core spec §73).
+    slack_connecting: HashMap<String, slack::SlackConnecting>,
     /// Pipelines imported from a swarm that has a newer version, by file (core spec §70).
     pipeline_updates: HashMap<String, crate::pipeline_share::Update>,
     /// The `<file> <version>` updates already announced, so each is told once.
@@ -571,6 +586,10 @@ impl Workspace {
             settings: None,
             projects: None,
             history: None,
+            actions: None,
+            general_draft: Vec::new(),
+            services_checked: None,
+            general_said: None,
             inbox: None,
             share_said: HashMap::new(),
             tickets: None,
@@ -605,6 +624,7 @@ impl Workspace {
             slack_queues: HashMap::new(),
             slack_mine: std::collections::HashSet::new(),
             slack_inflight: HashMap::new(),
+            slack_handed: Default::default(),
             starting_up: HashMap::new(),
             park_checked: None,
             schedule_checked: None,
@@ -612,6 +632,7 @@ impl Workspace {
             mail_releasing: Default::default(),
             mail_inflight: HashMap::new(),
             pipeline_updates: HashMap::new(),
+            slack_connecting: HashMap::new(),
             updates_told: std::collections::HashSet::new(),
             linear_tickets: HashMap::new(),
             in_flight: Default::default(),
@@ -2072,9 +2093,11 @@ impl Workspace {
                     .on_click(cx.listener(|ws, _, window, cx| ws.pick_env(window, cx))),
             )
             .child(div().flex_1())
+            .child(self.actions_button(cx))
             .child(self.projects_button(cx))
             .child(self.tickets_button(cx))
             .child(self.history_button(cx))
+            .children(self.update_button(cx))
             .child(self.inbox_button(cx))
             .child(
                 Button::new("open-settings")
@@ -2176,6 +2199,7 @@ impl Render for Workspace {
         let body = match self.envs.active() {
             // Settings opened from the start page shows over it; closing it goes back.
             _ if self.settings.is_some() => self.render_settings(cx),
+            _ if self.actions.is_some() => self.render_actions_page(window, cx),
             _ if self.tickets.is_some() => self.render_tickets_page(cx),
             _ if self.history.is_some() => self.render_history_page(cx),
             _ if self.projects.is_some() => self.render_projects(cx),

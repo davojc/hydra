@@ -5,11 +5,11 @@ use crate::inbox::{Note, PushNote};
 use std::cell::Cell;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Hsla, SharedString, Window, div, px, rgb};
+use gpui::{AnyElement, App, Context, Entity, Hsla, SharedString, Window, div, px, rgb};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_component::switch::Switch;
-use gpui_component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
+use gpui_component::{ActiveTheme, Disableable, Sizable, WindowExt, h_flex, v_flex};
 
 use super::Workspace;
 use crate::config::{self, ThemeChoice};
@@ -32,6 +32,13 @@ pub(super) enum Section {
 
 pub(super) struct SettingsTab {
     section: Section,
+    /// The Claude week limit's row is marked: General was opened from the status bar's usage.
+    week_spot: bool,
+    /// The Claude week limit's slider, while General shows, and what saves it on release.
+    week: Option<(
+        Entity<gpui_component::slider::SliderState>,
+        gpui::Subscription,
+    )>,
     /// You and this machine's name fields, while that page shows.
     pub(super) you: Option<super::swarms_page::IdentityFields>,
 }
@@ -58,12 +65,60 @@ impl Workspace {
             self.recheck_accounts(env, cx);
         }
         let you = (section == Section::You).then(|| self.identity_fields(window, cx));
-        self.settings = Some(SettingsTab { section, you });
+        let week = (section == Section::General).then(|| self.week_slider(window, cx));
+        self.settings = Some(SettingsTab {
+            section,
+            you,
+            week_spot: false,
+            week,
+        });
         self.projects = None;
         self.history = None;
         self.tickets = None;
+        self.actions = None;
         window.focus(&self.focus, cx);
         cx.notify();
+    }
+
+    /// The Claude week limit's slider at the saved value, in 5% notches: it shows the value as
+    /// it moves and saves it when let go.
+    fn week_slider(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (
+        Entity<gpui_component::slider::SliderState>,
+        gpui::Subscription,
+    ) {
+        use gpui_component::slider::{SliderEvent, SliderState};
+        let at = f32::from(self.shown_ui().min_week_left);
+        let slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.)
+                .max(100.)
+                .step(f32::from(crate::settings_words::WEEK_LEFT_STEP))
+                .default_value(at)
+        });
+        let sub = cx.subscribe_in(
+            &slider,
+            window,
+            |ws, _, e: &SliderEvent, window, cx| match e {
+                SliderEvent::Change(_) => cx.notify(),
+                SliderEvent::Release(v) => {
+                    let n = crate::settings_words::week_left_snap(v.end());
+                    ws.stage_ui("min_week_left", Some(i64::from(n).into()), window, cx)
+                }
+            },
+        );
+        (slider, sub)
+    }
+
+    /// General, with the Claude week limit's row marked: where the status bar's usage leads.
+    pub(super) fn open_week_limit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings(Section::General, window, cx);
+        if let Some(tab) = &mut self.settings {
+            tab.week_spot = true;
+        }
     }
 
     pub(super) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -72,18 +127,60 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Writes one config.toml setting, then applies the file as Reload config does.
-    fn set_ui(
+    /// Notes a change to one of General's settings, for **Save** to write (core spec §84): the
+    /// page shows it at once, and nothing is written until then. Set back to what the file has,
+    /// it's no longer a change.
+    fn stage_ui(
         &mut self,
         key: &str,
         value: Option<toml_edit::Value>,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match config::set(&self.hydra.paths, key, value) {
-            Ok(()) => self.apply_config(false, window, cx),
-            Err(e) => window.push_note(Note::error(e).title("Settings"), cx),
+        self.general_draft.retain(|(k, _)| k != key);
+        self.general_draft.push((key.to_string(), value));
+        let saved = config::read_text(&self.hydra.paths).unwrap_or_default();
+        self.general_draft = config::real_changes(&saved, &self.general_draft);
+        self.general_said = None;
+        cx.notify();
+    }
+
+    /// General's settings as the page shows them: the file's, with the unsaved changes.
+    fn shown_ui(&self) -> config::UiConfig {
+        if self.general_draft.is_empty() {
+            return self.ui.clone();
         }
+        config::read_text(&self.hydra.paths)
+            .and_then(|t| config::with_settings(&t, &self.general_draft))
+            .map(|t| config::parse(&t).0)
+            .unwrap_or_else(|_| self.ui.clone())
+    }
+
+    /// **Save**: every unsaved change to General in one write, then applied.
+    fn save_general(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match config::set_all(&self.hydra.paths, &self.general_draft) {
+            Ok(()) => {
+                self.general_draft.clear();
+                self.apply_config(false, window, cx);
+                self.general_said = Some((false, "Saved.".into()));
+            }
+            Err(e) => self.general_said = Some((true, format!("Couldn't save: {e}"))),
+        }
+        cx.notify();
+    }
+
+    /// **Discard**: back to what's saved.
+    fn discard_general(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.general_draft.clear();
+        self.general_said = None;
+        // The slider moves back to the saved value.
+        if self.settings.as_ref().is_some_and(|t| t.week.is_some()) {
+            let week = self.week_slider(window, cx);
+            if let Some(tab) = &mut self.settings {
+                tab.week = Some(week);
+            }
+        }
+        cx.notify();
     }
 
     /// After an env.toml edit: says what failed, else refreshes what shows it.
@@ -117,6 +214,39 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.text_dialog_about(title, None, initial, placeholder, save, window, cx)
+    }
+
+    /// `text_dialog`, with `about` above the box: what it's for and where to find it.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn text_dialog_about(
+        &mut self,
+        title: String,
+        about: Option<&'static str>,
+        initial: String,
+        placeholder: &'static str,
+        save: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) -> Result<(), String>
+        + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.text_dialog_labelled(title, about, initial, placeholder, "Save", save, window, cx)
+    }
+
+    /// `text_dialog_about`, its button saying `ok` ("Reject", "Ask for the change").
+    #[allow(clippy::too_many_arguments)] // a dialog's parts, each named at the call
+    pub(super) fn text_dialog_labelled(
+        &mut self,
+        title: String,
+        about: Option<&'static str>,
+        initial: String,
+        placeholder: &'static str,
+        ok: &'static str,
+        save: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) -> Result<(), String>
+        + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(placeholder)
@@ -144,6 +274,14 @@ impl Workspace {
                 .child(
                     v_flex()
                         .gap_2()
+                        .when_some(about, |d, a| {
+                            d.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(a),
+                            )
+                        })
                         .child(Input::new(&input))
                         .when_some(shown, |d, e| {
                             d.child(div().text_sm().text_color(danger).child(e))
@@ -158,7 +296,7 @@ impl Workspace {
                                 .label("Cancel")
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
-                        .child(Button::new("save").label("Save").primary().on_click(
+                        .child(Button::new("save").label(ok).primary().on_click(
                             move |_, window, cx| {
                                 let value = i.read(cx).value().trim().to_string();
                                 match ws.update(cx, |ws, cx| save(ws, value, window, cx)) {
@@ -429,7 +567,9 @@ impl Workspace {
 
     fn general_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        let ui = self.ui.clone();
+        let ui = self.shown_ui();
+        let dirty: Vec<&str> = self.general_draft.iter().map(|(k, _)| k.as_str()).collect();
+        let said = self.general_said.clone();
         let theme_buttons = h_flex()
             .gap_1()
             .child(
@@ -438,7 +578,7 @@ impl Workspace {
                     .small()
                     .when(ui.theme == ThemeChoice::Dark, |b| b.primary())
                     .on_click(cx.listener(|ws, _, window, cx| {
-                        ws.set_ui("theme", Some("dark".into()), window, cx)
+                        ws.stage_ui("theme", Some("dark".into()), window, cx)
                     })),
             )
             .child(
@@ -447,7 +587,7 @@ impl Workspace {
                     .small()
                     .when(ui.theme == ThemeChoice::Light, |b| b.primary())
                     .on_click(cx.listener(|ws, _, window, cx| {
-                        ws.set_ui("theme", Some("light".into()), window, cx)
+                        ws.stage_ui("theme", Some("light".into()), window, cx)
                     })),
             );
         let size = ui.font_size;
@@ -458,7 +598,7 @@ impl Workspace {
                     .label("−")
                     .small()
                     .on_click(cx.listener(move |ws, _, window, cx| {
-                        ws.set_ui(
+                        ws.stage_ui(
                             "font_size",
                             Some(f64::from((size - 1.0).max(6.0)).into()),
                             window,
@@ -472,7 +612,7 @@ impl Workspace {
                     .label("+")
                     .small()
                     .on_click(cx.listener(move |ws, _, window, cx| {
-                        ws.set_ui(
+                        ws.stage_ui(
                             "font_size",
                             Some(f64::from((size + 1.0).min(72.0)).into()),
                             window,
@@ -488,7 +628,7 @@ impl Workspace {
                     .small()
                     .when(ui.default_shell.as_deref() == Some(*s), |b| b.primary())
                     .on_click(cx.listener(move |ws, _, window, cx| {
-                        ws.set_ui("default_shell", Some((*s).into()), window, cx)
+                        ws.stage_ui("default_shell", Some((*s).into()), window, cx)
                     }))
             }))
             .child(
@@ -497,7 +637,7 @@ impl Workspace {
                     .small()
                     .when(ui.default_shell.is_none(), |b| b.primary())
                     .on_click(cx.listener(|ws, _, window, cx| {
-                        ws.set_ui("default_shell", None, window, cx)
+                        ws.stage_ui("default_shell", None, window, cx)
                     })),
             );
         let default_env = h_flex()
@@ -513,7 +653,7 @@ impl Workspace {
                     .small()
                     .on_click(cx.listener(|ws, _, window, cx| {
                         ws.choose_env("Default environment", window, cx, |ws, env, w, cx| {
-                            ws.set_ui("default_env", Some(env.into()), w, cx)
+                            ws.stage_ui("default_env", Some(env.into()), w, cx)
                         })
                     })),
             )
@@ -524,7 +664,7 @@ impl Workspace {
                         .ghost()
                         .small()
                         .on_click(cx.listener(|ws, _, window, cx| {
-                            ws.set_ui("default_env", None, window, cx)
+                            ws.stage_ui("default_env", None, window, cx)
                         })),
                 )
             });
@@ -543,14 +683,15 @@ impl Workspace {
                             .ghost()
                             .small()
                             .on_click(cx.listener(move |ws, _, window, cx| {
-                                ws.text_dialog(
+                                ws.text_dialog_labelled(
                                     label.to_string(),
+                                    None,
                                     shown.clone(),
                                     hint,
+                                    "Set",
                                     move |ws, v, window, cx| {
                                         let value = (!v.is_empty()).then(|| v.into());
-                                        config::set(&ws.hydra.paths, key, value)?;
-                                        ws.apply_config(false, window, cx);
+                                        ws.stage_ui(key, value, window, cx);
                                         Ok(())
                                     },
                                     window,
@@ -574,16 +715,76 @@ impl Workspace {
         )
         .into_any_element();
         let jev = matches!(JevKey::app().get(), Ok(Some(_)));
+        let slider = self
+            .settings
+            .as_ref()
+            .and_then(|t| t.week.as_ref())
+            .map(|(s, _)| s.clone());
+        // As it moves; the saved value until General has its slider.
+        let left = slider.as_ref().map_or(ui.min_week_left, |s| {
+            crate::settings_words::week_left_snap(s.read(cx).value().end())
+        });
+        let spot = self.settings.as_ref().is_some_and(|t| t.week_spot);
+        let week = v_flex()
+            .id("week-limit")
+            .gap_1()
+            .when(spot, |d| {
+                d.p_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(cx.theme().primary)
+            })
+            .children(slider.map(|s| {
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        div()
+                            .w(px(320.))
+                            .child(gpui_component::slider::Slider::new(&s)),
+                    )
+                    .child(
+                        div()
+                            .min_w(px(96.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(crate::settings_words::week_left(left)),
+                    )
+            }))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child(crate::settings_words::week_left_about(left)),
+            );
         v_flex()
             .gap_5()
             .child(page_title(
                 "General",
                 format!(
-                    "Saved to {} as you change it.",
+                    "Kept in {}. Changes here are saved when you click Save.",
                     config::config_file(&self.hydra.paths).display()
                 ),
                 h_flex()
                     .gap_2()
+                    .child(
+                        Button::new("general-save")
+                            .label("Save")
+                            .primary()
+                            .small()
+                            .disabled(dirty.is_empty())
+                            .on_click(cx.listener(|ws, _, window, cx| ws.save_general(window, cx))),
+                    )
+                    .when(!dirty.is_empty(), |d| {
+                        d.child(
+                            Button::new("general-discard")
+                                .label("Discard")
+                                .ghost()
+                                .small()
+                                .on_click(
+                                    cx.listener(|ws, _, window, cx| ws.discard_general(window, cx)),
+                                ),
+                        )
+                    })
                     .child(action_button("open-config", "Edit config.toml", cx, |ws, w, cx| {
                         let path = config::config_file(&ws.hydra.paths);
                         if !path.exists() {
@@ -597,6 +798,23 @@ impl Workspace {
                     .child(action_button("reload-config", "Reload config", cx, |ws, w, cx| {
                         ws.run(Action::ReloadConfig, w, cx)
                     })),
+                cx,
+            ))
+            .children((!dirty.is_empty() || said.is_some()).then(|| {
+                let (bad, text) = if dirty.is_empty() {
+                    said.clone().unwrap_or_default()
+                } else {
+                    (true, crate::settings_words::unsaved_line(&dirty))
+                };
+                div()
+                    .text_sm()
+                    .text_color(if bad { cx.theme().warning } else { cx.theme().success })
+                    .child(text)
+            }))
+            .child(group(
+                "Pipelines",
+                None,
+                vec![setting("Claude week limit", week.into_any_element(), cx)],
                 cx,
             ))
             .child(group(

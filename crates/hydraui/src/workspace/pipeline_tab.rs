@@ -660,20 +660,19 @@ impl Workspace {
                 let added = crate::pipeline::load(&root, &r.pipeline.file)
                     .map(|file| crate::runs::new_stages(r, &file))
                     .unwrap_or_default();
+                let added_at = |i: usize| {
+                    added
+                        .iter()
+                        .filter(move |n| n.at == i)
+                        .cloned()
+                        .map(|n| BackTo::New(Box::new(n)))
+                };
                 let mut out = Vec::new();
-                for i in 0..=passed {
-                    out.extend(
-                        added
-                            .iter()
-                            .filter(|n| n.at == i)
-                            .cloned()
-                            .map(|n| BackTo::New(Box::new(n))),
-                    );
-                    if i < passed {
-                        let spec = &r.pipeline.stages[i];
-                        out.push(BackTo::Passed(spec.id.clone(), spec.title.clone()));
-                    }
+                for (i, spec) in r.pipeline.stages.iter().take(passed).enumerate() {
+                    out.extend(added_at(i));
+                    out.push(BackTo::Passed(spec.id.clone(), spec.title.clone()));
                 }
+                out.extend(added_at(passed));
                 Some(out)
             })
             .unwrap_or_default();
@@ -1103,7 +1102,7 @@ impl Workspace {
                     SharedString::from(format!("look-bar-tab-{orch}")),
                     p,
                     last,
-                    source.every_minutes,
+                    std::time::Duration::from_secs(u64::from(source.every_minutes.max(1)) * 60),
                     checking,
                     accent,
                 ))

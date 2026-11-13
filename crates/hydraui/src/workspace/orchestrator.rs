@@ -1146,6 +1146,8 @@ impl Workspace {
                     "orchestrator",
                     serde_json::json!({"env": env, "folder": folder, "pid": std::process::id()}),
                 );
+                // Started by hand in a Slack pipeline: marked there as the trigger would (§85).
+                self.mark_hand_started(&run, &env, window, cx);
             }
         }
         let mut wakes = Vec::new();
@@ -1820,13 +1822,17 @@ impl Workspace {
         tokens
             .iter()
             .filter_map(|(id, token)| {
-                // Several tickets under one orchestrator: one card for them all, and every
-                // ticket's sessions under it.
+                // Tickets under the orchestrator, one or several: the card is the pipeline's, and
+                // each ticket (its name, state and what it waits on) is in its own box under it
+                // with its sessions, so it sits by the session it's about (core spec §76).
                 let open = reg.runs.open_of(token);
-                if open.len() > 1 {
+                if !open.is_empty() {
                     let cards: Vec<Card> = open.iter().map(|r| self.card_now(r)).collect();
                     let mut c = crate::pipeline_card::group_card(&cards.iter().collect::<Vec<_>>());
-                    c.line = format!("{} tickets in progress", open.len());
+                    c.line = match open.len() {
+                        1 => "1 ticket in progress".to_string(),
+                        n => format!("{n} tickets in progress"),
+                    };
                     let panes = std::iter::once(*id)
                         .chain(open.iter().flat_map(|r| {
                             crate::pipeline_card::stage_tokens(r)
@@ -2142,7 +2148,8 @@ impl Workspace {
                             .text_color(color(theme::TEXT_SECONDARY))
                             .child(c.line.clone()),
                     )
-                    .when(c.state.has_pill(), |d| {
+                    // A card with its tickets in boxes below leaves their state to them.
+                    .when(c.state.has_pill() && ticket, |d| {
                         d.child(
                             div()
                                 .flex_none()
@@ -2189,6 +2196,9 @@ impl Workspace {
             _ => color(theme::BORDER_STRONG),
         };
         let id = run.id.clone();
+        // Waiting on an author or product: the line under the head says so, for how long, and
+        // opens the question; the pill would only repeat it (core spec §77).
+        let waiting = run.asking.is_some();
         let title = crate::pipeline_card::ticket_title(&run.ticket, run.link.as_deref());
         let prs = crate::linear_watch::pr_links(run);
         // A pull request's own link is its title; a Linear ticket's link and PRs show below.
@@ -2226,7 +2236,7 @@ impl Workspace {
                             .text_color(color(theme::TEXT))
                             .child(title),
                     )
-                    .when(c.state.has_pill(), |d| {
+                    .when(c.state.has_pill() && !waiting, |d| {
                         d.child(
                             div()
                                 .flex_none()
@@ -2240,7 +2250,7 @@ impl Workspace {
                         )
                     }),
             )
-            .children(self.render_question(orchestrator, Some(&run.id), cx))
+            .children(self.render_question(orchestrator, Some(&run.id), c.accent, cx))
             .children(link)
             .children(sessions)
             .into_any_element()

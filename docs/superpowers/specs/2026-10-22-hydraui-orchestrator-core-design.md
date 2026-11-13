@@ -1604,3 +1604,14 @@ The week limit (`min_week_left`, §81) was checked only when a stage started. A 
 - **Which report counts.** The hold reads the environment's latest seven-day report. One from before the week's reset no longer counts, and with no report there's nothing to hold for.
 - **A started ticket finishes** (`finish_started`, on by default, under Pipeline settings › Advanced › Claude week limit). The limit applies to a ticket's first stage only. Once a ticket has started, its stages carry on to the end, so a claimed ticket is never left half done.
 - **"Stop for you"** (`finish_started = false`) keeps the old rule. Every stage needs the limit, and a ticket below it waits for a person, still claimed.
+
+## 84. General settings save when you click Save (added 2026-11-13)
+
+Settings › General wrote `config.toml` the moment a value changed, and nothing said whether it had saved.
+
+- **A draft.** A change shows on the page at once, and nothing is written until **Save**. That covers theme, font size, default shell, default environment, editor, terminal font and the Claude week limit (§81). A line under the title names what isn't saved yet: "Not saved yet: Theme, Claude week limit." in amber. After **Save** it says "Saved.".
+- **Save** writes every change in one go and applies them, as Reload config does. It's disabled while there's nothing to save. **Discard** puts the page back to what's saved.
+- **A change set back** to the saved value (or to a default the file leaves out) is no longer listed.
+- **Leaving General** keeps the draft until Save or Discard.
+- **Editor and Terminal font** dialogs set the value in the draft: their button says **Set**.
+- **Other Settings pages** (environments, Phone, Swarms) still save as they did.

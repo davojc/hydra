@@ -226,6 +226,10 @@ pub struct Workspace {
     history: Option<history_tab::HistoryTab>,
     /// Actions (core spec §80), when shown.
     actions: Option<actions_page::ActionsPage>,
+    /// General's changes not saved yet, in the order made (core spec §84).
+    general_draft: Vec<crate::config::Change>,
+    /// What General's last Save did: (went wrong, text).
+    general_said: Option<(bool, String)>,
     /// The notifications panel under the bell, while open (core spec §57).
     inbox: Option<inbox_panel::InboxPanel>,
     /// What Export to share or Share to a swarm just did, by pipeline file: a line under those
@@ -577,6 +581,8 @@ impl Workspace {
             projects: None,
             history: None,
             actions: None,
+            general_draft: Vec::new(),
+            general_said: None,
             inbox: None,
             share_said: HashMap::new(),
             tickets: None,

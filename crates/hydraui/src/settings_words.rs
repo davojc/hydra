@@ -34,6 +34,23 @@ pub fn days(d: u32) -> String {
     }
 }
 
+/// General's unsaved changes, in a line: "Not saved yet: Theme, Font size." Keys are
+/// config.toml's; one General doesn't name is shown as its key.
+pub fn unsaved_line(keys: &[&str]) -> String {
+    let name = |k: &str| match k {
+        "theme" => "Theme".to_string(),
+        "font" => "Terminal font".to_string(),
+        "font_size" => "Font size".to_string(),
+        "default_env" => "Default environment".to_string(),
+        "default_shell" => "Default shell".to_string(),
+        "editor" => "Editor".to_string(),
+        "min_week_left" => "Claude week limit".to_string(),
+        other => other.to_string(),
+    };
+    let names: Vec<String> = keys.iter().map(|k| name(k)).collect();
+    format!("Not saved yet: {}.", names.join(", "))
+}
+
 /// The week-limit slider's notches, in percent (orchestrator spec §5.1); 0 turns it off.
 pub const WEEK_LEFT_STEP: u8 = 5;
 
@@ -278,6 +295,15 @@ fn lower_first(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsaved_changes_are_named_as_the_page_names_them() {
+        assert_eq!(
+            unsaved_line(&["theme", "min_week_left"]),
+            "Not saved yet: Theme, Claude week limit."
+        );
+        assert_eq!(unsaved_line(&["odd"]), "Not saved yet: odd.");
+    }
 
     #[test]
     fn the_week_limit_reads_as_its_choices_say_it() {

@@ -1665,3 +1665,12 @@ The shared fix for any pipeline that several people run. It uses the swarm claim
 - **Setup is an owner's.** Contexts are created by swarm owners, in Swarms settings. The limit per machine (default 1) caps how many of a pipeline's jobs one machine holds at once, so an owner raises it for a pipeline running several tickets at once.
 - **Restarts.** A hydraui that quits stops renewing, and its claims lapse after the context's lapse time. Meanwhile the source's own mark keeps teammates off: a message with the 👀, or a Linear ticket already moved and assigned. A resumed run doesn't take its claim again.
 - **Mail stays on its claim files** (email triage spec §5.1). They already give each group email to one person across machines, by Message-ID. Moving them onto this service is left for later.
+
+## 88. Updates show sooner, and a shared pipeline's newer version shows on its cards (added 2026-11-13)
+
+- **hydra updates.** David didn't see the Update button (§86) until he restarted: hydraui asked GitHub once an hour, and a release lands about 15 minutes after a merge.
+  - It now asks every 15 minutes.
+  - It also asks again as soon as you come back to the window, if the last ask was more than 5 minutes ago.
+- **Shared pipelines** (§70).
+  - **On a running card:** a pipeline imported from a swarm already showed a small pill when its owner shared a newer version. The pill now reads **Update available**, and its tooltip says what it means.
+  - **On the Start pipeline card:** the card now shows "Newer version in Engineering" with **Update**, which opens the same update dialog. People see it before they start a run on an old version.

@@ -207,6 +207,8 @@ pub struct Workspace {
     /// The title bar's Update button (spec §7.11).
     update: crate::updater::UpdateState,
     _update_checks: Option<Task<()>>,
+    /// When GitHub was last asked for a newer release (core spec §86).
+    update_checked: Option<std::time::Instant>,
     /// The keys bound at startup, for the shortcuts list ([keys] changes wait for a restart).
     keymap: Vec<(crate::keys::Command, String)>,
     /// The layout file this window keeps saved (spec §7.12); `None` while untitled.
@@ -489,6 +491,10 @@ impl Workspace {
         // A session created a board file (spec §5): ask the same question the Tasks tab does. A
         // Claude hook said what its session is doing: the terminal's dot shows it.
         let activation = cx.observe_window_activation(window, |ws: &mut Self, window, cx| {
+            // Back at the window: a release out meanwhile shows on its Update button (§86).
+            if window.is_window_active() {
+                ws.update_check_on_return(cx);
+            }
             if window.is_window_active()
                 && let Some(id) = ws.envs.active().and_then(|t| t.shown)
                 && ws.attention.remove(&id)
@@ -581,6 +587,7 @@ impl Workspace {
             usage: HashMap::new(),
             update: Default::default(),
             _update_checks: None,
+            update_checked: None,
             layout: None,
             claim: None,
             unopened: Default::default(),

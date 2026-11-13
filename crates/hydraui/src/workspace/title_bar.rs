@@ -23,8 +23,11 @@ static ICON: LazyLock<Arc<Image>> = LazyLock::new(|| {
     ))
 });
 
-/// How often to ask GitHub again.
-const EVERY: Duration = Duration::from_secs(60 * 60);
+/// How often to ask GitHub again: a release is out about 15 minutes after a merge (§86).
+const EVERY: Duration = Duration::from_secs(15 * 60);
+
+/// Coming back to the window asks again, if the last ask is older than this.
+const ON_RETURN: Duration = Duration::from_secs(5 * 60);
 
 impl Workspace {
     /// Asks GitHub now and every hour, off the UI thread; failures say nothing. A newer
@@ -36,6 +39,7 @@ impl Workspace {
                     .background_spawn(async { updater::check(&hydra_update::latest_url()) })
                     .await;
                 let alive = this.update(cx, |ws, cx| {
+                    ws.update_checked = Some(std::time::Instant::now());
                     if let Ok(Some(version)) = found
                         && ws.update.found(version.clone())
                     {
@@ -56,6 +60,13 @@ impl Workspace {
                 cx.background_executor().timer(EVERY).await;
             }
         }));
+    }
+
+    /// Back at the window after a while: asks GitHub again now, then on the usual timetable.
+    pub(super) fn update_check_on_return(&mut self, cx: &mut Context<Self>) {
+        if self.update_checked.is_none_or(|t| t.elapsed() >= ON_RETURN) {
+            self.start_update_checks(cx);
+        }
     }
 
     /// "Check for updates": asks GitHub now and says what it found; a release found shows

@@ -1640,3 +1640,11 @@ Teammates missed updates. The offer was a button in the title bar, beside the ve
 
 **Fixed with §86's build:** Pipeline settings for a pipeline with a Jev step always said "Unsaved changes", even straight after Save. The page hides Jev's built-in `none` category, but every Jev stage gets `none` when it loads, so the page's values never matched what was saved. The page now adds `none` back the same way loading does (`jev_stage::with_none`).
 
+
+## 87. One taker per job when several people run a pipeline (added 2026-11-13)
+
+Three people ran the PR review pipeline on three machines. Two of them put 👀 on the same PR in the same moment, and both reviewed it. The 👀 was a mark, not a lock: nothing checked afterwards whether someone else had marked it too.
+
+### Slack: the first 👀 has it
+
+After adding its 👀, a trigger asks Slack who reacted first (`reactions.get`, which lists a reaction's users in the order they reacted). If it was someone else, the trigger takes its own 👀 off (`reactions.remove`) and leaves the PR. Every machine applies the same rule, so exactly one keeps it. The log names the other person's Slack user id. The card says "svc-usage-70 taken by someone else first" when that was all a look found. A PR started by hand (§85) is checked the same way. This needs no extra Slack scope: `auth.test` says who the token is.

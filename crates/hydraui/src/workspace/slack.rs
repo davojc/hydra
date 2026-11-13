@@ -266,10 +266,21 @@ impl Workspace {
                     pipeline.file
                 ));
             }
+            // Someone marked the same message in the same moment and was first (§87).
+            for (ticket, who) in &f.lost {
+                crate::action_log::write(format!(
+                    "slack: {}: {ticket}: Slack user {who} marked it first; left to them",
+                    pipeline.file
+                ));
+            }
         }
         let Some(w) = self.linear_watch.get_mut(&orch) else {
             return;
         };
+        let lost: Option<String> = found.as_ref().ok().filter(|f| !f.lost.is_empty()).map(|f| {
+            let names: Vec<&str> = f.lost.iter().map(|(t, _)| t.as_str()).collect();
+            format!("{} taken by someone else first", names.join(", "))
+        });
         let found = found.map(|f| f.queued);
         match found {
             Ok(prs) if !prs.is_empty() => {
@@ -300,7 +311,7 @@ impl Workspace {
             }
             Ok(_) => {
                 w.failures.clear();
-                w.status = Some("Nothing new".to_string());
+                w.status = Some(lost.unwrap_or_else(|| "Nothing new".to_string()));
                 crate::action_log::write(format!("slack: {}: nothing new", pipeline.file));
                 if by_hand {
                     window.push_note(

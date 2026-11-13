@@ -45,7 +45,9 @@ gpui_kit_assets::icon_assets!(
         // Export to share and Create a pipeline's choices.
         Share,
         FilePlus,
-        FileUp
+        FileUp,
+        // The Update button beside the bell (core spec §86).
+        CircleArrowUp
     ]
 );
 

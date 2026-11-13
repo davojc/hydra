@@ -2080,6 +2080,7 @@ impl Workspace {
             .child(self.projects_button(cx))
             .child(self.tickets_button(cx))
             .child(self.history_button(cx))
+            .children(self.update_button(cx))
             .child(self.inbox_button(cx))
             .child(
                 Button::new("open-settings")

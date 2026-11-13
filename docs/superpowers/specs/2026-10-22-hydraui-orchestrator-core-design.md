@@ -1628,3 +1628,12 @@ A new teammate imported the PR review pipeline and gave a PR to its orchestrator
   - The **Start pipeline** card says "Needs Slack connected".
   - A trigger stopped by a missing token says "isn't connected yet", not "sign in again".
 - **A PR started by hand is marked.** When a Slack pipeline's run starts on a PR its trigger didn't hand over, hydraui finds the PR's message in the channel, by ticket or link, and adds the trigger's reaction, as the trigger would. A message someone has already marked, or one not in the channel's look-back, is left alone, and a notice says so.
+
+## 86. The Update button sits beside the bell (added 2026-11-13)
+
+Teammates missed updates. The offer was a button in the title bar, beside the version number, where nobody looked. Updates stay a person's choice and never install by themselves. The offer is now where people look.
+
+- **Beside the bell.** While a release is out, a filled teal **Update** button with an up-arrow icon sits beside the notifications bell. It says **Updating…** while it installs, then **Restart** once the update is in. Its tooltip names the version. The title bar keeps only the version number.
+- **It asks first.** "Update hydra to 0.6.52?" says what happens: it downloads, checks and installs hydraui and the hydra command, and the terminals and tickets pick back up after the restart. **Restart** asks the same way. **Not now** leaves the button there.
+- **One notice per release** goes to the bell: "hydra 0.6.52 is out: Update is beside the bell."
+- **The hourly check** is unchanged.

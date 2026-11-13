@@ -1633,7 +1633,7 @@ A new teammate imported the PR review pipeline and gave a PR to its orchestrator
 
 Teammates missed updates. The offer was a button in the title bar, beside the version number, where nobody looked. Updates stay a person's choice and never install by themselves. The offer is now where people look.
 
-- **Beside the bell.** While a release is out, a filled teal **Update** button with an up-arrow icon sits beside the notifications bell. It says **Updating…** while it installs, then **Restart** once the update is in. Its tooltip names the version. The title bar keeps only the version number.
+- **Beside the bell.** While a release is out, a teal **Update** button with an up-arrow icon sits beside the notifications bell. It's the same outlined pill as its neighbours, tinted teal. (Restyled the same day: it was first a solid teal block, the only filled thing in the strip, and people found it ugly.) It says **Updating…** while it installs, then **Restart** once the update is in. Its tooltip names the version. The title bar keeps only the version number.
 - **It asks first.** "Update hydra to 0.6.52?" says what happens: it downloads, checks and installs hydraui and the hydra command, and the terminals and tickets pick back up after the restart. **Restart** asks the same way. **Not now** leaves the button there.
 - **One notice per release** goes to the bell: "hydra 0.6.52 is out: Update is beside the bell."
 - **The hourly check** is unchanged.

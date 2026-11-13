@@ -293,7 +293,7 @@ Each environment's Claude folder (`~/.hydra/state/<env>/claude`) is rebuilt from
 | | |
 |---|---|
 | **Linked from `~/.claude`** | `skills/`, `commands/`, `agents/`, `hooks/`, `output-styles/`, `plugins/`. Install once and it's available everywhere. |
-| **Rebuilt each launch** | `settings.json` (yours merged with the environment's own `envs/<env>/claude/settings.json`), `CLAUDE.md` (yours plus the environment's own section), and the MCP servers from `~/.claude.json`, minus any `--mcp-exclude` patterns, plus hydraui's `hydraui` tool server for the task board |
+| **Rebuilt each launch** | `settings.json` (yours merged with the environment's own `envs/<env>/claude/settings.json`), `CLAUDE.md` (yours plus the environment's own section), and the MCP servers from `~/.claude.json`, minus any `--mcp-exclude` patterns, plus hydraui's `hydraui` tool server (see [hydraui's MCP server](docs/mcp-server.md)) |
 | **Private to the environment** | the sign-in, history, projects, sessions, and the rest of `.claude.json` |
 
 - **Per-environment changes:** put files in `~/.hydra/envs/<env>/claude/`. A folder there, such as `skills/`, replaces the shared one for that environment rather than adding to it.
@@ -374,4 +374,4 @@ A project's task board is `.hydra/tasks.md` in the project itself.
 - **`hydra doctor`.**
 - **Linux,** and on macOS a signed and notarised app (`.app` bundle, Homebrew).
 
-The CLI's design is in [`docs/superpowers/specs/2026-10-03-hydra-design.md`](docs/superpowers/specs/2026-10-03-hydra-design.md) and its roadmap in [`docs/superpowers/plans/2026-10-03-hydra-roadmap.md`](docs/superpowers/plans/2026-10-03-hydra-roadmap.md). hydraui's designs are in [`docs/superpowers/specs/`](docs/superpowers/specs/): the app, environment tabs, the task board, its MCP server, auto-pickup and the orchestrator.
+The CLI's design is in [`docs/superpowers/specs/2026-10-03-hydra-design.md`](docs/superpowers/specs/2026-10-03-hydra-design.md) and its roadmap in [`docs/superpowers/plans/2026-10-03-hydra-roadmap.md`](docs/superpowers/plans/2026-10-03-hydra-roadmap.md). hydraui's designs are in [`docs/superpowers/specs/`](docs/superpowers/specs/): the app, environment tabs, the task board, its MCP server, auto-pickup and the orchestrator. The MCP server's tools are listed in [`docs/mcp-server.md`](docs/mcp-server.md).

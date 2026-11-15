@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hydraui guide</title>
+<link rel="icon" type="image/png" href="favicon.png">
+<meta name="description" content="hydraui, hydra's desktop app: one tab per environment with its terminals listed beside it, saved layouts, a file tree with git changes and diffs, quick open and search, and each environment's accounts at a glance.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@500;700;800&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="site-nav">
+  <div class="in">
+    <a class="home" href="index.html"><img src="favicon.png" alt="">hydra</a>
+    <a class="page" href="start.html">Getting started</a>
+    <a class="page" href="cli.html">CLI guide</a>
+    <a class="page" href="app.html" aria-current="page">App guide</a>
+    <a class="page gh" href="https://github.com/davojc/hydra">GitHub</a>
+  </div>
+</header>
+<div class="wrap">
+  <nav class="toc" aria-label="Contents">
+    <div class="brand">App guide</div>
+    <div class="grp">Getting started</div>
+    <ol>
+      <li><a href="#start">Install and first start</a></li>
+      <li><a href="#tabs">Environments and terminals</a></li>
+    </ol>
+    <div class="grp">Working</div>
+    <ol>
+      <li><a href="#tasks">Task board</a></li>
+      <li><a href="#orchestrator">Orchestrator</a></li>
+      <li><a href="#tree">File tree and git</a></li>
+      <li><a href="#files">The file pane</a></li>
+      <li><a href="#find">Finding files</a></li>
+      <li><a href="#accounts">Accounts</a></li>
+      <li><a href="#launcher">The launcher</a></li>
+    </ol>
+    <div class="grp">Organising</div>
+    <ol>
+      <li><a href="#layouts">Layout files</a></li>
+    </ol>
+    <div class="grp">Reference</div>
+    <ol>
+      <li><a href="#keys">Keyboard shortcuts</a></li>
+      <li><a href="#settings">Settings</a></li>
+      <li><a href="#updates">Updates</a></li>
+    </ol>
+  </nav>
+
+  <main>
+    <header class="hero">
+      <span class="status">App guide · Windows 11</span>
+      <h1>hydraui, the desktop app.</h1>
+      <p class="lede">hydraui is a terminal app built around hydra's <strong>environments</strong>. Each environment you add gets a tab, coloured to match, with a list of its terminals beside it and that environment's logins already in place. Around the terminals it adds what you reach for while working: a file tree that shows git changes, a pane for reading and editing files, quick open and search, and each environment's accounts in the status bar.</p>
+      <p><a class="download" href="https://github.com/davojc/hydra/releases/latest/download/hydra-setup.exe" download>Download the installer <span class="dl-version"></span><small>hydra + hydraui</small></a></p>
+      <p class="portable">Portable: <a href="https://github.com/davojc/hydra/releases/latest/download/hydraui-x86_64-pc-windows-msvc.exe" download>hydraui.exe</a> · <a href="https://github.com/davojc/hydra/releases/latest/download/hydra-x86_64-pc-windows-msvc.exe" download>hydra.exe</a></p>
+    </header>
+
+    <figure class="shot">
+      <img src="img/hydraui-window.png" width="1600" height="1013" alt="hydraui with tabs for the work, personal and client environments; work's terminals, api and server, listed on the left; git status in the api terminal; the project's README rendered in the file pane; and the file tree on the right.">
+      <figcaption>One tab per environment, with its terminals listed on the left. The shown terminal sits in the middle, the file pane beside it renders the README, and the file tree is on the right.</figcaption>
+    </figure>
+
+    <section id="start">
+      <h2>Install and first start</h2>
+      <p>Run the <a href="https://github.com/davojc/hydra/releases/latest/download/hydra-setup.exe">installer</a>: it installs hydraui and hydra for you alone, with no admin prompt, puts hydraui in the Start menu and hydra on your <code>PATH</code>. Prefer a single file? The portable <code>hydraui-x86_64-pc-windows-msvc.exe</code> from the <a href="https://github.com/davojc/hydra/releases/latest">latest release</a> runs from anywhere and doesn't need <code>hydra.exe</code>. Either way hydraui reads and writes the same <code>~/.hydra</code> folder as the CLI, so environments made with either show up in both.</p>
+      <p>The first time, hydraui opens a terminal in your home folder. With no environments yet, it asks you to name one and creates it, as <code>hydra env new</code> does. From then on hydraui starts on a page of your recent <a href="#layouts">layouts</a>: pick one, or <strong>New window</strong> for a plain terminal. A window saved as a layout keeps its file up to date as you work (its environments, their terminals and folders, the file tree and the files in each file pane); an untitled window isn't kept when you close it.</p>
+      <p>A new window's first environment is the one bound to the home folder, else <code>default_env</code> from the <a href="#settings">settings</a>, else you pick one:</p>
+      <figure class="shot narrow">
+        <img src="img/hydraui-picker.png" width="448" height="247" alt="The Add an environment picker listing the client, personal and work environments with their colours, and New environment…" loading="lazy">
+      </figure>
+      <div class="note"><strong>No folder guard in the app.</strong> A hydraui terminal gets exactly the isolation <code>hydra shell</code> gives, with one exception: it skips the CLI's folder guard. A push to the wrong account fails on its credentials anyway. If a terminal's folder is bound to a different environment than the one it runs in, the pane shows a warning badge.</div>
+    </section>
+
+    <section id="tabs">
+      <h2>Environments and terminals</h2>
+      <p>The tab strip shows one tab per environment in the window, tinted with its colour (<code>color</code> in its <code>env.toml</code>). A dot on a tab shows its busiest terminal: working, waiting or idle, so a background environment that needs you is easy to spot. <strong>+</strong> at the end of the strip lists the environments not yet in the window, with <strong>New environment…</strong> last; choosing one adds its tab with a terminal and selects it.</p>
+      <p>Down the left side is the selected environment's list of terminals, in the order you made them and grouped by project (terminals in the same repository, its worktrees included, sit together, with a line in the environment's colour between one project's terminals and the next's), each with an activity dot and a close button on hover. In a terminal running Claude, the dot follows what Claude says it is doing, through hooks hydra adds for you, and the row says <strong>working</strong>, <strong>needs you</strong> (when Claude is asking a question or for permission) or <strong>idle</strong> (finished, your turn). When a Claude session out of sight finishes or starts asking for you, its environment tab and row get an amber dot until you look at it, the taskbar button flashes if hydraui is in the background, and a toast names the terminal: click it to go there. Click one to show it. <strong>+ New</strong> at the top (or <kbd>Ctrl+T</kbd>) adds a terminal in the same environment, in the environment's root folder (its <code>home</code>, else the folder bound to it), else the shown terminal's folder. A terminal is named after its folder until you give it a name: the name is yours, and a program's own title never replaces it. The button at the left end of the tab strip collapses the list to give the terminal more room, and brings it back.</p>
+      <ul>
+        <li>Right-click a terminal: <strong>Rename…</strong> (an empty name goes back to the folder's), <strong>Restart</strong> (in the folder it was in, so an edited <code>env.toml</code> applies) or <strong>Close</strong>.</li>
+        <li>Right-click an environment's tab: <strong>New terminal</strong>, <strong>Restart environment</strong> (all its terminals) or <strong>Close environment</strong>. Closing or restarting asks first if a command is running, and closing also if a file has unsaved edits.</li>
+        <li>Closing a single terminal also asks when a command is running in it. An environment whose last terminal closes keeps its tab, with a <strong>New terminal</strong> button.</li>
+        <li><kbd>Ctrl+PageDown</kbd> and <kbd>Ctrl+PageUp</kbd> move between terminals in the list; <kbd>Ctrl+Tab</kbd> and <kbd>Ctrl+Shift+Tab</kbd> move between environment tabs; <kbd>Ctrl+W</kbd> closes the shown terminal.</li>
+        <li>Terminals you aren't looking at keep running and keep their scrollback.</li>
+        <li>Selecting text copies it, with a brief "Copied" label. <kbd>Ctrl+V</kbd> or <kbd>Ctrl+Shift+V</kbd> pastes text, and <kbd>Ctrl+F</kbd> finds in the scrollback. When the clipboard holds no text, such as a screenshot, <kbd>Ctrl+V</kbd> goes to the program instead, so Claude Code can paste the image.</li>
+        <li>Scrolled up into the history, a ↓ button appears at the bottom right and jumps back to the latest output.</li>
+        <li><kbd>Tab</kbd> and <kbd>Shift+Tab</kbd> go to the shell, so PowerShell's completion cycles through matching folders and files.</li>
+      </ul>
+      <p>The status bar shows the shown terminal's environment, its tools with a ✓ or ✗, the git branch and changes (<code>⎇ main · +1 ~2 ?1</code>) and the current folder. If an environment can't start (a missing SSH key, a secret that isn't stored), the pane shows hydra's error and how to fix it, with <strong>Retry</strong>.</p>
+    </section>
+
+    <section id="tasks">
+      <h2>Task board</h2>
+      <p>While Claude is busy in a terminal you will think of what to do next. The task board is a place to jot those ideas down without interrupting it, then pick them up later. Right-click a terminal in the list and choose <strong>Tasks</strong>: that terminal gets a <strong>Tasks</strong> tab beside it, with the terminal and <strong>Tasks ✕</strong> in a small strip at the top. ✕ closes the tab, and the cards stay. Each terminal has its own tabs, so another terminal shows its own view, and the layout file remembers which terminals have a Tasks tab.</p>
+      <p>The board belongs to the terminal's <strong>project</strong>: the git repository its folder is in (a linked worktree shares its repository's board), or, outside a repository, the folder itself. A folder inside a repository, including a home folder that is itself a repository, shares that repository's board, and terminals in the same project show the same cards.</p>
+      <p>There are five columns, side by side, each with its own color on the dot before its heading and down the left edge of its cards:</p>
+      <ul>
+        <li><strong>Backlog</strong> (grey): ideas not yet picked up. Its <strong>+</strong> adds a new card at the top.</li>
+        <li><strong>Pickup</strong> (blue): what you want to explore with Claude next. Right-click a Pickup card and choose <strong>Take in new worktree</strong> to give it a branch of its own (<code>task/…</code>) in a worktree beside the repository, with a Claude terminal there already working on it; when you move the card to Done, hydraui offers to merge the branch and remove the worktree.</li>
+        <li><strong>InProgress</strong> (orange): what is being worked on now.</li>
+        <li><strong>Verify</strong> (yellow): work that is committed and waiting for you to check it.</li>
+        <li><strong>Done</strong> (green): finished. Its <strong>Clear</strong> button removes every card in the column, after asking how many.</li>
+      </ul>
+      <p>A card is a short paragraph, with no title and plain text. A card shows its first two lines; click it to see the rest, and again to fold it. Double-click a card to edit it where it is. <kbd>Enter</kbd> saves it, <kbd>Esc</kbd> cancels, and clicking elsewhere on the board saves it too, as does switching to the terminal tab, another terminal or another environment. Saving an empty card deletes it, and so does the trash icon that shows while the pointer is over a card, after asking. Drag a card within a column or into another, and a line shows where it will land. Right-click a card for <strong>Move to</strong> any other column (the top of it), <strong>Move up</strong>, <strong>Move down</strong> and <strong>Delete</strong> (which also asks first). Every change is written to the file at once, so there is no Save button. If a save fails, the card stays open with its text and a message says why, and neither the Tasks tab nor the window will close until the save works.</p>
+      <h3>Auto-pickup</h3>
+      <p>Move a card into <strong>Pickup</strong> and hydraui types it into a free Claude session of that project, then presses Enter. Claude takes the card from the board and gets on with it. A session is free when it is idle, in the project's main work tree rather than a linked worktree, has nothing typed at its prompt, and isn't the terminal you are looking at (unless that terminal's Tasks tab is showing). A session that has clearly finished always counts: it is new, or it has just moved a card to Verify. A terminal restored from a layout, or a session you resumed with <code>claude -c</code> or <code>claude -r</code>, doesn't count as new, since its conversation may end in a question. Without a <a href="#launcher">Jev API key</a>, those are the only sessions that count; with one, Jev also judges the others (idle after other work) and says whether each is waiting for something to do. To judge a session, hydraui sends the last 60 lines of its terminal to TypeSafe's API (api.typesafe.ai). If no session is free, a message says <strong>No free Claude session for this card</strong> (with the reason when Jev couldn't be asked, such as <em>Jev: HTTP 401</em> for a bad key) and the card stays in Pickup. When one is sent, you see <strong>Sent to <em>terminal</em> in <em>env</em></strong>. A card isn't sent again while it is on its way; moving it out of Pickup and back in sends it again. To see why a card went where it did, or why it went nowhere, open <strong>Open hydraui log</strong> from the launcher: it lists each terminal and why it was or wasn't free, and Jev's answers with the lines sent.</p>
+      <p>Right-click a Pickup card for <strong>Send to a free session</strong>, which does the same on demand, or <strong>Send to</strong>, which lists the project's idle Claude sessions so you can pick one yourself.</p>
+      <h3>The file</h3>
+      <p>Cards live in <code>.hydra/tasks.md</code> in the project, created when you save the first card. It is ordinary markdown, so you can read and edit it in any editor, and so can Claude. The board watches the file and shows what changes in it, and a change you make on the board is applied to the file as it now is rather than over it, so neither side loses an idea. If the card you were editing was moved, changed or removed in the file meanwhile, what you typed is added as a new card at the top of Backlog and a message says so.</p>
+      <div class="term">
+        <div class="term-bar"><span class="tab plain">.hydra/tasks.md</span></div>
+<pre><span class="k"># Tasks</span>
+
+<span class="k">## Backlog</span>
+- Let the terminal list show which terminals have unread output, maybe a dot
+  that clears when you look at it.
+
+<span class="k">## Pickup</span>
+- Ctrl+K should open the launcher from anywhere, including the file pane.
+
+<span class="k">## InProgress</span>
+- [hydra] Add the terminal list dot for unread output.
+
+<span class="k">## Verify</span>
+
+<span class="k">## Done</span>
+- Collapse button for the terminal list.</pre>
+      </div>
+      <ul>
+        <li>One card is one top-level list item; a long card wraps onto lines indented by two spaces. Headings match whatever the case or spacing, so <code>## In Progress</code> is InProgress. Checkboxes (<code>[ ]</code>, <code>[x]</code>) are accepted and dropped.</li>
+        <li>Order in a column is the order in the file, top first.</li>
+        <li>Any other text in the file is kept, moved under a <code>## Notes</code> heading at the end of the file.</li>
+      </ul>
+      <h3>Claude and the board</h3>
+      <p>In an environment with a <code>[claude]</code> section, a Claude session running in a hydraui terminal finds the board itself, through a <code>hydraui</code> tool server that hydra adds for you and whose five tools it pre-approves, so Claude doesn't ask permission. Claude can <strong>read</strong> the whole board, <strong>add</strong> an idea at the top of Backlog, <strong>take</strong> a card from Pickup (it moves to the top of InProgress), move a card it took to <strong>Verify</strong> once its work is committed (giving the commit), and list the cards it took. Reading the board also tells it which other Claude sessions are working in the same project; when there are others, it is told to work in a git worktree of its own so the sessions don't change files under each other. Everything else stays yours: only you move cards into Pickup or Done (so a card goes from Verify to Done when you have checked it), move them back, edit, reorder or delete. A card you move into Pickup is typed into a free session (<a href="#tasks">auto-pickup</a>); otherwise ask Claude to check the board. It is also told to look at Pickup after finishing a piece of work.</p>
+      <p>A card Claude takes is written <code>- [name] text</code>, and the Tasks tab shows the name as a small badge: click it to go to that terminal. The name is the terminal's title if you gave it one, else the name of the folder it started in, with <code>-2</code>, <code>-3</code> added if another terminal in the window has the same name. Renaming the terminal changes it; a <code>cd</code> doesn't. A card Claude moves to Verify is written <code>- [name @5e9a827] text</code>: the card shows the commit beside the name, and clicking it opens what that commit changed as a diff in the environment's file pane, so checking the work is one click. Moving a card back to Backlog or Pickup clears the name (and commit), and Verify and Done keep it. The <code>[name]</code> prefix is only read in InProgress, Verify and Done. If a session creates the board file in a git repository, you get the same <strong>Keep tasks private?</strong> question. To leave an environment out, set <code>mcp.exclude = ["hydraui"]</code> in its <code>[claude]</code> section; outside hydraui the server quietly offers no tools.</p>
+      <h3>Tasks: all projects</h3>
+      <p>At the top of the terminal list, above the terminals, <strong>Tasks: all projects</strong> shows every project that the selected environment has a terminal in, one swimlane each, in place of the terminal. Each lane is that project's own board, so you can edit, add, drag and send cards just as on its Tasks tab. It shows every column except Done, since it is there to show outstanding work, and the lane's header says how many Done cards it leaves out. A card can't be dragged into another project's lane. Click a terminal, or press <kbd>Ctrl+W</kbd>, to go back. The lanes follow your terminals: open one in another project, or <code>cd</code> into one, and its lane appears.</p>
+      <h3>Commit or keep private</h3>
+      <p>In a git repository, the first card you save in a new project asks <strong>Keep tasks private?</strong>, unless the project's <code>.gitignore</code> already keeps the file out of git: <strong>Keep private</strong> adds <code>.hydra/tasks.md</code> to the project's <code>.gitignore</code>, and <strong>Commit tasks</strong> leaves things as they are so the file can be committed. You can change your mind later with the <strong>⋯</strong> menu at the right of the <strong>Done</strong> column's header, which offers the other choice. If another <code>.gitignore</code> rule already ignores the file, the menu says <strong>Ignored by another .gitignore rule</strong> instead. The menu, and the question, appear only in git repositories.</p>
+    </section>
+
+    <section id="orchestrator">
+      <h2>Orchestrator</h2>
+      <p>The orchestrator takes one ticket at a time through a <strong>pipeline</strong> of stages, such as understand and replicate, develop, review and verify. It is a Claude session in a hydraui terminal that coordinates and never does a stage's work itself: each stage runs in a fresh Claude session of its own, which hydraui opens beside you without taking the focus, in the run's own worktree when the stage asks for one. A stage ends by reporting a <strong>confidence rating</strong>: a score from 0 to 100, the evidence behind it, and its reasons for and against. The next stage can start only once that score clears the stage's <strong>bar</strong> (80% unless the pipeline or the stage sets its own). hydraui enforces this itself: nothing, no setting and no button, lets a stage past its gate.</p>
+      <p>Start one from the launcher with <strong>Start orchestrator…</strong>: pick an environment with Claude configured and a pipeline, and a terminal named <em>orchestrator</em> opens with Claude ready; tell it the ticket. Its run shows as a <strong>card</strong> at the top of the terminal list: the pipeline's name, the ticket and current stage, a state (Working, Needs you, Paused, Done) and a bar per stage. The run's stage terminals sit under it, named <em>1. Understand and replicate</em>, <em>2. Develop</em> and so on, framed under their orchestrator, and the foot of the list shows how much of the environment's seven-day Claude limit is left. Click the card for the <strong>Pipeline</strong> tab: the ticket's timeline of stages with their gate scores and every session each stage ran, and on the right whichever session you pick, live in its own terminal, or its rating with the reasons and evidence.</p>
+      <p>When a stage scores below its bar, reports that it is blocked, or fails three times (its session ended without reporting), the run <strong>needs you</strong>: a toast names the ticket, the stage and why, and the Pipeline tab offers <strong>Step into</strong> the session to work in it yourself, <strong>Re-run</strong> the stage with a note for its next session (it still has to clear the bar), or <strong>Stop this ticket</strong>. Runs also wait when less than <code>min_week_left</code> of the seven-day limit is left (30% by default; see <a href="#settings">Settings</a>). <strong>Pause orchestrator</strong> in the title bar holds the next stage until you resume. hydraui types a one-line note into the orchestrator whenever a stage is decided, but only while it is idle with nothing typed, so it never writes over you.</p>
+      <p><strong>Tickets from Linear.</strong> Give a pipeline a <code>[linear]</code> table, or turn on <strong>Pull tickets from Linear</strong> in its settings: the team's key, the state that triggers a pickup (Ready for Investigation by default, or say Ready for Review), whether to take only unassigned tickets or anyone's, the state a claimed ticket moves to, the state it moves to when every stage passed, and how often to look (every 5 minutes). Then switch the card to <strong>Automatic</strong> (its pill shows <strong>Automatic</strong>, <strong>Manual</strong> or <strong>Stopped</strong>, with one line on what happens next; in Manual, <strong>Pick next ticket</strong> picks one and says what it found): while the orchestrator has no ticket, hydraui checks Linear, takes the ticket whose SLA breaches soonest, claims it (assigns it to you if nobody has it, moves it, and comments), and types it into the orchestrator. <strong>Check now</strong> looks at once. When the run ends, the ticket gets a comment with each stage's score and the PR links, and moves on when every stage passed. Only one orchestrator watches a team. A rejected key, or three failed checks in a row, stops watching with a toast. The card shows the ticket's SLA (amber when close, red once breached) and <strong>Open in Linear</strong>; Ticket history shows whether each run ended inside its SLA. The environment needs a Linear personal API key: <code>hydra add linear</code> or <strong>Add account… → Set up linear…</strong>.</p>
+      <p>A pipeline is a file in <code>~/.hydra/hydraui/pipelines/</code>; hydraui writes an example, <code>ticket.toml</code>, the first time. <strong>Pipeline settings</strong> under the card edits its name, default bar and stages (order, name, skill, the folder its session starts in, and bar) and keeps each stage's prompt and comments, which you edit in the file itself (<strong>Edit pipelines</strong> in the launcher). <strong>Ticket history</strong> lists every run with how it ended and how long it took. Every run is logged to <code>~/.hydra/hydraui/runs/</code>, and when a run ends its worktree is removed, keeping its branch, unless it holds work that isn't committed. The pipeline never merges: what it opened waits for a person.</p>
+    </section>
+
+    <section id="tree">
+      <h2>File tree and git</h2>
+      <p><kbd>Ctrl+B</kbd> shows the file tree on the right, rooted at the shown terminal's current folder; it follows you as you <code>cd</code> and as you switch terminals or environments. Drag its edge to resize it; the terminal list on the left drags the same way. It respects <code>.gitignore</code> and updates as files change.</p>
+      <ul>
+        <li><strong>Click</strong> a file to open it in the environment's file pane.</li>
+        <li><strong>Ctrl+click</strong> a file to type its quoted path at the terminal's cursor.</li>
+        <li><strong>Double-click</strong> a folder to <code>cd</code> there, when the shell is at its prompt.</li>
+      </ul>
+      <p>In a git repository, files show their status: <strong>M</strong> modified in yellow, <strong>A</strong> added and <strong>?</strong> untracked in green, <strong>D</strong> deleted in red, ignored files dimmed. A folder that holds changes gets a dot. Right-click a changed file and choose <strong>Show changes</strong> for a side-by-side diff against the last commit:</p>
+      <figure class="shot">
+        <img src="img/hydraui-diff.png" width="1600" height="1013" alt="A side-by-side diff of src/routes.rs in the file pane, removed lines on the left and added lines on the right, with the file tree marking routes.rs modified (M) and orders.rs untracked (?)." loading="lazy">
+        <figcaption>The diff opens as its own tab in the file pane, next to the file itself. Renamed files are compared with their old name.</figcaption>
+      </figure>
+      <p>Right-click a file or folder for <strong>New file…</strong>, <strong>New folder…</strong>, <strong>cd here</strong>, <strong>New terminal here</strong> (folders), <strong>Reveal in Explorer</strong>, <strong>Rename…</strong>, <strong>Delete…</strong> (to the Recycle Bin, after asking), <strong>Copy path</strong> and <strong>Copy relative path</strong>. Open files follow a rename.</p>
+    </section>
+
+    <section id="files">
+      <h2>The file pane</h2>
+      <p>Opening a file splits the middle: the shown terminal on the left, the file pane on its right, next to the tree, with a tab per open file. Each environment has one file pane, and it stays beside whichever of its terminals is shown.</p>
+      <ul>
+        <li><strong>Raw</strong> is an editor with syntax highlighting (including C#, Java, SQL, GraphQL, Protobuf, TypeSpec, Dockerfiles and HCL/Terraform), line numbers and find. <kbd>Ctrl+S</kbd> saves, keeping the file's line endings and encoding, so a save changes only what you edited.</li>
+        <li><strong>Rendered</strong> shows Markdown as a page. Markdown files open rendered; the header switches between the two. Links open in your browser, and images load only from local files.</li>
+        <li><strong>OpenAPI 3 specs</strong> (<code>.yaml</code>, <code>.yml</code>, <code>.json</code>) open as API docs: endpoints grouped by tag. Click one to open it as a card: its parameters and request body as tables of fields, types and rules (required ones marked <code>*</code>), and its responses as tabs, each with <strong>Schema</strong> or an <strong>Example</strong> made up from the schema. <strong>Copy as curl</strong> puts a ready-to-run command on the clipboard, and <strong>Go to line</strong> shows the endpoint in the file. A filter finds endpoints by path, method, summary or operation id, and <strong>Expand all</strong> opens every one. <strong>Raw</strong> shows the file, and your edits show up in the docs as you type; if an edit breaks the YAML, the docs say which line, with <strong>Go to line</strong>.</li>
+        <li><strong>Open in editor</strong> hands the file to your editor (<code>editor</code> in the settings, else Windows' default).</li>
+        <li>If the file changes on disk it reloads; if you have unsaved edits you get <strong>Reload</strong> or <strong>Keep mine</strong>. Closing a file with unsaved edits asks first.</li>
+        <li>PNG, JPEG, GIF and ICO images show as pictures, shrunk to fit the pane, with their size in the header; an animated GIF plays. A change on disk shows the new picture. An SVG shows as a picture too, with <strong>Raw</strong> to edit its text; the picture follows your edits.</li>
+        <li>A PDF shows its pages one under another, fitted to the pane's width, with its page count and size in the header. Pages show as they are drawn; the first 300 are shown. A change on disk draws it again. Text can't be selected here: <strong>Open in editor</strong> opens it in your PDF reader (or your editor, if you set one).</li>
+        <li>Other files over 5 MB and other binary files aren't shown, with <strong>Open in editor</strong> instead.</li>
+      </ul>
+    </section>
+
+    <section id="find">
+      <h2>Finding files</h2>
+      <p>All three search the shown terminal's folder and respect <code>.gitignore</code>.</p>
+      <h3>Clickable paths</h3>
+      <p>Hold <kbd>Ctrl</kbd> over terminal output and a path under the mouse is underlined; <kbd>Ctrl</kbd>+click opens it at its line. Compiler errors, test failures and <code>grep -n</code> output all work: <code>src/main.rs:42</code>, <code>src/main.rs:42:7</code>, <code>src\main.rs(42,7)</code>, even when a long path wraps onto the next row. Web links, such as the URL a sign-in prints, open in the browser the same way.</p>
+      <h3>Quick open <kbd>Ctrl+Shift+O</kbd></h3>
+      <p>Type a few letters of a file's name; matches are ranked so consecutive letters, word starts and the file name count most. <code>name:42</code> opens at line 42.</p>
+      <figure class="shot narrow">
+        <img src="img/hydraui-open.png" width="598" height="279" alt="The Open file dialog with rs typed, listing src/stock.rs, src/main.rs and src/routes.rs." loading="lazy">
+      </figure>
+      <h3>Search in files <kbd>Ctrl+Shift+F</kbd></h3>
+      <p>Results appear as you type, as <code>file:line</code> and the line. <strong>Aa</strong> matches case and <strong>.*</strong> searches with a regular expression. Enter opens the file at the match.</p>
+      <figure class="shot narrow">
+        <img src="img/hydraui-search.png" width="598" height="568" alt="The Search in files dialog with Order typed, listing matches in Cargo.toml, docs/design.md and README.md with their line numbers." loading="lazy">
+        <figcaption>Search stops at 1,000 results and skips binary files and files over 5 MB.</figcaption>
+      </figure>
+    </section>
+
+    <section id="accounts">
+      <h2>Accounts</h2>
+      <p>The status bar lists the shown environment's tools, each with a ✓ when its login matches and a ✗ when it's missing or wrong. Click the environment's name to open its page in Settings, with the details checked again as it opens:</p>
+      <figure class="shot narrow">
+        <img src="img/hydraui-accounts.png" width="751" height="223" alt="The Accounts in work popover: github not signed in, git signed in as sam@work.example, with Refresh and Add account…" loading="lazy">
+      </figure>
+      <ul>
+        <li><strong>Add account…</strong> turns a tool on for the environment, as <code>hydra add</code> does. Tools that only need a sign-in (Claude Code, GitHub, Azure, Google Cloud, Codex, Google Workspace) sign in straight away in a new terminal; git, AWS, Gemini, Jev, Linear and Kubernetes ask for their settings first (Gemini's, Jev's and Linear's API key is stored as a hydra secret).</li>
+        <li><strong>Use from…</strong> on a tool borrows another environment's login for it, so you sign in once and use it in both.</li>
+        <li><strong>Switch account…</strong> on a tool runs its sign-in again in a new terminal, to move the environment to another account.</li>
+        <li>On a Claude Pro or Max account, the status bar also shows how much of Claude's limits the environment has used: <strong>claude 5h 42% · 7d 18%</strong>, amber from 80% and red from 95%. Hover it for the account and when each limit resets; click it for the accounts. The numbers come from Claude's own status line, which hydra passes to hydraui; if you have a status line of your own, hydra keeps it and runs it for you.</li>
+        <li>A borrowed login says which environment it comes from.</li>
+      </ul>
+      <h3>Settings</h3>
+      <p>The gear in the tab strip (or the launcher's <strong>Settings</strong>) opens Settings in the middle, in place of the terminal; pick a terminal or <strong>Close</strong> to go back.</p>
+      <ul>
+        <li><strong>General</strong>: default environment and shell, editor, theme, terminal font and size, keyboard shortcuts, the Jev key and questions for auto-pickup, version and updates. Each change is written to <code>config.toml</code> and applies at once.</li>
+        <li><strong>Each environment</strong>: its label, colour and home, its accounts (as above), its <code>[env]</code> variables, and Delete. A plain value whose name looks secret is masked, with a nudge to store it as a secret.</li>
+        <li><strong>Credentials</strong>: hydraui's own Jev key, then each environment's secrets with where each is used and whether it is stored, with Set… or Replace…. A secret that becomes a variable has <strong>Agents can see</strong>: turn it on and describe what it is for, and Claude sessions in that environment find it with the <code>hydra_access</code> tool, which lists the environment's tools and those credentials but never a value. <strong>What agents see</strong> shows that reply. It is saved as <code>[agents]</code> in env.toml.</li>
+      </ul>
+    </section>
+
+    <section id="launcher">
+      <h2>The launcher</h2>
+      <p><kbd>Ctrl+Shift+P</kbd> opens the launcher: type to filter, Enter to run.</p>
+      <figure class="shot narrow">
+        <img src="img/hydraui-launcher.png" width="448" height="398" alt="The launcher listing Environment and Edit environment entries for client, personal and work, then Open file… and Search in files…" loading="lazy">
+      </figure>
+      <div class="tbl">
+        <table>
+          <thead><tr><th>Entry</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td>Environment: <em>env</em></td><td>Adds that environment's tab to the window, or selects it if it's already there.</td></tr>
+            <tr><td>Edit environment: <em>env</em></td><td>Opens that environment's <code>env.toml</code> in the file pane. Restart the environment afterwards to apply it.</td></tr>
+            <tr><td>Sign in: <em>tool</em> in <em>env</em></td><td>Runs the tool's sign-in in a new terminal, adding the environment's tab if needed, as <code>hydra auth</code> does.</td></tr>
+            <tr><td>Set secret: <em>env/key</em></td><td>Stores a value in a masked box, for secrets an <code>env.toml</code> refers to but that aren't stored yet (or any other).</td></tr>
+            <tr><td>Open file… / Search in files…</td><td><a href="#find">Quick open and search</a>.</td></tr>
+            <tr><td>New environment…</td><td>Name it and it's created, as <code>hydra env new</code> does, with its tab added.</td></tr>
+            <tr><td>Delete environment…</td><td>Like <code>hydra env rm</code>: refused while it has terminals open; otherwise lists its folder and secrets, and asks whether its saved logins go too.</td></tr>
+            <tr><td>Set environment home…</td><td>Pick a folder: new terminals for the environment open there, and the folder is bound to it.</td></tr>
+            <tr><td>Open layout file… / Save layout as… / Start page</td><td>Open and save <a href="#layouts">layout files</a>, or go back to the start page.</td></tr>
+            <tr><td>Start orchestrator… / Edit pipelines</td><td>Opens an <a href="#orchestrator">orchestrator</a> terminal in an environment with Claude, for a pipeline you pick; opens the pipelines folder, writing the example first if it is empty.</td></tr>
+            <tr><td>Tasks: all projects</td><td>Shows the selected environment's <a href="#tasks">boards for all its projects</a>, as the entry at the top of the terminal list does.</td></tr>
+            <tr><td>Set Jev API key… / Remove Jev API key</td><td>Stores or forgets the key for TypeSafe's Jev model, in a masked box. It is optional. With it, <a href="#tasks">auto-pickup</a> can judge a session that finished other work and is waiting for a card: the last 60 lines of that session's terminal are sent to TypeSafe's API (api.typesafe.ai) to judge it. The key is kept in Windows Credential Manager. <strong>Remove Jev API key</strong> shows only while a key is set.</td></tr>
+            <tr><td>Edit Jev questions</td><td>Opens <code>~/.hydra/hydraui/jev.toml</code> in the file pane, creating it with the defaults first. It holds the one question <a href="#tasks">auto-pickup</a> asks Jev: which state a Claude session is in, chosen from options such as <em>ready</em>, <em>asking</em>, <em>working</em> and <em>draft</em>, each described in your words. A session can take a card when Jev picks <em>ready</em> with at least <code>min_confidence</code> (0.7 by default). <em>ready</em> must be an option, and <em>none</em> is always offered, added if you leave it out, so Jev can say it can't tell rather than guess. The file is read every time Jev is asked, so save and move a card into Pickup to try new wording; <strong>Open hydraui log</strong> shows Jev's pick, its confidence and each option's probability. A file that can't be used gives the defaults and a warning.</td></tr>
+            <tr><td>Open hydraui log</td><td>Opens <code>~/.hydra/hydraui/hydraui.log</code> in the file pane: what hydraui did and why, such as each Claude session's reported state and how <a href="#tasks">auto-pickup</a> chose a session, with the terminal lines sent to Jev. A log over 1 MB is set aside as <code>hydraui.log.old</code> when hydraui starts.</td></tr>
+            <tr><td>Open config folder / Reload config</td><td>Opens <code>~/.hydra/hydraui</code>, where the settings live; reloads the <a href="#settings">settings</a> and hydra's bindings without restarting.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="layouts">
+      <h2>Layout files</h2>
+      <p>A layout file (<code>*.hydraui</code>) is a window written down: its environments in tab order, each one's terminals (their names and folders) and file pane, the file tree and terminal list widths and what is selected. Each window has one layout, named in its title bar; the name's ▾ menu has <strong>Save layout as…</strong>, <strong>Open layout file…</strong>, <strong>Recent</strong> and <strong>Reveal in Explorer</strong>. Once saved, the window keeps the file up to date. Opening a layout in a window that already has one opens a new window; opening one that's already open brings its window forward, so two windows never write the same file. With the installer, double-clicking a <code>.hydraui</code> file opens it.</p>
+      <div class="term">
+        <div class="term-bar"><span class="tab plain">client-a.hydraui</span></div>
+<pre><span class="k">version</span> = 2
+<span class="k">active_env</span> = <span class="s">"work"</span>
+<span class="k">list</span> = { <span class="k">width</span> = 240.0 }       <span class="c"># optional: the terminal list's dragged width (hidden = true when collapsed)</span>
+
+[[<span class="k">env</span>]]
+<span class="k">name</span> = <span class="s">"work"</span>
+
+[[<span class="k">env</span>.<span class="k">terminal</span>]]
+<span class="k">title</span> = <span class="s">"claude"</span>                  <span class="c"># optional: the name you gave it</span>
+<span class="k">cwd</span> = <span class="s">"E:/work/api"</span>
+<span class="k">command</span> = <span class="s">"claude"</span>                <span class="c"># optional, hand-written: runs whenever the layout opens</span>
+
+[[<span class="k">env</span>.<span class="k">terminal</span>]]
+<span class="k">cwd</span> = <span class="s">"~/blog"</span>
+<span class="k">claude</span> = <span class="k">true</span>                     <span class="c"># written by hydraui: Claude was running here</span></pre>
+      </div>
+      <ul>
+        <li>An environment that no longer exists, or a terminal whose folder is gone, is skipped with a message but kept in the file.</li>
+        <li>Scrollback, running programs and unsaved edits aren't saved, with one exception: a terminal that had Claude Code running when the layout was saved (closing the window counts) starts it again with <code>claude --continue</code> when the layout reopens, picking up that folder's latest conversation.</li>
+        <li>Layouts made by earlier versions of hydraui (without <code>version = 2</code>) aren't opened, and the file is left as it is. Sets and group files are gone; <code>~/.hydra/hydraui/sets</code> is no longer read.</li>
+      </ul>
+    </section>
+
+    <section id="keys">
+      <h2>Keyboard shortcuts</h2>
+      <p>The help icon <strong>(?)</strong> in the title bar (or <strong>Keyboard shortcuts</strong> in the launcher) lists every key hydraui answers to, with your own <code>[keys]</code> changes.</p>
+      <div class="tbl">
+        <table>
+          <thead><tr><th>Action</th><th>Default</th><th>Setting</th></tr></thead>
+          <tbody>
+            <tr><td>New terminal</td><td><kbd>Ctrl+T</kbd></td><td><code>new_terminal</code></td></tr>
+            <tr><td>Close terminal</td><td><kbd>Ctrl+W</kbd></td><td><code>close_pane</code></td></tr>
+            <tr><td>Next / previous terminal</td><td><kbd>Ctrl+PageDown</kbd> / <kbd>Ctrl+PageUp</kbd></td><td><code>next_terminal</code>, <code>previous_terminal</code></td></tr>
+            <tr><td>Next / previous environment</td><td><kbd>Ctrl+Tab</kbd> / <kbd>Ctrl+Shift+Tab</kbd></td><td><code>next_tab</code>, <code>previous_tab</code></td></tr>
+            <tr><td>Copy / paste</td><td><kbd>Ctrl+Shift+C</kbd> / <kbd>Ctrl+Shift+V</kbd></td><td><code>copy</code>, <code>paste</code></td></tr>
+            <tr><td>Find in scrollback</td><td><kbd>Ctrl+F</kbd></td><td><code>find</code></td></tr>
+            <tr><td>Launcher</td><td><kbd>Ctrl+Shift+P</kbd></td><td><code>launcher</code></td></tr>
+            <tr><td>File tree</td><td><kbd>Ctrl+B</kbd></td><td><code>file_tree</code></td></tr>
+            <tr><td>Quick open</td><td><kbd>Ctrl+Shift+O</kbd></td><td><code>open_file</code></td></tr>
+            <tr><td>Search in files</td><td><kbd>Ctrl+Shift+F</kbd></td><td><code>search</code></td></tr>
+            <tr><td>Save file</td><td><kbd>Ctrl+S</kbd></td><td>in the file pane</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Change any of them under <code>[keys]</code> in the settings: <code>new_terminal = "ctrl-alt-n"</code>, or <code>""</code> to unbind. Key changes apply the next time hydraui starts.</p>
+    </section>
+
+    <section id="settings">
+      <h2>Settings</h2>
+      <p>hydraui's own settings live in <code>~/.hydra/hydraui/config.toml</code>. Every key is optional, and a mistake in one is reported without costing you the rest. <strong>Reload config</strong> in the launcher applies changes without restarting.</p>
+      <div class="term">
+        <div class="term-bar"><span class="tab plain">~/.hydra/hydraui/config.toml</span></div>
+<pre><span class="k">font</span> = <span class="s">"Cascadia Mono"</span>          <span class="c"># the default</span>
+<span class="k">font_size</span> = 14
+<span class="k">theme</span> = <span class="s">"dark"</span>                   <span class="c"># or "light": hydraui's own controls</span>
+<span class="k">default_env</span> = <span class="s">"work"</span>             <span class="c"># for new windows in folders nothing is bound to</span>
+<span class="k">default_shell</span> = <span class="s">"pwsh"</span>           <span class="c"># or "bash"</span>
+<span class="k">editor</span> = <span class="s">"code"</span>                  <span class="c"># for Open in editor</span>
+<span class="k">min_week_left</span> = 30                <span class="c"># % of the seven-day Claude limit a pipeline stage needs left</span>
+
+[<span class="k">colors</span>]                          <span class="c"># the terminal's colours, #rrggbb</span>
+<span class="k">background</span> = <span class="s">"#0b1116"</span>
+
+[<span class="k">keys</span>]
+<span class="k">new_terminal</span> = <span class="s">"ctrl-alt-n"</span></pre>
+      </div>
+      <p><code>[colors]</code> also takes <code>foreground</code>, <code>cursor</code>, <code>selection</code> and <code>palette</code>, a list of the 16 ANSI colours.</p>
+    </section>
+
+    <section id="updates">
+      <h2>Updates</h2>
+      <p>The title bar shows the version you're running (<strong>hydra <em>version</em></strong>) on the right. hydraui checks GitHub for a new release when it starts and every hour after, and the launcher's <strong>Check for updates</strong> (<kbd>Ctrl+Shift+P</kbd>) checks straight away and says what it found. When there is one, the title bar shows <strong>Update hydra <em>version</em></strong> beside the version:</p>
+      <ol>
+        <li>Clicking it downloads <code>hydraui.exe</code> and, if it finds your <code>hydra.exe</code> (next to hydraui, or on your <code>PATH</code>), that too, and checks both against the release's SHA-256 checksums. It won't update while a <code>hydra</code> command is running.</li>
+        <li>Nothing is replaced until everything has downloaded and checked out; if replacing one fails, the other is put back.</li>
+        <li>The button becomes <strong>Restart to finish</strong>. Restarting reopens your layout (an untitled window is saved first), but stops what's running in it, so it's always your call.</li>
+      </ol>
+      <p>Builds you compile yourself never offer updates.</p>
+    </section>
+
+    <footer>hydra · <a href="index.html">Home</a> · <a href="start.html">Getting started</a> · <a href="cli.html">CLI guide</a> · <a href="https://github.com/davojc/hydra">github.com/davojc/hydra</a></footer>
+  </main>
+</div>
+
+<script>
+(() => {
+  fetch("https://api.github.com/repos/davojc/hydra/releases/latest")
+    .then(r => r.ok ? r.json() : null)
+    .then(rel => {
+      if (!rel || !rel.tag_name) return;
+      for (const el of document.querySelectorAll(".dl-version")) el.textContent = rel.tag_name.replace(/^v/, "");
+    })
+    .catch(() => {});
+})();
+</script>
+</body>
+</html>

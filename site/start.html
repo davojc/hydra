@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Getting started with hydraui</title>
+<link rel="icon" type="image/png" href="favicon.png">
+<meta name="description" content="Get going with hydraui in ten minutes: install it, make your first environment, sign in to Claude Code and GitHub, point it at your code, save your window, and hand Claude work through the task board.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@500;700;800&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="site-nav">
+  <div class="in">
+    <a class="home" href="index.html"><img src="favicon.png" alt="">hydra</a>
+    <a class="page" href="start.html" aria-current="page">Getting started</a>
+    <a class="page" href="cli.html">CLI guide</a>
+    <a class="page" href="app.html">App guide</a>
+    <a class="page gh" href="https://github.com/davojc/hydra">GitHub</a>
+  </div>
+</header>
+<div class="wrap">
+  <nav class="toc" aria-label="Contents">
+    <div class="brand">Getting started</div>
+    <div class="grp">Set up</div>
+    <ol>
+      <li><a href="#install">Install</a></li>
+      <li><a href="#first">Your first environment</a></li>
+      <li><a href="#sign-in">Sign in</a></li>
+      <li><a href="#code">Point it at your code</a></li>
+      <li><a href="#more">Add another environment</a></li>
+      <li><a href="#keep">Keep your window</a></li>
+    </ol>
+    <div class="grp">Work with Claude</div>
+    <ol>
+      <li><a href="#claude">Run Claude</a></li>
+      <li><a href="#board">Hand it work</a></li>
+    </ol>
+    <div class="grp">After that</div>
+    <ol>
+      <li><a href="#keys">Keys worth knowing</a></li>
+      <li><a href="#next">Where next</a></li>
+    </ol>
+  </nav>
+
+  <main>
+    <header class="hero">
+      <span class="status">Getting started · about ten minutes</span>
+      <h1>From install to Claude at work.</h1>
+      <p class="lede">This walks you through hydraui once, in order: install it, make an <strong>environment</strong> for each identity you work as, sign each one in, point it at your code, save the window, and hand Claude a task. Each step takes a minute or two. Two words first: an <strong>environment</strong> is a named set of logins (Claude Code, GitHub, git and so on), and every terminal hydraui opens runs inside one, already signed in as that environment.</p>
+    </header>
+
+    <section id="install">
+      <h2>1. Install</h2>
+      <p>Download and run the installer. It installs hydraui and the <code>hydra</code> command line for you alone, with no admin prompt, adds hydraui to the Start menu and puts <code>hydra</code> on your <code>PATH</code>.</p>
+      <p><a class="download" href="https://github.com/davojc/hydra/releases/latest/download/hydra-setup.exe" download>Download the installer <span class="dl-version"></span><small>hydra + hydraui</small></a></p>
+      <p>Then start <strong>hydraui</strong> from the Start menu. You need Windows 11 and PowerShell 7 (<code>pwsh</code>); Git for Windows if you want bash terminals or git.</p>
+    </section>
+
+    <section id="first">
+      <h2>2. Your first environment</h2>
+      <p>The first time, hydraui has no environments yet, so it asks you to name one. Pick the identity you'll use most, say <code>work</code>. hydraui creates it and opens a tab for it with one terminal.</p>
+      <ul>
+        <li>The tab at the top is the environment, in its own colour. The list on the left is its terminals; <strong>+ New</strong> (or <kbd>Ctrl+T</kbd>) adds another.</li>
+        <li>The terminal's prompt starts with <code>[work]</code>, so you can always see which identity you are typing as.</li>
+      </ul>
+    </section>
+
+    <section id="sign-in">
+      <h2>3. Sign in</h2>
+      <p>A new environment has no logins. The status bar at the bottom shows its tools; click the environment's name there to open its <strong>Accounts</strong>:</p>
+      <ol>
+        <li>Choose <strong>Add account…</strong>, then <strong>Claude Code</strong>. Its sign-in runs in a new terminal: follow it in the browser that opens.</li>
+        <li>Do the same for <strong>GitHub</strong>, and <strong>git</strong> if you commit from here (it asks for the name and email to commit as).</li>
+        <li>Each tool shows a <strong>✓</strong> once its login is in place.</li>
+      </ol>
+      <p>These logins belong to <code>work</code> alone: <code>claude</code>, <code>gh</code> and <code>git</code> in a <code>work</code> terminal use them, and nothing else does. Already signed in to a tool in another environment and happy to share it? <strong>Use from…</strong> on that tool borrows the login instead.</p>
+    </section>
+
+    <section id="code">
+      <h2>4. Point it at your code</h2>
+      <p>Press <kbd>Ctrl+Shift+P</kbd> to open the launcher, choose <strong>Set environment home…</strong> and pick the folder you work in, for example your project or the folder that holds your projects.</p>
+      <ul>
+        <li>New <code>work</code> terminals now open there.</li>
+        <li>The folder is <strong>bound</strong> to <code>work</code>: a new window started in it picks <code>work</code> by itself, and the <code>hydra</code> command line knows the folder's identity too.</li>
+      </ul>
+      <p>Press <kbd>Ctrl+B</kbd> for the file tree: it follows the shown terminal's folder and marks what git sees changed. Click a file to read or edit it in the file pane beside the terminal.</p>
+    </section>
+
+    <section id="more">
+      <h2>5. Add another environment</h2>
+      <p>Work as more than one person, say <code>work</code> and <code>personal</code>? Click <strong>+</strong> at the end of the tab strip and choose <strong>New environment…</strong>. Name it, then repeat steps 3 and 4 for it: its own sign-ins, its own home folder.</p>
+      <figure class="shot narrow">
+        <img src="img/hydraui-picker.png" width="448" height="247" alt="The Add an environment picker listing the client, personal and work environments with their colours, and New environment…" loading="lazy">
+      </figure>
+      <p>Each environment gets its own tab and colour, and <kbd>Ctrl+Tab</kbd> moves between them. To change a colour, open the launcher, choose <strong>Edit environment: <em>name</em></strong> and set <code>color = "#rrggbb"</code>.</p>
+    </section>
+
+    <section id="keep">
+      <h2>6. Keep your window</h2>
+      <p>A new window is <strong>untitled</strong> and isn't kept when you close it. To keep it, click <strong>untitled ▾</strong> in the title bar and choose <strong>Save layout as…</strong>. From then on the window keeps its layout file up to date as you work.</p>
+      <ul>
+        <li>Next time, hydraui starts on a page of your recent layouts: pick one and its environments, terminals, folders and open files come back.</li>
+        <li>Terminals that had Claude running start it again with <code>claude --continue</code>, so you pick up where you left off.</li>
+      </ul>
+    </section>
+
+    <section id="claude">
+      <h2>7. Run Claude</h2>
+      <p>Type <code>claude</code> in a terminal. It runs as that environment's Claude account, with your usual skills, plugins and settings shared from <code>~/.claude</code>.</p>
+      <figure class="shot">
+        <img src="img/hydraui-window.png" width="1600" height="1013" alt="hydraui with tabs for the work, personal and client environments; work's terminals, api and server, listed on the left; git status in the api terminal; the project's README rendered in the file pane; and the file tree on the right." loading="lazy">
+      </figure>
+      <p>You don't have to watch it. Each terminal's row in the list says what its Claude is doing: <strong>working</strong>, <strong>needs you</strong> (a question or a permission) or <strong>idle</strong> (finished, your turn). When a session you can't see finishes or needs you, its environment tab gets an amber dot, a toast names the terminal (click it to go there), and the taskbar button flashes if hydraui is in the background. Run several sessions side by side, one per terminal, and come back to each when it's ready.</p>
+    </section>
+
+    <section id="board">
+      <h2>8. Hand it work</h2>
+      <p>Ideas arrive while Claude is busy. The <strong>task board</strong> holds them until you're ready, and Claude can pick them up itself.</p>
+      <ol>
+        <li>Right-click the terminal in the list and choose <strong>Tasks</strong>. A Tasks tab opens beside it with five columns: <strong>Backlog</strong>, <strong>Pickup</strong>, <strong>InProgress</strong>, <strong>Verify</strong> and <strong>Done</strong>.</li>
+        <li>Click <strong>+</strong> on Backlog and write the task in a sentence or two. Jot down as many as you like.</li>
+        <li>When one is ready to be done, drag it to <strong>Pickup</strong>. Pickup is your go-ahead: Claude only takes cards from there.</li>
+        <li>Tell Claude <em>"take the next task"</em>. It moves the card to InProgress with its terminal's name on it, and does the work.</li>
+        <li>Once the work is committed, Claude moves the card to <strong>Verify</strong> with the commit on it. Click the commit to see exactly what changed, as a diff in the file pane.</li>
+        <li>Happy with it? Drag it to <strong>Done</strong>. Only you can do that.</li>
+      </ol>
+      <div class="note"><strong>Why it works:</strong> hydra gives every Claude Code session in a hydraui terminal a small tool server for the board, with its tools pre-approved, in every environment with Claude Code turned on. The board itself is a plain Markdown file, <code>.hydra/tasks.md</code> in your project, so you can read or edit it anywhere.</div>
+    </section>
+
+    <section id="keys">
+      <h2>Keys worth knowing</h2>
+      <div class="tbl">
+        <table>
+          <thead><tr><th>Key</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td><kbd>Ctrl+Shift+P</kbd></td><td>The launcher: environments, sign-ins, layouts, settings, everything else</td></tr>
+            <tr><td><kbd>Ctrl+T</kbd> / <kbd>Ctrl+W</kbd></td><td>New terminal in this environment / close the terminal</td></tr>
+            <tr><td><kbd>Ctrl+PageDown</kbd> / <kbd>Ctrl+PageUp</kbd></td><td>Next / previous terminal</td></tr>
+            <tr><td><kbd>Ctrl+Tab</kbd></td><td>Next environment</td></tr>
+            <tr><td><kbd>Ctrl+B</kbd></td><td>Show or hide the file tree</td></tr>
+            <tr><td><kbd>Ctrl+Shift+O</kbd> / <kbd>Ctrl+Shift+F</kbd></td><td>Quick open / search in files</td></tr>
+            <tr><td><kbd>Ctrl+Shift+C</kbd> / <kbd>Ctrl+Shift+V</kbd></td><td>Copy / paste in a terminal</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="next">
+      <h2>Where next</h2>
+      <ul>
+        <li>The <a href="app.html">App guide</a> covers everything in hydraui: the file pane, layouts, accounts, the launcher, settings and every shortcut.</li>
+        <li>The <a href="cli.html">CLI guide</a> covers <code>hydra</code> on the command line: binding folders, guards that stop the wrong account committing or pushing, borrowed logins and secrets.</li>
+        <li>hydraui checks for updates every hour; when there is one, <strong>Update hydra</strong> appears in the title bar.</li>
+      </ul>
+    </section>
+
+    <footer>hydra · <a href="start.html">Getting started</a> · <a href="cli.html">CLI guide</a> · <a href="app.html">App guide</a> · <a href="https://github.com/davojc/hydra">github.com/davojc/hydra</a></footer>
+  </main>
+</div>
+<script>
+(() => {
+  fetch("https://api.github.com/repos/davojc/hydra/releases/latest")
+    .then(r => r.ok ? r.json() : null)
+    .then(rel => {
+      if (!rel || !rel.tag_name) return;
+      for (const el of document.querySelectorAll(".dl-version")) el.textContent = rel.tag_name.replace(/^v/, "");
+    })
+    .catch(() => {});
+})();
+</script>
+</body>
+</html>

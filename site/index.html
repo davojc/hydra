@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hydra: one terminal per identity</title>
+<link rel="icon" type="image/png" href="favicon.png">
+<meta name="description" content="hydra opens Windows terminals inside named environments, each with its own Claude Code, GitHub, git, cloud and AI CLI accounts. Use it from the command line or from hydraui, the desktop app.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@500;700;800&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="site-nav">
+  <div class="in">
+    <a class="home" href="index.html" aria-current="page"><img src="favicon.png" alt="">hydra</a>
+    <a class="page" href="start.html">Getting started</a>
+    <a class="page" href="cli.html">CLI guide</a>
+    <a class="page" href="app.html">App guide</a>
+    <a class="page gh" href="https://github.com/davojc/hydra">GitHub</a>
+  </div>
+</header>
+
+<main class="landing">
+  <header class="hero">
+    <span class="status">Early release · Windows 11</span>
+    <h1>One terminal per identity.</h1>
+    <p class="lede">hydra opens terminals inside named <strong>environments</strong>. Each one has its own Claude Code account, GitHub login, git author and SSH key, cloud logins and secrets. A terminal stays in its environment, and none of them can quietly use another's account. Use it from the <strong>command line</strong>, or from <strong>hydraui</strong>, the desktop app.</p>
+    <div class="envs" aria-label="Example environments">
+      <span class="chip work">work</span>
+      <span class="chip personal">personal</span>
+      <span class="chip client">client</span>
+    </div>
+  </header>
+
+  <figure class="hero-shot">
+    <img src="img/hydraui-window.png" width="1600" height="1013" alt="hydraui with tabs for the work, personal and client environments, work's terminals listed on the left, a terminal showing git status, the project's README rendered beside it, and the file tree on the right.">
+  </figure>
+
+  <section id="two-ways">
+    <h2>Two ways to use it</h2>
+    <p>Both work from the same environments in <code>~/.hydra</code>: set one up in either and the other sees it.</p>
+    <div class="pair">
+      <article class="card">
+        <h3>hydra <small>the command line</small></h3>
+        <p>Create environments, turn tools on, sign in, and open a shell in any of them from your usual terminal.</p>
+        <div class="term">
+          <div class="term-bar"><span class="tab plain">PowerShell</span></div>
+<pre><span class="p">PS&gt;</span> hydra env new work
+<span class="p">PS&gt;</span> hydra add github work
+<span class="p">PS&gt;</span> hydra shell work
+<span class="pw">[work]</span> <span class="p">PS&gt;</span> gh api user --jq .login
+work-user</pre>
+        </div>
+        <ul>
+          <li>Folders bound to an environment, with guards that stop the wrong account</li>
+          <li>Logins borrowed between environments</li>
+          <li>Secrets from Windows Credential Manager</li>
+        </ul>
+        <a class="more" href="cli.html">CLI guide →</a>
+      </article>
+      <article class="card">
+        <h3>hydraui <small>the desktop app</small></h3>
+        <p>A terminal app built around environments: every environment gets a tab, coloured to match, with its terminals listed beside it and already signed in.</p>
+        <img src="img/hydraui-diff.png" width="1600" height="1013" alt="hydraui showing a side-by-side diff of a changed file next to the file tree." loading="lazy">
+        <ul>
+          <li>An environment per tab, its terminals in a list, saved layouts</li>
+          <li>File tree with git changes, diffs and a file pane</li>
+          <li>Quick open, search in files, clickable paths</li>
+          <li>Each environment's accounts at a glance</li>
+        </ul>
+        <a class="more" href="app.html">App guide →</a>
+      </article>
+    </div>
+  </section>
+
+  <section id="how">
+    <h2>How environments work</h2>
+    <p>Most command-line tools read their login from a folder you can move with an environment variable: Claude Code uses <code>CLAUDE_CONFIG_DIR</code>, the GitHub CLI <code>GH_CONFIG_DIR</code>, git <code>GIT_CONFIG_GLOBAL</code>. hydra keeps a separate set of those folders for each environment and starts every terminal with them already set.</p>
+    <div class="points">
+      <div class="point work">
+        <h4>Separate logins</h4>
+        <p>Each environment signs in to each tool on its own, so commits, pushes and Claude Code sessions always use that environment's account.</p>
+      </div>
+      <div class="point personal">
+        <h4>Folders know their environment</h4>
+        <p>Bind a folder and terminals opened there use its environment. In the CLI, guards block <code>git commit</code>, <code>git push</code> and <code>gh</code> write commands from the wrong one.</p>
+      </div>
+      <div class="point client">
+        <h4>Share when you mean to</h4>
+        <p>An environment can borrow another's login for one tool, and Claude Code's skills, plugins and settings stay shared.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="install">
+    <h2>Install</h2>
+    <div class="dl-row">
+      <a class="download" href="https://github.com/davojc/hydra/releases/latest/download/hydra-setup.exe" download>Download the installer <span class="dl-version"></span><small>hydra + hydraui</small></a>
+    </div>
+    <p>New to hydra? <a href="start.html">Getting started</a> walks you from install to Claude at work in about ten minutes.</p>
+    <p class="portable">Portable: <a href="https://github.com/davojc/hydra/releases/latest/download/hydraui-x86_64-pc-windows-msvc.exe" download>hydraui.exe</a> · <a href="https://github.com/davojc/hydra/releases/latest/download/hydra-x86_64-pc-windows-msvc.exe" download>hydra.exe</a></p>
+    <ul>
+      <li><strong>The installer</strong> puts both apps in <code>%LOCALAPPDATA%\Programs\hydra</code> for you alone, with no admin prompt: hydraui in the Start menu, hydra on your <code>PATH</code>, and <code>hydra init</code> done. Uninstall it from Settings → Apps; your environments in <code>~/.hydra</code> stay.</li>
+      <li><strong>Portable:</strong> single files from the <a href="https://github.com/davojc/hydra/releases/latest">latest release</a>, each with a <code>.sha256</code> beside it. Rename to <code>hydraui.exe</code> / <code>hydra.exe</code> and run from anywhere; put <code>hydra.exe</code> on your <code>PATH</code> and run <code>hydra init</code> yourself.</li>
+      <li><strong>Updates:</strong> hydraui's title bar shows <strong>Update hydra</strong> when a release is out and updates both apps; <code>hydra update</code> updates <code>hydra.exe</code> on its own from the command line.</li>
+    </ul>
+  </section>
+
+  <footer>hydra · <a href="start.html">Getting started</a> · <a href="cli.html">CLI guide</a> · <a href="app.html">App guide</a> · <a href="https://github.com/davojc/hydra">github.com/davojc/hydra</a></footer>
+</main>
+
+<script>
+// Links into the old single-page guide (/#walkthrough, /#guards, …) go on to the CLI guide.
+(() => {
+  const id = decodeURIComponent(location.hash.slice(1));
+  if (id && !document.getElementById(id)) location.replace("cli.html#" + encodeURIComponent(id));
+})();
+</script>
+<script>
+(() => {
+  fetch("https://api.github.com/repos/davojc/hydra/releases/latest")
+    .then(r => r.ok ? r.json() : null)
+    .then(rel => {
+      if (!rel || !rel.tag_name) return;
+      for (const el of document.querySelectorAll(".dl-version")) el.textContent = rel.tag_name.replace(/^v/, "");
+    })
+    .catch(() => {});
+})();
+</script>
+</body>
+</html>
